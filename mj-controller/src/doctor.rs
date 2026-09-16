@@ -14,7 +14,7 @@ use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
 use crate::targets::{
-    BoundedProcessExecutor, CommandExecutor, CommandSpec,
+    BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
     ContainerTemplate as RuntimeContainerTemplate, ProcessExecutor, SshTarget as RuntimeSshTarget,
     TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test, ssh_command,
     ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
@@ -805,8 +805,8 @@ fn ssh_connectivity(ssh: &RuntimeSshTarget, executor: &impl CommandExecutor) -> 
     let command = ssh_connectivity_probe(ssh);
     match executor.execute(&command) {
         Err(error) => SshConnectivity::Failed {
-            detail: format!("Could not run `ssh {destination} true`: {error}"),
-            remediation: SSH_MISSING_REMEDIATION.to_owned(),
+            detail: format!("Could not run `ssh {destination} true`: {error:#}"),
+            remediation: ssh_launch_failure_remediation(&error, ssh),
         },
         Ok(output) if output.status != 0 => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -820,6 +820,36 @@ fn ssh_connectivity(ssh: &RuntimeSshTarget, executor: &impl CommandExecutor) -> 
 }
 
 const SSH_MISSING_REMEDIATION: &str = "Install an OpenSSH client and put `ssh` on PATH: `sudo apt update && sudo apt install -y openssh-client` (Debian/Ubuntu) or `sudo dnf install -y openssh-clients` (Fedora).";
+
+/// Map a failure to run `ssh` at all (as opposed to `ssh` exiting nonzero)
+/// to the command that fixes it.
+fn ssh_launch_failure_remediation(error: &anyhow::Error, ssh: &RuntimeSshTarget) -> String {
+    if error.downcast_ref::<CommandTimedOut>().is_some() {
+        return ssh_unreachable_remediation(ssh);
+    }
+    let missing_binary = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if missing_binary {
+        return SSH_MISSING_REMEDIATION.to_owned();
+    }
+    format!(
+        "Run `ssh {} true` by hand and resolve the error it reports: {error:#}",
+        ssh.destination
+    )
+}
+
+/// The host answered nothing: it is asleep, behind a down VPN, or the cloud
+/// session that exposes it has expired.
+fn ssh_unreachable_remediation(ssh: &RuntimeSshTarget) -> String {
+    let host = ssh_host_only(&ssh.destination);
+    format!(
+        "Check that {host} is up and reachable from this machine: wake it, bring up the VPN, or refresh the cloud session that exposes it, then run `ssh {} true` by hand.",
+        ssh.destination
+    )
+}
 
 /// Map `ssh -o BatchMode=yes` stderr to the command that fixes it.
 fn ssh_failure_remediation(stderr: &str, ssh: &RuntimeSshTarget) -> String {
@@ -849,6 +879,12 @@ fn ssh_failure_remediation(stderr: &str, ssh: &RuntimeSshTarget) -> String {
     }
     if stderr.contains("ssh: command not found") || stderr.contains("No such file or directory") {
         return SSH_MISSING_REMEDIATION.to_owned();
+    }
+    if stderr.contains("Connection timed out")
+        || stderr.contains("No route to host")
+        || stderr.contains("Network is unreachable")
+    {
+        return ssh_unreachable_remediation(ssh);
     }
     format!("Run `ssh {destination} true` by hand and resolve the error it reports: {stderr}")
 }
@@ -2651,7 +2687,10 @@ mod tests {
 
     #[test]
     fn ssh_bare_check_without_an_ssh_client_recommends_installing_openssh() {
-        let executor = FakeExecutor::new([Err(anyhow!("No such file or directory (os error 2)"))]);
+        let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        ))
+        .context("run ssh for verify SSH connectivity"))]);
 
         let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
 
@@ -2663,7 +2702,33 @@ mod tests {
     }
 
     #[test]
-    fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
+    fn ssh_bare_check_probe_timeout_recommends_checking_the_host_is_reachable() {
+        let executor = FakeExecutor::new([Err(anyhow::Error::new(CommandTimedOut {
+            program: "ssh".into(),
+            purpose: "verify SSH connectivity".into(),
+            timeout: Duration::from_secs(15),
+        }))]);
+
+        let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+        assert_eq!(checks[0].status, CheckStatus::Fixable);
+        let remediation = checks[0].remediation.as_deref().unwrap();
+        assert!(
+            remediation.contains("example.test is up and reachable"),
+            "{remediation}"
+        );
+        assert!(!remediation.contains("openssh-client"), "{remediation}");
+        assert!(
+            checks[0]
+                .detail
+                .contains("did not answer within 15 seconds"),
+            "{}",
+            checks[0].detail
+        );
+    }
+
+    #[test]
+    fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
         let executor = FakeExecutor::new([Ok(failed(
             b"ssh: connect to host example.test port 22: Connection timed out",
         ))]);
@@ -2672,13 +2737,45 @@ mod tests {
 
         let remediation = checks[0].remediation.as_deref().unwrap();
         assert!(
-            remediation.contains("Connection timed out"),
+            remediation.contains("example.test is up and reachable"),
+            "{remediation}"
+        );
+    }
+
+    #[test]
+    fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
+        let executor = FakeExecutor::new([Ok(failed(
+            b"kex_exchange_identification: read: Connection reset by peer",
+        ))]);
+
+        let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+        let remediation = checks[0].remediation.as_deref().unwrap();
+        assert!(
+            remediation.contains("Connection reset by peer"),
             "{remediation}"
         );
         assert!(
             remediation.contains("Run `ssh dev@example.test true` by hand"),
             "{remediation}"
         );
+    }
+
+    #[test]
+    fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
+        let executor = FakeExecutor::new([Err(anyhow!(
+            "operation cancelled while verify SSH connectivity"
+        ))]);
+
+        let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+        assert_eq!(checks[0].status, CheckStatus::Fixable);
+        let remediation = checks[0].remediation.as_deref().unwrap();
+        assert!(
+            remediation.contains("Run `ssh dev@example.test true` by hand"),
+            "{remediation}"
+        );
+        assert!(!remediation.contains("openssh-client"), "{remediation}");
     }
 
     #[test]

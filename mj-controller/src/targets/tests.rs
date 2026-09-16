@@ -3967,6 +3967,10 @@ fn bounded_executor_times_out_naming_the_probe_and_still_runs_the_next_one() {
         message.contains("check a wedged prerequisite"),
         "the timeout must name the probe that hung: {message}"
     );
+    let timed_out = error
+        .downcast_ref::<CommandTimedOut>()
+        .expect("a probe timeout is a typed CommandTimedOut so callers can tell it apart");
+    assert_eq!(timed_out.purpose, "check a wedged prerequisite");
 
     // Each command gets its own deadline, so one hung probe does not
     // cancel every probe that follows it.

@@ -983,6 +983,30 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 }
 
+/// A command supervised by [`BoundedProcessExecutor`] did not finish before
+/// its deadline. Callers downcast to this to tell a hung probe apart from a
+/// command that could not be started at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandTimedOut {
+    pub program: String,
+    pub purpose: String,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Display for CommandTimedOut {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "`{}` did not answer within {} seconds while trying to {}",
+            self.program,
+            self.timeout.as_secs(),
+            self.purpose
+        )
+    }
+}
+
+impl std::error::Error for CommandTimedOut {}
+
 /// Runs every command with its own deadline.
 ///
 /// [`CancellableProcessExecutor::with_timeout`] bounds a whole operation from a
@@ -1007,12 +1031,11 @@ impl CommandExecutor for BoundedProcessExecutor {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
             if executor.is_cancelled() {
-                anyhow::anyhow!(
-                    "`{}` did not answer within {} seconds while trying to {}",
-                    command.program,
-                    self.timeout.as_secs(),
-                    command.purpose
-                )
+                anyhow::Error::new(CommandTimedOut {
+                    program: command.program.clone(),
+                    purpose: command.purpose.clone(),
+                    timeout: self.timeout,
+                })
             } else {
                 error
             }
