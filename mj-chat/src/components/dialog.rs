@@ -452,12 +452,10 @@ impl DialogShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::components::test_support::key;
+    use crossterm::event::KeyCode;
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
     fn editor() -> Dialog<u8> {
         let mut dialog = Dialog::new();
         dialog.declare(1, ControlKind::TextField);

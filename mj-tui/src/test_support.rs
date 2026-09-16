@@ -36,6 +36,38 @@ pub(crate) fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         .collect()
 }
 
+/// The whole dashboard surface drawn into a terminal of the given size, as one
+/// string per row.
+pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, dashboard))
+        .expect("draw the surface");
+    buffer_lines(terminal.backend().buffer())
+}
+
+/// The cell position of the first drawn row containing `label`, as the column
+/// where the label starts and the row it is on.
+pub(crate) fn point(lines: &[String], label: &str) -> (u16, u16) {
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains(label))
+        .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"));
+    (cell_column(line, label), row as u16)
+}
+
+/// A mouse event at one cell position, with no modifiers held.
+pub(crate) fn mouse_at(kind: MouseEventKind, (column, row): (u16, u16)) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
 /// Column of `needle` within a drawn row, counted in cells rather than bytes.
 pub(crate) fn cell_column(line: &str, needle: &str) -> u16 {
     let byte = line
