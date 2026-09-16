@@ -1386,6 +1386,29 @@ fn target_architecture(
     }
 }
 
+/// Run a `reqwest::blocking` request on a dedicated OS thread and return its
+/// result.
+///
+/// A `reqwest::blocking::Client` owns a private Tokio runtime and drops it when
+/// the client is dropped. Dropping a runtime while the current thread has a
+/// Tokio `block_on` context entered panics with "Cannot drop a runtime in a
+/// context where blocking is not allowed". The session-move lifecycle drives
+/// this otherwise synchronous staging code under `Handle::block_on` (see
+/// `daemon::session_move`), so the parent thread does have such a context
+/// entered. A freshly spawned OS thread has entered no runtime, so the client's
+/// runtime is created and dropped there without tripping that check. Every
+/// caller of these HTTP helpers is protected, not just the move path.
+fn on_dedicated_thread<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Result<T> {
+    std::thread::scope(|scope| {
+        scope.spawn(work).join().unwrap_or_else(|panic| {
+            Err(anyhow::anyhow!(
+                "blocking HTTP thread panicked: {}",
+                targets::command_thread_panic_message(panic.as_ref())
+            ))
+        })
+    })
+}
+
 fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<PathBuf> {
     validate_worker_sha256(expected_sha256)?;
     let digest = expected_sha256.to_ascii_lowercase();
@@ -1408,13 +1431,15 @@ fn download_worker(url: &str, expected_sha256: &str, triple: &str) -> Result<Pat
             expected_sha256
         );
     }
-    let bytes = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?
-        .get(url)
-        .send()?
-        .error_for_status()?
-        .bytes()?;
+    let bytes = on_dedicated_thread(|| {
+        Ok(reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?
+            .get(url)
+            .send()?
+            .error_for_status()?
+            .bytes()?)
+    })?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         bail!("downloaded worker checksum mismatch: expected {expected_sha256}, got {actual}");
@@ -1843,16 +1868,18 @@ fn point_config_at_catalog(path: &Path) -> Result<()> {
 /// Fetch a provider's catalog over HTTPS. Mirrors the bounded client the Coding
 /// Plan quota reader uses: a short timeout and no redirects.
 pub(super) fn fetch_catalog_over_https(url: &str, api_key: &str) -> Result<Vec<u8>> {
-    let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?
-        .get(url)
-        .bearer_auth(api_key)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()?
-        .error_for_status()?;
-    Ok(response.bytes()?.to_vec())
+    on_dedicated_thread(|| {
+        let response = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?
+            .get(url)
+            .bearer_auth(api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()?
+            .error_for_status()?;
+        Ok(response.bytes()?.to_vec())
+    })
 }
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
@@ -3103,6 +3130,28 @@ mod tests {
     use std::collections::BTreeMap;
 
     use std::path::{Path, PathBuf};
+
+    /// A `reqwest::blocking::Client` owns a private Tokio runtime that it drops
+    /// with the client. The session-move lifecycle and the sub-agent spawn path
+    /// drive catalog staging inside a Tokio context (`Handle::block_on` and a
+    /// runtime worker respectively), where dropping that runtime panics with
+    /// "Cannot drop a runtime in a context where blocking is not allowed" and
+    /// strands the session. The HTTP helper must run off that context and
+    /// return an ordinary error instead of panicking.
+    #[test]
+    fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // Port 1 refuses the connection at once, so no network is needed; the
+        // point is that the client's runtime is created and dropped without a
+        // panic while a Tokio context is entered on this thread.
+        let result = runtime.block_on(async {
+            fetch_catalog_over_https("http://127.0.0.1:1/models", "unused-key")
+        });
+        assert!(
+            result.is_err(),
+            "expected a connection error, got {result:?}"
+        );
+    }
 
     /// The session's stored choice decides, with the global setting as the
     /// fallback, and a child never gets the tools whatever either says.
