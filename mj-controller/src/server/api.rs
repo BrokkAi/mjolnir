@@ -9,8 +9,9 @@
 //! read a structured outcome for it.
 //!
 //! Everything that needs the daemon's live session actors or its SQLite store
-//! reaches them through [`SubagentBackend`], because this crate cannot depend
-//! on the daemon runtime that owns them.
+//! reaches them through [`SubagentBackend`]. The daemon implements it in
+//! `server_runtime::api`; the route tests implement it with a hand-written fake,
+//! so the HTTP contract is tested without a running daemon.
 
 mod events;
 
@@ -650,11 +651,8 @@ impl From<ExportError> for ApiFailure {
 /// Everything the API needs from the daemon: live session actors, the durable
 /// projection, and the target-side git operations.
 ///
-/// `mj-controller` cannot depend on the daemon's runtime state, which lives in
-/// `mj-cli`, so the daemon implements this trait and installs it on the server
-/// options. The whole trait is declared now, including the methods later
-/// milestones fill in, so that adding those milestones does not change the
-/// shape every implementation has to match.
+/// The daemon's implementation lives in `server_runtime::api`; route tests
+/// supply a fake.
 pub trait SubagentBackend: Send + Sync {
     fn events(
         &self,

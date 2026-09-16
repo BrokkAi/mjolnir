@@ -116,7 +116,6 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         sessions_side: Default::default(),
         advanced: Default::default(),
         show_stopped_sessions: false,
-        newer_config_version: None,
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
@@ -175,7 +174,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = mj_controller::database::load_state_migrating()?;
+    let state = mj_controller::database::load_state()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -206,7 +205,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = mj_controller::database::load_state_migrating()?;
+    let final_state = mj_controller::database::load_state()?;
     let checkpoint = final_state.sessions[session_id]
         .checkpoint
         .as_ref()
@@ -235,7 +234,6 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         sessions_side: Default::default(),
         advanced: Default::default(),
         show_stopped_sessions: false,
-        newer_config_version: None,
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
@@ -300,7 +298,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = mj_controller::database::load_state_migrating()?;
+    let state = mj_controller::database::load_state()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -330,7 +328,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = mj_controller::database::load_state_migrating()?;
+    let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint
@@ -361,7 +359,6 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         sessions_side: Default::default(),
         advanced: Default::default(),
         show_stopped_sessions: false,
-        newer_config_version: None,
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
@@ -426,7 +423,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = mj_controller::database::load_state_migrating()?;
+    let state = mj_controller::database::load_state()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -456,7 +453,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = mj_controller::database::load_state_migrating()?;
+    let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint
@@ -594,7 +591,6 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         sessions_side: Default::default(),
         advanced: Default::default(),
         show_stopped_sessions: false,
-        newer_config_version: None,
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
@@ -659,7 +655,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let state = mj_controller::database::load_state_migrating()?;
+    let state = mj_controller::database::load_state()?;
     let (session_id, imported) = state.sessions.iter().next().unwrap();
     assert_eq!(imported.state, SessionState::Stopped);
     let checkpoint = imported.checkpoint.as_ref().unwrap();
@@ -689,7 +685,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
     )
     .await?;
     controller.close_session(session_id).await?;
-    let final_state = mj_controller::database::load_state_migrating()?;
+    let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
             .checkpoint

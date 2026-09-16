@@ -46,6 +46,55 @@ pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSp
     CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
 }
 
+/// Home-relative directory on an SSH host where files bound for a remote
+/// container wait before the engine copies them in. Home-relative rather than
+/// `~/`, because `ssh_command` quotes every argument while `scp` expands `~`.
+pub const REMOTE_UPLOAD_STAGING: &str = ".cache/mjolnir/uploads";
+
+/// Upload a local file or directory to the SSH host.
+pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool) -> CommandSpec {
+    let mut args = scp_args(ssh);
+    if recursive {
+        args.push("-r".into());
+    }
+    args.push(source.to_string_lossy().into_owned());
+    args.push(format!("{}:{remote}", ssh.destination));
+    scp_command(ssh, args)
+}
+
+/// Download a remote file from the SSH host.
+pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
+    let mut args = scp_args(ssh);
+    args.push(format!("{}:{remote}", ssh.destination));
+    args.push(local.into());
+    scp_command(ssh, args)
+}
+
+/// The connection's `ssh` arguments rewritten for `scp`, which spells the port
+/// option `-P`; to `scp`, `-p` means "preserve file times". The connection
+/// sharing options follow, as they do for `ssh`.
+fn scp_args(ssh: &SshTarget) -> Vec<String> {
+    let mut args = ssh
+        .ssh_args
+        .iter()
+        .map(|argument| {
+            if argument == "-p" {
+                "-P".to_owned()
+            } else {
+                argument.clone()
+            }
+        })
+        .collect();
+    push_connection_sharing_args(&mut args);
+    args
+}
+
+fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
+    // `scp` opens its own connection to the same host, so it competes for the
+    // same pre-auth budget and is admitted and retried the same way.
+    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
+}
+
 /// How long a shared master connection stays alive after its last channel
 /// closes. The master is an `ssh` process that outlives the daemon by this
 /// long, so it is kept short enough to be unsurprising and long enough to
@@ -1000,6 +1049,50 @@ mod tests {
             String::from_utf8_lossy(&check.stderr)
         );
         drop(exit);
+    }
+
+    /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
+    /// to preserve file times and read the port as a file name. Every `scp`
+    /// also opens a connection, so it is admitted like `ssh`.
+    #[test]
+    #[cfg(unix)]
+    fn scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let ssh = SshTarget {
+            destination: "build@10.0.0.1".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+
+        let upload = scp_upload(&ssh, Path::new("/tmp/local"), "remote/path", true);
+        let download = scp_download(&ssh, "remote/archive.zip", "/tmp/local.zip");
+        set_ssh_connection_sharing_for_test(None);
+
+        assert_eq!(
+            upload.args,
+            [
+                "-P",
+                "2222",
+                "-r",
+                "/tmp/local",
+                "build@10.0.0.1:remote/path"
+            ]
+        );
+        assert_eq!(
+            download.args,
+            [
+                "-P",
+                "2222",
+                "build@10.0.0.1:remote/archive.zip",
+                "/tmp/local.zip"
+            ]
+        );
+        for command in [upload, download] {
+            assert_eq!(command.program, "scp");
+            assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
+        }
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -565,13 +564,10 @@ where
 }
 
 /// Hand back a usable Kimi Code access token, refreshing the stored pair when
-/// it is stale or when the server rejected it.
-///
-/// The refresh lock is taken before the round trip, but a peer may break a lock
-/// it judges stale while that round trip is in flight, so ownership is checked
-/// again immediately before the credentials are written rather than only when
-/// the lock is released: see `decide_kimi_refresh_persist` for what a refresh
-/// that lost its lock does with the pair it fetched.
+/// it is stale or when the server rejected it. The refresh runs under the
+/// lock the Kimi Code CLI also takes, and the pair is re-read once the lock is
+/// held, so a refresh another process just finished is used instead of
+/// spending its new refresh token again.
 async fn ensure_fresh_kimi_token(
     client: &reqwest::Client,
     home: &Path,
@@ -585,7 +581,8 @@ async fn ensure_fresh_kimi_token(
         return Ok(initial.access_token);
     }
 
-    let refresh_lock = KimiRefreshLock::acquire(home).await?;
+    // Held until this function returns, released on drop.
+    let _refresh_lock = KimiRefreshLock::acquire(home, KIMI_LOCK_WAIT).await?;
     let active = read_kimi_credentials(credentials_path).await?;
     let changed_while_waiting = active.differs_from(&initial);
     if (!force && !active.needs_refresh())
@@ -593,11 +590,9 @@ async fn ensure_fresh_kimi_token(
             && (changed_while_waiting
                 || rejected_token.is_some_and(|token| token != active.access_token)))
     {
-        refresh_lock.release().await?;
         return Ok(active.access_token);
     }
     if active.refresh_token.is_empty() {
-        refresh_lock.release().await?;
         bail!("Kimi Code refresh token is missing; run `kimi login`");
     }
 
@@ -627,11 +622,9 @@ async fn ensure_fresh_kimi_token(
             tokio::time::sleep(Duration::from_millis(100)).await;
             let recovery = read_kimi_credentials(credentials_path).await?;
             if recovery.refresh_token != active.refresh_token && !recovery.access_token.is_empty() {
-                refresh_lock.release().await?;
                 return Ok(recovery.access_token);
             }
         }
-        refresh_lock.release().await?;
         bail!("Kimi Code token refresh returned HTTP {status}");
     }
 
@@ -666,108 +659,14 @@ async fn ensure_fresh_kimi_token(
             .to_string(),
         expires_in,
     };
-    // Prove the lock is still Mjolnir's before the write, not after it: a peer that
-    // broke the lock during the round trip may already have stored a newer pair,
-    // and overwriting that would strand both refreshes.
-    let ownership = confirm_kimi_lock_ownership(&refresh_lock.path, &refresh_lock.ownership);
-    let on_disk = match &ownership {
-        // A proven loss makes the file the authority on which pair is live.
-        Err(KimiLockLoss::Stolen { .. } | KimiLockLoss::Gone) => {
-            read_kimi_credentials(credentials_path).await.ok()
-        }
-        Ok(_) | Err(KimiLockLoss::Unproven(_)) => None,
-    };
-    match decide_kimi_refresh_persist(&ownership, on_disk.as_ref(), &active) {
-        KimiRefreshPersist::Save => {
-            save_kimi_credentials(credentials_path, &refreshed)?;
-            if let Err(error) = refresh_lock.release().await {
-                // The lock was Mjolnir's when the pair was written and the write
-                // landed; losing it in the microseconds since costs the lock,
-                // not a valid credential.
-                tracing::warn!(
-                    %error,
-                    "saved refreshed Kimi Code credentials, then lost the OAuth refresh lock before releasing it"
-                );
-            }
-            Ok(refreshed.access_token)
-        }
-        KimiRefreshPersist::SaveContested(loss) => {
-            save_kimi_credentials(credentials_path, &refreshed)?;
-            tracing::warn!(
-                path = %refresh_lock.path.display(),
-                %loss,
-                "another Kimi Code token refresh took the OAuth refresh lock, but left behind the pair this refresh already spent; saved Mjolnir's refreshed pair, the only live one"
-            );
-            Ok(refreshed.access_token)
-        }
-        KimiRefreshPersist::Adopt { access_token, loss } => {
-            tracing::warn!(
-                path = %refresh_lock.path.display(),
-                %loss,
-                "another Kimi Code token refresh took the OAuth refresh lock and stored its own credentials; using those instead of the pair Mjolnir just fetched"
-            );
-            Ok(access_token)
-        }
-    }
+    save_kimi_credentials(credentials_path, &refreshed)?;
+    Ok(refreshed.access_token)
 }
 
 fn save_kimi_credentials(path: &Path, credentials: &KimiCredentials) -> Result<()> {
     let mut body = serde_json::to_vec_pretty(credentials)?;
     body.push(b'\n');
     mj_core::config::atomic_write(path, &body).context("save refreshed Kimi Code credentials")
-}
-
-/// What a completed refresh does with the pair it just fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum KimiRefreshPersist {
-    /// The lock is Mjolnir's: save the refreshed pair and give the lock back.
-    Save,
-    /// The lock is another refresher's, and the file still holds the pair this
-    /// refresh spent: save the refreshed pair anyway and leave the lock alone.
-    SaveContested(KimiLockLoss),
-    /// The lock's new holder finished first and stored its own pair: return
-    /// that token and write nothing.
-    Adopt {
-        access_token: String,
-        loss: KimiLockLoss,
-    },
-}
-
-/// Decide how a completed refresh persists its result.
-///
-/// `ownership` is the lock check taken immediately before the write, `on_disk`
-/// the pair the credentials file carried when that check reported a proven
-/// loss (`None` when the file was not consulted, or could not be read), and
-/// `active` the pair whose refresh token this refresh spent at the server.
-///
-/// A lost lock never fails the refresh: exactly one of the two pairs is live,
-/// and the file says which. A pair on disk that moved on from `active` is the
-/// other refresher's, and it is the live one, because the server rotated Mjolnir's
-/// pair away from it. A file that still holds `active` is dead whichever
-/// refresh wrote it — its refresh token is the one Mjolnir just spent — so the
-/// refreshed pair is the only live credential anywhere and has to be stored,
-/// even over a contested lock; leaving the spent pair in place would force a
-/// `kimi login`. The peer recovers the same way Mjolnir does, by re-reading the
-/// file when the server rejects its consumed token.
-fn decide_kimi_refresh_persist(
-    ownership: &Result<SystemTime, KimiLockLoss>,
-    on_disk: Option<&KimiCredentials>,
-    active: &KimiCredentials,
-) -> KimiRefreshPersist {
-    let loss = match ownership {
-        Ok(_) => return KimiRefreshPersist::Save,
-        // A check that could not read the directory proves nothing about who
-        // holds it, so it is no reason to treat the lock as lost.
-        Err(KimiLockLoss::Unproven(_)) => return KimiRefreshPersist::Save,
-        Err(loss) => loss.clone(),
-    };
-    match on_disk {
-        Some(pair) if pair.differs_from(active) => KimiRefreshPersist::Adopt {
-            access_token: pair.access_token.clone(),
-            loss,
-        },
-        _ => KimiRefreshPersist::SaveContested(loss),
-    }
 }
 
 fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&'a str> {
@@ -778,163 +677,52 @@ fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&
         .with_context(|| format!("{context} is missing {key}"))
 }
 
+/// The Kimi Code CLI serializes token refreshes with `proper-lockfile` on the
+/// directory `oauth/kimi-code.lock` (`stale: 5_000`): a holder keeps the
+/// directory's modification time moving, and a lock whose time stopped for
+/// longer than the stale window is abandoned and may be removed. Mjolnir takes
+/// the same directory the same way, so its refresh and the CLI's never spend
+/// the same single-use refresh token.
 struct KimiRefreshLock {
     path: std::path::PathBuf,
-    ownership: Arc<Mutex<KimiLockOwnership>>,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
+    heartbeat: tokio::task::JoinHandle<()>,
 }
 
-/// What Mjolnir knows about the lock directory it created. The Kimi Code CLI
-/// breaks a lock whose modification time stopped moving and takes it over, so
-/// holding the directory is not the same as owning it: Mjolnir checks the mtime it
-/// published is still there before touching or removing the directory.
-/// Touching a lock the CLI now owns trips the CLI's own ownership check
-/// (`ECOMPROMISED`, proper-lockfile 4.1.2 `lib/lockfile.js:114-140`), and
-/// removing it would hand a third holder a lock the CLI is still using.
-#[derive(Debug)]
-enum KimiLockOwnership {
-    /// Mjolnir published this modification time and the directory still carried it
-    /// when Mjolnir last looked.
-    Held(SystemTime),
-    /// Mjolnir must not touch or remove the directory again.
-    Lost(KimiLockLoss),
-}
-
-/// Why the lock directory is not Mjolnir's any more.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum KimiLockLoss {
-    /// It carries a modification time Mjolnir never published: another holder broke
-    /// the lock and took it.
-    Stolen {
-        published: SystemTime,
-        observed: SystemTime,
-    },
-    /// It is gone: another holder broke the lock, or Mjolnir already released it.
-    Gone,
-    /// It could not be inspected, so Mjolnir cannot prove the lock is still its
-    /// own. Mjolnir leaves it alone; whoever wants it next breaks it once Mjolnir's
-    /// modification time goes stale.
-    Unproven(String),
-}
-
-impl std::fmt::Display for KimiLockLoss {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stolen {
-                published,
-                observed,
-            } => write!(
-                formatter,
-                "another process took it: Mjolnir published modification time {}, but the directory carries {}",
-                epoch_label(*published),
-                epoch_label(*observed)
-            ),
-            Self::Gone => formatter.write_str("another process removed it"),
-            Self::Unproven(error) => {
-                write!(
-                    formatter,
-                    "Mjolnir could not confirm it still owns it: {error}"
-                )
-            }
-        }
-    }
-}
-
-fn epoch_label(time: SystemTime) -> String {
-    match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => format!("{:.3}", since.as_secs_f64()),
-        Err(_) => "before the epoch".to_string(),
-    }
-}
-
-/// The Kimi Code CLI is the other holder of this lock, and it agrees that a
-/// live holder keeps the directory's mtime moving. It takes the lock through
-/// `proper-lockfile` with `stale: 5_000` (kimi-code
-/// `packages/oauth/src/oauth-manager.ts:216-220`; the shipped binary carries
-/// the same `stale: 5e3`), which rewrites the mtime every `stale / 2` for as
-/// long as the lock is held (proper-lockfile 4.1.2 `lib/lockfile.js:99-183`,
-/// interval resolved at `lib/lockfile.js:220-221`) and removes any lock whose
-/// mtime is older than `stale` (`lib/lockfile.js:67-79, 84-86`). A CLI refresh
-/// can hold the lock far longer than that — three tries against a 30s HTTP
-/// timeout plus backoff (`packages/oauth/src/oauth.ts:56-73, 226-263`) — but
-/// never silently, so a stopped mtime still means the holder is gone. Its
-/// mtimes can also land up to a second in the future
-/// (`lib/mtime-precision.js:44-52`), which `break_stale_kimi_lock` reads as
-/// "not stale" because `duration_since` fails: the safe answer.
-const KIMI_CLI_LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
-/// A holder republishes the lock directory's modification time on this
-/// interval, so a lock whose mtime stopped moving has no live holder. The CLI
-/// judges Mjolnir's lock by that same mtime, so the interval has to fit inside
-/// `KIMI_CLI_LOCK_STALE_AFTER` several times over: one beat pays for the wait
-/// between touches, and the rest is stall the heartbeat task may absorb.
+/// How often a holder republishes the lock's modification time. It fits inside
+/// the CLI's 5 second stale window several times over.
 const KIMI_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-/// How long the heartbeat task may stall — descheduled, starved, or blocked on
-/// a slow filesystem — before the CLI is entitled to break a lock Mjolnir still
-/// holds and rotate the credentials alongside it. It is the CLI's window less
-/// the interval Mjolnir already spends waiting between touches.
-const KIMI_LOCK_HEARTBEAT_STALL_TOLERANCE: Duration = Duration::from_secs(
-    KIMI_CLI_LOCK_STALE_AFTER.as_secs() - KIMI_LOCK_HEARTBEAT_INTERVAL.as_secs(),
-);
-/// Beats of silence Mjolnir waits out before it calls another holder's lock
-/// abandoned. Several beats of slack, so a live holder delayed by the scheduler
-/// keeps its lock, and deliberately more patient than the CLI's 5s: breaking
-/// later than the peer can never steal a live lock, and it costs no recovery
-/// time, because the CLI reclaims a lock a crashed Mjolnir left behind after its
-/// own 5s.
-const KIMI_LOCK_STALE_HEARTBEATS: u64 = 10;
-/// Derived from the heartbeat so the two cannot drift apart.
-const KIMI_LOCK_STALE_AFTER: Duration =
-    Duration::from_secs(KIMI_LOCK_STALE_HEARTBEATS * KIMI_LOCK_HEARTBEAT_INTERVAL.as_secs());
-const _: () = assert!(
-    KIMI_LOCK_HEARTBEAT_STALL_TOLERANCE.as_secs() >= 4 * KIMI_LOCK_HEARTBEAT_INTERVAL.as_secs(),
-    "Mjolnir must be able to miss several beats in a row and still hold a lock the Kimi Code CLI could otherwise break"
-);
-const _: () = assert!(
-    KIMI_LOCK_STALE_AFTER.as_secs() >= KIMI_CLI_LOCK_STALE_AFTER.as_secs(),
-    "Mjolnir must not call a lock stale sooner than the Kimi Code CLI does, or it can break a lock the CLI still holds"
-);
+/// How long a lock's modification time must be still before Mjolnir removes
+/// it as abandoned. Longer than the CLI's own 5 seconds, so Mjolnir never
+/// breaks a lock the CLI would still consider live.
+const KIMI_LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
 const KIMI_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const KIMI_LOCK_WAIT: Duration = Duration::from_secs(60);
-/// Filesystems record modification times at their own precision — whole
-/// seconds on ext3 and HFS+ — and the Kimi Code CLI leans on that, rounding
-/// its own writes up to the next whole second so a coarse filesystem stores
-/// them unchanged (`lib/mtime-precision.js:44-52`); its mtimes therefore land
-/// up to a second in the future. So a time Mjolnir published and the time it reads
-/// back can differ by anything under a second and still be the same write.
-/// Nothing smaller than a second distinguishes holders: taking the lock from
-/// Mjolnir costs another holder at least `KIMI_CLI_LOCK_STALE_AFTER` of silence
-/// first, so a thief's modification time is seconds away, never milliseconds.
-const KIMI_LOCK_MTIME_TOLERANCE: Duration = Duration::from_secs(1);
 
 impl KimiRefreshLock {
-    async fn acquire(home: &Path) -> Result<Self> {
-        Self::acquire_within(home, KIMI_LOCK_WAIT).await
-    }
-
-    async fn acquire_within(home: &Path, wait: Duration) -> Result<Self> {
+    async fn acquire(home: &Path, wait: Duration) -> Result<Self> {
         let oauth_dir = home.join("oauth");
         tokio::fs::create_dir_all(&oauth_dir)
             .await
             .context("prepare Kimi Code OAuth lock")?;
-        let sentinel = oauth_dir.join("kimi-code");
+        // proper-lockfile locks `<file>.lock` for a file that must exist.
         tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&sentinel)
+            .open(oauth_dir.join("kimi-code"))
             .await
             .context("prepare Kimi Code OAuth lock sentinel")?;
         let path = oauth_dir.join("kimi-code.lock");
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             match tokio::fs::create_dir(&path).await {
-                Ok(()) => return Self::claim(path).await,
+                Ok(()) => return Ok(Self::held(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if tokio::time::Instant::now() >= deadline {
-                        break;
+                        bail!(
+                            "timed out waiting for Kimi Code OAuth refresh lock {}",
+                            path.display()
+                        );
                     }
-                    // A holder killed mid-refresh leaves its directory behind
-                    // forever; break the lock once its heartbeat has stopped
-                    // and retry the create immediately.
                     if !break_stale_kimi_lock(&path).await {
                         tokio::time::sleep(KIMI_LOCK_RETRY_INTERVAL).await;
                     }
@@ -942,179 +730,36 @@ impl KimiRefreshLock {
                 Err(error) => return Err(error).context("acquire Kimi Code OAuth refresh lock"),
             }
         }
-        bail!(
-            "timed out waiting for Kimi Code OAuth refresh lock {}; another Kimi Code refresh is holding it, or a crashed one left it behind and the directory has to be removed",
-            path.display()
-        )
     }
 
-    /// Take ownership of a directory Mjolnir just created. The modification time
-    /// the filesystem recorded for the create is the first proof of ownership;
-    /// every heartbeat republishes it.
-    async fn claim(path: std::path::PathBuf) -> Result<Self> {
-        let published = kimi_lock_mtime(&path)
-            .map_err(anyhow::Error::new)
-            .and_then(|mtime| mtime.context("it vanished as Mjolnir created it"));
-        match published {
-            Ok(published) => Ok(Self::held(path, published)),
-            Err(error) => {
-                // Without a first modification time Mjolnir could never prove the
-                // lock is its own, so it could never release it either. Give it
-                // back now instead of leaving it for a stale-breaker.
-                let _ = tokio::fs::remove_dir(&path).await;
-                Err(error).with_context(|| {
-                    format!(
-                        "claim the new Kimi Code OAuth refresh lock {}",
-                        path.display()
-                    )
-                })
-            }
-        }
-    }
-
-    fn held(path: std::path::PathBuf, published: SystemTime) -> Self {
-        let ownership = Arc::new(Mutex::new(KimiLockOwnership::Held(published)));
+    fn held(path: std::path::PathBuf) -> Self {
         let heartbeat_path = path.clone();
-        let heartbeat_ownership = Arc::clone(&ownership);
         let heartbeat = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(KIMI_LOCK_HEARTBEAT_INTERVAL).await;
-                match beat_kimi_lock(&heartbeat_path, &heartbeat_ownership) {
-                    Ok(()) => {}
-                    Err(KimiLockLoss::Unproven(error)) => {
-                        tracing::debug!(path = %heartbeat_path.display(), %error, "heartbeat Kimi Code OAuth refresh lock");
-                    }
-                    Err(loss) => {
-                        tracing::warn!(path = %heartbeat_path.display(), %loss, "stopped heartbeating a Kimi Code OAuth refresh lock Mjolnir no longer holds");
-                        return;
-                    }
+                if let Err(error) = touch_kimi_lock(&heartbeat_path, SystemTime::now()) {
+                    tracing::debug!(path = %heartbeat_path.display(), %error, "heartbeat Kimi Code OAuth refresh lock");
                 }
             }
         });
-        Self {
-            path,
-            ownership,
-            heartbeat: Some(heartbeat),
-        }
-    }
-
-    /// Give the lock back. Fails when the lock stopped being Mjolnir's, because the
-    /// refresh it was protecting then ran beside another one. Callers that have
-    /// already confirmed ownership and stored valid credentials treat that
-    /// failure as a lost lock rather than a failed refresh; see
-    /// `ensure_fresh_kimi_token`.
-    async fn release(mut self) -> Result<()> {
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-        if let Err(loss) = confirm_kimi_lock_ownership(&self.path, &self.ownership) {
-            bail!(
-                "the Kimi Code OAuth refresh lock {} stopped being Mjolnir's mid-refresh: {loss}; another Kimi Code token refresh may have rotated the credentials beside this one",
-                self.path.display()
-            );
-        }
-        match tokio::fs::remove_dir(&self.path).await {
-            Ok(()) => {
-                *lock_ownership(&self.ownership) = KimiLockOwnership::Lost(KimiLockLoss::Gone)
-            }
-            Err(error) => {
-                tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
-            }
-        }
-        Ok(())
+        Self { path, heartbeat }
     }
 }
 
 impl Drop for KimiRefreshLock {
     fn drop(&mut self) {
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-        if matches!(*lock_ownership(&self.ownership), KimiLockOwnership::Lost(_)) {
-            // Already released, or reported where the loss was discovered.
-            return;
-        }
-        match confirm_kimi_lock_ownership(&self.path, &self.ownership) {
-            Ok(_) => {
-                if let Err(error) = std::fs::remove_dir(&self.path) {
-                    tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
-                }
-            }
-            Err(loss) => {
-                tracing::warn!(path = %self.path.display(), %loss, "left a Kimi Code OAuth refresh lock Mjolnir no longer holds in place");
+        self.heartbeat.abort();
+        match std::fs::remove_dir(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %self.path.display(), %error, "release Kimi Code OAuth refresh lock");
             }
         }
     }
 }
 
-fn lock_ownership(
-    ownership: &Mutex<KimiLockOwnership>,
-) -> std::sync::MutexGuard<'_, KimiLockOwnership> {
-    ownership
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Check that the lock directory still carries the modification time Mjolnir
-/// published, and remember a loss so every later check agrees. `Ok` hands back
-/// the published time; `Err` means Mjolnir must neither touch nor remove the
-/// directory.
-fn confirm_kimi_lock_ownership(
-    path: &Path,
-    ownership: &Mutex<KimiLockOwnership>,
-) -> Result<SystemTime, KimiLockLoss> {
-    let published = match &*lock_ownership(ownership) {
-        KimiLockOwnership::Held(published) => *published,
-        KimiLockOwnership::Lost(loss) => return Err(loss.clone()),
-    };
-    let loss = match kimi_lock_mtime(path) {
-        Ok(Some(observed)) if kimi_lock_mtime_matches(published, observed) => {
-            return Ok(published);
-        }
-        Ok(Some(observed)) => KimiLockLoss::Stolen {
-            published,
-            observed,
-        },
-        Ok(None) => KimiLockLoss::Gone,
-        // A stat that fails says nothing about who holds the lock, so the
-        // ownership Mjolnir recorded stands and a later beat can confirm it again.
-        Err(error) => return Err(KimiLockLoss::Unproven(error.to_string())),
-    };
-    *lock_ownership(ownership) = KimiLockOwnership::Lost(loss.clone());
-    Err(loss)
-}
-
-/// One heartbeat: prove the directory is still Mjolnir's, then publish a fresh
-/// modification time on it.
-fn beat_kimi_lock(path: &Path, ownership: &Mutex<KimiLockOwnership>) -> Result<(), KimiLockLoss> {
-    confirm_kimi_lock_ownership(path, ownership)?;
-    let published = SystemTime::now();
-    if let Err(error) = touch_kimi_lock(path, published) {
-        // Only a time actually written may be remembered, or the next check
-        // would report a theft that never happened.
-        return Err(KimiLockLoss::Unproven(error.to_string()));
-    }
-    let mut ownership = lock_ownership(ownership);
-    if matches!(*ownership, KimiLockOwnership::Held(_)) {
-        *ownership = KimiLockOwnership::Held(published);
-    }
-    Ok(())
-}
-
-/// Whether a modification time read back from the lock directory is the one Mjolnir
-/// published. See `KIMI_LOCK_MTIME_TOLERANCE` for why a sub-second difference
-/// is the same write rather than another holder's.
-fn kimi_lock_mtime_matches(published: SystemTime, observed: SystemTime) -> bool {
-    observed
-        .duration_since(published)
-        .or_else(|_| published.duration_since(observed))
-        .is_ok_and(|drift| drift < KIMI_LOCK_MTIME_TOLERANCE)
-}
-
-/// The lock directory's modification time, or `None` when the directory is
-/// gone. Mjolnir and the Kimi Code CLI share this one value and nothing else: the
-/// CLI releases its lock with a plain `rmdir`, so the directory has to stay
-/// empty and the mtime is the whole protocol.
+/// The lock directory's modification time, or `None` when it is gone.
 fn kimi_lock_mtime(path: &Path) -> std::io::Result<Option<SystemTime>> {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.modified().map(Some),
@@ -1123,10 +768,8 @@ fn kimi_lock_mtime(path: &Path) -> std::io::Result<Option<SystemTime>> {
     }
 }
 
-/// Publish a lock directory's modification time, the signal that its holder is
-/// still alive. Windows opens a directory handle only under backup semantics,
-/// so the heartbeat would otherwise be a silent no-op there and every live lock
-/// would look abandoned.
+/// Publish a lock directory's modification time. Windows opens a directory
+/// handle only under backup semantics.
 fn touch_kimi_lock(path: &Path, modified: SystemTime) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -1141,11 +784,9 @@ fn touch_kimi_lock(path: &Path, modified: SystemTime) -> std::io::Result<()> {
         .set_times(std::fs::FileTimes::new().set_modified(modified))
 }
 
-/// Remove a lock directory whose heartbeat has stopped, so a holder killed
-/// mid-refresh cannot poison the profile home until someone removes it by hand.
-/// Returns whether the lock is gone and the caller should retry the create at
-/// once; a lock another process removes or recreates underneath simply loses or
-/// wins the next create.
+/// Remove a lock whose holder stopped heartbeating, so a holder killed
+/// mid-refresh cannot block every later refresh. Returns whether the caller
+/// should retry the create at once.
 async fn break_stale_kimi_lock(path: &Path) -> bool {
     let modified = match kimi_lock_mtime(path) {
         Ok(Some(modified)) => modified,
@@ -1155,8 +796,13 @@ async fn break_stale_kimi_lock(path: &Path) -> bool {
             return false;
         }
     };
-    let age = SystemTime::now().duration_since(modified).ok();
-    let Some(age) = age.filter(|age| *age >= KIMI_LOCK_STALE_AFTER) else {
+    // A modification time in the future (the CLI rounds its writes up) is not
+    // stale.
+    let Some(age) = SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .filter(|age| *age >= KIMI_LOCK_STALE_AFTER)
+    else {
         return false;
     };
     match tokio::fs::remove_dir(path).await {
@@ -2249,7 +1895,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
         age_kimi_lock(&lock, KIMI_LOCK_STALE_AFTER + Duration::from_secs(60));
 
         let started = std::time::Instant::now();
-        let held = KimiRefreshLock::acquire_within(home.path(), Duration::from_secs(10))
+        let held = KimiRefreshLock::acquire(home.path(), Duration::from_secs(10))
             .await
             .expect("an orphaned lock must not block a refresh");
         let waited = started.elapsed();
@@ -2258,7 +1904,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
             waited < Duration::from_secs(5),
             "acquisition waited {waited:?}"
         );
-        held.release().await.expect("release an uncontested lock");
+        drop(held);
         assert!(!lock.exists(), "the released lock must be gone");
     }
 
@@ -2268,7 +1914,7 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
         let lock = home.path().join("oauth/kimi-code.lock");
         std::fs::create_dir_all(&lock).unwrap();
 
-        let error = KimiRefreshLock::acquire_within(home.path(), Duration::from_millis(600))
+        let error = KimiRefreshLock::acquire(home.path(), Duration::from_millis(600))
             .await
             .err()
             .expect("a lock with a live holder must be waited out, not stolen");
@@ -2281,17 +1927,20 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
     }
 
     /// The Kimi Code CLI breaks a lock whose modification time is more than
-    /// `KIMI_CLI_LOCK_STALE_AFTER` old, so Mjolnir's beats have to be frequent
-    /// enough that a stalled heartbeat task still cannot cost it a live lock.
+    /// five seconds old, so Mjolnir's beats have to be frequent enough that a
+    /// stalled heartbeat task still cannot cost it a live lock.
     #[tokio::test]
     async fn a_held_kimi_lock_republishes_its_mtime_several_times_per_cli_break_window() {
         let home = tempfile::tempdir().unwrap();
-        let held = KimiRefreshLock::acquire(home.path()).await.unwrap();
+        let held = KimiRefreshLock::acquire(home.path(), KIMI_LOCK_WAIT)
+            .await
+            .unwrap();
         let lock = home.path().join("oauth/kimi-code.lock");
 
         // Half the peer's break window: two beats have to land inside it, so
         // Mjolnir publishes at least four times per window and can miss several in
         // a row and still hold the lock.
+        const KIMI_CLI_LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
         let watched = KIMI_CLI_LOCK_STALE_AFTER / 2;
         let deadline = tokio::time::Instant::now() + watched;
         let mut published = vec![kimi_lock_mtime(&lock).unwrap().expect("the created lock")];
@@ -2313,348 +1962,9 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
             "the lock's modification time moved {} times in {watched:?}; the Kimi Code CLI breaks a lock after {KIMI_CLI_LOCK_STALE_AFTER:?} without a beat",
             published.len() - 1
         );
-        held.release().await.expect("release an uncontested lock");
+        drop(held);
     }
 
-    #[tokio::test]
-    async fn a_stolen_kimi_refresh_lock_is_left_to_its_new_holder_and_fails_the_refresh() {
-        let home = tempfile::tempdir().unwrap();
-        let held = KimiRefreshLock::acquire(home.path()).await.unwrap();
-        let lock = home.path().join("oauth/kimi-code.lock");
-
-        // The Kimi Code CLI breaks a lock it judges stale and takes it over:
-        // rmdir, mkdir, then its own modification time. The CLI dates those
-        // ahead of the clock; date this one far enough ahead that only the new
-        // holder could have written it.
-        std::fs::remove_dir(&lock).unwrap();
-        std::fs::create_dir(&lock).unwrap();
-        let thief = SystemTime::now() + Duration::from_secs(30);
-        touch_kimi_lock(&lock, thief).unwrap();
-
-        // Mjolnir must stop beating: a touch on the CLI's lock trips the CLI's own
-        // mtime ownership check and it abandons its refresh with ECOMPROMISED.
-        tokio::time::sleep(2 * KIMI_LOCK_HEARTBEAT_INTERVAL + Duration::from_millis(400)).await;
-        let observed = kimi_lock_mtime(&lock)
-            .unwrap()
-            .expect("the new holder's lock");
-        assert!(
-            observed.duration_since(SystemTime::now()).is_ok(),
-            "Mjolnir kept heartbeating a lock it no longer holds: the directory carries {} instead of the new holder's {}",
-            epoch_label(observed),
-            epoch_label(thief)
-        );
-
-        let error = held
-            .release()
-            .await
-            .expect_err("a refresh that lost its lock must fail loudly");
-        let message = error.to_string();
-        assert!(message.contains("kimi-code.lock"), "{message}");
-        assert!(message.contains("another process took it"), "{message}");
-        assert!(
-            lock.exists(),
-            "Mjolnir must not remove a lock another holder owns"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_kimi_refresh_lock_removed_underneath_hel_fails_the_refresh() {
-        let home = tempfile::tempdir().unwrap();
-        let held = KimiRefreshLock::acquire(home.path()).await.unwrap();
-        let lock = home.path().join("oauth/kimi-code.lock");
-        std::fs::remove_dir(&lock).unwrap();
-
-        let error = held
-            .release()
-            .await
-            .expect_err("a refresh that lost its lock must fail loudly");
-
-        assert!(
-            error.to_string().contains("another process removed it"),
-            "{error}"
-        );
-        assert!(!lock.exists(), "Mjolnir must not recreate a lock it lost");
-    }
-
-    fn kimi_pair(access: &str, refresh: &str, expires_at: i64) -> KimiCredentials {
-        KimiCredentials {
-            access_token: access.into(),
-            refresh_token: refresh.into(),
-            expires_at,
-            scope: "kimi-code".into(),
-            token_type: "Bearer".into(),
-            expires_in: 900,
-        }
-    }
-
-    fn a_stolen_lock() -> KimiLockLoss {
-        KimiLockLoss::Stolen {
-            published: SystemTime::UNIX_EPOCH,
-            observed: SystemTime::UNIX_EPOCH + Duration::from_secs(30),
-        }
-    }
-
-    #[test]
-    fn a_lock_still_held_saves_the_refreshed_pair_and_releases() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Ok(SystemTime::now()), None, &active),
-            KimiRefreshPersist::Save
-        );
-    }
-
-    #[test]
-    fn an_unprovable_ownership_check_still_saves_the_refreshed_pair() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let unproven = Err(KimiLockLoss::Unproven("stat failed".into()));
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&unproven, None, &active),
-            KimiRefreshPersist::Save,
-            "a failed stat proves nothing about the lock and must not discard valid tokens"
-        );
-    }
-
-    #[test]
-    fn a_stolen_lock_adopts_the_thiefs_newer_credentials() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let thiefs = kimi_pair("thief-access", "thief-refresh", 900);
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Err(a_stolen_lock()), Some(&thiefs), &active),
-            KimiRefreshPersist::Adopt {
-                access_token: "thief-access".into(),
-                loss: a_stolen_lock(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_removed_lock_adopts_the_newer_credentials_left_on_disk() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let thiefs = kimi_pair("thief-access", "thief-refresh", 900);
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Err(KimiLockLoss::Gone), Some(&thiefs), &active),
-            KimiRefreshPersist::Adopt {
-                access_token: "thief-access".into(),
-                loss: KimiLockLoss::Gone,
-            }
-        );
-    }
-
-    /// The pair on disk is dead whoever wrote it: its refresh token is the one
-    /// this refresh just spent at the server.
-    #[test]
-    fn a_stolen_lock_saves_hels_pair_over_the_spent_one_on_disk() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let on_disk = active.clone();
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Err(a_stolen_lock()), Some(&on_disk), &active),
-            KimiRefreshPersist::SaveContested(a_stolen_lock())
-        );
-    }
-
-    #[test]
-    fn an_unreadable_credentials_file_after_a_lost_lock_saves_hels_pair() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Err(KimiLockLoss::Gone), None, &active),
-            KimiRefreshPersist::SaveContested(KimiLockLoss::Gone),
-            "nothing readable is newer, so the refreshed pair is the only live one"
-        );
-    }
-
-    #[test]
-    fn any_rotated_field_marks_the_disk_pair_as_the_other_refreshers() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let rotations = [
-            kimi_pair("other-access", "spent-refresh", 100),
-            kimi_pair("spent-access", "other-refresh", 100),
-            kimi_pair("spent-access", "spent-refresh", 900),
-        ];
-
-        for on_disk in &rotations {
-            assert!(
-                matches!(
-                    decide_kimi_refresh_persist(&Err(a_stolen_lock()), Some(on_disk), &active),
-                    KimiRefreshPersist::Adopt { .. }
-                ),
-                "{on_disk:?} is a rotated pair, not the spent one"
-            );
-        }
-    }
-
-    #[test]
-    fn a_disk_pair_that_differs_only_in_description_is_still_the_spent_one() {
-        let active = kimi_pair("spent-access", "spent-refresh", 100);
-        let on_disk = KimiCredentials {
-            scope: "kimi-code extra".into(),
-            token_type: "bearer".into(),
-            expires_in: 1_800,
-            ..active.clone()
-        };
-
-        assert_eq!(
-            decide_kimi_refresh_persist(&Err(a_stolen_lock()), Some(&on_disk), &active),
-            KimiRefreshPersist::SaveContested(a_stolen_lock())
-        );
-    }
-
-    #[derive(Clone)]
-    struct KimiThiefState {
-        home: std::path::PathBuf,
-        /// The pair the lock's new holder stores before Mjolnir's own refresh
-        /// returns, when it got that far.
-        winner: Option<Value>,
-    }
-
-    /// Answer the refresh, but take the lock over first the way the Kimi Code
-    /// CLI takes over one it judges stale: rmdir, mkdir, then a modification
-    /// time of its own, dated ahead of the clock as the CLI dates its locks.
-    async fn test_kimi_refresh_stealing_the_lock(
-        State(state): State<KimiThiefState>,
-        _body: Bytes,
-    ) -> Json<Value> {
-        let lock = state.home.join("oauth/kimi-code.lock");
-        std::fs::remove_dir(&lock).unwrap();
-        std::fs::create_dir(&lock).unwrap();
-        touch_kimi_lock(&lock, SystemTime::now() + Duration::from_secs(30)).unwrap();
-        if let Some(winner) = &state.winner {
-            std::fs::write(
-                state.home.join("credentials/kimi-code.json"),
-                serde_json::to_vec(winner).unwrap(),
-            )
-            .unwrap();
-        }
-        Json(serde_json::json!({
-            "access_token": "hel-access",
-            "refresh_token": "hel-refresh",
-            "expires_in": 900,
-            "scope": "kimi-code",
-            "token_type": "Bearer"
-        }))
-    }
-
-    /// Serve one refresh that steals the lock while it is in flight, and hand
-    /// back what `ensure_fresh_kimi_token` made of it.
-    async fn refresh_against_a_lock_thief(
-        home: &Path,
-        winner: Option<Value>,
-    ) -> (Result<String>, std::path::PathBuf) {
-        let credentials_path = home.join("credentials/kimi-code.json");
-        tokio::fs::create_dir_all(credentials_path.parent().unwrap())
-            .await
-            .unwrap();
-        let soon = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
-            + 10;
-        tokio::fs::write(
-            &credentials_path,
-            serde_json::to_vec(&serde_json::json!({
-                "access_token": "spent-access",
-                "refresh_token": "spent-refresh",
-                "expires_at": soon,
-                "scope": "kimi-code",
-                "token_type": "Bearer",
-                "expires_in": 900
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let app = Router::new()
-            .route(
-                "/api/oauth/token",
-                post(test_kimi_refresh_stealing_the_lock),
-            )
-            .with_state(KimiThiefState {
-                home: home.to_path_buf(),
-                winner,
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let environment =
-            HashMap::from([("KIMI_CODE_OAUTH_HOST".into(), format!("http://{address}"))]);
-
-        let token = ensure_fresh_kimi_token(
-            &reqwest::Client::new(),
-            home,
-            &credentials_path,
-            &environment,
-            false,
-            None,
-        )
-        .await;
-        server.abort();
-        (token, credentials_path)
-    }
-
-    #[tokio::test]
-    async fn a_refresh_that_loses_its_lock_returns_the_winners_stored_token() {
-        let home = tempfile::tempdir().unwrap();
-        let winner = serde_json::json!({
-            "access_token": "winner-access",
-            "refresh_token": "winner-refresh",
-            "expires_at": 4_102_444_800i64,
-            "scope": "kimi-code",
-            "token_type": "Bearer",
-            "expires_in": 900
-        });
-
-        let (token, credentials_path) =
-            refresh_against_a_lock_thief(home.path(), Some(winner)).await;
-
-        assert_eq!(
-            token.unwrap(),
-            "winner-access",
-            "a contested lock must not fail a refresh when a live token exists"
-        );
-        let saved = read_kimi_credentials(&credentials_path).await.unwrap();
-        assert_eq!(
-            saved.access_token, "winner-access",
-            "Mjolnir must not clobber the credentials the lock's new holder stored"
-        );
-        assert!(
-            home.path().join("oauth/kimi-code.lock").exists(),
-            "Mjolnir must not remove a lock another holder owns"
-        );
-    }
-
-    /// The pair the thief left behind is the one this refresh already spent, so
-    /// it is dead: only Mjolnir's pair can still authenticate, and storing it is
-    /// what keeps the peer's own recovery re-read working.
-    #[tokio::test]
-    async fn a_refresh_that_loses_its_lock_saves_its_pair_over_the_spent_one() {
-        let home = tempfile::tempdir().unwrap();
-
-        let (token, credentials_path) = refresh_against_a_lock_thief(home.path(), None).await;
-
-        assert_eq!(token.unwrap(), "hel-access");
-        let saved = read_kimi_credentials(&credentials_path).await.unwrap();
-        assert_eq!(
-            saved.access_token, "hel-access",
-            "leaving the spent pair on disk would force a `kimi login`"
-        );
-        assert_eq!(saved.refresh_token, "hel-refresh");
-        assert!(
-            home.path().join("oauth/kimi-code.lock").exists(),
-            "Mjolnir must not remove a lock another holder owns"
-        );
-    }
-
-    /// The child is reaped by the shutdown, so a live pid means it was never
-    /// stopped.
-    #[cfg(unix)]
     fn process_is_gone(pid: i32) -> bool {
         // SAFETY: signal 0 only probes whether the process exists.
         unsafe { libc::kill(pid, 0) != 0 }

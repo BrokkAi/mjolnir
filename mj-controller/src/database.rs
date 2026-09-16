@@ -26,7 +26,6 @@ use mj_core::state::{
 use mj_core::subagent::SubagentRecord;
 
 use crate::targets::AdditionalMount;
-use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
 use mj_core::workspace::{
     DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
     normalize_workspace_name,
@@ -45,7 +44,7 @@ pub use events::*;
 
 pub use schema::database_path;
 #[cfg(test)]
-use schema::{forget_verified_schema, table_has_column};
+use schema::forget_verified_schema;
 use schema::{open, open_reader};
 
 const DATABASE_WRITE_QUEUE_CAPACITY: usize = 256;
@@ -343,11 +342,6 @@ where
     }
 }
 
-pub fn load_state_migrating() -> Result<State> {
-    migrate_legacy_state()?;
-    load_state()
-}
-
 pub fn load_state() -> Result<State> {
     load_state_from(&database_path())
 }
@@ -612,7 +606,7 @@ pub fn delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
         states
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|state| parse_session_state(state).is_active())
+            .filter(|state| stored_session_state(state).is_active())
             .count()
     };
     let draft_count: u64 = tx.query_row(
@@ -661,7 +655,7 @@ pub fn force_delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> 
         states
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|state| parse_session_state(state).is_active())
+            .filter(|state| stored_session_state(state).is_active())
             .count()
     };
     ensure!(
@@ -713,7 +707,7 @@ pub fn reassign_resumable_session_workspace_at(
         .with_context(|| format!("find resumable session {session_id:?}"))?;
     ensure!(
         matches!(
-            parse_session_state(&state),
+            stored_session_state(&state),
             SessionState::Stopped | SessionState::Lost | SessionState::Error
         ),
         "session {session_id} is not resumable"
@@ -732,10 +726,6 @@ pub fn reassign_resumable_session_workspace_at(
     }
     tx.commit()?;
     Ok(())
-}
-
-pub fn workspace_for_session(session_id: &str) -> Result<Option<String>> {
-    workspace_for_session_at(&database_path(), session_id)
 }
 
 pub fn workspace_for_session_at(path: &Path, session_id: &str) -> Result<Option<String>> {
@@ -1368,7 +1358,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                     )
                 })?,
             additional_mounts: Vec::new(),
-            state: parse_session_state(&row.get::<_, String>(6)?),
+            state: stored_session_state(&row.get::<_, String>(6)?),
             target: None,
             native_session_id: row.get(7)?,
             acp_session_title: row
@@ -1728,7 +1718,7 @@ fn mark_session_target_missing_if_current_to(
             [session_id],
             |row| row.get(0),
         )?;
-        Some(parse_session_state(&stored))
+        Some(stored_session_state(&stored))
     } else {
         None
     };
@@ -2503,32 +2493,6 @@ fn load_materialized_turn_summary_from(
     })
 }
 
-/// Read the transcript items whose sequence is above `after_seq`, oldest
-/// first. Returns `None` when the session has no projection row.
-///
-/// The sequence is `COALESCE(latest_content_event_ordinal, position)`: an
-/// agent message is rewritten while it streams, so paging by position would
-/// hand a caller the message as it was first created and never send the
-/// finished text. Paging by this sequence sends the item again exactly when it
-/// changed, and a caller that keeps the highest sequence it saw resumes from
-/// there whether the session is live or long stopped.
-pub fn load_materialized_transcript_after(
-    session_id: &str,
-    after_seq: u64,
-    limit: usize,
-) -> Result<Option<TranscriptPage>> {
-    load_materialized_transcript_after_from(&database_path(), session_id, after_seq, limit)
-}
-
-fn load_materialized_transcript_after_from(
-    path: &Path,
-    session_id: &str,
-    after_seq: u64,
-    limit: usize,
-) -> Result<Option<TranscriptPage>> {
-    load_materialized_transcript_filtered_from(path, session_id, after_seq, limit, None)
-}
-
 pub fn load_materialized_transcript_filtered(
     session_id: &str,
     after_seq: u64,
@@ -2621,31 +2585,6 @@ fn load_materialized_transcript_filtered_from(
         latest_seq,
         execution: fields.execution,
     }))
-}
-
-/// Read the newest `limit` transcript items for a session, oldest first.
-///
-/// A conversation view seeds itself from the tail and discards everything
-/// before it — `ChatState::from_materialized_tail` keeps `TAIL_SEED_ITEMS`
-/// and drops the rest — so reading the whole transcript to show the end of it
-/// is work proportional to history for a result that never was. On a real
-/// session that meant reading 28,066 rows to render 256.
-///
-/// The `materialized_transcript_position` index covers the ordering, so this
-/// costs the rows it returns rather than the rows that exist.
-pub fn load_materialized_transcript_tail(
-    session_id: &str,
-    limit: usize,
-) -> Result<Vec<Arc<TranscriptItem>>> {
-    load_materialized_transcript_tail_from(&database_path(), session_id, limit)
-}
-
-fn load_materialized_transcript_tail_from(
-    path: &Path,
-    session_id: &str,
-    limit: usize,
-) -> Result<Vec<Arc<TranscriptItem>>> {
-    read_materialized_transcript(&open_reader(path)?, session_id, Some(limit))
 }
 
 /// How many transcript rows one retention pass rewrites.
@@ -4495,7 +4434,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.harness_kind.id(),
             session.last_profile,
             session.target_template_id,
-            session_state_name(session.state),
+            session.state.as_str(),
             session.native_session_id,
             session.acp_session_title,
             session.session_title_override,
@@ -4579,7 +4518,7 @@ fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRecord) -> Res
             session.harness_kind.id(),
             session.last_profile,
             session.target_template_id,
-            session_state_name(session.state),
+            session.state.as_str(),
             session.updated_at,
             session.viewed_through_event_ordinal,
             session.last_error,
@@ -5111,61 +5050,9 @@ fn query_history_page(
         .map_err(Into::into)
 }
 
-pub fn migrate_legacy_state() -> Result<()> {
-    let legacy = mj_core::state::state_path();
-    let database = database_path();
-    migrate_legacy_state_from(&legacy, &database)
-}
-
-fn migrate_legacy_state_from(legacy: &Path, database: &Path) -> Result<()> {
-    if !legacy.exists() {
-        return Ok(());
-    }
-    // The database may exist after an interrupted migration. The legacy file
-    // remains the authority until the import commits and this file is renamed.
-    let mut state = State::load_json_from(legacy)?;
-    // Legacy worker sequence numbers are not relay event ordinals. Carrying
-    // them across the new compatibility floor could mark unseen relay events
-    // as read.
-    for session in state.sessions.values_mut() {
-        session.viewed_through_event_ordinal = 0;
-    }
-    save_state_to(database, &state)?;
-    let migrated = legacy.with_file_name("state.json.migrated-v1");
-    fs::rename(legacy, &migrated)
-        .with_context(|| format!("retain migrated Mjolnir state as {}", migrated.display()))?;
-    Ok(())
-}
-
-fn session_state_name(value: SessionState) -> &'static str {
-    match value {
-        SessionState::Provisioning => "provisioning",
-        SessionState::Running => "running",
-        SessionState::Disconnected => "disconnected",
-        SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing => "closing",
-        SessionState::Destroying => "destroying",
-        SessionState::Stopped => "stopped",
-        SessionState::Lost => "lost",
-        SessionState::Error => "error",
-        SessionState::DestroyedWithDataLoss => "destroyed-with-data-loss",
-    }
-}
-fn parse_session_state(value: &str) -> SessionState {
-    match value {
-        "provisioning" => SessionState::Provisioning,
-        "running" => SessionState::Running,
-        "disconnected" => SessionState::Disconnected,
-        "checkpointing" => SessionState::Checkpointing,
-        "closing" => SessionState::Closing,
-        "destroying" => SessionState::Destroying,
-        // Rows written before the verb was renamed still say "archived".
-        "stopped" | "archived" => SessionState::Stopped,
-        "lost" => SessionState::Lost,
-        "error" => SessionState::Error,
-        "destroyed-with-data-loss" => SessionState::DestroyedWithDataLoss,
-        _ => unreachable!(),
-    }
+/// The schema's CHECK constraint admits only known session states.
+fn stored_session_state(value: &str) -> SessionState {
+    SessionState::from_stored(value).expect("schema CHECK admits only known session states")
 }
 
 #[cfg(unix)]

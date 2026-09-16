@@ -118,8 +118,6 @@ pub struct MaterializedSessionMutation {
     pub api_events: Vec<ApiEventData>,
 }
 
-/// Atomically advance both the per-client and legacy session read frontiers.
-/// Neither value changes when validation or persistence fails.
 /// One viewer's stored state for one session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClientSessionState {

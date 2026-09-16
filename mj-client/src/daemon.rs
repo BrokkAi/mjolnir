@@ -188,7 +188,6 @@ pub struct CreateSessionRequest {
     pub project_directory: Option<PathBuf>,
     pub target_template_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
-    pub allow_dirty_local: bool,
     pub resource_allocation: Option<SessionResourceAllocation>,
     pub title: String,
     pub session_title_override: Option<String>,
@@ -1386,7 +1385,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

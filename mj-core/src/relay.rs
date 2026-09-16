@@ -42,17 +42,14 @@ pub const RELAY_TRUNCATION_FLOOR: usize = 4 * 1024;
 /// The private snapshot also has a hard ceiling so repeated accepted commands
 /// cannot grow the durable state file without bound between checkpoints.
 pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
-/// Current durable ACP relay protocol. Peers that only speak an older
-/// version in [`RELAY_MIN_PROTOCOL_VERSION`]..=this range still connect.
-/// Protocol 0 is the retired pre-relay worker protocol and is rejected.
+/// Current durable ACP relay protocol. A worker serves only this version.
+///
+/// A controller still connects to a worker that speaks an older version in
+/// [`RELAY_MIN_PROTOCOL_VERSION`]..=this range, so that it can read the
+/// session and replace the worker with the current build once it is quiet.
+/// Until then, a request the older worker cannot decode is refused on the
+/// controller side. Protocol 0 is the retired pre-relay worker protocol.
 pub const RELAY_PROTOCOL_VERSION: u32 = 13;
-/// Historical note: protocol 13 was required because writers emitted per-turn
-/// plan credits, and an older reader dropped that unknown field when it
-/// re-serialized an observation, so its recomputed digest would not match. The
-/// field is gone with the harness that produced it, but the floor stays: a
-/// worker pinned to it is still the contract this release writes.
-/// Controllers still read older workers using RELAY_MIN_PROTOCOL_VERSION.
-pub const RELAY_WRITER_MIN_PROTOCOL_VERSION: u32 = 13;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;

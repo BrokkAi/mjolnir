@@ -344,23 +344,31 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
             )],
         );
     }
+    // A config a newer build wrote is not broken TOML: replacing it with
+    // `mj setup` would discard that build's settings. Say what is actually
+    // wrong before the load below reports it as invalid.
+    if let Some(found) = mj_core::config::newer_version_on_disk(path) {
+        return (
+            None,
+            vec![DoctorCheck::fixable(
+                "config",
+                "Mjolnir configuration",
+                format!(
+                    "{} was written by a newer Mjolnir (config version {found}; this build supports {})",
+                    path.display(),
+                    mj_core::config::CONFIG_VERSION
+                ),
+                "Update Mjolnir to that build or newer. Do not lower the version value by hand or replace the file.",
+            )],
+        );
+    }
     match Config::load_from(path) {
         Ok(config) => {
-            let mut checks = vec![match config.newer_build_notice() {
-                // Hel still runs on a config a newer build owns, but every
-                // save refuses, so say so rather than reporting it as valid.
-                Some(notice) => DoctorCheck::warning(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{}: {notice}", path.display()),
-                    "Update Mjolnir, or change settings with the newer build.",
-                ),
-                None => DoctorCheck::ready(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{} is valid", path.display()),
-                ),
-            }];
+            let mut checks = vec![DoctorCheck::ready(
+                "config",
+                "Mjolnir configuration",
+                format!("{} is valid", path.display()),
+            )];
             if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
@@ -1911,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_a_config_owned_by_a_newer_hel_as_read_only() {
+    fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(
@@ -1925,10 +1933,13 @@ mod tests {
 
         let (config, checks) = configuration_checks(&path);
 
-        assert!(config.is_some());
+        assert!(config.is_none());
         let check = checks.iter().find(|check| check.id == "config").unwrap();
-        assert_eq!(check.status, CheckStatus::Warning);
-        assert!(check.detail.contains("read-only"), "{}", check.detail);
+        assert_eq!(check.status, CheckStatus::Fixable);
+        assert!(check.detail.contains("newer Mjolnir"), "{}", check.detail);
+        let remediation = check.remediation.as_deref().unwrap_or_default();
+        assert!(remediation.contains("Update Mjolnir"), "{remediation}");
+        assert!(!remediation.contains("mj setup"), "{remediation}");
     }
 
     fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>) -> Config {

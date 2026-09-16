@@ -1,8 +1,5 @@
 //! Controller-side checkpoint transport and verified teardown gates.
-use crate::targets::{
-    CommandExecutor, CommandPlan, CommandSpec, SshTarget, TargetLocator, join_remote_command,
-    push_connection_sharing_args, worker_root,
-};
+use crate::targets::{CommandExecutor, CommandPlan, CommandSpec, TargetLocator, worker_root};
 use anyhow::{Context, Result, bail, ensure};
 use mj_checkpoint::archive::validate_component;
 use mj_checkpoint::checkpoint::*;
@@ -209,7 +206,7 @@ fn cleanup_transfer_staging(
     validate_remote_path(staging)?;
     let command = match locator {
         TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } => Some(
-            ssh_command(ssh, ["rm", "-f", "--", staging])
+            crate::targets::ssh_command(ssh, ["rm", "-f", "--", staging])
                 .purpose("remove remote checkpoint staging"),
         ),
         _ => None,
@@ -270,16 +267,19 @@ pub fn transfer_plan(
             .purpose("download checkpoint from Apple container"),
         ],
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            vec![scp_command(ssh, remote_archive, &local).purpose("download checkpoint over SSH")]
+            vec![
+                crate::targets::scp_download(ssh, remote_archive, &local)
+                    .purpose("download checkpoint over SSH"),
+            ]
         }
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
         | TargetLocator::SshDocker { ssh, container_id } => {
             vec![
-                ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
                     .purpose("create remote checkpoint staging directory"),
-                ssh_command(
+                crate::targets::ssh_command(
                     ssh,
                     [
                         locator.container_engine().expect("remote container"),
@@ -294,7 +294,7 @@ pub fn transfer_plan(
     };
     if let TargetLocator::SshPodman { ssh, .. } | TargetLocator::SshDocker { ssh, .. } = locator {
         commands.push(
-            scp_command(ssh, staging, &local)
+            crate::targets::scp_download(ssh, staging, &local)
                 .purpose("download remote container checkpoint over SSH"),
         );
     }
@@ -307,45 +307,13 @@ pub fn transfer_plan(
 fn cleanup_plan(locator: &TargetLocator, session_id: &str, remote: &str) -> Result<CommandPlan> {
     validate_remote_path(remote)?;
     worker_root(locator, session_id)?;
-    let commands = match locator {
-        TargetLocator::LocalBare { .. } => vec![
-            CommandSpec::new("rm", ["-f", "--", remote])
-                .purpose("remove local bare checkpoint staging"),
-        ],
-        TargetLocator::LocalPodman { container_id, .. } => vec![container_exec(
-            "podman",
-            container_id,
-            ["rm", "-f", "--", remote],
-        )],
-        TargetLocator::LocalDocker { container_id } => vec![container_exec(
-            "docker",
-            container_id,
-            ["rm", "-f", "--", remote],
-        )],
-        TargetLocator::AppleContainer { container_id } => vec![container_exec(
-            "container",
-            container_id,
-            ["rm", "-f", "--", remote],
-        )],
-        TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
-            vec![ssh_command(ssh, ["rm", "-f", "--", remote])]
-        }
-        TargetLocator::SshPodman {
-            ssh, container_id, ..
-        }
-        | TargetLocator::SshDocker { ssh, container_id } => vec![ssh_command(
-            ssh,
-            [
-                locator.container_engine().expect("remote container"),
-                "exec",
-                container_id,
-                "rm",
-                "-f",
-                "--",
-                remote,
-            ],
-        )],
-    };
+    let commands = vec![
+        crate::targets::locator_command(
+            locator,
+            ["rm", "-f", "--", remote].map(str::to_owned).to_vec(),
+        )
+        .purpose("remove checkpoint staging"),
+    ];
     Ok(CommandPlan {
         description: format!("clean checkpoint for {session_id}"),
         commands,
@@ -358,43 +326,6 @@ fn remote_staging_path(session_id: &str, operation_id: &str) -> Result<String> {
     Ok(format!(
         ".local/share/hel/transfers/{session_id}-{operation_id}.hel.zip"
     ))
-}
-
-fn scp_command(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
-    let mut args = ssh.ssh_args.clone();
-    for argument in &mut args {
-        if argument == "-p" {
-            *argument = "-P".into();
-        }
-    }
-    push_connection_sharing_args(&mut args);
-    args.push(format!("{}:{remote}", ssh.destination));
-    args.push(local.into());
-    // `scp` opens its own connection to the same host, so it competes for the
-    // same pre-auth budget and is admitted and retried the same way.
-    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
-}
-
-fn ssh_command(ssh: &SshTarget, args: impl IntoIterator<Item = impl AsRef<str>>) -> CommandSpec {
-    let remote = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let mut command = ssh.ssh_args.clone();
-    push_connection_sharing_args(&mut command);
-    command.push(ssh.destination.clone());
-    command.push(join_remote_command(&remote));
-    CommandSpec::new("ssh", command).ssh_destination(ssh.destination.clone())
-}
-
-fn container_exec(
-    engine: &str,
-    id: &str,
-    args: impl IntoIterator<Item = impl Into<String>>,
-) -> CommandSpec {
-    let mut command = vec!["exec".into(), "-i".into(), id.into()];
-    command.extend(args.into_iter().map(Into::into));
-    CommandSpec::new(engine, command)
 }
 
 fn validate_remote_path(path: &str) -> Result<()> {
@@ -431,24 +362,10 @@ mod tests {
 
     const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
-    /// A checkpoint download opens its own connection to the host, so it has
-    /// to be admitted and retried the same way an `ssh` invocation is.
-    #[test]
-    fn a_checkpoint_scp_is_tagged_with_the_connection_destination() {
-        let ssh = SshTarget {
-            destination: "build@10.0.0.1".into(),
-            ssh_args: vec!["-p".into(), "2222".into()],
-        };
-
-        let download = scp_command(&ssh, "remote/archive.zip", "/tmp/local.zip");
-
-        assert_eq!(download.program, "scp");
-        assert_eq!(download.ssh_destination.as_deref(), Some("build@10.0.0.1"));
-    }
     const NATIVE: &str = "0190aabb-ccdd-7eef-9000-abcdef012345";
 
-    fn ssh() -> SshTarget {
-        SshTarget {
+    fn ssh() -> crate::targets::SshTarget {
+        crate::targets::SshTarget {
             destination: "dev@example.test".into(),
             ssh_args: vec!["-p".into(), "2222".into()],
         }

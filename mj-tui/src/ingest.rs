@@ -808,55 +808,6 @@ impl DashboardState {
         }
     }
 
-    /// Record one launch stage entering or leaving the active set. Repeated
-    /// starts retain the original clock, and finishing one concurrent lane
-    /// leaves the others visible.
-    pub fn set_session_operation_stage(
-        &mut self,
-        session_id: &str,
-        stage: ProvisionStage,
-        active: bool,
-    ) {
-        let changed = if let Some(operation) = self.session_operations.get_mut(session_id) {
-            if active {
-                if let std::collections::btree_map::Entry::Vacant(e) =
-                    operation.active_stages.entry(stage)
-                {
-                    e.insert(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                operation.active_stages.remove(&stage).is_some()
-            }
-        } else {
-            false
-        };
-        if changed && self.session_is_visible(session_id) {
-            self.mark_render_changed();
-        }
-    }
-
-    pub fn rekey_session_operation(&mut self, previous: &str, session_id: String) {
-        let previous_visible = self.visible_state_signature();
-        if let Some(mut operation) = self.session_operations.remove(previous) {
-            operation.placeholder = None;
-            self.session_operations.insert(session_id, operation);
-        }
-        self.apply_operation_projection();
-        self.rebuild_resume_rows();
-        self.clamp_selections();
-        if self.visible_state_signature() != previous_visible {
-            self.mark_render_changed();
-        }
-    }
-
     pub fn finish_session_operation(&mut self, session_id: &str) {
         let previous_visible = self.visible_state_signature();
         self.session_operations.remove(session_id);
@@ -2321,13 +2272,6 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_stage_for_an_unknown_session_is_ignored() {
-        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-        dashboard.set_session_operation_stage("missing", ProvisionStage::Booting, true);
-        assert!(dashboard.session_operations.is_empty());
-    }
-
-    #[test]
     fn daemon_operation_snapshot_preserves_remote_clocks_and_stages() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_session_operation_at(
@@ -2367,52 +2311,6 @@ mod tests {
         let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
         dashboard.set_resume_destination("missing", "grok-1".into(), "localhost".into());
         assert!(dashboard.session_operations.is_empty());
-    }
-
-    #[test]
-    fn repeating_a_stage_report_does_not_reset_its_clock() {
-        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Launching,
-            None,
-        );
-        dashboard.set_session_operation_stage("session-1", ProvisionStage::Booting, true);
-        dashboard
-            .session_operations
-            .get_mut("session-1")
-            .expect("operation")
-            .active_stages
-            .insert(ProvisionStage::Booting, 1_000);
-
-        dashboard.set_session_operation_stage("session-1", ProvisionStage::Booting, true);
-
-        assert_eq!(
-            dashboard.session_operations["session-1"].active_stages[&ProvisionStage::Booting],
-            1_000
-        );
-    }
-
-    #[test]
-    fn finishing_one_stage_keeps_a_concurrent_stage_active() {
-        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Launching,
-            None,
-        );
-        dashboard.set_session_operation_stage("session-1", ProvisionStage::Cloning, true);
-        dashboard.set_session_operation_stage("session-1", ProvisionStage::Syncing, true);
-        dashboard.set_session_operation_stage("session-1", ProvisionStage::Cloning, false);
-
-        assert_eq!(
-            dashboard.session_operations["session-1"]
-                .active_stages
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![ProvisionStage::Syncing]
-        );
     }
 
     #[test]

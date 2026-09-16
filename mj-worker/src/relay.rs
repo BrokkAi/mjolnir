@@ -938,23 +938,29 @@ impl DurableRelay {
     pub fn clear_agent_terminals(&mut self) -> Result<()> {
         self.active_agent_terminals.clear();
         self.closed_agent_terminals.clear();
-        // The harness that owned those processes is gone, and so is whatever
-        // it left running: a restart cannot poll a process it no longer has.
+        self.forget_harness_processes();
+        self.persist_activity_transition()
+    }
+
+    /// The harness that owned its processes is gone, and so is whatever it
+    /// left running: a restart cannot poll a process it no longer has. Every
+    /// piece of in-memory process state a harness reports is cleared here, so
+    /// a restart and a closed terminal set cannot disagree about it.
+    fn forget_harness_processes(&mut self) {
         self.codex_execute_tools.clear();
         self.background_exec_cards.clear();
         self.claude_background_tasks.clear();
         self.claude_pending_stops.clear();
+        self.claude_stoppable_tasks.clear();
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
         self.kimi_observed_task_ids.clear();
         self.kimi_observed_tool_ids.clear();
         self.agent_terminal_tool_calls.clear();
+        self.foreground_tools.clear();
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
         }
-        self.claude_stoppable_tasks.clear();
-        self.foreground_tools.clear();
-        self.persist_activity_transition()
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
@@ -1171,7 +1177,7 @@ impl DurableRelay {
         }
         if let RelayRequest::Hello { supported, .. } = &envelope.request {
             let writer_range = RelayVersionRange {
-                min: mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION,
+                min: RELAY_PROTOCOL_VERSION,
                 max: RELAY_PROTOCOL_VERSION,
             };
             let Some(negotiated) = writer_range.negotiate(*supported) else {
@@ -1194,20 +1200,7 @@ impl DurableRelay {
                 },
             });
         }
-        if matches!(envelope.request, RelayRequest::Attach { .. })
-            && envelope.protocol_version < mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION
-        {
-            return Some(relay_error(
-                RelayErrorCode::IncompatibleProtocol,
-                "upgrade the controller to read goal controls and provider details without losing event integrity",
-                false,
-                None,
-            ));
-        }
-        if !envelope.request.supported_at(envelope.protocol_version) {
-            return Some(incompatible_request_protocol(envelope.protocol_version));
-        }
-        None
+        mj_core::relay::protocol::relay_protocol_rejection(envelope)
     }
 
     fn handle_inner(&mut self, envelope: &RelayRequestEnvelope) -> Result<RelayResponseBody> {
@@ -2196,20 +2189,7 @@ impl DurableRelay {
                 | RelayObservation::Closing
                 | RelayObservation::Closed
         ) {
-            self.codex_execute_tools.clear();
-            self.background_exec_cards.clear();
-            self.claude_background_tasks.clear();
-            self.claude_pending_stops.clear();
-            self.kimi_background_tasks.clear();
-            self.kimi_provisional_tasks.clear();
-            self.kimi_observed_task_ids.clear();
-            self.kimi_observed_tool_ids.clear();
-            self.agent_terminal_tool_calls.clear();
-            if self.background_work == BackgroundWorkPolicy::KimiTasks {
-                self.background_work_known = Some(false);
-            }
-            self.claude_stoppable_tasks.clear();
-            self.foreground_tools.clear();
+            self.forget_harness_processes();
         }
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {

@@ -23,7 +23,7 @@ use mj_checkpoint::archive::{
     ArchiveInput, BundleManifest, GitCollectionSpec, GitHistoryMode, GitSnapshotProgress,
     SystemGit, TargetManifest, collect_git_snapshot_with_progress, write_archive_atomic,
 };
-use mj_checkpoint::checkpoint::{collect_import_native_artifacts, collect_native_artifacts};
+use mj_checkpoint::checkpoint::collect_import_native_artifacts;
 
 use mj_core::config::{
     Config, HarnessKind, ProjectBundle, ProjectRepository, TargetTemplate, validate_id,
@@ -240,10 +240,6 @@ pub struct ImportedClaudeSession {
     pub archive_path: PathBuf,
 }
 
-pub type ImportedCodexSession = ImportedClaudeSession;
-pub type ImportedKimiSession = ImportedClaudeSession;
-pub type ImportedGrokSession = ImportedClaudeSession;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportArchiveProgress {
     Repository {
@@ -279,46 +275,6 @@ impl ImportControl<'_> {
     }
 }
 
-pub struct ClaudeImportRequest<'a> {
-    pub claude_home: &'a Path,
-    pub source: &'a LocatedClaudeSession,
-    pub transcript: &'a ClaudeTranscript,
-    pub bundle_id: &'a str,
-    pub profile_id: Option<&'a str>,
-    pub title: Option<&'a str>,
-    pub archive_directory: &'a Path,
-}
-
-pub struct CodexImportRequest<'a> {
-    pub codex_home: &'a Path,
-    pub source: &'a LocatedCodexSession,
-    pub transcript: &'a CodexTranscript,
-    pub bundle_id: &'a str,
-    pub profile_id: Option<&'a str>,
-    pub title: Option<&'a str>,
-    pub archive_directory: &'a Path,
-}
-
-pub struct KimiImportRequest<'a> {
-    pub kimi_home: &'a Path,
-    pub source: &'a LocatedKimiSession,
-    pub transcript: &'a KimiTranscript,
-    pub bundle_id: &'a str,
-    pub profile_id: Option<&'a str>,
-    pub title: Option<&'a str>,
-    pub archive_directory: &'a Path,
-}
-
-pub struct GrokImportRequest<'a> {
-    pub grok_home: &'a Path,
-    pub source: &'a LocatedGrokSession,
-    pub transcript: &'a GrokTranscript,
-    pub bundle_id: &'a str,
-    pub profile_id: Option<&'a str>,
-    pub title: Option<&'a str>,
-    pub archive_directory: &'a Path,
-}
-
 /// Resolve a harness's configuration home without ever modifying it.
 ///
 /// The environment override wins; otherwise the harness's default directory
@@ -335,26 +291,6 @@ pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
         home.display()
     );
     Ok(home)
-}
-
-/// Resolve the Claude configuration home without ever modifying it.
-pub fn claude_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Claude)
-}
-
-/// Resolve the Codex configuration home without ever modifying it.
-pub fn codex_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Codex)
-}
-
-/// Resolve the Kimi Code configuration home without ever modifying it.
-pub fn kimi_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Kimi)
-}
-
-/// Resolve the Grok Build configuration home without ever modifying it.
-pub fn grok_config_home() -> Result<PathBuf> {
-    harness_config_home(HarnessKind::Grok)
 }
 
 /// One native session located on disk, normalized across harnesses: the id
@@ -2402,305 +2338,6 @@ pub(crate) fn unique_bundle_id(config: &Config, base: &str) -> String {
     unreachable!("u32 bundle suffixes are finite")
 }
 
-/// Build, verify, and install a local archive, then update the in-memory state.
-/// The caller saves `state` only after this returns successfully.
-pub fn import_claude_session(
-    config: &Config,
-    state: &mut State,
-    request: ClaudeImportRequest<'_>,
-) -> Result<ImportedClaudeSession> {
-    import_claude_session_inner(config, state, request, None)
-}
-
-pub fn import_claude_session_with_control(
-    config: &Config,
-    state: &mut State,
-    request: ClaudeImportRequest<'_>,
-    control: &ImportControl<'_>,
-) -> Result<ImportedClaudeSession> {
-    import_claude_session_inner(config, state, request, Some(control))
-}
-
-fn import_claude_session_inner(
-    config: &Config,
-    state: &mut State,
-    request: ClaudeImportRequest<'_>,
-    control: Option<&ImportControl<'_>>,
-) -> Result<ImportedClaudeSession> {
-    let ClaudeImportRequest {
-        claude_home,
-        source,
-        transcript,
-        bundle_id,
-        profile_id,
-        title,
-        archive_directory,
-    } = request;
-    let bundle = config
-        .bundles
-        .get(bundle_id)
-        .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
-    let session_title_override = title.map(str::to_owned);
-    let title = match session_title_override.as_deref() {
-        Some(title) if !title.trim().is_empty() => title.to_owned(),
-        Some(_) => bail!("import title must not be empty"),
-        None => harness_session_title(&transcript.events)
-            .unwrap_or_else(|| format!("Imported Claude session {}", source.native_session_id)),
-    };
-    let targets = session_edit_targets(transcript, claude_home)?;
-    let raw_project = raw_project_import(config, &targets);
-    let repositories =
-        collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
-    let native_artifacts = collect_native_artifacts(
-        HarnessKind::Claude,
-        claude_home,
-        &source.native_session_id,
-        false,
-    )?;
-    let session_id = new_session_id()?;
-    let canonical_session =
-        canonical_import_session(&session_id, &transcript.events, &source.jsonl_path)?;
-    let timestamp = timestamp();
-    let profile_id = import_profile_id(config, profile_id, HarnessKind::Claude, claude_home)?;
-    let target_id = default_import_target_id(config);
-    let archive_path = archive_directory.join(format!("{session_id}.hel.zip"));
-    if let Some(control) = control {
-        control.report(ImportArchiveProgress::WritingArchive)?;
-    }
-    let verified = write_archive_atomic(
-        &archive_path,
-        &ArchiveInput {
-            session: mj_checkpoint::archive::SessionManifest {
-                id: session_id.clone(),
-                title: title.clone(),
-                harness_kind: HarnessKind::Claude,
-                profile_id: profile_id.clone(),
-                native_session_id: source.native_session_id.clone(),
-                created_at: timestamp.clone(),
-                checkpointed_at: timestamp.clone(),
-                hel_version: env!("CARGO_PKG_VERSION").into(),
-                relay_version: env!("CARGO_PKG_VERSION").into(),
-                adapter_version: "acp-v1".into(),
-            },
-            target: TargetManifest {
-                template_id: target_id.clone(),
-                target_kind: "import".into(),
-                details: BTreeMap::from([("source".into(), "claude-import".into())]),
-            },
-            bundle: BundleManifest {
-                id: bundle_id.to_owned(),
-                primary_repository: bundle.primary_repo.clone(),
-            },
-            canonical_session,
-            native_artifacts,
-            repositories,
-        },
-    )?;
-    if let Some(control) = control
-        && let Err(error) = control.check_cancelled()
-    {
-        let _ = fs::remove_file(&archive_path);
-        return Err(error);
-    }
-    let checkpoint = CheckpointMetadata {
-        archive_path: archive_path.clone(),
-        sha256: verified.archive_sha256,
-        created_at: timestamp.clone(),
-        event_frontier: transcript.events.last().map_or(0, |event| event.seq),
-    };
-    state.sessions.insert(
-        session_id.clone(),
-        SessionRecord {
-            mjolnir_subagents: None,
-            create_managed_worktree: None,
-            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-            archived: false,
-            container_cpus: None,
-            container_memory: None,
-            id: session_id.clone(),
-            title,
-            harness_kind: HarnessKind::Claude,
-            last_profile: profile_id,
-            bundle_id: bundle_id.to_owned(),
-            project_directory: raw_project.as_ref().map(|(directory, _)| directory.clone()),
-            managed_worktree: None,
-            target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
-            resource_allocation: None,
-            additional_mounts: Vec::new(),
-            state: SessionState::Stopped,
-            target: None,
-            native_session_id: Some(source.native_session_id.clone()),
-            acp_session_title: None,
-            session_title_override,
-            created_at: timestamp.clone(),
-            updated_at: timestamp,
-            viewed_through_event_ordinal: 0,
-            draft_input: String::new(),
-            last_error: None,
-            last_checkpoint_error: None,
-            checkpoint: Some(checkpoint),
-        },
-    );
-    Ok(ImportedClaudeSession {
-        session_id,
-        native_session_id: source.native_session_id.clone(),
-        source_jsonl: source.jsonl_path.clone(),
-        source_cwd: transcript.cwd.clone(),
-        bundle_id: bundle_id.to_owned(),
-        archive_path,
-    })
-}
-
-pub fn import_codex_session(
-    config: &Config,
-    state: &mut State,
-    request: CodexImportRequest<'_>,
-) -> Result<ImportedCodexSession> {
-    import_codex_session_inner(config, state, request, None)
-}
-
-pub fn import_codex_session_with_control(
-    config: &Config,
-    state: &mut State,
-    request: CodexImportRequest<'_>,
-    control: &ImportControl<'_>,
-) -> Result<ImportedCodexSession> {
-    import_codex_session_inner(config, state, request, Some(control))
-}
-
-fn import_codex_session_inner(
-    config: &Config,
-    state: &mut State,
-    request: CodexImportRequest<'_>,
-    control: Option<&ImportControl<'_>>,
-) -> Result<ImportedCodexSession> {
-    let CodexImportRequest {
-        codex_home,
-        source,
-        transcript,
-        bundle_id,
-        profile_id,
-        title,
-        archive_directory,
-    } = request;
-    import_native_session(
-        config,
-        state,
-        NativeImportRequest {
-            harness: HarnessKind::Codex,
-            harness_home: codex_home,
-            native_session_id: &source.native_session_id,
-            source_path: &source.jsonl_path,
-            transcript,
-            bundle_id,
-            profile_id,
-            title,
-            archive_directory,
-        },
-        control,
-    )
-}
-
-pub fn import_grok_session(
-    config: &Config,
-    state: &mut State,
-    request: GrokImportRequest<'_>,
-) -> Result<ImportedGrokSession> {
-    import_grok_session_inner(config, state, request, None)
-}
-
-pub fn import_grok_session_with_control(
-    config: &Config,
-    state: &mut State,
-    request: GrokImportRequest<'_>,
-    control: &ImportControl<'_>,
-) -> Result<ImportedGrokSession> {
-    import_grok_session_inner(config, state, request, Some(control))
-}
-
-fn import_grok_session_inner(
-    config: &Config,
-    state: &mut State,
-    request: GrokImportRequest<'_>,
-    control: Option<&ImportControl<'_>>,
-) -> Result<ImportedGrokSession> {
-    let GrokImportRequest {
-        grok_home,
-        source,
-        transcript,
-        bundle_id,
-        profile_id,
-        title,
-        archive_directory,
-    } = request;
-    import_native_session(
-        config,
-        state,
-        NativeImportRequest {
-            harness: HarnessKind::Grok,
-            harness_home: grok_home,
-            native_session_id: &source.native_session_id,
-            source_path: &source.session_path,
-            transcript,
-            bundle_id,
-            profile_id,
-            title,
-            archive_directory,
-        },
-        control,
-    )
-}
-
-pub fn import_kimi_session(
-    config: &Config,
-    state: &mut State,
-    request: KimiImportRequest<'_>,
-) -> Result<ImportedKimiSession> {
-    import_kimi_session_inner(config, state, request, None)
-}
-
-pub fn import_kimi_session_with_control(
-    config: &Config,
-    state: &mut State,
-    request: KimiImportRequest<'_>,
-    control: &ImportControl<'_>,
-) -> Result<ImportedKimiSession> {
-    import_kimi_session_inner(config, state, request, Some(control))
-}
-
-fn import_kimi_session_inner(
-    config: &Config,
-    state: &mut State,
-    request: KimiImportRequest<'_>,
-    control: Option<&ImportControl<'_>>,
-) -> Result<ImportedKimiSession> {
-    let KimiImportRequest {
-        kimi_home,
-        source,
-        transcript,
-        bundle_id,
-        profile_id,
-        title,
-        archive_directory,
-    } = request;
-    import_native_session(
-        config,
-        state,
-        NativeImportRequest {
-            harness: HarnessKind::Kimi,
-            harness_home: kimi_home,
-            native_session_id: &source.native_session_id,
-            source_path: &source.session_path,
-            transcript,
-            bundle_id,
-            profile_id,
-            title,
-            archive_directory,
-        },
-        control,
-    )
-}
-
 pub struct NativeImportRequest<'a> {
     pub harness: HarnessKind,
     pub harness_home: &'a Path,
@@ -2713,17 +2350,9 @@ pub struct NativeImportRequest<'a> {
     pub archive_directory: &'a Path,
 }
 
-/// Import one already-located, already-parsed native session, for any harness.
-/// The per-harness `import_*_session` wrappers are thin adapters over this.
-pub fn import_native_session_with_control(
-    config: &Config,
-    state: &mut State,
-    request: NativeImportRequest<'_>,
-    control: &ImportControl<'_>,
-) -> Result<ImportedClaudeSession> {
-    import_native_session(config, state, request, Some(control))
-}
-
+/// Build, verify, and install a local archive for one already-located,
+/// already-parsed native session, for any harness, then update the in-memory
+/// state. The caller saves `state` only after this returns successfully.
 pub fn import_native_session(
     config: &Config,
     state: &mut State,

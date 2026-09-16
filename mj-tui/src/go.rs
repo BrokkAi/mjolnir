@@ -170,7 +170,6 @@ impl DashboardState {
             mjolnir_subagents: recipe.mjolnir_subagents,
             additional_mounts: recipe.additional_mounts,
             resource_allocation: recipe.resource_allocation,
-            allow_dirty_local: false,
         }
     }
 
