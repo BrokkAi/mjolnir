@@ -20,6 +20,23 @@ jobs:
         components: rustfmt
     - run: cargo fmt --all -- --check
 
+  unused-dependencies:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+    - name: Cache pinned cargo-machete
+      id: machete-tool
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/bin/cargo-machete
+        key: cargo-machete-${{ runner.os }}-${{ runner.arch }}-0.9.2-rust-1.96.0
+    - name: Install pinned cargo-machete
+      if: steps.machete-tool.outputs.cache-hit != 'true'
+      run: cargo install --locked cargo-machete --version 0.9.2
+    - run: cargo machete
+
   licenses:
     name: Dependency licenses
     runs-on: ubuntu-latest
