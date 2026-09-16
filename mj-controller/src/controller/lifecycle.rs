@@ -851,6 +851,7 @@ mod tests {
         session.target_template_id = "podman".into();
         session.state = SessionState::Stopped;
         session.target = Some(TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id,
             workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume { name: volume },
         });
@@ -1201,6 +1202,7 @@ mod tests {
         session.target_template_id = "podman".into();
         session.state = SessionState::Closing;
         session.target = Some(TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id,
             workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
                 name: volume.clone(),
@@ -1536,6 +1538,7 @@ mod tests {
         session.target_template_id = "apple".into();
         session.state = SessionState::Destroying;
         session.target = Some(TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: targets::resource_name(session_id).unwrap(),
         });
         session.checkpoint = Some(checkpoint.clone());

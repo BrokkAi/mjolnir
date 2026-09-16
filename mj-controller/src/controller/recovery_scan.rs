@@ -584,21 +584,26 @@ fn candidates_from_container_json(
             };
             let locator = match template {
                 TargetTemplate::LocalPodman { .. } => TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: generated,
                     workspace_storage: Default::default(),
                 },
                 TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
+                    borrowed_from: None,
                     container_id: generated,
                 },
                 TargetTemplate::AppleContainer { .. } => TargetLocator::AppleContainer {
+                    borrowed_from: None,
                     container_id: generated,
                 },
                 TargetTemplate::SshPodman { ssh, .. } => TargetLocator::SshPodman {
+                    borrowed_from: None,
                     host: ssh.host.clone(),
                     container_id: generated,
                     workspace_storage: Default::default(),
                 },
                 TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+                    borrowed_from: None,
                     host: ssh.host.clone(),
                     container_id: generated,
                 },
@@ -863,22 +868,27 @@ fn recovery_backend_locator(
         }
         (TargetTemplate::LocalPodman { .. }, TargetLocator::LocalPodman { container_id, .. }) => {
             targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
             }
         }
-        (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id }) => {
+        (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id, .. }) => {
             targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
                 container_id: container_id.clone(),
             }
         }
-        (TargetTemplate::AppleContainer { .. }, TargetLocator::AppleContainer { container_id }) => {
-            targets::TargetLocator::AppleContainer {
-                container_id: container_id.clone(),
-            }
-        }
+        (
+            TargetTemplate::AppleContainer { .. },
+            TargetLocator::AppleContainer { container_id, .. },
+        ) => targets::TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
         (TargetTemplate::SshPodman { ssh, .. }, TargetLocator::SshPodman { container_id, .. }) => {
             targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
@@ -886,12 +896,15 @@ fn recovery_backend_locator(
         }
         (
             TargetTemplate::SshDocker { ssh, .. },
-            TargetLocator::SshDocker { host, container_id },
+            TargetLocator::SshDocker {
+                host, container_id, ..
+            },
         ) => {
             if host != &ssh.host {
                 bail!("recovery SSH Docker host does not match target template")
             }
             targets::TargetLocator::SshDocker {
+                borrowed_from: None,
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
             }
@@ -1217,7 +1230,7 @@ mod tests {
         assert_eq!(candidates[0].session_id, session);
         assert!(matches!(
             &candidates[0].locator,
-            TargetLocator::LocalDocker { container_id }
+            TargetLocator::LocalDocker { container_id, .. }
                 if container_id == &targets::resource_name(session).unwrap()
         ));
     }

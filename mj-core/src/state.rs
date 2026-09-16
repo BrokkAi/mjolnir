@@ -642,12 +642,27 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     LocalDocker {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AppleContainer {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AwsEc2 {
         instance_id: String,
@@ -665,10 +680,20 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     SshDocker {
         host: String,
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
 }
 
@@ -816,8 +841,8 @@ impl TargetLocator {
                 }
             }
             Self::LocalPodman { container_id, .. }
-            | Self::LocalDocker { container_id }
-            | Self::AppleContainer { container_id }
+            | Self::LocalDocker { container_id, .. }
+            | Self::AppleContainer { container_id, .. }
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
                 if container_id.trim().is_empty() =>
@@ -1780,6 +1805,7 @@ mod tests {
             }],
             state: SessionState::Running,
             target: Some(TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "afb67d".into(),
                 workspace_storage: Default::default(),
             }),

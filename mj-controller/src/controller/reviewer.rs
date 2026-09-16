@@ -316,8 +316,8 @@ fn upload_reviewer_profile(
             }
         }
         targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id }
-        | targets::TargetLocator::AppleContainer { container_id } => {
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. } => {
             let engine = match locator {
                 targets::TargetLocator::LocalPodman { .. } => "podman",
                 targets::TargetLocator::LocalDocker { .. } => "docker",
@@ -393,7 +393,9 @@ fn upload_reviewer_profile(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",
@@ -622,6 +624,7 @@ mod tests {
         for (locator, engine) in [
             (
                 mj_core::state::TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: container_id.clone(),
                     workspace_storage: Default::default(),
                 },
@@ -629,6 +632,7 @@ mod tests {
             ),
             (
                 mj_core::state::TargetLocator::LocalDocker {
+                    borrowed_from: None,
                     container_id: container_id.clone(),
                 },
                 "docker",

@@ -1536,12 +1536,27 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     LocalDocker {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AppleContainer {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AwsEc2 {
         profile: String,
@@ -1562,10 +1577,20 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     SshDocker {
         ssh: SshTarget,
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
 }
 
@@ -1743,8 +1768,8 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             CommandSpec::new(program, args)
         }
         TargetLocator::LocalPodman { container_id, .. }
-        | TargetLocator::LocalDocker { container_id }
-        | TargetLocator::AppleContainer { container_id } => container_exec(
+        | TargetLocator::LocalDocker { container_id, .. }
+        | TargetLocator::AppleContainer { container_id, .. } => container_exec(
             locator.container_engine().expect("local container"),
             container_id,
             args,
@@ -1755,7 +1780,9 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | TargetLocator::SshDocker { ssh, container_id } => {
+        | TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 locator
                     .container_engine()

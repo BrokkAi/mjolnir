@@ -962,6 +962,9 @@ impl RuntimeState {
                     }
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
+                    if let Err(error) = &result {
+                        tracing::warn!(session_id = %operation_session_id, ?kind, %error, "lifecycle operation failed");
+                    }
                     result_tx.send_replace(Some(result));
                     // Completion must release transient mutation ownership even
                     // when every requesting client has disconnected. Durable
@@ -3874,6 +3877,7 @@ mod tests {
     #[test]
     fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         let target = Some(mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         });
@@ -5673,6 +5677,7 @@ mod tests {
         let state = test_runtime_state();
         let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
         session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         });

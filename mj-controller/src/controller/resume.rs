@@ -2735,6 +2735,7 @@ mod tests {
         };
         let syncing = StagedExecutor::new(&executor, ProvisionStage::Syncing);
         let backend = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "abcdef0123456789".into(),
             workspace_storage: Default::default(),
         };
@@ -2957,6 +2958,7 @@ mod tests {
             worker_root: "/var/lib/hel/workers/session".into(),
         };
         let container = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container".into(),
             workspace_storage: Default::default(),
         };
@@ -3039,6 +3041,7 @@ mod tests {
             checkpoint: None,
         };
         let partial_target = TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "partial-container".into(),
             workspace_storage: Default::default(),
         };

@@ -449,17 +449,51 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
                 bail!("refusing cleanup: invalid local bare worker root");
             }
         }
-        TargetLocator::LocalPodman { container_id, .. }
-        | TargetLocator::LocalDocker { container_id }
-        | TargetLocator::AppleContainer { container_id }
-        | TargetLocator::SshPodman { container_id, .. }
-        | TargetLocator::SshDocker { container_id, .. } => {
-            if container_id != &expected_name && !is_runtime_container_id(container_id) {
-                bail!(
-                    "refusing cleanup: container locator is neither the generated name nor an immutable runtime ID"
-                );
-            }
+        TargetLocator::LocalPodman {
+            container_id,
+            borrowed_from,
+            ..
         }
+        | TargetLocator::LocalDocker {
+            container_id,
+            borrowed_from,
+        }
+        | TargetLocator::AppleContainer {
+            container_id,
+            borrowed_from,
+        }
+        | TargetLocator::SshPodman {
+            container_id,
+            borrowed_from,
+            ..
+        }
+        | TargetLocator::SshDocker {
+            container_id,
+            borrowed_from,
+            ..
+        } => match borrowed_from {
+            Some(owner) => {
+                validate_session_id(owner)?;
+                if owner == session_id {
+                    bail!(
+                        "refusing cleanup: a borrowed container cannot be owned by the borrowing session"
+                    );
+                }
+                let owner_name = resource_name(owner)?;
+                if container_id != &owner_name && !is_runtime_container_id(container_id) {
+                    bail!(
+                        "refusing cleanup: borrowed container locator is neither the owning session's generated name nor an immutable runtime ID"
+                    );
+                }
+            }
+            None => {
+                if container_id != &expected_name && !is_runtime_container_id(container_id) {
+                    bail!(
+                        "refusing cleanup: container locator is neither the generated name nor an immutable runtime ID"
+                    );
+                }
+            }
+        },
         TargetLocator::AwsEc2 {
             instance_id,
             workspace,
@@ -486,6 +520,21 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// Whether this locator names a target another session owns: a sub-agent
+/// child either borrowing its parent's container or running as its own worker
+/// inside the parent's SSH workspace.
+pub fn is_borrowed(locator: &TargetLocator) -> bool {
+    match locator {
+        TargetLocator::LocalPodman { borrowed_from, .. }
+        | TargetLocator::LocalDocker { borrowed_from, .. }
+        | TargetLocator::AppleContainer { borrowed_from, .. }
+        | TargetLocator::SshPodman { borrowed_from, .. }
+        | TargetLocator::SshDocker { borrowed_from, .. } => borrowed_from.is_some(),
+        TargetLocator::SshBare { worker_id, .. } => worker_id.is_some(),
+        TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. } => false,
+    }
 }
 
 pub fn verify_session_workspace(workspace: &str, session_id: &str) -> Result<()> {
@@ -802,6 +851,99 @@ pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BORROW_PARENT: &str = "0123456789abcdef0123456789abcdef";
+    const BORROW_CHILD: &str = "fedcba9876543210fedcba9876543210";
+
+    fn borrowed_podman(owner: &str) -> TargetLocator {
+        TargetLocator::LocalPodman {
+            container_id: crate::targets::resource_name(owner).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::default(),
+            borrowed_from: Some(owner.to_owned()),
+        }
+    }
+
+    #[test]
+    fn verify_locator_accepts_a_container_borrowed_from_its_owner() {
+        verify_locator(&borrowed_podman(BORROW_PARENT), BORROW_CHILD)
+            .expect("a child may borrow its parent's container");
+    }
+
+    #[test]
+    fn verify_locator_rejects_a_container_borrowed_from_the_checking_session() {
+        let error = verify_locator(&borrowed_podman(BORROW_PARENT), BORROW_PARENT)
+            .expect_err("a session cannot borrow from itself");
+        assert!(
+            format!("{error:#}").contains("cannot be owned by the borrowing session"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn verify_locator_rejects_a_borrowed_container_naming_another_session() {
+        let locator = TargetLocator::LocalPodman {
+            container_id: crate::targets::resource_name(BORROW_CHILD).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::default(),
+            borrowed_from: Some(BORROW_PARENT.to_owned()),
+        };
+        let error = verify_locator(&locator, BORROW_CHILD)
+            .expect_err("the container must belong to the recorded owner");
+        assert!(
+            format!("{error:#}").contains("borrowed container locator"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn worker_root_of_a_borrowed_container_is_the_childs_own_directory() {
+        assert_eq!(
+            crate::targets::worker_root(&borrowed_podman(BORROW_PARENT), BORROW_CHILD).unwrap(),
+            format!("/var/lib/hel/workers/{BORROW_CHILD}")
+        );
+    }
+
+    #[test]
+    fn is_borrowed_distinguishes_borrowed_targets_from_owned_ones() {
+        assert!(is_borrowed(&borrowed_podman(BORROW_PARENT)));
+        assert!(is_borrowed(&TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "host".to_owned(),
+                ssh_args: Vec::new(),
+            },
+            workspace: format!(".local/share/hel/workspaces/{BORROW_PARENT}"),
+            worker_id: Some(BORROW_CHILD.to_owned()),
+        }));
+        assert!(!is_borrowed(&TargetLocator::LocalPodman {
+            container_id: crate::targets::resource_name(BORROW_CHILD).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::default(),
+            borrowed_from: None,
+        }));
+    }
+
+    #[test]
+    fn an_owned_container_locator_serializes_without_a_borrowed_from_key() {
+        let owned = TargetLocator::LocalDocker {
+            container_id: crate::targets::resource_name(BORROW_CHILD).unwrap(),
+            borrowed_from: None,
+        };
+        let serialized = serde_json::to_string(&owned).unwrap();
+        assert!(
+            !serialized.contains("borrowed_from"),
+            "owned locators must stay byte-identical for older readers: {serialized}"
+        );
+        assert_eq!(
+            serde_json::from_str::<TargetLocator>(&serialized).unwrap(),
+            owned
+        );
+
+        let borrowed = borrowed_podman(BORROW_PARENT);
+        let serialized = serde_json::to_string(&borrowed).unwrap();
+        assert!(serialized.contains("borrowed_from"));
+        assert_eq!(
+            serde_json::from_str::<TargetLocator>(&serialized).unwrap(),
+            borrowed
+        );
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The connection-sharing override is process-wide, so the tests that set

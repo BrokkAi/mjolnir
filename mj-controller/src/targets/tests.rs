@@ -714,6 +714,7 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
     let name = resource_name(SESSION).unwrap();
     let local = target_recovery_plan(
         &TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name.clone(),
             workspace_storage: Default::default(),
         },
@@ -727,6 +728,7 @@ fn podman_target_recovery_uses_the_exact_local_or_remote_container() {
 
     let remote = target_recovery_plan(
         &TargetLocator::SshPodman {
+            borrowed_from: None,
             ssh: ssh(),
             container_id: name.clone(),
             workspace_storage: Default::default(),
@@ -756,6 +758,7 @@ fn stopped_owned_podman_target_is_started_and_reinspected() {
     let name = resource_name(SESSION).unwrap();
     let plan = target_recovery_plan(
         &TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name,
             workspace_storage: Default::default(),
         },
@@ -2128,6 +2131,7 @@ fn apple_pull_policy_prepares_mutable_and_pinned_images() {
 fn apple_cleanup_confirms_absence_by_the_exact_provisioned_container_id() {
     let container_id = resource_name(SESSION).unwrap();
     let locator = TargetLocator::AppleContainer {
+        borrowed_from: None,
         container_id: container_id.clone(),
     };
     let still_live = PodmanPreflightExecutor::with_outputs([podman_output(format!(
@@ -2154,6 +2158,7 @@ fn apple_cleanup_confirms_absence_by_the_exact_provisioned_container_id() {
 #[test]
 fn docker_cleanup_confirmation_distinguishes_live_absent_and_unreachable() {
     let locator = TargetLocator::LocalDocker {
+        borrowed_from: None,
         container_id: resource_name(SESSION).unwrap(),
     };
     let live = PodmanPreflightExecutor::with_outputs([CommandOutput {
@@ -2180,6 +2185,7 @@ fn podman_cleanup_confirmation_checks_container_and_workspace_storage() {
     let name = resource_name(SESSION).unwrap();
     let volume = format!("{name}-workspace");
     let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: name,
         workspace_storage: PodmanWorkspaceLocator::Volume {
             name: volume.clone(),
@@ -2213,6 +2219,7 @@ fn remote_podman_cleanup_confirmation_uses_the_recorded_helper_resource() {
     let name = resource_name(SESSION).unwrap();
     let resource = format!("{name}-workspace");
     let locator = TargetLocator::SshPodman {
+        borrowed_from: None,
         ssh: ssh(),
         container_id: name,
         workspace_storage: PodmanWorkspaceLocator::HostPath {
@@ -2331,6 +2338,7 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
 #[test]
 fn remote_podman_resource_probe_uses_ssh_and_container_cgroups() {
     let locator = TargetLocator::SshPodman {
+        borrowed_from: None,
         ssh: ssh(),
         container_id: resource_name(SESSION).unwrap(),
         workspace_storage: Default::default(),
@@ -3098,6 +3106,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     assert!(
         clear_relay_state_plan(
             &TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: resource_name(SESSION).unwrap(),
                 workspace_storage: Default::default(),
             },
@@ -3113,6 +3122,7 @@ fn podman_cleanup_ignores_an_already_absent_container() {
     let name = resource_name(SESSION).unwrap();
     let local = close_plan(
         &TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name.clone(),
             workspace_storage: Default::default(),
         },
@@ -3131,6 +3141,7 @@ fn podman_cleanup_ignores_an_already_absent_container() {
 
     let remote = close_plan(
         &TargetLocator::SshPodman {
+            borrowed_from: None,
             ssh: ssh(),
             container_id: name,
             workspace_storage: Default::default(),
@@ -3158,6 +3169,7 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
     let volume = format!("{name}-workspace");
     let plan = close_plan(
         &TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name,
             workspace_storage: PodmanWorkspaceLocator::Volume {
                 name: volume.clone(),
@@ -3186,6 +3198,7 @@ fn podman_quiesce_stops_and_confirms_the_owned_container_without_removing_it() {
     let name = resource_name(SESSION).unwrap();
     let plan = quiesce_plan(
         &TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name,
             workspace_storage: Default::default(),
         },
@@ -3203,7 +3216,14 @@ fn podman_quiesce_stops_and_confirms_the_owned_container_without_removing_it() {
 #[test]
 fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
     let name = resource_name(SESSION).unwrap();
-    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, SESSION).unwrap();
+    let close = close_plan(
+        &TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name,
+        },
+        SESSION,
+    )
+    .unwrap();
     let command = &close.commands[0];
     assert_eq!(command.program, "sh");
     let script = &command.args[1];
@@ -3398,6 +3418,7 @@ fn docker_cleanup_removes_owned_state_with_fake_docker() {
     let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
     let close = close_plan(
         &TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: name.clone(),
         },
         SESSION,
@@ -3439,7 +3460,14 @@ fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
     let state = home.join("fake-docker");
     let overlay = home.join(".cache/mjolnir/docker-overlays").join(&name);
     let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
-    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, SESSION).unwrap();
+    let close = close_plan(
+        &TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name,
+        },
+        SESSION,
+    )
+    .unwrap();
 
     let output = execute_with_fake_docker(
         &environment,
@@ -3530,6 +3558,7 @@ fn close_rejects_broad_or_mismatched_targets() {
     };
     assert!(close_plan(&broad, SESSION).is_err());
     let mismatch = TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "hel-someone-abcdef".to_owned(),
         workspace_storage: Default::default(),
     };
@@ -4031,6 +4060,7 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
 #[test]
 fn ssh_docker_reconnect_recovery_and_metrics_use_remote_docker() {
     let locator = TargetLocator::SshDocker {
+        borrowed_from: None,
         ssh: ssh(),
         container_id: resource_name(SESSION).unwrap(),
     };
@@ -4124,6 +4154,7 @@ fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_
 #[test]
 fn ssh_docker_absence_does_not_hide_unavailable_daemon() {
     let locator = TargetLocator::SshDocker {
+        borrowed_from: None,
         ssh: ssh(),
         container_id: resource_name(SESSION).unwrap(),
     };
@@ -4268,7 +4299,14 @@ fn docker_vm_attachment_shares_source_isolates_writes_and_cleans_up() {
         );
         Ok(())
     })();
-    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, &session).unwrap();
+    let close = close_plan(
+        &TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name,
+        },
+        &session,
+    )
+    .unwrap();
     for command in &close.commands {
         execute_checked(&ProcessExecutor, command).unwrap();
     }
@@ -4314,7 +4352,14 @@ fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
         "mj-volume-backing\nmj-volume-overlay\n",
     )
     .unwrap();
-    let close = close_plan(&TargetLocator::LocalDocker { container_id: name }, SESSION).unwrap();
+    let close = close_plan(
+        &TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name,
+        },
+        SESSION,
+    )
+    .unwrap();
     let output = execute_with_fake_docker(
         &environment,
         &close.commands[0],
@@ -4327,5 +4372,55 @@ fn docker_cleanup_retains_backing_volume_when_overlay_removal_fails() {
     assert_eq!(
         std::fs::read_to_string(state.join("volumes")).unwrap(),
         "mj-volume-backing\nmj-volume-overlay\n"
+    );
+}
+
+const BORROWED_CHILD: &str = "018f9dd2-a3b4-7c8d-9000-ffffffffffff";
+
+fn borrowed_child_locator() -> TargetLocator {
+    TargetLocator::LocalPodman {
+        borrowed_from: Some(SESSION.to_owned()),
+        container_id: resource_name(SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    }
+}
+
+#[test]
+fn whole_target_plans_refuse_a_borrowed_container() {
+    let locator = borrowed_child_locator();
+    for error in [
+        close_plan(&locator, BORROWED_CHILD).unwrap_err(),
+        quiesce_plan(&locator, BORROWED_CHILD).unwrap_err(),
+    ] {
+        assert!(
+            format!("{error:#}").contains("borrowed from another session"),
+            "unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
+    let locator = borrowed_child_locator();
+
+    reconnect_plan(&locator, BORROWED_CHILD).expect("a child reconnects through its parent");
+
+    let cleanup = borrowed_worker_cleanup_plan(&locator, BORROWED_CHILD).unwrap();
+    assert_eq!(cleanup.commands.len(), 1);
+    let script = cleanup.commands[0]
+        .args
+        .iter()
+        .find(|argument| argument.contains("rm -rf"))
+        .expect("the cleanup runs a removal script");
+    assert!(script.contains(&format!("/var/lib/hel/workers/{BORROWED_CHILD}")));
+    assert!(script.contains(&format!("/var/lib/hel/profiles/{BORROWED_CHILD}")));
+    assert!(script.contains(&format!(".local/share/hel/profiles/{BORROWED_CHILD}")));
+    assert!(
+        !script.contains(&format!("/var/lib/hel/workers/{SESSION}")),
+        "a child must never remove its parent's worker root: {script}"
+    );
+    assert!(
+        !script.contains("podman rm") && !script.contains("docker rm"),
+        "a child must never remove the borrowed container: {script}"
     );
 }

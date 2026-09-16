@@ -31,7 +31,7 @@ use mj_core::workspace::{
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 36;
+const SCHEMA_VERSION: i64 = 37;
 
 mod session_move;
 pub use session_move::*;
@@ -4569,105 +4569,136 @@ fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) -> Result<(
 }
 
 fn insert_target(tx: &Transaction<'_>, session_id: &str, target: &TargetLocator) -> Result<()> {
-    let (kind, host, resource, address, workspace, worker_id, workspace_storage) = match target {
-        TargetLocator::LocalBare { worker_root } => (
-            "local-bare",
-            None,
-            None,
-            None,
-            Some(path_to_blob(worker_root)),
-            None,
-            None,
-        ),
-        TargetLocator::LocalPodman {
-            container_id,
-            workspace_storage,
-        } => (
-            "local-podman",
-            None,
-            Some(container_id.as_str()),
-            None,
-            None,
-            None,
-            Some(serde_json::to_string(workspace_storage)?),
-        ),
-        TargetLocator::LocalDocker { container_id } => (
-            "local-docker",
-            None,
-            Some(container_id.as_str()),
-            None,
-            None,
-            None,
-            None,
-        ),
-        TargetLocator::SshDocker { host, container_id } => (
-            "ssh-docker",
-            Some(host.as_str()),
-            Some(container_id.as_str()),
-            None,
-            None,
-            None,
-            None,
-        ),
-        TargetLocator::AppleContainer { container_id } => (
-            "apple-container",
-            None,
-            Some(container_id.as_str()),
-            None,
-            None,
-            None,
-            None,
-        ),
-        TargetLocator::AwsEc2 {
-            instance_id,
-            address,
-        } => (
-            "aws-ec2",
-            None,
-            Some(instance_id.as_str()),
-            address.as_deref(),
-            None,
-            None,
-            None,
-        ),
-        TargetLocator::SshBare {
+    let (kind, host, resource, address, workspace, worker_id, workspace_storage, borrowed_from) =
+        match target {
+            TargetLocator::LocalBare { worker_root } => (
+                "local-bare",
+                None,
+                None,
+                None,
+                Some(path_to_blob(worker_root)),
+                None,
+                None,
+                None,
+            ),
+            TargetLocator::LocalPodman {
+                container_id,
+                workspace_storage,
+                borrowed_from,
+            } => (
+                "local-podman",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                Some(serde_json::to_string(workspace_storage)?),
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::LocalDocker {
+                container_id,
+                borrowed_from,
+            } => (
+                "local-docker",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::SshDocker {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-docker",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::AppleContainer {
+                container_id,
+                borrowed_from,
+            } => (
+                "apple-container",
+                None,
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
+            TargetLocator::AwsEc2 {
+                instance_id,
+                address,
+            } => (
+                "aws-ec2",
+                None,
+                Some(instance_id.as_str()),
+                address.as_deref(),
+                None,
+                None,
+                None,
+                None,
+            ),
+            TargetLocator::SshBare {
+                host,
+                workspace,
+                worker_id,
+            } => (
+                "ssh-bare",
+                Some(host.as_str()),
+                None,
+                None,
+                Some(path_to_blob(workspace)),
+                worker_id.as_deref(),
+                None,
+                None,
+            ),
+            TargetLocator::SshPodman {
+                host,
+                container_id,
+                workspace_storage,
+                borrowed_from,
+            } => (
+                "ssh-podman",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                Some(serde_json::to_string(workspace_storage)?),
+                borrowed_from.as_deref(),
+            ),
+        };
+    tx.execute(
+        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            session_id,
+            kind,
             host,
+            resource,
+            address,
             workspace,
             worker_id,
-        } => (
-            "ssh-bare",
-            Some(host.as_str()),
-            None,
-            None,
-            Some(path_to_blob(workspace)),
-            worker_id.as_deref(),
-            None,
-        ),
-        TargetLocator::SshPodman {
-            host,
-            container_id,
             workspace_storage,
-        } => (
-            "ssh-podman",
-            Some(host.as_str()),
-            Some(container_id.as_str()),
-            None,
-            None,
-            None,
-            Some(serde_json::to_string(workspace_storage)?),
-        ),
-    };
-    tx.execute(
-        "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![session_id, kind, host, resource, address, workspace, worker_id, workspace_storage],
+            borrowed_from
+        ],
     )?;
     Ok(())
 }
 
 fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
     let mut statement = connection.prepare(
-        "SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage
+        "SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
          FROM session_targets",
     )?;
     let rows = statement.query_map([], |row| {
@@ -4687,18 +4718,22 @@ fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
             })
             .transpose()?
             .unwrap_or_default();
+        let borrowed_from: Option<String> = row.get(8)?;
         let target = match kind.as_str() {
             "local-bare" => TargetLocator::LocalBare {
                 worker_root: workspace.unwrap(),
             },
             "local-podman" => TargetLocator::LocalPodman {
+                borrowed_from,
                 container_id: resource.unwrap(),
                 workspace_storage,
             },
             "local-docker" => TargetLocator::LocalDocker {
+                borrowed_from,
                 container_id: resource.unwrap(),
             },
             "apple-container" => TargetLocator::AppleContainer {
+                borrowed_from,
                 container_id: resource.unwrap(),
             },
             "aws-ec2" => TargetLocator::AwsEc2 {
@@ -4711,10 +4746,12 @@ fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
                 worker_id,
             },
             "ssh-docker" => TargetLocator::SshDocker {
+                borrowed_from,
                 host: host.unwrap(),
                 container_id: resource.unwrap(),
             },
             "ssh-podman" => TargetLocator::SshPodman {
+                borrowed_from,
                 host: host.unwrap(),
                 container_id: resource.unwrap(),
                 workspace_storage,

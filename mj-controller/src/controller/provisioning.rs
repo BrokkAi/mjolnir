@@ -95,21 +95,38 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        let result = self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
-        let result = match result {
-            Ok(()) => {
-                self.connect_and_start_worker(session_id, executor, &backend, &worker_root, false)
-                    .await
+        // Placement failures must reach the same failure arm as startup
+        // failures; otherwise the child record stays `Provisioning` forever.
+        let placement = self.worker_placement(session_id);
+        let (result, placement) = match placement {
+            Ok((backend, worker_root)) => {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                let prepared =
+                    self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
+                let result = match prepared {
+                    Ok(()) => {
+                        self.connect_and_start_worker(
+                            session_id,
+                            executor,
+                            &backend,
+                            &worker_root,
+                            false,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                (result, Some((backend, worker_root)))
             }
-            Err(error) => Err(error),
+            Err(error) => (Err(error), None),
         };
         match result {
             Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
             Err(error) => {
-                if let Err(stop_error) =
-                    super::worker_binary::stop_worker(executor, &backend, &worker_root)
+                // Without placement there is no worker to stop.
+                if let Some((backend, worker_root)) = placement
+                    && let Err(stop_error) =
+                        super::worker_binary::stop_worker(executor, &backend, &worker_root)
                 {
                     tracing::warn!(
                         session_id,
@@ -117,6 +134,11 @@ impl Controller {
                         "failed sub-agent worker could not be stopped cleanly"
                     );
                 }
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "sub-agent startup failed"
+                );
                 let record = self
                     .state
                     .sessions
@@ -944,23 +966,28 @@ fn provisioned_locator(
         // nothing that a failure could leak.
         targets::TargetTemplate::LocalBare => return None,
         targets::TargetTemplate::LocalPodman(container) => targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: container_id()?,
             workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
         },
         targets::TargetTemplate::LocalDocker(_) => targets::TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: container_id()?,
         },
         targets::TargetTemplate::AppleContainer(_) => targets::TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: container_id()?,
         },
         targets::TargetTemplate::SshPodman { ssh, container } => {
             targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: ssh.clone(),
                 container_id: container_id()?,
                 workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
             }
         }
         targets::TargetTemplate::SshDocker { ssh, .. } => targets::TargetLocator::SshDocker {
+            borrowed_from: None,
             ssh: ssh.clone(),
             container_id: container_id()?,
         },
@@ -1889,6 +1916,101 @@ mod tests {
         assert!(retained.last_error.is_some());
     }
 
+    /// A sub-agent create has no waiter, so a failure that happens before the
+    /// first command has to land in the child's own record.
+    #[test]
+    fn subagent_placement_failure_marks_the_child_record_in_error() {
+        if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let test = "subagent_placement_failure_marks_the_child_record_in_error";
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    &format!("controller::provisioning::tests::{test}"),
+                    "--nocapture",
+                ])
+                .env(SSH_DOCKER_FAILURE_CHILD, "1")
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_CONFIG_DIR", directory.path());
+            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "isolated {test} failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _writer = crate::database::install_isolated_test_writer();
+        let config = ssh_docker_registration_config();
+        config.save().unwrap();
+        let mut controller = Controller {
+            config,
+            state: State::default(),
+        };
+        let child_id = controller
+            .register_session_with_resources(
+                "codex",
+                "project",
+                "docker",
+                "borrow the parent container",
+                SessionLaunchOptions {
+                    mjolnir_subagents: None,
+                    create_managed_worktree: None,
+                    initial_prompt: None,
+                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                    additional_mounts: Vec::new(),
+                    resource_allocation: None,
+                    project_directory: None,
+                    session_title_override: None,
+                },
+            )
+            .unwrap();
+
+        // The shape `register_subagent` produced before borrowing was
+        // recorded: the parent's container with no owner, which no child can
+        // verify.
+        let record = controller.state.sessions.get_mut(&child_id).unwrap();
+        record.target = Some(mj_core::state::TargetLocator::SshDocker {
+            host: "builder".into(),
+            container_id: targets::resource_name("0123456789abcdef0123456789abcdef").unwrap(),
+            borrowed_from: None,
+        });
+        crate::database::save_lifecycle_session(record).unwrap();
+
+        let executor = RecordingExecutor::succeeding();
+        let error = futures::executor::block_on(
+            controller.provision_subagent_session_controlled(&child_id, &executor),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("refusing cleanup: container locator"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            executor.commands().is_empty(),
+            "placement failed, so nothing should have run: {:?}",
+            executor.commands()
+        );
+
+        for record in [
+            controller.state.sessions[&child_id].clone(),
+            Controller::load().unwrap().state.sessions[&child_id].clone(),
+        ] {
+            assert_eq!(record.state, SessionState::Error);
+            assert!(
+                record
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("sub-agent startup failed:")),
+                "unexpected durable error: {:?}",
+                record.last_error
+            );
+        }
+    }
+
     #[test]
     fn failed_node_preflight_retains_error_before_provisioning() {
         if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
@@ -2133,10 +2255,12 @@ mod tests {
         };
         let ephemeral = [
             targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "abcdef012345".into(),
                 workspace_storage: Default::default(),
             },
             targets::TargetLocator::AppleContainer {
+                borrowed_from: None,
                 container_id: "abcdef012346".into(),
             },
             targets::TargetLocator::AwsEc2 {
@@ -2148,6 +2272,7 @@ mod tests {
                     .into(),
             },
             targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: ssh.clone(),
                 container_id: "abcdef012347".into(),
                 workspace_storage: Default::default(),
@@ -2358,6 +2483,7 @@ mod tests {
         let (_, repositories) =
             provision_target_creation(&plan, &target, PROVISIONED_SESSION, &executor, |_| {
                 Ok(TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: targets::resource_name(PROVISIONED_SESSION)?,
                     workspace_storage: Default::default(),
                 })

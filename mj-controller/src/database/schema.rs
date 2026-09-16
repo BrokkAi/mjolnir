@@ -284,6 +284,21 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: adds one nullable column to `session_targets`. Only a
+    // container sub-agent child row ever carries a value, and older builds
+    // could never start such a child, so an older update that rewrites the row
+    // without the column loses nothing usable. Older readers ignore it. The
+    // compatibility floor stays where it is.
+    if version < 37 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_targets ADD COLUMN borrowed_from TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (37, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 37;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

@@ -2169,13 +2169,13 @@ fn install_mbx_files(
     let shim_script = format!(r#"ln -f "{mbx}" "{cargo}" 2>/dev/null || cp -f "{mbx}" "{cargo}""#);
     let (engine, container_id, ssh) = match locator {
         targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
-        targets::TargetLocator::LocalDocker { container_id } => ("docker", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         } => ("podman", container_id, Some(ssh)),
-        targets::TargetLocator::SshDocker { ssh, container_id } => {
-            ("docker", container_id, Some(ssh))
-        }
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::AwsEc2 { .. }
@@ -2363,8 +2363,8 @@ fn install_worker_files(
             }
         }
         targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id }
-        | targets::TargetLocator::AppleContainer { container_id } => {
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. } => {
             let engine = match locator {
                 targets::TargetLocator::LocalPodman { .. } => "podman",
                 targets::TargetLocator::LocalDocker { .. } => "docker",
@@ -2477,7 +2477,9 @@ fn install_worker_files(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",
@@ -2877,8 +2879,8 @@ fn installed_worker_binary_replacement_plan(
                 .purpose("make replaced Mjolnir worker executable"),
         ],
         targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id }
-        | targets::TargetLocator::AppleContainer { container_id } => {
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. } => {
             let engine = match locator {
                 targets::TargetLocator::LocalPodman { .. } => "podman",
                 targets::TargetLocator::LocalDocker { .. } => "docker",
@@ -2937,7 +2939,9 @@ fn installed_worker_binary_replacement_plan(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",
@@ -3242,11 +3246,11 @@ fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> 
             "podman",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
-        targets::TargetLocator::LocalDocker { container_id } => CommandSpec::new(
+        targets::TargetLocator::LocalDocker { container_id, .. } => CommandSpec::new(
             "docker",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
-        targets::TargetLocator::AppleContainer { container_id } => CommandSpec::new(
+        targets::TargetLocator::AppleContainer { container_id, .. } => CommandSpec::new(
             "container",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
@@ -3268,7 +3272,9 @@ fn start_worker_command(locator: &targets::TargetLocator, worker_root: &str) -> 
                 &exec_script,
             ],
         ),
-        targets::TargetLocator::SshDocker { ssh, container_id } => crate::targets::ssh_command(
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => crate::targets::ssh_command(
             ssh,
             [
                 "docker",
@@ -3837,6 +3843,7 @@ mod tests {
         assert!(
             worker_workspace_for_recovery(
                 &targets::TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: "container".into(),
                     workspace_storage: Default::default(),
                 },
@@ -4232,6 +4239,7 @@ mod tests {
                 worker_root: "/worker/root".into(),
             },
             targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "container-1".into(),
                 workspace_storage: Default::default(),
             },
@@ -4370,6 +4378,7 @@ mod tests {
             ]),
         };
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id,
             workspace_storage: Default::default(),
         };
@@ -4443,6 +4452,7 @@ mod tests {
             ownership,
             profile_stage,
             locator: targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: SshTarget {
                     destination: "user@example.test".into(),
                     ssh_args: Vec::new(),
@@ -4569,6 +4579,7 @@ mod tests {
     fn ssh_docker_install_uses_docker_for_remote_container_operations() {
         let mut fixture = podman_install_fixture();
         fixture.locator = targets::TargetLocator::SshDocker {
+            borrowed_from: None,
             ssh: SshTarget {
                 destination: "user@example.test".into(),
                 ssh_args: Vec::new(),
@@ -4614,6 +4625,7 @@ mod tests {
         let session = mj_core::state::new_session_id().unwrap();
         let container_id = targets::resource_name(&session).unwrap();
         let locator = targets::TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: container_id.clone(),
         };
         execute_checked(
@@ -4698,6 +4710,7 @@ mod tests {
         let session = "0123456789abcdef0123456789abcdef";
         let container_id = targets::resource_name(session).unwrap();
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: container_id.clone(),
             workspace_storage: Default::default(),
         };
@@ -4812,6 +4825,7 @@ mod tests {
             ),
             (
                 targets::TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: "container".into(),
                     workspace_storage: Default::default(),
                 },
@@ -4939,6 +4953,7 @@ mod tests {
             worker_root: "/worker".into(),
         };
         let podman = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container".into(),
             workspace_storage: Default::default(),
         };
@@ -5524,6 +5539,7 @@ mod tests {
         let workspace = targets::new_container_workspace(session_id).unwrap();
         let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: targets::resource_name(session_id).unwrap(),
             workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
         };
@@ -5627,6 +5643,7 @@ mod tests {
         let binary = tempfile::NamedTempFile::new().unwrap();
         let executor = RecordingExecutor::default();
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "hel-session".into(),
             workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
         };
@@ -5674,6 +5691,7 @@ mod tests {
         let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
         let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: targets::resource_name(parent_id).unwrap(),
             workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
         };
@@ -5934,6 +5952,7 @@ mod tests {
     #[test]
     fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
         let target = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container".into(),
             workspace_storage: Default::default(),
         };
@@ -5996,6 +6015,7 @@ mod tests {
             profile.kind,
             staged.path(),
             &targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "container".into(),
                 workspace_storage: Default::default(),
             },
