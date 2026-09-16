@@ -39,7 +39,7 @@ warning and a new native thread instead of a dead worker.
 - [x] (2026-09-16) Implemented resume-then-decide in `serve_session`, with the Codex message match in `mj-core`.
 - [x] (2026-09-16) Replaced the journal-proof tests with behaviour tests in `mj-worker/src/relay.rs`, `mj-worker/src/worker_runtime/relay_tests.rs`, `mj-worker/src/acp/tests.rs`, and `mj-core/src/acp.rs`.
 - [x] (2026-09-16) Ran `cargo fmt --all -- --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` on the dev profile.
-- [ ] Live verification against the stuck session `1f5b67e4…` on the local daemon (rebuild the worker, restart the daemon, watch the relay journal); not performed as part of this change.
+- [x] (2026-09-16) Live verification against the stuck session `1f5b67e4…`: after the release rebuild and a daemon restart on the new build, the worker relaunched, its relay journal recorded the warning "Codex has no thread 01a0a743… and this session never used it; continuing in a new empty thread" followed by `session_opened` with native id 01a0a7fc…, `worker-exit.json` was removed, and the worker processes stayed up. The negative check (renaming a prompted session's rollout) was not performed.
 
 ## Surprises & Discoveries
 
@@ -209,7 +209,7 @@ In `mj-worker/src/worker_runtime/relay_tests.rs`,
 `a_used_native_session_is_reported_as_used_after_a_worker_restart` cover
 startup.
 
-Live acceptance, not performed here: rebuild the worker, restart the local
+Live acceptance (performed 2026-09-16, see Progress): rebuild the worker, restart the local
 daemon, and watch a stuck unprompted Codex session. Its relay journal should
 show the warning and a `session_opened` with a new native id, `worker-exit.json`
 should be gone, and the TUI should show the session reachable. The negative
