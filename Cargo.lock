@@ -576,7 +576,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "fs2",
  "futures",
  "http",
@@ -635,7 +635,7 @@ dependencies = [
  "base64",
  "blake3",
  "brokk-mj-core",
- "dirs",
+ "dirs 6.0.0",
  "flate2",
  "libc",
  "rayon",
@@ -687,7 +687,7 @@ dependencies = [
  "brokk-mj-transcript",
  "brokk-mj-worker",
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "flate2",
  "futures",
  "getrandom 0.3.4",
@@ -704,6 +704,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sessionwiki",
  "sha2 0.10.9",
  "signal-hook",
  "sysinfo",
@@ -727,7 +728,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "getrandom 0.3.4",
  "libc",
  "regex",
@@ -879,7 +880,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "dirs",
+ "dirs 6.0.0",
  "getrandom 0.3.4",
  "libc",
  "ratatui",
@@ -1556,6 +1557,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -5247,6 +5257,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sessionwiki"
+version = "0.28.0"
+source = "git+https://github.com/jbellis/sessionwiki.git?tag=v0.28.0-mj.1#529b8fea7b6013f9776fc431df15427bf1a0ceda"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs 7.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+ "unicode-normalization",
+ "walkdir",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6257,6 +6285,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"
@@ -7451,7 +7488,7 @@ dependencies = [
  "block2",
  "cookie",
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "dom_query",
  "dpi",
  "dunce",

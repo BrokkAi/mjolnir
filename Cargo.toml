@@ -42,6 +42,7 @@ mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.10.0
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.10.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.10.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.10.0" }
+sessionwiki = { git = "https://github.com/jbellis/sessionwiki.git", tag = "v0.28.0-mj.1" }
 
 [workspace.lints.clippy]
 disallowed_methods = "warn"

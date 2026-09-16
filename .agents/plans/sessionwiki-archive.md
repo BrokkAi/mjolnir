@@ -16,7 +16,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 
 - [x] (2026-09-16 18:00Z) Plan written and committed (milestone 0).
 - [x] (2026-09-16 20:05Z) Milestone 1: rusqlite 0.40 bump in mj-worker, mj-cli, mj-controller; full `cargo test`; commit `4994dc15`.
-- [ ] Milestone 2: SessionWiki fork branch with three library changes, tests, tag `v0.26.0-mj.1`, pushed to `jbellis/sessionwiki`; upstream PR opened; Mjolnir git dependency added and building.
+- [x] (2026-09-16 20:40Z) Milestone 2: fork branch `mj-embed` commit 529b8fe, tag `v0.28.0-mj.1` pushed to `jbellis/sessionwiki`, upstream PR https://github.com/youdie006/sessionwiki/pull/26; Mjolnir git dependency added, `cargo build` and `cargo about generate` pass.
 - [ ] Milestone 3: `[sessionwiki]` config section, Mjolnir adapter, daemon indexer; `sessionwiki list --tool mjolnir` shows a closed session.
 - [ ] Milestone 4: HTTP API and client wrappers; terminal Resume dialog search, preview, Archived tab, restore.
 - [ ] Milestone 5: archive job driven by `archive_after_days`.
@@ -36,6 +36,8 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: `mj-core/src/state.rs` line 649 against `recovery_scan.rs` line 1306. Fixed in the same commit because it blocked `cargo test`.
 - Observation: `mj-worker`'s `acp::tests::ten_large_photos_reach_acp_for_both_prompt_and_steering` failed once under whole-workspace load and passed alone and in its own crate suite. It is timing-sensitive, not a rusqlite regression.
   Evidence: the workspace run took 207s for that suite against 86s for the crate alone.
+- Observation: The fork's `main` already carried upstream through 0.28.0 when milestone 2 started, so the tag was cut as `v0.28.0-mj.1` rather than the 0.26.0 name in the first draft. The tag was created once and never moved after Mjolnir referenced it.
+  Evidence: `git log --oneline mj-embed` shows the 0.27.0 and 0.28.0 release merges below commit 529b8fe.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
   Evidence: `src/index.rs` lines 375-395. A `sessionwiki` binary at a different schema version than the library Mjolnir links would force a full re-index on every alternation. Documented in milestone 7.
 
@@ -72,7 +74,7 @@ To be written at completion. Open question carried forward: whether `Lost` and `
 
 ## Context and Orientation
 
-Two repositories are involved. This one, Mjolnir, is a Cargo workspace. The other, SessionWiki, is checked out beside it at `../sessionwiki` with remote `origin` = `git@github.com:jbellis/sessionwiki.git` (the user's fork) and remote `upstream` = the original project by youdie006. The fork's `main` is identical to upstream `main` at the start of this work, at version 0.26.0.
+Two repositories are involved. This one, Mjolnir, is a Cargo workspace. The other, SessionWiki, is checked out beside it at `../sessionwiki` with remote `origin` = `git@github.com:jbellis/sessionwiki.git` (the user's fork) and remote `upstream` = the original project by youdie006. The fork's `main` is identical to upstream `main` at the start of this work, at version 0.28.0.
 
 Terms used below. A "session" is one conversation between the user and a coding agent, run by Mjolnir on a "target" (the local machine, a container, or an SSH host) under a "profile" (which agent harness to run, for example Codex or Claude Code). The "daemon" is the long-running background process, implemented in the `mj-controller` crate, that owns every session; the terminal UI (`mj-tui`, driven by `mj-cli`) and the web viewer (`mj-controller/src/web/`) are clients that talk to it over an HTTP API in `mj-controller/src/server/api.rs`, wrapped for Rust callers in `mj-client/src/daemon.rs`. An "instance" is an isolated copy of Mjolnir selected with `mj -i <name>` or the `MJ_INSTANCE` environment variable; it has its own config, database, daemon, and data directory nested under `instances/<name>` (see `with_instance_dir` in `mj-core/src/config.rs`). A "checkpoint" is a zip archive of a session's transcript and workspace state written when a session closes; a "record" is the row describing a session in Mjolnir's own SQLite database, loaded into memory as `mj_core::state::SessionRecord`.
 
@@ -113,7 +115,7 @@ In `../sessionwiki`, create branch `mj-embed` from `main`. Make three library ch
 2. In `src/adapters/mod.rs`, add to the trait `fn reconcile_scope(&self) -> Option<String> { None }` documented as: when `Some(prefix)`, deletion reconciliation for this adapter only considers indexed rows whose key starts with `prefix`, for stores that hold only part of a tool's sessions. In `archive_or_prune`, take `scope: Option<&str>` and, in Rust, drop live rows not starting with the prefix before computing `gone` (do not use SQL `LIKE`; paths contain `_`). Both call sites in `sync_with` pass `adapter.reconcile_scope().as_deref()`. The test: index two rows for one tool with different prefixes, sync an adapter scoped to one prefix that lists nothing, and assert only the in-scope row is archived.
 3. In `src/commands.rs`, add `pub fn brief_markdown(session: &crate::model::Session, max_chars: usize, include_tools: bool) -> String { brief_text(session, max_chars, include_tools, false) }`.
 
-Run `cargo test` in `../sessionwiki`, commit with a plain-language message, tag `v0.26.0-mj.1`, push branch and tag to `origin`, and open a pull request against `upstream` `main` titled for the embedder hooks. In Mjolnir, add to `[workspace.dependencies]` in the root `Cargo.toml`: `sessionwiki = { git = "https://github.com/jbellis/sessionwiki.git", tag = "v0.26.0-mj.1" }` and to `mj-controller/Cargo.toml`: `sessionwiki.workspace = true`. Confirm `cargo build` and that `cargo about generate` (see `.github/workflows/release.yml` line 39) still runs locally if `cargo-about` is installed; if it is not installed, note that in Progress and rely on CI. Commit.
+Run `cargo test` in `../sessionwiki`, commit with a plain-language message, tag `v0.28.0-mj.1`, push branch and tag to `origin`, and open a pull request against `upstream` `main` titled for the embedder hooks. In Mjolnir, add to `[workspace.dependencies]` in the root `Cargo.toml`: `sessionwiki = { git = "https://github.com/jbellis/sessionwiki.git", tag = "v0.28.0-mj.1" }` and to `mj-controller/Cargo.toml`: `sessionwiki.workspace = true`. Confirm `cargo build` and that `cargo about generate` (see `.github/workflows/release.yml` line 39) still runs locally if `cargo-about` is installed; if it is not installed, note that in Progress and rely on CI. Commit.
 
 ### Milestone 3: config, adapter, indexer
 
@@ -186,7 +188,7 @@ Add a `sessionwiki` row to the configuration table in `docs/src/content/docs/con
 
 ### Milestone 8: release gate
 
-A git dependency cannot be published to crates.io. Before the next release, publish the fork under the package name `brokk-sessionwiki` (on a `publish` branch of the fork that renames the package and keeps `[[bin]] name = "sessionwiki"`), then change the workspace dependency to `sessionwiki = { package = "brokk-sessionwiki", version = "0.26.0" }` and re-lock. This needs crates.io credentials the automated work does not have; the plan stops at preparing the branch and stating the command.
+A git dependency cannot be published to crates.io. Before the next release, publish the fork under the package name `brokk-sessionwiki` (on a `publish` branch of the fork that renames the package and keeps `[[bin]] name = "sessionwiki"`), then change the workspace dependency to `sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }` and re-lock. This needs crates.io credentials the automated work does not have; the plan stops at preparing the branch and stating the command.
 
 ## Concrete Steps
 
@@ -229,7 +231,7 @@ Add transcripts proving each acceptance here as milestones complete.
 
 ## Interfaces and Dependencies
 
-SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.26.0-mj.1`):
+SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.1`):
 
     // src/index.rs
     pub fn sync_with(conn: &mut Connection, adapters: &[Box<dyn Adapter>], since: Option<i64>) -> Result<()>;
