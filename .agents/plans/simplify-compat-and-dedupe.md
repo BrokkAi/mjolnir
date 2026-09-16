@@ -23,11 +23,14 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 3, part 2: `mj_core::bounded_frame::read_bounded_frame` replaces four async frame readers (each caller keeps its own meaning for a partial frame at end of stream). `SessionState::as_str`/`from_stored`, `TargetTemplate::kind_name` and `TargetLocator::kind_name` replace four hand-written maps. One `mj_core::config::sync_directory` replaces four copies.
 - [x] (2026-09-16) Milestone 4, part 1: one MCP stdio loop and socket client (`mj-worker/src/mcp_stdio.rs`); every harness imports through `import_native_session`; move-preparation image placeholders come from one tested helper; stale crate-split comments corrected.
 - [x] (2026-09-16) Milestone 4, part 2: the activity-kind logic was already shared (`mj_client::usage_format::SessionActivityKind` feeds the web payload). Removed the unused server-side `ViewerOperationKind::label` copy. Display wording stays per surface.
-- [ ] Milestone 5: larger merges that keep behavior the same.
-- [ ] Milestone 6: hand the Kimi quota token refresh to the Kimi CLI.
+- [x] (2026-09-16) Milestone 5: harness process-state resets share `forget_harness_processes`. The other four merges were examined and deferred (see Decision Log).
+- [x] (2026-09-16) Milestone 6: the Kimi CLI cannot refresh on ACP startup, so the fallback was implemented. mj keeps its refresh with a plain proper-lockfile-compatible lock (take, heartbeat, break when stale, release on drop), and the lock-takeover handling is removed.
 
 ## Surprises & Discoveries
 
+- Observation: `mj_core::login_environment::tests::failed_login_never_returns_an_ambient_environment` failed once during the first full build in a fresh worktree, then passed three times alone and in the next full run. It runs a login shell under a 2 second timeout, so a timeout under build load reports no exit code 42. The file is untouched by this plan.
+- Observation: The Kimi Code CLI refreshes its OAuth token lazily. Its `OAuthManager` says "Lazy refresh on `ensureFresh()`, no background loop", and only token users (model calls, `getManagedUsage`) call it. `kimi acp` + `initialize` never touches the token. The only CLI path that refreshes and returns usage is `GET /oauth/usage` on the `kimi web` server, which would mean running an HTTP server with a port and a scraped bearer token for every quota poll.
+  Evidence: strings of `~/.kimi-code/bin/kimi` (the bundled `packages/oauth/src/oauth-manager.ts`), read without running anything against real credentials.
 - Observation: One full `cargo test -p brokk-mj-controller` run before commit 392cd7be failed two tests: `controller::update::tests::npm_upgrade_restarts_after_the_running_package_is_removed` and `worker_client::tests::a_relay_proxy_that_fails_for_another_reason_is_not_retried`. Both passed alone, and the next full run passed (1225 passed, 0 failed). Both drive subprocesses under timeouts, so this is likely a flake under load. It is not proven unrelated: the second test goes through the relay client read path that commit 53105c47 changed. Watch for a recurrence.
   Evidence: the rerun log in the session scratchpad; the commit was made before the failure was noticed, because a pipeline's exit status hid it.
 - Observation: The controller's `scp_command_spec` passed an SSH target's `-p PORT` straight to `scp`, where `-p` means "preserve file times". The checkpoint-transfer copy rewrote it to `-P`. With `extra_args = ["-p", "2222"]`, every controller-side upload (worker binary, launch config, checkpoint spec, reviewer profile) would treat `2222` as a local source file. Found by reading the code; not reproduced against a live host.
@@ -40,6 +43,16 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Defer four Milestone 5 merges.
+  Rationale:
+  - **Drafts:** not three copies of one store. `sessions.draft_input` is the handoff that `recover_detached_draft` writes, `detached_drafts` holds terminal drafts awaiting recovery, and `client_session_state` holds each web viewer's draft. Merging them is a redesign.
+  - **Dictation:** routing the TUI voice worker through the daemon's web dictation endpoint would break TUI dictation whenever the phone server is disabled.
+  - **Import transcripts:** mj-chat's `ChatState` still consumes the entry model (`apply_session_update_to_entries` in `mj-chat/src/chat.rs`), which the plan named as the stop condition.
+  - **Self-updater running install.sh:** it would replace a Rust download path that requires a checksum with a downloaded shell script, and the npm and curl update paths cannot be exercised here.
+  Date/Author: 2026-09-16, agent.
+- Decision: Milestone 6 uses the fallback lock rather than the Kimi CLI.
+  Rationale: See the Kimi observation in Surprises. A lock with take, heartbeat and release keeps interoperating with the CLI's `proper-lockfile` and removes ownership proofs, theft adjudication and mtime-tolerance logic. The case it no longer handles is mj stalling for more than 5 seconds mid-refresh while the CLI takes the lock over; the worst outcome is one `kimi login`.
+  Date/Author: 2026-09-16, agent.
 - Decision: Do not standardize the TUI and web activity wording.
   Rationale: The audit counted the differing strings as drift, but the decision about what a session is doing is already shared. The server builds `activity_details.kind` from `SessionActivityKind`. The TUI renders a fixed-width bracketed column (`[idle]`, `  BG 1m00s`), and the web renders phone-card sentences (`Idle since 14:02`). Making them match would be a UI change nobody asked for, not a simplification.
   Date/Author: 2026-09-16, agent.
@@ -98,7 +111,18 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Outcomes & Retrospective
 
-Not started.
+(2026-09-16) The plan's work is done on branch `opus-cleanup`. The commits remove about 5,900 lines net outside `.agents`, and every user-facing feature stays. The biggest wins were the revision-33 database baseline (checked against a real long-lived store), protocol checks in one place on each side, per-target command builders in one place, the MCP stdio loop, the importer merge, and the Kimi lock.
+
+Real defects found and fixed along the way:
+- An SSH target configured with a port in its extra arguments broke controller-side `scp`.
+- The journal rewrite recorded `Some("")` as a span's boundary digest.
+- A drifted attachment protocol gate.
+- The Claude import title had drifted from the other harnesses.
+
+Lessons:
+- The audits' line counts and "drift" claims needed checking against the code. Several "legacy" items turned out to be stored-content compatibility that a 2.8+ install still needs, or real mechanisms (draft recovery, the backend test seam).
+- A compatibility floor for installs says nothing about how old the stored bytes are.
+- Remaining candidates are the deferred Milestone 5 merges and issues #1043 and #1044.
 
 ## Context and Orientation
 
