@@ -18,7 +18,7 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 1: delete dead code. Daemon protocol raised to 20 because `CreateSessionRequest` lost `allow_dirty_local`.
 - [x] (2026-09-16) Milestone 2a, database part: `mj-controller/src/database/baseline.sql` creates a new store at revision 33 and replaces migration steps 1–33. Stores older than revision 33 are refused.
 - [x] (2026-09-16) Milestone 2a, remaining: loading a newer build's config read-only, the `raw-localhost` rename, the 1.x `state.json` import, the two-part web login cookie, and the Ctrl-G/Ctrl-Q "moved" notices are removed.
-- [ ] Milestone 2b: relay protocol, journal format v1, and worker-export fallbacks.
+- [x] (2026-09-16) Milestone 2b: the worker checks the relay protocol once, when a request arrives, and serves only the current version. The controller checks each request's minimum protocol once, in `WorkerClient::call_with_timeout`. Checkpoint export uses the shared staging-command loop, and the fallback that uploaded the spec file is gone. Journal span boundary digests come from one helper.
 - [ ] Milestone 3: merge duplicated target and process plumbing.
 - [ ] Milestone 4: merge duplicated feature paths.
 - [ ] Milestone 5: larger merges that keep behavior the same.
@@ -34,6 +34,12 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: The controller keeps accepting older worker protocols at hello. It does not require exactly 13.
+  Rationale: The worker-upgrade coordinator (`mj-controller/src/worker_upgrade.rs`, `controller/worker_restart.rs::upgrade_session_worker`) replaces an outdated worker only after it connects, leases the connection, and reads a quiet snapshot. Stop and checkpoint also need a connection. Refusing older workers at hello would strand every session still running a pre-2.8 worker. So the protocol logic was merged instead: one worker-side rule (`mj_core::relay::protocol::relay_protocol_rejection`, current version only), and one controller-side check that refuses a request an older worker cannot decode with the same `IncompatibleProtocol` code the worker would use. Eight call-site checks and the checkpoint pre-check are gone.
+  Date/Author: 2026-09-16, agent.
+- Decision: Keep journal record format v1, `LegacyFlaggedObservation`, the `native_continuity_lost` field, `adopt_unqueued_queue_commands`, the `activity_turn_started_at_ms` backfill, and the historical image-count leniency.
+  Rationale: Each one reads stored content that a 2.8+ install can still hold, and each is covered by an event digest or a stored snapshot. v1 records stay in a journal until a checkpoint acknowledges past them. The flagged `session_opened` encoding was written by commits 0f070506 through e6ed54ed, all inside the 2.8.0 range, and by development builds. Dropping a serialized field changes how existing records re-serialize, so their digests would stop matching (the same failure the protocol-13 note in `mj-core/src/relay.rs` describes). The one real defect, the rewrite path storing `Some("")` as a span's boundary digest, is fixed by sharing `span_previous_digest`.
+  Date/Author: 2026-09-16, agent.
 - Decision: Milestone 2a keeps shims that read old *content* rather than serve old *installs*. These are the `[startup]` section and top-level `show_stopped_sessions` in config files, config versions 1–8, `WirePolicy::Legacy`/`force_unrestricted_mode` in launch specs stored inside checkpoint archives, and `LEGACY_HANDOFF_PREAMBLE` in stored transcripts.
   Rationale: The 2.8.0 floor says nothing about how old a file's contents are. A config file is rewritten only when a setting changes, and archives and transcripts are never rewritten, so a current 2.8+ install can still hold this content. With `deny_unknown_fields`, dropping the config aliases would stop such a config from loading.
   Date/Author: 2026-09-16, agent.

@@ -45,6 +45,13 @@ pub(crate) struct RelayJournalSpan {
     pub(crate) after_ordinal: u64,
 }
 
+/// The digest before a span, as cached by its first record. A v1 record
+/// carries it in `previous_digest`; a v2 record carries none, so the boundary
+/// digest must be read from the event itself when it is needed.
+pub(crate) fn span_previous_digest(first: &RelayEvent) -> Option<String> {
+    (!first.previous_digest.is_empty()).then(|| first.previous_digest.clone())
+}
+
 /// Persist the snapshot without ever recreating the worker root. Session
 /// teardown deletes that directory while this daemon may still be alive, and a
 /// recreated root holding only a snapshot cannot be reopened: its frontier
@@ -358,11 +365,7 @@ fn inspect_relay_journal_file(
     Ok(first.zip(previous).map(|(first, last)| RelayJournalSpan {
         path: path.to_owned(),
         file_first_ordinal: first.ordinal,
-        // A v1 first event caches the digest before the span in its
-        // `previous_digest`; a v2 first event carries none, so the boundary
-        // digest must be read from the event itself when needed.
-        file_first_previous_digest: (!first.previous_digest.is_empty())
-            .then_some(first.previous_digest),
+        file_first_previous_digest: span_previous_digest(&first),
         file_last_ordinal: last.ordinal,
         file_last_digest: Some(last.digest),
         after_ordinal: 0,
@@ -818,10 +821,7 @@ impl DurableRelay {
         self.journal_spans.push(RelayJournalSpan {
             path: active.to_owned(),
             file_first_ordinal: event.ordinal,
-            // v2 events carry no `previous_digest`; the boundary digest is read
-            // from the event itself when needed.
-            file_first_previous_digest: (!event.previous_digest.is_empty())
-                .then(|| event.previous_digest.clone()),
+            file_first_previous_digest: span_previous_digest(event),
             file_last_ordinal: event.ordinal,
             file_last_digest: Some(event.digest.clone()),
             after_ordinal: event.ordinal - 1,
@@ -890,7 +890,7 @@ impl DurableRelay {
             (Some(first), Some(last)) => vec![RelayJournalSpan {
                 path: active.clone(),
                 file_first_ordinal: first.ordinal,
-                file_first_previous_digest: Some(first.previous_digest),
+                file_first_previous_digest: span_previous_digest(&first),
                 file_last_ordinal: last.ordinal,
                 file_last_digest: Some(last.digest),
                 after_ordinal: retain_after,

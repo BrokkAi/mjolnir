@@ -323,27 +323,24 @@ impl RelayRequest {
     }
 }
 
+/// The worker-side protocol rule, applied once where requests arrive: a relay
+/// serves only [`RELAY_PROTOCOL_VERSION`]. `Hello` is exempt because it is how
+/// the two sides discover each other's versions.
+pub fn relay_protocol_rejection(envelope: &RelayRequestEnvelope) -> Option<RelayResponseBody> {
+    (!matches!(envelope.request, RelayRequest::Hello { .. })
+        && envelope.protocol_version != RELAY_PROTOCOL_VERSION)
+        .then(|| incompatible_request_protocol(envelope.protocol_version))
+}
+
 pub fn incompatible_request_protocol(protocol_version: u32) -> RelayResponseBody {
     relay_error(
         RelayErrorCode::IncompatibleProtocol,
         format!(
-            "request uses protocol {protocol_version}, relay supports protocol {}-{}",
-            RELAY_MIN_PROTOCOL_VERSION, RELAY_PROTOCOL_VERSION
+            "request uses protocol {protocol_version}, relay supports protocol {RELAY_PROTOCOL_VERSION}"
         ),
         false,
         None,
     )
-}
-
-pub fn incompatible_request_protocol_response(
-    request_id: String,
-    protocol_version: u32,
-) -> RelayResponseEnvelope {
-    RelayResponseEnvelope {
-        request_id,
-        protocol_version,
-        body: incompatible_request_protocol(protocol_version),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -577,8 +577,8 @@ impl RelayClient {
         &self.session_id
     }
 
-    pub const fn supports_project_memory_sync(&self) -> bool {
-        self.protocol_version >= 4
+    pub fn supports_project_memory_sync(&self) -> bool {
+        RelayRequest::ProjectMemorySnapshot.supported_at(self.protocol_version)
     }
 
     pub fn relay_version(&self) -> &str {
@@ -796,13 +796,6 @@ impl RelayClient {
     /// to the next real prompt without creating a synthetic transcript turn.
     pub async fn install_prompt_context(&mut self, text: String) -> Result<()> {
         let request = RelayRequest::InstallPromptContext { text };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "hidden prompt context requires relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::PromptContextInstalled => Ok(()),
             _ => bail!("relay returned an unexpected prompt-context response"),
@@ -816,13 +809,6 @@ impl RelayClient {
         mj_core::project_memory::ProjectMemorySnapshot,
     )> {
         let request = RelayRequest::ProjectMemorySnapshot;
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "project memory synchronization requires relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
                 Ok((baseline, replica))
@@ -836,13 +822,6 @@ impl RelayClient {
         snapshot: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<()> {
         let request = RelayRequest::InstallProjectMemorySnapshot { snapshot };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "project memory synchronization requires relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshotInstalled => Ok(()),
             _ => bail!("relay returned an unexpected project-memory install response"),
@@ -869,10 +848,6 @@ impl RelayClient {
         &mut self,
         reference: &mj_core::attachment::AttachmentRef,
     ) -> Result<()> {
-        anyhow::ensure!(
-            self.protocol_version >= 8,
-            "photo attachments require an updated worker (protocol 8); upgrade the worker and retry"
-        );
         match self
             .call(RelayRequest::AttachmentPresent {
                 reference: reference.clone(),
@@ -1230,13 +1205,6 @@ impl RelayClient {
             role: role.map(str::to_owned),
             request,
         };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "a second opinion requires relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         Ok(request)
     }
 
@@ -1251,13 +1219,6 @@ impl RelayClient {
             elicitation_id: elicitation_id.clone(),
             response,
         };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "elicitation responses require relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::ElicitationResolved {
                 elicitation_id: resolved,
@@ -1274,13 +1235,6 @@ impl RelayClient {
         let request = RelayRequest::StopBackgroundTask {
             background_task_id: background_task_id.clone(),
         };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "background task controls require relay protocol {}; this session negotiated {}",
-                request.minimum_protocol(),
-                self.protocol_version
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::BackgroundTaskStopRequested {
                 background_task_id: stopped,
@@ -1315,12 +1269,6 @@ impl RelayClient {
         result: mj_core::subagent::SubagentToolResult,
     ) -> Result<()> {
         let request = RelayRequest::CompleteSubagentRequest { result };
-        if !request.supported_at(self.protocol_version) {
-            bail!(
-                "sub-agent tools require relay protocol {}",
-                request.minimum_protocol()
-            );
-        }
         match self.call(request).await? {
             RelayResponsePayload::SubagentRequestCompleted => Ok(()),
             _ => bail!("relay returned an unexpected sub-agent completion response"),
@@ -1372,6 +1320,23 @@ impl RelayClient {
         timeout: Duration,
     ) -> Result<RelayResponsePayload> {
         let operation = request.method_name();
+        if !request.supported_at(self.protocol_version) {
+            // An older worker cannot decode this request. It is refused here,
+            // with the same code the worker would use, and the worker is
+            // replaced with the current build once the session is quiet.
+            return Err(RelayRejected(mj_core::relay::relay_protocol_error(
+                RelayErrorCode::IncompatibleProtocol,
+                format!(
+                    "{operation} requires relay protocol {}; this session's worker speaks \
+                     protocol {} and is replaced with the current worker when the session is idle",
+                    request.minimum_protocol(),
+                    self.protocol_version
+                ),
+                false,
+                None,
+            ))
+            .into());
+        }
         let request_id = self.request_id();
         let envelope = RelayRequestEnvelope {
             request_id: request_id.clone(),

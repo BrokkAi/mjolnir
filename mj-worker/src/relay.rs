@@ -1171,7 +1171,7 @@ impl DurableRelay {
         }
         if let RelayRequest::Hello { supported, .. } = &envelope.request {
             let writer_range = RelayVersionRange {
-                min: mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION,
+                min: RELAY_PROTOCOL_VERSION,
                 max: RELAY_PROTOCOL_VERSION,
             };
             let Some(negotiated) = writer_range.negotiate(*supported) else {
@@ -1194,20 +1194,7 @@ impl DurableRelay {
                 },
             });
         }
-        if matches!(envelope.request, RelayRequest::Attach { .. })
-            && envelope.protocol_version < mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION
-        {
-            return Some(relay_error(
-                RelayErrorCode::IncompatibleProtocol,
-                "upgrade the controller to read goal controls and provider details without losing event integrity",
-                false,
-                None,
-            ));
-        }
-        if !envelope.request.supported_at(envelope.protocol_version) {
-            return Some(incompatible_request_protocol(envelope.protocol_version));
-        }
-        None
+        mj_core::relay::protocol::relay_protocol_rejection(envelope)
     }
 
     fn handle_inner(&mut self, envelope: &RelayRequestEnvelope) -> Result<RelayResponseBody> {
