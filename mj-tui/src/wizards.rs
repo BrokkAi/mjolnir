@@ -3,6 +3,7 @@ use mj_chat::path_input::PathInput;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use mj_chat::theme;
@@ -76,11 +77,40 @@ pub(crate) enum WizardControl {
     Submit,
 }
 
+/// How long a stored readiness result stays usable across wizard opens
+/// before it is treated as missing and re-probed. Each non-local probe is an
+/// ssh round trip (about 2 seconds), so this keeps repeated wizard opens in
+/// the same dashboard session from re-probing every time while still
+/// catching a target that went unavailable a while ago.
+pub(crate) const TARGET_READINESS_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// How long a failed readiness result is kept. Failures are usually
+/// transient (a sleeping host, a VPN that is down, an expired cloud session,
+/// a probe that timed out) and the user fixes them within minutes, so they
+/// are re-probed much sooner than successes; the re-probe only costs the
+/// user whose target is already broken.
+pub(crate) const TARGET_READINESS_FAILURE_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub(crate) struct TargetReadiness {
     template: TargetTemplate,
     generation: u64,
     result: Option<Result<(), String>>,
+    /// When `result` was stored. Only meaningful once `result` is `Some`; a
+    /// pending check (`result: None`) is never considered stale, so a
+    /// probe already in flight is never re-requested.
+    recorded_at: Instant,
+}
+
+impl TargetReadiness {
+    fn is_stale(&self, now: Instant) -> bool {
+        let ttl = match &self.result {
+            None => return false,
+            Some(Ok(())) => TARGET_READINESS_TTL,
+            Some(Err(_)) => TARGET_READINESS_FAILURE_TTL,
+        };
+        now.saturating_duration_since(self.recorded_at) >= ttl
+    }
 }
 
 #[derive(Debug, Clone)]

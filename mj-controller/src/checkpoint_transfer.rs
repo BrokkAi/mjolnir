@@ -1,7 +1,7 @@
 //! Controller-side checkpoint transport and verified teardown gates.
 use crate::targets::{
     CommandExecutor, CommandPlan, CommandSpec, SshTarget, TargetLocator, join_remote_command,
-    worker_root,
+    push_connection_sharing_args, worker_root,
 };
 use anyhow::{Context, Result, bail, ensure};
 use mj_checkpoint::archive::validate_component;
@@ -367,6 +367,7 @@ fn scp_command(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
             *argument = "-P".into();
         }
     }
+    push_connection_sharing_args(&mut args);
     args.push(format!("{}:{remote}", ssh.destination));
     args.push(local.into());
     // `scp` opens its own connection to the same host, so it competes for the
@@ -380,6 +381,7 @@ fn ssh_command(ssh: &SshTarget, args: impl IntoIterator<Item = impl AsRef<str>>)
         .map(|arg| arg.as_ref().to_owned())
         .collect::<Vec<_>>();
     let mut command = ssh.ssh_args.clone();
+    push_connection_sharing_args(&mut command);
     command.push(ssh.destination.clone());
     command.push(join_remote_command(&remote));
     CommandSpec::new("ssh", command).ssh_destination(ssh.destination.clone())

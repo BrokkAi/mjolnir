@@ -4355,11 +4355,11 @@ mod tests {
         );
         let partial = format!("{cache_dir}/hel.partial-{session}");
         assert!(
-            lines.iter().any(|line| line
-                == &format!(
-                    "scp {} user@example.test:{partial}",
+            lines.iter().any(|line| line.starts_with("scp ")
+                && line.ends_with(&format!(
+                    "{} user@example.test:{partial}",
                     fixture.worker_binary.display()
-                )),
+                ))),
             "expected the worker to be uploaded to the partial cache path, got {lines:#?}"
         );
         assert!(

@@ -1286,6 +1286,7 @@ fn ssh_command_spec(
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     let mut command_args = ssh.ssh_args.clone();
+    targets::push_connection_sharing_args(&mut command_args);
     command_args.push(ssh.destination.clone());
     command_args.push(targets::join_remote_command(&remote));
     CommandSpec::new("ssh", command_args).ssh_destination(ssh.destination.clone())
@@ -1293,6 +1294,7 @@ fn ssh_command_spec(
 
 fn scp_command_spec(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
+    targets::push_connection_sharing_args(&mut args);
     if recursive {
         args.push("-r".into());
     }
