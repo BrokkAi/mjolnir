@@ -1,8 +1,9 @@
 //! Durable, non-blocking diagnostics for controller-facing Mjolnir processes.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread;
 use std::time::Duration;
@@ -14,6 +15,31 @@ use tracing_subscriber::fmt::MakeWriter;
 
 const RETAINED_LOGS: usize = 10;
 const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The kind of process writing a Mjolnir log, recorded in the log filename so
+/// retention can keep the newest logs of each kind separately. A short-lived
+/// `mj sessions` or `mj wait` invocation must never crowd the long-running
+/// daemon's own log out of a single shared newest-N window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ProcessKind {
+    /// The persistent per-user daemon (`mj daemon-run`).
+    Daemon,
+    /// An interactive dashboard or other terminal-owning surface (no
+    /// subcommand, `go`, `workspaces`, `app`).
+    Tui,
+    /// A one-shot CLI invocation (everything else).
+    Cli,
+}
+
+impl ProcessKind {
+    fn label(&self) -> &'static str {
+        match self {
+            ProcessKind::Daemon => "daemon",
+            ProcessKind::Tui => "tui",
+            ProcessKind::Cli => "cli",
+        }
+    }
+}
 
 pub(crate) struct ControllerLog {
     _writer_guard: ReliableWorkerGuard,
@@ -141,13 +167,18 @@ fn write_log_messages(mut file: File, receiver: mpsc::Receiver<LogMessage>) {
 }
 
 impl ControllerLog {
-    pub(crate) fn start(command: &'static str) -> Result<Self> {
-        let directory = mj_core::config::data_dir().join("logs");
+    pub(crate) fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
+        let data_dir = mj_core::config::data_dir();
+        let directory = data_dir.join("logs");
         fs::create_dir_all(&directory)
             .with_context(|| format!("create Mjolnir log directory {}", directory.display()))?;
-        prune_logs(&directory, RETAINED_LOGS.saturating_sub(1))?;
+        prune_logs(
+            &directory,
+            RETAINED_LOGS.saturating_sub(1),
+            current_daemon_pid(&data_dir),
+        )?;
 
-        let path = directory.join(log_filename());
+        let path = directory.join(log_filename(kind));
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
         #[cfg(unix)]
@@ -196,34 +227,81 @@ fn env_filter(default: &str) -> (EnvFilter, Option<String>) {
     }
 }
 
-fn log_filename() -> String {
+fn log_filename(kind: ProcessKind) -> String {
     format!(
-        "mj-{}-{}.log",
+        "mj-{}-{}-{}.log",
+        kind.label(),
         Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
         std::process::id()
     )
 }
 
-fn prune_logs(directory: &Path, retain: usize) -> Result<()> {
-    let mut logs = Vec::new();
+/// Reads the PID of the daemon currently recorded in `<data_dir>/daemon.json`,
+/// if any. A missing or unparseable file means "no protected PID" rather than
+/// an error: absence just means no daemon has started under this data
+/// directory yet, or its metadata predates this process.
+fn current_daemon_pid(data_dir: &Path) -> Option<u32> {
+    let path = data_dir.join("daemon.json");
+    let body = fs::read(path).ok()?;
+    let metadata: mj_client::daemon::DaemonMetadata = serde_json::from_slice(&body).ok()?;
+    Some(metadata.pid)
+}
+
+/// Parses a managed Mjolnir log filename (already known to start with `mj-`
+/// and end with `.log`) into its process kind and PID. The current format is
+/// `mj-<kind>-<timestamp>-<pid>.log`; the pre-existing format
+/// `mj-<timestamp>-<pid>.log` (no kind, three `-`-separated parts) is treated
+/// as kind `cli` so its retention matches today's short CLI invocations. The
+/// PID is `None` when it cannot be parsed, which keeps the file eligible for
+/// pruning as before this change.
+fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
+    let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    match parts.as_slice() {
+        [kind, _timestamp, pid] => {
+            let kind = match *kind {
+                "daemon" => ProcessKind::Daemon,
+                "tui" => ProcessKind::Tui,
+                "cli" => ProcessKind::Cli,
+                _ => return None,
+            };
+            Some((kind, pid.parse::<u32>().ok()))
+        }
+        [_timestamp, pid] => Some((ProcessKind::Cli, pid.parse::<u32>().ok())),
+        _ => None,
+    }
+}
+
+fn prune_logs(directory: &Path, retain: usize, protected_pid: Option<u32>) -> Result<()> {
+    let mut logs_by_kind: HashMap<ProcessKind, Vec<PathBuf>> = HashMap::new();
     for entry in fs::read_dir(directory)
         .with_context(|| format!("read Mjolnir log directory {}", directory.display()))?
     {
         let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
-        if let Some(path) = {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            (name.starts_with("mj-") && name.ends_with(".log")).then_some(entry.path())
-        } {
-            logs.push(path);
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with("mj-") && name.ends_with(".log")) {
+            continue;
         }
+        // A file whose kind cannot be parsed falls back to `cli`, the same
+        // group a malformed-but-managed name would have landed in before
+        // filenames carried a kind.
+        let (kind, pid) = parse_log_filename(name).unwrap_or((ProcessKind::Cli, None));
+        if pid.is_some() && pid == protected_pid {
+            // Never prune the current daemon's own log, regardless of kind
+            // or age; it may still be writing to it.
+            continue;
+        }
+        logs_by_kind.entry(kind).or_default().push(entry.path());
     }
-    logs.sort_unstable();
-    let remove = logs.len().saturating_sub(retain);
-    for path in logs.into_iter().take(remove) {
-        remove_expired_log(&path)?;
+    for mut logs in logs_by_kind.into_values() {
+        logs.sort_unstable();
+        let remove = logs.len().saturating_sub(retain);
+        for path in logs.into_iter().take(remove) {
+            remove_expired_log(&path)?;
+        }
     }
     Ok(())
 }
@@ -278,37 +356,41 @@ mod tests {
         assert_eq!(contents, "before guard drop\nafter guard drop\n");
     }
 
+    /// An arbitrary PID used for logs that are never the protected daemon
+    /// PID in a given test.
+    const OTHER_PID: u32 = 999_999_999;
+
     #[test]
     fn prune_logs_keeps_newest_managed_logs_and_unrelated_files() {
         let directory = tempfile::tempdir().unwrap();
         for name in [
-            "mj-20260824T000000.000Z-1.log",
-            "mj-20260825T000000.000Z-2.log",
-            "mj-20260826T000000.000Z-3.log",
-            "hel-20260823T000000.000Z-4.log",
-            "notes.log",
+            format!("mj-cli-20260824T000000.000Z-{OTHER_PID}.log"),
+            format!("mj-cli-20260825T000000.000Z-{OTHER_PID}.log"),
+            format!("mj-cli-20260826T000000.000Z-{OTHER_PID}.log"),
+            "hel-20260823T000000.000Z-4.log".to_string(),
+            "notes.log".to_string(),
         ] {
-            fs::write(directory.path().join(name), name).unwrap();
+            fs::write(directory.path().join(&name), &name).unwrap();
         }
 
-        prune_logs(directory.path(), 2).unwrap();
+        prune_logs(directory.path(), 2, None).unwrap();
 
         assert!(
             !directory
                 .path()
-                .join("mj-20260824T000000.000Z-1.log")
+                .join(format!("mj-cli-20260824T000000.000Z-{OTHER_PID}.log"))
                 .exists()
         );
         assert!(
             directory
                 .path()
-                .join("mj-20260825T000000.000Z-2.log")
+                .join(format!("mj-cli-20260825T000000.000Z-{OTHER_PID}.log"))
                 .exists()
         );
         assert!(
             directory
                 .path()
-                .join("mj-20260826T000000.000Z-3.log")
+                .join(format!("mj-cli-20260826T000000.000Z-{OTHER_PID}.log"))
                 .exists()
         );
         assert!(
@@ -322,9 +404,135 @@ mod tests {
     }
 
     #[test]
+    fn prune_logs_never_removes_the_current_daemons_log() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let daemon_pid = 4_242_424u32;
+        let metadata = serde_json::json!({
+            "protocol_version": 1,
+            "pid": daemon_pid,
+            "address": "127.0.0.1:0",
+            "token": "t",
+            "started_at": "2026-01-01T00:00:00Z",
+            "build_version": "0.0.0",
+        });
+        fs::write(data_dir.path().join("daemon.json"), metadata.to_string()).unwrap();
+        let logs_dir = data_dir.path().join("logs");
+        fs::create_dir_all(&logs_dir).unwrap();
+
+        // The current daemon's own log is the oldest by filename, so a naive
+        // newest-N prune would delete it first.
+        let protected_name = format!("mj-daemon-20260101T000000.000Z-{daemon_pid}.log");
+        fs::write(logs_dir.join(&protected_name), "daemon").unwrap();
+        let other_names: Vec<String> = (0..12)
+            .map(|index| format!("mj-daemon-202602{index:02}T000000.000Z-{OTHER_PID}.log"))
+            .collect();
+        for name in &other_names {
+            fs::write(logs_dir.join(name), "daemon").unwrap();
+        }
+
+        let resolved_pid = current_daemon_pid(data_dir.path());
+        assert_eq!(resolved_pid, Some(daemon_pid));
+        prune_logs(&logs_dir, RETAINED_LOGS - 1, resolved_pid).unwrap();
+
+        assert!(
+            logs_dir.join(&protected_name).exists(),
+            "the current daemon's own log must survive pruning even when it is the oldest"
+        );
+        let remaining_others = other_names
+            .iter()
+            .filter(|name| logs_dir.join(name).exists())
+            .count();
+        assert_eq!(
+            remaining_others,
+            RETAINED_LOGS - 1,
+            "other daemon-kind logs beyond the retained window are still pruned"
+        );
+    }
+
+    #[test]
+    fn current_daemon_pid_is_none_without_a_daemon_json() {
+        let data_dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_daemon_pid(data_dir.path()), None);
+    }
+
+    #[test]
+    fn prune_logs_retains_per_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..12 {
+            let name = format!("mj-cli-202601{index:02}T000000.000Z-{OTHER_PID}.log");
+            fs::write(directory.path().join(&name), "cli").unwrap();
+        }
+        let daemon_name = format!("mj-daemon-20260101T000000.000Z-{OTHER_PID}.log");
+        fs::write(directory.path().join(&daemon_name), "daemon").unwrap();
+
+        prune_logs(directory.path(), RETAINED_LOGS - 1, None).unwrap();
+
+        assert!(
+            directory.path().join(&daemon_name).exists(),
+            "the single daemon log must survive even though 12 cli logs are newer by name"
+        );
+        let remaining_cli = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("mj-cli-"))
+            })
+            .count();
+        assert_eq!(remaining_cli, RETAINED_LOGS - 1);
+    }
+
+    #[test]
+    fn prune_logs_treats_legacy_filenames_as_cli() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_names: Vec<String> = (0..12)
+            .map(|index| format!("mj-202601{index:02}T000000.000Z-{OTHER_PID}.log"))
+            .collect();
+        for name in &legacy_names {
+            fs::write(directory.path().join(name), "legacy").unwrap();
+        }
+        let daemon_name = format!("mj-daemon-20260101T000000.000Z-{OTHER_PID}.log");
+        fs::write(directory.path().join(&daemon_name), "daemon").unwrap();
+
+        prune_logs(directory.path(), RETAINED_LOGS - 1, None).unwrap();
+
+        assert!(
+            directory.path().join(&daemon_name).exists(),
+            "legacy cli-shaped logs must not crowd out the daemon's retained window"
+        );
+        let remaining_legacy = legacy_names
+            .iter()
+            .filter(|name| directory.path().join(name).exists())
+            .count();
+        assert_eq!(
+            remaining_legacy,
+            RETAINED_LOGS - 1,
+            "legacy filenames are pruned in the same group as mj-cli-* files"
+        );
+    }
+
+    #[test]
+    fn log_filename_carries_the_expected_kind_prefix() {
+        for (kind, prefix) in [
+            (ProcessKind::Daemon, "mj-daemon-"),
+            (ProcessKind::Tui, "mj-tui-"),
+            (ProcessKind::Cli, "mj-cli-"),
+        ] {
+            let name = log_filename(kind);
+            assert!(
+                name.starts_with(prefix),
+                "{name} should start with {prefix}"
+            );
+            assert!(name.ends_with(".log"));
+        }
+    }
+
+    #[test]
     fn remove_expired_log_ignores_a_candidate_removed_by_another_process() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mj-20260824T000000.000Z-1.log");
+        let path = directory.path().join("mj-cli-20260824T000000.000Z-1.log");
         fs::write(&path, "expired").unwrap();
 
         // This is the state observed when another process wins the race
