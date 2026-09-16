@@ -1,10 +1,10 @@
+use crate::test_support::git;
 use mj_checkpoint::archive::*;
 use mj_checkpoint::checkpoint::*;
 use mj_core::config::HarnessKind;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 const NATIVE: &str = "0190aabb-ccdd-7eef-9000-abcdef012345";
 #[cfg(unix)]
@@ -101,19 +101,6 @@ async fn live_muse_checkpoint_restore_relocates_native_context_and_preserves_que
         ).await;
     assert_eq!(resumed_id, session_id);
     assert!(reply.contains(&token), "native context was not restored");
-}
-fn git(repository: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().into()
 }
 pub(crate) fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let worker_root = temp.join("worker");

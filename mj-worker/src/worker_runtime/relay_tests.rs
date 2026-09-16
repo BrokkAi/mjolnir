@@ -1,3 +1,4 @@
+use crate::test_support::git;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -59,19 +60,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
     }
-}
-
-fn git(repository: &Path, arguments: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(arguments)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
@@ -5423,6 +5411,11 @@ while True: time.sleep(1)
 /// sub-agent sockets only bind under their own configuration, so proving that
 /// `control.sock` binds and serves is enough to show the daemon no longer
 /// trips over `sun_path`.
+///
+/// The daemon runs checkpoint-only so that the test owns its lifetime. A
+/// daemon that starts a harness returns as soon as the bridge fails to
+/// launch, and under load that return could drop the listener before the
+/// status request was served, resetting the connection.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -5437,8 +5430,20 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
         "the test root must be long enough to need the relative-name bind"
     );
 
+    // Checkpoint-only startup refuses a root with no durable relay state, so
+    // record one observation to write it.
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "saved-native-session".into(),
+            resumed: true,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    drop(durable);
+
     let mut config = launch_config("profile-home-that-must-not-be-used");
-    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     config.cwd = temp.path().to_owned();
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
@@ -5489,8 +5494,8 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
 
     writer.shutdown().await.unwrap();
     daemon.abort();
-    // Under load the daemon's own bridge failure can land before the abort
-    // does. This test is about the socket path, not about how the daemon
-    // eventually stops.
-    let _ = daemon.await;
+    assert!(
+        daemon.await.unwrap_err().is_cancelled(),
+        "the daemon must still have been serving when the test aborted it"
+    );
 }

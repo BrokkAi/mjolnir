@@ -4,3 +4,5 @@ pub mod archive;
 pub mod checkpoint;
 pub mod native;
 pub mod resources;
+#[cfg(test)]
+mod test_support;

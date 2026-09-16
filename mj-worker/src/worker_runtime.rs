@@ -174,8 +174,8 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 
 #[cfg(unix)]
 pub use unix::{
-    attach_session_git_environment, configure_github_cli, lead_process_group,
-    prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
+    SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
+    lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
 };
 
 #[cfg(not(unix))]

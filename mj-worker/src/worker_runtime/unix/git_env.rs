@@ -38,6 +38,11 @@ pub(crate) fn prepend_github_cli_path(
     Ok(())
 }
 
+/// What a person can do about a broken or missing session Git setup. Every
+/// producer of that failure appends this, and the branch-export test matches
+/// on it, so the guidance and the tests cannot drift apart.
+pub const SESSION_SETUP_GUIDANCE: &str = "resume the session to restore its setup";
+
 /// Attach an export to existing session authentication without rewriting it.
 /// The wrapper reads the latest token only when Git invokes its helper.
 pub fn attach_session_git_environment(
@@ -66,7 +71,7 @@ pub fn attach_session_git_environment(
     };
     validate().with_context(|| {
         format!(
-            "load session Git authentication from {}; resume the session to restore its setup",
+            "load session Git authentication from {}; {SESSION_SETUP_GUIDANCE}",
             root.display()
         )
     })?;

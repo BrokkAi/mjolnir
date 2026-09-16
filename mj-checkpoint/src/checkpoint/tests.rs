@@ -892,19 +892,7 @@ fn restore_rewrites_kimi_workspace_and_state_for_target_workspace() {
     );
 }
 
-fn git(repository: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().into()
-}
+use crate::test_support::git_line as git;
 
 fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
     let worker_root = temp.join("worker");
