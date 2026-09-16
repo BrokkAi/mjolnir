@@ -1587,27 +1587,10 @@ mod tests {
     /// history, and nothing else.
     #[tokio::test]
     async fn a_lifecycle_reload_keeps_sessions_from_all_workspaces() {
-        if std::env::var_os(LIFECYCLE_RELOAD_CHILD).is_none() {
-            // MJ_DATA_DIR is process-global, so the database-backed half runs
-            // alone in an exact child with its own store.
-            let directory = tempfile::tempdir().unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "dashboard::io::tests::a_lifecycle_reload_keeps_sessions_from_all_workspaces",
-                    "--nocapture",
-                ])
-                .env(LIFECYCLE_RELOAD_CHILD, "1")
-                .env("MJ_DATA_DIR", directory.path())
-                .env("MJ_CONFIG_DIR", directory.path())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "isolated lifecycle reload failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if crate::test_support::rerun_in_isolated_child(
+            LIFECYCLE_RELOAD_CHILD,
+            "dashboard::io::tests::a_lifecycle_reload_keeps_sessions_from_all_workspaces",
+        ) {
             return;
         }
         let _writer = mj_controller::database::install_isolated_test_writer();

@@ -276,10 +276,10 @@ pub(crate) fn render_footer_command(
 mod tests {
     use super::*;
     use crate::test_support::{
-        buffer_lines, cell_column, dashboard_with_session, key, running_session,
+        buffer_lines, dashboard_with_session, key, mouse_at, point, running_session,
     };
     use crate::{Focus, Mode, PaneSize, SupportPane};
-    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+    use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
     use mj_chat::theme;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -291,30 +291,12 @@ mod tests {
         buffer_lines(terminal.backend().buffer())
     }
 
-    fn point(lines: &[String], label: &str) -> (u16, u16) {
-        let (y, line) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.contains(label))
-            .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"));
-        (cell_column(line, label), y as u16)
-    }
-
-    fn mouse(kind: MouseEventKind, (column, row): (u16, u16)) -> MouseEvent {
-        MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        }
-    }
-
     fn click(dashboard: &mut DashboardState, point: (u16, u16)) -> DashboardAction {
         assert_eq!(
-            dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), point)),
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), point)),
             DashboardAction::None
         );
-        dashboard.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), point))
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), point))
     }
 
     #[test]
@@ -530,15 +512,15 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         let lines = draw(&mut dashboard, (120, 40));
         let create = point(&lines, "Create");
-        dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), create));
-        let outside = mouse(MouseEventKind::Up(MouseButton::Left), (119, 1));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), create));
+        let outside = mouse_at(MouseEventKind::Up(MouseButton::Left), (119, 1));
         assert!(dashboard.component_handles_mouse(outside));
         assert_eq!(dashboard.handle_mouse(outside), DashboardAction::None);
-        dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), create));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), create));
         dashboard.config.profiles.clear();
         draw(&mut dashboard, (120, 40));
         assert_eq!(
-            dashboard.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), create)),
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), create)),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
@@ -575,7 +557,7 @@ mod tests {
         click(&mut dashboard, create);
         assert!(matches!(dashboard.mode, Mode::Help(_)));
         let dismiss = point(&lines, "×");
-        dashboard.handle_mouse(mouse(MouseEventKind::ScrollDown, dismiss));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::ScrollDown, dismiss));
         assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll > 0));
         click(&mut dashboard, dismiss);
         assert!(matches!(dashboard.mode, Mode::Dashboard));

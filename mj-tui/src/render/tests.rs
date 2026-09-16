@@ -1889,14 +1889,6 @@ fn add_api_priced_profile(dashboard: &mut DashboardState) {
     );
 }
 
-fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, dashboard))
-        .expect("draw the combined surface");
-    buffer_lines(terminal.backend().buffer())
-}
-
 /// An agent that is idle but left a command running says so, in the wide
 /// rows and in the minimized grid, from the one fact the daemon forwards.
 #[test]

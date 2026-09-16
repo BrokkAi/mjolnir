@@ -587,9 +587,9 @@ impl DashboardState {
 mod tests {
     use super::*;
     use crate::test_support::{
-        buffer_lines, cell_column, dashboard_with_session, key, running_session,
+        buffer_lines, dashboard_with_session, key, mouse_at, point, running_session,
     };
-    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn open() -> DashboardState {
@@ -605,20 +605,6 @@ mod tests {
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
         buffer_lines(terminal.backend().buffer())
-    }
-
-    fn point(lines: &[String], label: &str) -> (u16, u16) {
-        let y = lines.iter().position(|line| line.contains(label)).unwrap();
-        (cell_column(&lines[y], label), y as u16)
-    }
-
-    fn pointer(kind: MouseEventKind, point: (u16, u16)) -> MouseEvent {
-        MouseEvent {
-            kind,
-            column: point.0,
-            row: point.1,
-            modifiers: KeyModifiers::NONE,
-        }
     }
 
     #[test]
@@ -660,7 +646,7 @@ mod tests {
         let lines = draw(&mut dashboard, 100, 40);
         let save = point(&lines, "  Save  ");
         assert_eq!(
-            dashboard.handle_mouse(pointer(MouseEventKind::Down(MouseButton::Left), save)),
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), save)),
             DashboardAction::None
         );
         let Mode::EditContainer(editor) = &dashboard.mode else {
@@ -669,16 +655,16 @@ mod tests {
         assert_eq!(editor.focused(), ContainerEditFocus::Save);
         assert!(
             dashboard
-                .component_handles_mouse(pointer(MouseEventKind::Up(MouseButton::Left), (0, 0)))
+                .component_handles_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (0, 0)))
         );
         assert_eq!(
-            dashboard.handle_mouse(pointer(MouseEventKind::Up(MouseButton::Left), (0, 0))),
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (0, 0))),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::EditContainer(_)));
-        dashboard.handle_mouse(pointer(MouseEventKind::Down(MouseButton::Left), save));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), save));
         assert!(
-            matches!(dashboard.handle_mouse(pointer(MouseEventKind::Up(MouseButton::Left), save)), DashboardAction::SaveContainerSettings { cpus: Some(value), .. } if value == "4")
+            matches!(dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), save)), DashboardAction::SaveContainerSettings { cpus: Some(value), .. } if value == "4")
         );
     }
 
@@ -717,11 +703,11 @@ mod tests {
         let save = point(&draw(&mut dashboard, 100, 40), "  Save  ");
         let lines = draw(&mut dashboard, 20, 8);
         assert!(lines.iter().any(|line| line.contains("Terminal too small")));
-        let down = pointer(MouseEventKind::Down(MouseButton::Left), save);
+        let down = mouse_at(MouseEventKind::Down(MouseButton::Left), save);
         assert!(!dashboard.component_handles_mouse(down));
         assert_eq!(dashboard.handle_mouse(down), DashboardAction::None);
         assert_eq!(
-            dashboard.handle_mouse(pointer(MouseEventKind::Up(MouseButton::Left), save)),
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), save)),
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::EditContainer(_)));

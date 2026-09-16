@@ -16,6 +16,9 @@ mod logging;
 mod pollers;
 mod session_presentation;
 
+#[cfg(test)]
+mod test_support;
+
 use std::io::{self, Write};
 #[cfg(test)]
 use std::path::PathBuf;

@@ -1,8 +1,5 @@
 use super::*;
-
-fn key(code: KeyCode) -> Event {
-    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-}
+use crate::components::test_support::key;
 
 fn form() -> Form<u8> {
     let mut form = Form::new();
