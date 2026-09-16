@@ -4400,6 +4400,18 @@ fn whole_target_plans_refuse_a_borrowed_container() {
 }
 
 #[test]
+fn target_recovery_of_a_borrowed_container_belongs_to_the_owning_session() {
+    // A child must not restart the container it borrows, but reporting no
+    // plan is not a failure: its own liveness probe and worker restart still
+    // have to run.
+    assert!(
+        target_recovery_plan(&borrowed_child_locator(), BORROWED_CHILD)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
     let locator = borrowed_child_locator();
 

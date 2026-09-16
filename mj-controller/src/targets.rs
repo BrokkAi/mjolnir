@@ -1189,10 +1189,12 @@ pub fn target_recovery_plan(
     session_id: &str,
 ) -> Result<Option<TargetRecoveryPlan>> {
     verify_locator(locator, session_id)?;
-    ensure!(
-        !is_borrowed(locator),
-        "refusing to operate on a target borrowed from another session; act on the owning session instead"
-    );
+    // Nothing to recover at the target level for a borrowed worker; the
+    // owning session recovers the target. Reporting no plan keeps the child's
+    // liveness probe and worker restart working.
+    if is_borrowed(locator) {
+        return Ok(None);
+    }
     if let TargetLocator::SshDocker {
         ssh, container_id, ..
     } = locator
