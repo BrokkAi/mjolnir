@@ -37,11 +37,7 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
 /// JSON-RPC lets a response arrive in any order because it carries the request
 /// id, and every write to `writer` is serialized behind one lock so concurrent
 /// responses never interleave.
-fn run<R: BufRead, W: Write + Send + 'static>(
-    reader: R,
-    writer: W,
-    socket: &Path,
-) -> Result<()> {
+fn run<R: BufRead, W: Write + Send + 'static>(reader: R, writer: W, socket: &Path) -> Result<()> {
     let output = Arc::new(Mutex::new(writer));
     let socket = socket.to_path_buf();
     let mut calls = Vec::new();
@@ -75,9 +71,10 @@ fn run<R: BufRead, W: Write + Send + 'static>(
                 ),
             )?,
             "ping" => write_line(&output, &rpc_result(id, json!({})))?,
-            "tools/list" => {
-                write_line(&output, &rpc_result(id, json!({"tools": tool_definitions()})))?
-            }
+            "tools/list" => write_line(
+                &output,
+                &rpc_result(id, json!({"tools": tool_definitions()})),
+            )?,
             "tools/call" => {
                 // Dispatch on its own thread and socket connection. The read
                 // loop stays free to accept and dispatch the next request while
@@ -403,7 +400,10 @@ mod tests {
 
     impl Write for SharedWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("shared writer poisoned").extend_from_slice(buf);
+            self.0
+                .lock()
+                .expect("shared writer poisoned")
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -431,7 +431,10 @@ mod tests {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
                     let request: Value = serde_json::from_str(line.trim()).unwrap();
-                    let action = request["action"]["action"].as_str().unwrap_or_default().to_owned();
+                    let action = request["action"]["action"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
                     if action == "wait_agents" {
                         std::thread::sleep(std::time::Duration::from_millis(200));
                     }
@@ -469,7 +472,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            first["id"], 2,
+            first["id"],
+            2,
             "the cheap list_agents response must be written before the slow wait: {}",
             String::from_utf8_lossy(&written)
         );
