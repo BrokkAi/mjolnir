@@ -1,6 +1,8 @@
-
 use std::sync::{Arc, Mutex};
 
+use super::background::{
+    CLAUDE_ORIGIN_META_KEY, CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text,
+};
 use super::*;
 use test_support::*;
 
