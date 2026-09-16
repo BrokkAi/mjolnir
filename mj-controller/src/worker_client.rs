@@ -1652,41 +1652,30 @@ async fn read_bounded_frame_with_limit(
     maximum_bytes: usize,
     kind: ExchangeKind,
 ) -> Result<Option<String>> {
-    let mut frame = Vec::new();
-    loop {
-        // A failed read and a half-written frame are transport deaths; the
-        // limit and encoding failures below are protocol violations that a
-        // worker restart would not fix, so only these two carry the marker.
-        let available = reader
-            .fill_buf()
-            .await
-            .map_err(|error| RelayTransportDead::from_io(error, kind))?;
-        if available.is_empty() {
-            if frame.is_empty() {
-                return Ok(None);
-            }
+    use mj_core::bounded_frame::{BoundedFrame, BoundedFrameError};
+    // A failed read and a half-written frame are transport deaths; the limit
+    // and encoding failures are protocol violations that a worker restart
+    // would not fix, so only the first two carry the marker.
+    let mut frame = match mj_core::bounded_frame::read_bounded_frame(reader, maximum_bytes).await {
+        Ok(BoundedFrame::Line(frame)) => frame,
+        Ok(BoundedFrame::End) => return Ok(None),
+        Ok(BoundedFrame::Truncated(_)) => {
             return Err(anyhow::Error::new(RelayTransportDead::during_exchange(
                 "relay proxy disconnected in the middle of a response frame",
                 kind,
             )));
         }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let consumed = newline.map_or(available.len(), |position| position + 1);
-        let payload = newline.map_or(available, |position| &available[..position]);
-        if frame.len().saturating_add(payload.len()) > maximum_bytes {
-            bail!("relay response frame is too large");
+        Err(BoundedFrameError::Io(error)) => {
+            return Err(RelayTransportDead::from_io(error, kind).into());
         }
-        frame.extend_from_slice(payload);
-        reader.consume(consumed);
-        if newline.is_some() {
-            if frame.last() == Some(&b'\r') {
-                frame.pop();
-            }
-            return String::from_utf8(frame)
-                .context("relay response is not UTF-8")
-                .map(Some);
-        }
+        Err(BoundedFrameError::TooLarge) => bail!("relay response frame is too large"),
+    };
+    if frame.last() == Some(&b'\r') {
+        frame.pop();
     }
+    String::from_utf8(frame)
+        .context("relay response is not UTF-8")
+        .map(Some)
 }
 
 fn clip_catch_up_page(

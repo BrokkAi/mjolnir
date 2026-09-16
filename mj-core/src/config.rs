@@ -1153,6 +1153,20 @@ pub enum TargetTemplate {
 }
 
 impl TargetTemplate {
+    /// The `kind` spelling used in configuration and on the wire.
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::LocalBare => "local-bare",
+            Self::LocalPodman { .. } => "local-podman",
+            Self::LocalDocker { .. } => "local-docker",
+            Self::AppleContainer { .. } => "apple-container",
+            Self::AwsEc2 { .. } => "aws-ec2",
+            Self::SshBare { .. } => "ssh-bare",
+            Self::SshPodman { .. } => "ssh-podman",
+            Self::SshDocker { .. } => "ssh-docker",
+        }
+    }
+
     pub const fn execution_policy(&self) -> ExecutionPolicy {
         match self {
             Self::LocalBare => ExecutionPolicy::ConfiguredApprovals,
@@ -2067,6 +2081,18 @@ enum ParentDirectory {
     Require,
 }
 
+/// Make a rename or new entry in `path` durable. Directory fsync is only
+/// available on Unix; Windows cannot open a directory handle this way.
+pub fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("sync directory {}", path.display()))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn atomic_write_with_parent(
     path: &Path,
     body: &[u8],
@@ -2118,13 +2144,7 @@ fn atomic_write_with_parent(
         drop(file);
         fs::rename(&temporary, path)
             .with_context(|| format!("replace {} with {}", path.display(), temporary.display()))?;
-        #[cfg(unix)]
-        OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| format!("sync {}", parent.display()))?;
-        Ok(())
+        sync_directory(parent)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

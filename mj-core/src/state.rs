@@ -555,6 +555,40 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl SessionState {
+    /// The persisted and wire spelling, matching the serde encoding.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisioning => "provisioning",
+            Self::Running => "running",
+            Self::Disconnected => "disconnected",
+            Self::Checkpointing => "checkpointing",
+            Self::Closing => "closing",
+            Self::Destroying => "destroying",
+            Self::Stopped => "stopped",
+            Self::Lost => "lost",
+            Self::Error => "error",
+            Self::DestroyedWithDataLoss => "destroyed-with-data-loss",
+        }
+    }
+
+    /// Read a stored spelling. Rows written before the verb was renamed still
+    /// say `"archived"`.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        Some(match value {
+            "provisioning" => Self::Provisioning,
+            "running" => Self::Running,
+            "disconnected" => Self::Disconnected,
+            "checkpointing" => Self::Checkpointing,
+            "closing" => Self::Closing,
+            "destroying" => Self::Destroying,
+            "stopped" | "archived" => Self::Stopped,
+            "lost" => Self::Lost,
+            "error" => Self::Error,
+            "destroyed-with-data-loss" => Self::DestroyedWithDataLoss,
+            _ => return None,
+        })
+    }
+
     /// Recovery without a live operation still hides an unfinished target transition.
     /// Ordinary checkpoints and reconnects deliberately keep their conversation visible.
     pub const fn transition_kind(self) -> Option<SessionTransitionKind> {

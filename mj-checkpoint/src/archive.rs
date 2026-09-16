@@ -360,7 +360,7 @@ fn write_archive_installed_view(
     restrict_archive_permissions(path)?;
     let persist_ms = persist_started.elapsed().as_millis();
     let directory_sync_started = std::time::Instant::now();
-    sync_directory(parent)?;
+    mj_core::config::sync_directory(parent)?;
     if std::env::var_os("MJ_CHECKPOINT_BENCH_PHASES").is_some() {
         eprintln!(
             "archive install phases: prepare_ms={prepare_ms} zip_ms={zip_ms} file_sync_ms={file_sync_ms} persist_ms={persist_ms} directory_sync_ms={}",
@@ -1564,18 +1564,6 @@ fn restrict_archive_permissions(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn restrict_archive_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("fsync archive directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 

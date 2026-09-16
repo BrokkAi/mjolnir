@@ -40,7 +40,7 @@ use super::backend::backend_locator;
 use super::readiness::wait_for_native_session_in_stage;
 use super::worker_restart::{InstalledWorkerRestart, RESTART_FOR_CHECKPOINT};
 use super::{
-    Controller, execute_checked, now, persist_session_record_transition_or_restore, target_kind,
+    Controller, execute_checked, now, persist_session_record_transition_or_restore,
     target_profile_home,
 };
 
@@ -786,7 +786,7 @@ impl Controller {
         let checkpointed_at = now();
         let target_manifest = TargetManifest {
             template_id: session.target_template_id.clone(),
-            target_kind: target_kind(&backend).into(),
+            target_kind: backend.kind_name().into(),
             details: Default::default(),
         };
         let bundle_manifest = BundleManifest {

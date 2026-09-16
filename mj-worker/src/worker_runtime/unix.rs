@@ -1506,35 +1506,18 @@ pub(super) async fn read_bounded_line(
     reader: &mut (impl AsyncBufRead + Unpin),
     maximum_bytes: usize,
 ) -> Result<Option<String>> {
-    let mut line = Vec::new();
-    loop {
-        let available = reader.fill_buf().await.context("read relay request")?;
-        if available.is_empty() {
-            if line.is_empty() {
-                return Ok(None);
-            }
-            return String::from_utf8(line)
-                .context("relay request is not UTF-8")
-                .map(Some);
+    use mj_core::bounded_frame::{BoundedFrame, BoundedFrameError};
+    let line = match mj_core::bounded_frame::read_bounded_frame(reader, maximum_bytes).await {
+        Ok(BoundedFrame::Line(line) | BoundedFrame::Truncated(line)) => line,
+        Ok(BoundedFrame::End) => return Ok(None),
+        Err(BoundedFrameError::TooLarge) => bail!("relay request frame is too large"),
+        Err(BoundedFrameError::Io(error)) => {
+            return Err(anyhow::Error::new(error).context("read relay request"));
         }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let content_bytes = newline.unwrap_or(available.len());
-        let next_len = line
-            .len()
-            .checked_add(content_bytes)
-            .context("relay request frame length overflow")?;
-        if next_len > maximum_bytes {
-            bail!("relay request frame is too large");
-        }
-        line.extend_from_slice(&available[..content_bytes]);
-        let consumed = content_bytes + usize::from(newline.is_some());
-        reader.consume(consumed);
-        if newline.is_some() {
-            return String::from_utf8(line)
-                .context("relay request is not UTF-8")
-                .map(Some);
-        }
-    }
+    };
+    String::from_utf8(line)
+        .context("relay request is not UTF-8")
+        .map(Some)
 }
 
 /// A durable write can only fail permanently because the worker root is

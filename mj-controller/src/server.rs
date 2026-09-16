@@ -432,7 +432,7 @@ impl ViewerSnapshot {
                     profile_id: session.last_profile.clone(),
                     bundle_id: session.bundle_id.clone(),
                     target_id: session.target_template_id.clone(),
-                    state: session_state_name(session.state).into(),
+                    state: session.state.as_str().into(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
                     has_error: session.last_error.is_some()
@@ -507,7 +507,7 @@ impl ViewerSnapshot {
             .iter()
             .map(|(id, target)| ViewerTarget {
                 id: id.clone(),
-                kind: target_kind_name(target).into(),
+                kind: target.kind_name().into(),
                 requires_project_directory: matches!(
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
@@ -3623,34 +3623,6 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(u64::MAX)
-}
-
-const fn session_state_name(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Provisioning => "provisioning",
-        SessionState::Running => "running",
-        SessionState::Disconnected => "disconnected",
-        SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing => "closing",
-        SessionState::Destroying => "destroying",
-        SessionState::Stopped => "stopped",
-        SessionState::Lost => "lost",
-        SessionState::Error => "error",
-        SessionState::DestroyedWithDataLoss => "destroyed-with-data-loss",
-    }
-}
-
-const fn target_kind_name(target: &TargetTemplate) -> &'static str {
-    match target {
-        TargetTemplate::LocalBare => "local-bare",
-        TargetTemplate::LocalPodman { .. } => "local-podman",
-        TargetTemplate::LocalDocker { .. } => "local-docker",
-        TargetTemplate::AppleContainer { .. } => "apple-container",
-        TargetTemplate::AwsEc2 { .. } => "aws-ec2",
-        TargetTemplate::SshBare { .. } => "ssh-bare",
-        TargetTemplate::SshPodman { .. } => "ssh-podman",
-        TargetTemplate::SshDocker { .. } => "ssh-docker",
-    }
 }
 
 /// Every asset the browser application is built from. They are real files

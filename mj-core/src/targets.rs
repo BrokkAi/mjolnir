@@ -1466,6 +1466,20 @@ impl TargetTemplate {
 }
 
 impl TargetLocator {
+    /// The target kind spelling shared with [`crate::config::TargetTemplate`].
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::LocalBare { .. } => "local-bare",
+            Self::LocalPodman { .. } => "local-podman",
+            Self::LocalDocker { .. } => "local-docker",
+            Self::AppleContainer { .. } => "apple-container",
+            Self::AwsEc2 { .. } => "aws-ec2",
+            Self::SshBare { .. } => "ssh-bare",
+            Self::SshPodman { .. } => "ssh-podman",
+            Self::SshDocker { .. } => "ssh-docker",
+        }
+    }
+
     pub const fn container_engine(&self) -> Option<&'static str> {
         match self {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),

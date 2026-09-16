@@ -20,7 +20,7 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Milestone 2a, remaining: loading a newer build's config read-only, the `raw-localhost` rename, the 1.x `state.json` import, the two-part web login cookie, and the Ctrl-G/Ctrl-Q "moved" notices are removed.
 - [x] (2026-09-16) Milestone 2b: the worker checks the relay protocol once, when a request arrives, and serves only the current version. The controller checks each request's minimum protocol once, in `WorkerClient::call_with_timeout`. Checkpoint export uses the shared staging-command loop, and the fallback that uploaded the spec file is gone. Journal span boundary digests come from one helper.
 - [x] (2026-09-16) Milestone 3, part 1: one set of ssh, scp and container-exec builders in `mj-core/src/targets/ssh.rs` and `targets.rs`. `locator_command` builds every exec-style per-target command (architecture probe, worker stop/liveness/probe/last words, digest, launch refresh, reconnect, checkpoint cleanup). Remote upload staging uses `REMOTE_UPLOAD_STAGING`.
-- [ ] Milestone 3, part 2: shared bounded line reader, enum name maps, journal file operations.
+- [x] (2026-09-16) Milestone 3, part 2: `mj_core::bounded_frame::read_bounded_frame` replaces four async frame readers (each caller keeps its own meaning for a partial frame at end of stream). `SessionState::as_str`/`from_stored`, `TargetTemplate::kind_name` and `TargetLocator::kind_name` replace four hand-written maps. One `mj_core::config::sync_directory` replaces four copies.
 - [ ] Milestone 4: merge duplicated feature paths.
 - [ ] Milestone 5: larger merges that keep behavior the same.
 - [ ] Milestone 6: hand the Kimi quota token refresh to the Kimi CLI.
@@ -37,6 +37,9 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Milestone 3 leaves three duplicates alone: the relay journal validation loops, the `zai_usage`/`muse_usage` HTTP body readers, and the database's target-kind column projection.
+  Rationale: The validation loops check different things (some enforce ordinal continuity, one enforces only the v1 chain link), so merging them would change validation. The body readers are two 12-line loops over `reqwest` streams, and `mj-core` does not depend on `reqwest`. The database projection maps a different locator type into several columns at once.
+  Date/Author: 2026-09-16, agent.
 - Decision: File transfers into and out of targets keep their per-target code for now. Only exec-style commands move to `locator_command`.
   Rationale: The transfer sites differ in meaning, not just spelling. Some copy a directory's contents and others the directory itself, and they differ in ownership fixups, atomic renames, and content-addressed caching. They cannot be checked end to end against docker, podman-over-ssh or EC2 in this environment, so a shared copy helper would risk untested behavior changes. The drift that was real (the scp port flag and two upload staging directories) is fixed.
   Date/Author: 2026-09-16, agent.

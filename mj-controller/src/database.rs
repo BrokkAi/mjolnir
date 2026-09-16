@@ -606,7 +606,7 @@ pub fn delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
         states
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|state| parse_session_state(state).is_active())
+            .filter(|state| stored_session_state(state).is_active())
             .count()
     };
     let draft_count: u64 = tx.query_row(
@@ -655,7 +655,7 @@ pub fn force_delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> 
         states
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|state| parse_session_state(state).is_active())
+            .filter(|state| stored_session_state(state).is_active())
             .count()
     };
     ensure!(
@@ -707,7 +707,7 @@ pub fn reassign_resumable_session_workspace_at(
         .with_context(|| format!("find resumable session {session_id:?}"))?;
     ensure!(
         matches!(
-            parse_session_state(&state),
+            stored_session_state(&state),
             SessionState::Stopped | SessionState::Lost | SessionState::Error
         ),
         "session {session_id} is not resumable"
@@ -1358,7 +1358,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                     )
                 })?,
             additional_mounts: Vec::new(),
-            state: parse_session_state(&row.get::<_, String>(6)?),
+            state: stored_session_state(&row.get::<_, String>(6)?),
             target: None,
             native_session_id: row.get(7)?,
             acp_session_title: row
@@ -1718,7 +1718,7 @@ fn mark_session_target_missing_if_current_to(
             [session_id],
             |row| row.get(0),
         )?;
-        Some(parse_session_state(&stored))
+        Some(stored_session_state(&stored))
     } else {
         None
     };
@@ -4434,7 +4434,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.harness_kind.id(),
             session.last_profile,
             session.target_template_id,
-            session_state_name(session.state),
+            session.state.as_str(),
             session.native_session_id,
             session.acp_session_title,
             session.session_title_override,
@@ -4518,7 +4518,7 @@ fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRecord) -> Res
             session.harness_kind.id(),
             session.last_profile,
             session.target_template_id,
-            session_state_name(session.state),
+            session.state.as_str(),
             session.updated_at,
             session.viewed_through_event_ordinal,
             session.last_error,
@@ -5050,35 +5050,9 @@ fn query_history_page(
         .map_err(Into::into)
 }
 
-fn session_state_name(value: SessionState) -> &'static str {
-    match value {
-        SessionState::Provisioning => "provisioning",
-        SessionState::Running => "running",
-        SessionState::Disconnected => "disconnected",
-        SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing => "closing",
-        SessionState::Destroying => "destroying",
-        SessionState::Stopped => "stopped",
-        SessionState::Lost => "lost",
-        SessionState::Error => "error",
-        SessionState::DestroyedWithDataLoss => "destroyed-with-data-loss",
-    }
-}
-fn parse_session_state(value: &str) -> SessionState {
-    match value {
-        "provisioning" => SessionState::Provisioning,
-        "running" => SessionState::Running,
-        "disconnected" => SessionState::Disconnected,
-        "checkpointing" => SessionState::Checkpointing,
-        "closing" => SessionState::Closing,
-        "destroying" => SessionState::Destroying,
-        // Rows written before the verb was renamed still say "archived".
-        "stopped" | "archived" => SessionState::Stopped,
-        "lost" => SessionState::Lost,
-        "error" => SessionState::Error,
-        "destroyed-with-data-loss" => SessionState::DestroyedWithDataLoss,
-        _ => unreachable!(),
-    }
+/// The schema's CHECK constraint admits only known session states.
+fn stored_session_state(value: &str) -> SessionState {
+    SessionState::from_stored(value).expect("schema CHECK admits only known session states")
 }
 
 #[cfg(unix)]

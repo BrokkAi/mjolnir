@@ -1163,19 +1163,6 @@ fn finish_config_map_rename<T>(
     Ok(())
 }
 
-fn target_kind(locator: &targets::TargetLocator) -> &'static str {
-    match locator {
-        targets::TargetLocator::LocalBare { .. } => "local-bare",
-        targets::TargetLocator::LocalPodman { .. } => "local-podman",
-        targets::TargetLocator::LocalDocker { .. } => "local-docker",
-        targets::TargetLocator::AppleContainer { .. } => "apple-container",
-        targets::TargetLocator::AwsEc2 { .. } => "aws-ec2",
-        targets::TargetLocator::SshBare { .. } => "ssh-bare",
-        targets::TargetLocator::SshPodman { .. } => "ssh-podman",
-        targets::TargetLocator::SshDocker { .. } => "ssh-docker",
-    }
-}
-
 /// Whether this profile must run from a private staged copy of its home even on
 /// a local bare target, where a session would otherwise use the profile home
 /// directly.

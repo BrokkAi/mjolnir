@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 // A cold Codex app-server start can be slow on busy machines. The client is
@@ -213,33 +213,13 @@ async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, QueryE
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let mut frame = Vec::new();
-    loop {
-        let (consumed, found_newline) = {
-            let available = reader
-                .fill_buf()
-                .await
-                .map_err(|_| QueryError::Protocol(ProtocolError::Io))?;
-            if available.is_empty() {
-                if frame.is_empty() {
-                    return Ok(None);
-                }
-                return Err(QueryError::Protocol(ProtocolError::Closed));
-            }
-            let take = available
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(available.len(), |position| position + 1);
-            if frame.len().saturating_add(take) > MAX_RESPONSE_BYTES {
-                return Err(QueryError::Protocol(ProtocolError::TooLarge));
-            }
-            frame.extend_from_slice(&available[..take]);
-            (take, available.get(take.saturating_sub(1)) == Some(&b'\n'))
-        };
-        reader.consume(consumed);
-        if found_newline {
-            return Ok(Some(frame));
-        }
+    use mj_core::bounded_frame::{BoundedFrame, BoundedFrameError};
+    match mj_core::bounded_frame::read_bounded_frame(reader, MAX_RESPONSE_BYTES).await {
+        Ok(BoundedFrame::Line(frame)) => Ok(Some(frame)),
+        Ok(BoundedFrame::End) => Ok(None),
+        Ok(BoundedFrame::Truncated(_)) => Err(QueryError::Protocol(ProtocolError::Closed)),
+        Err(BoundedFrameError::TooLarge) => Err(QueryError::Protocol(ProtocolError::TooLarge)),
+        Err(BoundedFrameError::Io(_)) => Err(QueryError::Protocol(ProtocolError::Io)),
     }
 }
 
@@ -738,11 +718,11 @@ mod tests {
         let mut reader = BufReader::new(&b"first\nsecond\n"[..]);
         assert_eq!(
             read_bounded_frame(&mut reader).await.expect("first frame"),
-            Some(b"first\n".to_vec())
+            Some(b"first".to_vec())
         );
         assert_eq!(
             read_bounded_frame(&mut reader).await.expect("second frame"),
-            Some(b"second\n".to_vec())
+            Some(b"second".to_vec())
         );
         assert_eq!(
             read_bounded_frame(&mut reader).await.expect("clean eof"),
