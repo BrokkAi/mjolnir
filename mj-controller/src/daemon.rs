@@ -2063,18 +2063,36 @@ impl RuntimeState {
     /// Checkpoint a session now and publish the result, the way the daemon's
     /// own checkpoint action does.
     ///
-    /// The API's bundle export needs a fresh archive for a running session, and
-    /// it must take the same lifecycle guard and controller refresh as any
-    /// other checkpoint rather than driving the controller behind their backs.
+    /// The API's bundle export needs a fresh archive for a running session. Only
+    /// that session's own lifecycle operation can conflict with its checkpoint,
+    /// so this refuses when the session itself is mid-operation and returns a
+    /// [`SessionLifecycleBusy`] the export path can fall back on. It must not
+    /// take the process-wide lifecycle guard: that rejected every export while
+    /// any unrelated session anywhere was mid-lifecycle (#1010).
     pub async fn checkpoint_session_now(
         &self,
         session_id: &str,
     ) -> Result<mj_core::state::CheckpointMetadata> {
-        ensure_no_active_lifecycle(self)?;
+        if self.session_lifecycle_active(session_id) {
+            return Err(anyhow::Error::new(SessionLifecycleBusy {
+                session_id: session_id.to_owned(),
+            }));
+        }
         let mut controller = blocking(Controller::load).await?;
         let checkpoint = controller.checkpoint_session(session_id).await?;
         refresh_runtime_controller(self).await;
         Ok(checkpoint)
+    }
+
+    /// Whether this specific session has a lifecycle operation still running.
+    /// A checkpoint conflicts only with its own session's operations, never
+    /// with another session's (#1010).
+    fn session_lifecycle_active(&self, session_id: &str) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .is_some_and(|active| active.result.borrow().is_none())
     }
 
     /// In-memory records and ownership sampled with the same lock order as
@@ -3669,6 +3687,26 @@ async fn handle_action(
     }
 }
 
+/// A session has its own lifecycle operation in flight, so a fresh checkpoint
+/// would fight it. Callers that only need archived state (bundle export) fall
+/// back to the last durable checkpoint instead of failing (#1010).
+#[derive(Debug)]
+pub(crate) struct SessionLifecycleBusy {
+    pub session_id: String,
+}
+
+impl std::fmt::Display for SessionLifecycleBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session {} has a lifecycle operation in flight; its checkpoint cannot run now",
+            self.session_id
+        )
+    }
+}
+
+impl std::error::Error for SessionLifecycleBusy {}
+
 fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
     ensure!(
         !state
@@ -3995,6 +4033,34 @@ mod tests {
             },
         );
         assert!(state.workspace_has_active_resume("workspace-a"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lifecycle_guard_is_per_session() {
+        let state = test_runtime_state();
+        let (_completed, result) = tokio::sync::watch::channel(None);
+        state.lifecycle.lock().unwrap().insert(
+            "session-b".into(),
+            ActiveLifecycle {
+                operation_id: "resume-operation".into(),
+                create_control: None,
+                kind: LifecycleKind::Resume,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                started_at_epoch_seconds: 1,
+                active_stages: BTreeMap::new(),
+                resume_workspace_id: None,
+                resume_destination: None,
+                notice: None,
+                request_key: None,
+                _move_guard: None,
+                move_source_closed: false,
+                result,
+            },
+        );
+        // An unrelated session's operation must not block another session's
+        // checkpoint; only the session's own operation does (#1010).
+        assert!(!state.session_lifecycle_active("session-a"));
+        assert!(state.session_lifecycle_active("session-b"));
     }
 
     #[cfg(target_os = "macos")]
