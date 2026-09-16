@@ -756,6 +756,16 @@ impl ReviewerRole {
         }
 
         let session_environment = mj_core::login_environment::with_overrides(&environment).await?;
+        // A Codex reviewer needs its recorded model at launch for the same
+        // reason the primary session does, so the environment must be final
+        // before the spec below is written. Read the accepted configuration
+        // once; the ACP runtime further down reuses this value.
+        let accepted_config = {
+            let relay = relay.lock().expect("reviewer relay lock poisoned");
+            let state = relay.operational_state();
+            acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+        };
+        super::pin_accepted_codex_model(config.harness, &mut environment, &accepted_config)?;
         let supervisor_path = root.join("acp-supervisor.json");
         AcpSupervisorSpec {
             command: managed_harness.as_ref().map_or_else(
@@ -799,10 +809,7 @@ impl ReviewerRole {
                 relay.native_session_may_have_history(),
                 relay.acp_activity_clock(),
                 relay.step_clock(),
-                Arc::new(Mutex::new(acp::AcceptedSessionConfig::from_configuration(
-                    &state.config,
-                    &state.config_options,
-                ))),
+                Arc::new(Mutex::new(accepted_config)),
             )
         };
         let spec = LaunchSpec {

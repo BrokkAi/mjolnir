@@ -1142,6 +1142,54 @@ async fn a_resumed_reviewer_reloads_its_native_session() {
     fixture.sidecar.pause_all().await;
 }
 
+/// A reviewer resumes its native session the same way a primary session does,
+/// so a Codex reviewer's relaunched bridge needs the model it accepted even
+/// though the relay already recorded it.
+#[tokio::test]
+async fn a_relaunched_codex_reviewer_pins_the_model_it_accepted() {
+    let mut fixture = Fixture::new(true);
+    write_options(
+        &fixture.script_directory(),
+        "options.json",
+        &[
+            select_option("model", "default", &["default", "flash"]),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "agent",
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("agent", "Agent"),
+                    SessionConfigSelectOption::new("agent-full-access", "Agent full access"),
+                ]),
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ],
+    );
+    let mut first = config(0);
+    first.harness = HarnessKind::Codex;
+    first.model = Some("flash".into());
+    fixture.start(first).await;
+    fixture.sidecar.pause_all().await;
+
+    let mut second = config(0);
+    second.harness = HarnessKind::Codex;
+    second.model = Some("flash".into());
+    fixture.start(second).await;
+
+    let spec = super::AcpSupervisorSpec::read(
+        &fixture
+            .worker_root
+            .join("reviewer")
+            .join("acp-supervisor.json"),
+    )
+    .unwrap();
+    let pinned: serde_json::Value =
+        serde_json::from_str(&spec.environment["CODEX_CONFIG"]).unwrap();
+    assert_eq!(pinned["model"], "flash");
+
+    fixture.sidecar.pause_all().await;
+}
+
 #[tokio::test]
 async fn a_harness_that_never_answers_reports_why_instead_of_hanging() {
     let mut fixture = Fixture::new(true);
