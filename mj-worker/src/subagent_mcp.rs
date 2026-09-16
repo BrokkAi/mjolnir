@@ -393,28 +393,27 @@ mod tests {
         assert!(description.contains("relative"), "{description}");
     }
 
-    /// A writer shared with the test so `run` (which takes the writer by value)
-    /// can be observed after it returns.
-    #[derive(Clone)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("shared writer poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
+    #[cfg(unix)]
     #[test]
     fn a_slow_tool_call_does_not_block_a_later_one() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
+
+        // Observe output after `run` consumes the writer.
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("shared writer poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");
