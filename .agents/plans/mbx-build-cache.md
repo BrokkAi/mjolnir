@@ -13,11 +13,8 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 ## Progress
 
 - [x] (2026-09-16) Design settled with the user; this ExecPlan written.
-- [ ] Milestone 0 prototype: ownership of files written through a read-write bind mount (localhost Podman and morannon Podman).
-- [ ] Milestone 0 prototype: separating two sessions on the same repository (managed target and incremental state).
-- [ ] Milestone 0 prototype: mount path, and garbage collection safety between host and containers.
-- [ ] Milestone 0 prototype: passing host limits to containers.
-- [ ] Milestone 0 prototype: measured speed-up and reflink rate.
+- [x] (2026-09-16) Milestone 0 on morannon (rootless Podman 5.7.0, cache on ZFS): ownership, session separation, mount path and garbage collection, limits approach, speed. All five answered; see Surprises & Discoveries and Decision Log.
+- [ ] Milestone 0 on localhost: blocked. Rootless Podman cannot run in the current WSL session because `/run/user/1000` does not exist (`loginctl`: "User ID 1000 is not logged in or lingering"). Needs the user to enable a systemd user session or lingering; repeat the morannon checks afterwards against `/mnt/optane/mbx-cache`.
 - [ ] Milestone 1: configuration types and setup screens.
 - [ ] Milestone 1: host cache resolution, limits, and reflink probe (`mj-controller/src/controller/mbx.rs`).
 - [ ] Milestone 1: pinned mbx binary download and installation into containers.
@@ -40,6 +37,27 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 
 - Observation: mbx keys per-checkout state by the absolute workspace path, and every mj container uses the same path.
   Evidence: `CONTAINER_WORKSPACE` is `/workspace` in `mj-core/src/targets.rs`. mbx names managed target directories with `CacheDigest::blake3(workspace_root)` (`../mr-boxington/crates/mbx/src/target.rs`, around line 986) and incremental state with a 16-character prefix of the same digest (`crates/mbx/src/incremental.rs`, around line 266).
+
+- Observation: without a user-namespace mapping, the container user cannot write to a host directory at all; with `--userns=keep-id` it writes files owned by the host user.
+  Evidence (morannon): `podman run -v $C:$C:rw IMG touch $C/no-keepid` gives `touch: cannot touch ...: Permission denied`. With `--userns=keep-id`, `ls -ln` shows the new file and directory owned by `1000 1000`. The image user `hel` is UID 1000, which happens to equal the host user's UID on morannon; `/etc/subuid` maps `jonathan:100000:65536`.
+
+- Observation: two sessions at the same container path share one managed target directory, confirming the collision; a different checkout path or a per-session target root separates them.
+  Evidence: containers A and B at `/workspace/proj` both got `target -> .../targets/v1/f0be10cad904...`, and B's build did no work. With `MBX_TARGET_ROOT=$C/mj-targets/sess-a` (and `sess-b`) plus `MBX_INCREMENTAL=1`, concurrent builds produced `target -> .../mj-targets/sess-a/v1/f0be10...` and `.../mj-targets/sess-b/v1/f0be10...`, each with `43 compilations replayed from cache` in 0.69 s wall.
+
+- Observation: the cache works and is fast with reflinks on ZFS.
+  Evidence: a small project (anyhow, serde, serde_json, regex, clap) built cold with an empty cache in `real 0m7.872s` (`user 0m29.963s`); the same project at a different path against the shared cache took `real 0m0.368s` with `cache hits 44` and `copying avoided 178.8 MiB reflinked`.
+
+- Observation: garbage collection with a per-session target root cannot reach other sessions' targets.
+  Evidence: host-side `mbx gc --dry-run` with `MBX_TARGET_MAX_AGE=1s` listed only the two directories in the default `targets/` root and nothing under `mj-targets/`; container A's dry run with its own root listed only `1 target directories`, and evicted 0 store objects under its default store budget.
+
+- Observation: mbx has no command that prints its effective configuration.
+  Evidence: `mbx config --help` is forwarded to Cargo (`Usage: cargo config`). `crates/mbx/src/cli/` has no config subcommand. Environment variables override the config file for every key (`crates/mbx/src/config.rs`).
+
+- Observation: `--userns=keep-id` is compatible with the options mj already uses.
+  Evidence: one `podman run --init --userns=keep-id` with `--volume VOL:/workspace:rw,U`, an `:O` overlay attachment, and the `:rw` cache mount: the workspace file is owned by `1000 1000`, the overlay write is visible inside the container but the host file still contains only `hi`, and the cache probe file is owned by `1000 1000`.
+
+- Observation: mbx accepts `/mnt/nvme/mbx` with its pre-existing directories and detects reflinks there.
+  Evidence: `MBX_CACHE_DIR=/mnt/nvme/mbx mbx doctor` reports `ok cache /mnt/nvme/mbx is writable`, `ok reflink ... cloning is supported`, `ok config 240.0 GiB budget`; afterwards `ls -la` shows only `.agents`, `.codex`, `.git` (the `cargo`/`rustc` failures are because morannon's host has no Rust toolchain).
 
 ## Decision Log
 
@@ -67,9 +85,29 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
   Rationale: the mbx cache needs a read-write mount, and once that mode exists in the model, the user wants it available for any attached directory. Read-only becomes the default for new directories because it is the safest choice. Existing sessions must not change behavior on upgrade.
   Date/Author: 2026-09-16, user.
 
+- Decision: separate sessions with `MBX_TARGET_ROOT=<cache>/mj-targets/<session id>` and `MBX_INCREMENTAL=1`; do not change the container workspace path.
+  Rationale: the prototype showed this fully separates concurrent sessions at the same `/workspace` path while keeping each managed target inside the cache mount, so reflinks still work. `MBX_INCREMENTAL=1` hands incremental compilation to Cargo, which keeps it inside the per-session target directory instead of the path-keyed shared `incremental/` tree. Changing `/workspace` would touch the `CONTAINER_WORKSPACE` constant plus 45 literal `/workspace` strings in non-test code and complicate resuming older containers.
+  Date/Author: 2026-09-16, agent (from prototype evidence).
+
+- Decision: mount the cache at the same absolute path inside the container as on the host.
+  Rationale: records mbx writes (target records, cache paths) then name paths that exist on both sides. `validate_mount_destination` accepts any absolute path without `..`.
+  Date/Author: 2026-09-16, agent.
+
+- Decision: on Podman, any container with a read-write mount (the mbx cache or a user `rw` attachment) runs with `--userns=keep-id:uid=<image user uid>,gid=<image user gid>`. mj learns the image user's numeric IDs before creating the container, once per image digest, by running `id -u` and `id -g` in a throwaway container of that image, and caches the answer.
+  Rationale: without the mapping the container user cannot write to the host directory at all. The explicit `uid`/`gid` form is needed because the host user's UID matches `hel` only by coincidence on morannon. The existing ownership helper (`container_upload_ownership_args` in `mj-controller/src/controller/worker_binary.rs`) runs after creation, which is too late for a user-namespace option.
+  Date/Author: 2026-09-16, agent.
+
+- Decision: give containers the host's mbx limits by mounting the host's mbx config file read-only at the container user's `~/.config/mbx/config.toml` when it exists, and set `MBX_CACHE_DIR` and `MBX_TARGET_ROOT` in the environment, which override the file's host-specific paths. A per-target `max_size` override is passed as `MBX_GC_MAX_SIZE`. Without a host config file, pass `MBX_GC_MAX_SIZE` from the mj setting or its default formula.
+  Rationale: mbx has no command that prints effective configuration, and reimplementing its config parsing in mj would drift. Reading the same file gives containers exactly the host's budgets, so a container's automatic garbage collection cannot shrink a shared store to mbx's default of 5% of the disk.
+  Date/Author: 2026-09-16, agent.
+
+- Decision: mj removes `<cache>/mj-targets/<session id>` after a session closes, on a supervised background task started after the session entry is cleared, and also collects leftover `mj-targets/*` directories whose session no longer exists, following `git_cache`'s garbage collection.
+  Rationale: mbx only collects targets inside the root it was given, so nothing else ever removes a closed session's target root.
+  Date/Author: 2026-09-16, agent.
+
 ## Outcomes & Retrospective
 
-Nothing yet.
+Milestone 0 (morannon): a shared read-write cache is safe and effective under rootless Podman once the user namespace is mapped and each session has its own target root. The second build of a small project dropped from 7.9 s to 0.4 s with 44 cache hits and all restored output reflinked. Localhost validation is still pending because rootless Podman cannot run in the current WSL session.
 
 ## Context and Orientation
 
@@ -119,7 +157,7 @@ Host resolution. Create `mj-controller/src/controller/mbx.rs`, next to `git_cach
 
 Binary. Pin an mbx version and the SHA-256 digests of `mbx-x86_64-unknown-linux-musl.tar.gz` and `mbx-aarch64-unknown-linux-musl.tar.gz` from the upstream GitHub release (`jdx/mr-boxington`). Download on first use into `data_dir()/mbx/<version>/<triple>/mbx`, verifying the digest, following `download_worker`. `MJ_MBX_BINARY` overrides it. Install `mbx` and a `cargo` hard link or copy of it into a `bin` directory next to the worker files in the container, alongside `install_worker_files`, and do the same on the worker refresh and resume paths. The shim works because mbx checks whether it was invoked under the name `cargo`, removes its own directory from `PATH`, and runs the real Cargo.
 
-Environment. When the session uses mbx, add to `WorkerLaunchConfig.environment`: `PATH` with the mbx `bin` directory first, `MBX_CACHE_DIR` set to the in-container mount path, and the limit variables from milestone 0, plus any separation variables from milestone 0 question 2. Confirm with a test that the login environment rebuild keeps the `PATH` prefix.
+Environment. When the session uses mbx, add to `WorkerLaunchConfig.environment`: `PATH` with the mbx `bin` directory first, `MBX_CACHE_DIR` set to the cache path (identical inside and outside the container), `MBX_TARGET_ROOT` set to `<cache>/mj-targets/<session id>`, `MBX_INCREMENTAL=1`, and `MBX_GC_MAX_SIZE` when mj supplies the budget. When the host has an mbx config file, add a read-only mount of it at the container user's `~/.config/mbx/config.toml`. Confirm with a test that the login environment rebuild keeps the `PATH` prefix.
 
 Detection and the session record. Mounts are fixed when a container is created, so detection must precede `targets::provision_plan`. After `git_cache::prepare`, check the primary repository's host mirror with `git --git-dir <mirror> cat-file -e HEAD:Cargo.toml` through `CacheHost`. If the mirror is unavailable, the session runs without mbx. Add a field to `SessionRecord` recording the decision and the resolved directory so resume and move use the same values; write the migration and classify it (an added nullable column read as "no mbx" by older code is expected to be compatible, but apply the repository's rule that uncertainty means breaking).
 
@@ -129,7 +167,7 @@ In `container_run_args`, read-write becomes Podman `--volume src:dst:rw` and Doc
 
 Attached-directory editors. In `mj-tui/src/wizards.rs`, the mount editor currently has a read-only checkbox (`read_only`, `toggle_read_only`, `forced_read_only`, `read_only_marker`) used by the session wizards and the Ctrl+E dialog. Replace it with a three-way selector (`ro` default, `cow`, `rw`); when the filesystem probe forces a downgrade, lock the selector on `ro` and show the existing reason. The list marker shows ` · ro`, ` · cow`, or ` · rw`. Update the save path in `mj-cli/src/dashboard/io.rs` and any web UI form that edits attached directories to carry the mode.
 
-mbx cache mount. Add the run options found in milestone 0 (for example `--userns=keep-id`) only for sessions that use mbx. Push a read-write cache mount into `runtime_mounts` in `provisioning.rs`, as `git_cache` does, rather than storing it as a user mount. Skip mbx on Apple `container`, on Docker Desktop VMs, and when `probe_filesystem_types` reports a filesystem for which `overlay_unsupported_filesystem` returns a network, FUSE, virtiofs, or 9p reason.
+mbx cache mount. On Podman, add `--userns=keep-id:uid=<uid>,gid=<gid>` whenever the container has any read-write mount, using the image user's IDs learned before creation and cached per image digest. Record the effective option on the session so resume and move do not change it. For Docker, pass `--user <host uid>:<host gid>` only if the image user differs; this path is untested because no Docker host is available, and the Decision Log should say so when implemented. Push a read-write cache mount into `runtime_mounts` in `provisioning.rs`, as `git_cache` does, rather than storing it as a user mount. Skip mbx on Apple `container`, on Docker Desktop VMs, and when `probe_filesystem_types` reports a filesystem for which `overlay_unsupported_filesystem` returns a network, FUSE, virtiofs, or 9p reason.
 
 Close. If milestone 0 requires mj to remove a session's managed target or incremental state, do it on a supervised background task started after the session entry has been cleared, run through `CacheHost`, logging failures. Nothing on the close path or UI waits for it.
 
