@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 mod api;
 mod api_activity;
+mod profile_catalog;
 
 use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
 use mj_core::remote_git::{default_branch, display_url, resolve_repository};
@@ -689,6 +690,10 @@ pub async fn run_server(
     let resolved = resolve_server_args(args, termination.clone()).await?;
     let bind = resolved.bind;
     let mut controller = Controller::load()?;
+    // `list_profiles` is called in the middle of a model's turn, so its
+    // capabilities are discovered ahead of the call rather than inside it.
+    let profile_catalog = profile_catalog::ProfileCatalog::new(termination.child_token());
+    profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     let mut phone_workspaces = workspace_updates.borrow_and_update().clone();
@@ -811,7 +816,8 @@ pub async fn run_server(
             Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
             daemon_runtime.clone(),
         )
-        .with_quota_reports(subagent_quota_reports.clone()),
+        .with_quota_reports(subagent_quota_reports.clone())
+        .with_profile_catalog(profile_catalog.clone()),
     );
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
@@ -2081,6 +2087,13 @@ pub async fn run_server(
                                 &mut quota_batch,
                                 &quota_profiles_tx,
                             );
+                            // A changed profile set or sub-agent policy makes
+                            // the catalogue's answers wrong, so it drops them,
+                            // adopts the configuration it is given here, and
+                            // discovers the new one in the background. A
+                            // `list_profiles` call that arrives first falls
+                            // back to discovering on the call.
+                            profile_catalog.sync(&controller.config);
                             queued_prompts.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });

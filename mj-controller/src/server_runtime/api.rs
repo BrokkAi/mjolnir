@@ -144,6 +144,10 @@ pub struct ApiBackend {
     /// Latest background-refreshed quota reports, used to choose one profile
     /// per harness without making the parent reason about credential aliases.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    /// The capabilities `list_profiles` answers with. A warm catalogue turns
+    /// that call into a filter over data the daemon discovered in the
+    /// background; a cold one falls back to discovering on the call.
+    profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
 }
 
 impl ApiBackend {
@@ -158,6 +162,12 @@ impl ApiBackend {
             exports,
             starts: Arc::new(Mutex::new(BTreeMap::new())),
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
+            // Cold until the daemon adopts a configuration, so a backend built
+            // without one — every test that does not care about profiles —
+            // keeps the on-demand behaviour.
+            profile_catalog: super::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
         }
     }
 
@@ -166,6 +176,14 @@ impl ApiBackend {
         quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
     ) -> Self {
         self.quota_reports = quota_reports;
+        self
+    }
+
+    pub fn with_profile_catalog(
+        mut self,
+        profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
+    ) -> Self {
+        self.profile_catalog = profile_catalog;
         self
     }
 
@@ -204,16 +222,19 @@ impl ApiBackend {
                     .exports
                     .session_record(parent_session_id)
                     .context("parent session disappeared")?;
-                let config = tokio::task::spawn_blocking(mj_core::config::Config::load).await??;
-                let candidates = config
-                    .enabled_profiles()
-                    .filter(|(id, _)| {
-                        config
-                            .subagents
-                            .profile_is_eligible(&parent.last_profile, id)
-                    })
-                    .map(|(id, profile)| (id.to_owned(), profile.kind))
-                    .collect::<Vec<_>>();
+                // A warm catalogue already holds both the candidate list and
+                // the capabilities the answer quotes, so the call only filters
+                // and ranks. A cold one reads the configuration and discovers
+                // what it is missing on the call, as this arm always did.
+                let (candidates, configs, generation) =
+                    match self.profile_catalog.view(&parent.last_profile) {
+                        Some(view) => (view.candidates, view.configs, Some(view.generation)),
+                        None => (
+                            self.list_profile_candidates(&parent.last_profile).await?,
+                            BTreeMap::new(),
+                            None,
+                        ),
+                    };
                 let ids = {
                     let quota_reports = self
                         .quota_reports
@@ -223,7 +244,16 @@ impl ApiBackend {
                 };
                 let mut profiles = Vec::with_capacity(ids.len());
                 for (id, harness) in ids {
-                    let choices = self.profile_config(id.clone(), None, false).await?;
+                    let choices = match configs.get(&id) {
+                        Some(choices) => choices.clone(),
+                        // The catalogue remembers a discovery it was missing,
+                        // so a failed background probe heals on first use.
+                        None => {
+                            self.profile_catalog
+                                .discover_profile(&id, generation)
+                                .await?
+                        }
+                    };
                     profiles.push(serde_json::json!({
                         "profile_id":id,
                         "harness":harness.id(),
@@ -558,6 +588,19 @@ impl ApiBackend {
             ));
         }
         Ok(())
+    }
+
+    /// The profiles a parent may delegate to, for a catalogue that has not
+    /// adopted a configuration yet. It reads the file on a blocking thread —
+    /// the daemon's control loop must not wait for the disk — and applies the
+    /// same policy the catalogue applies to the configuration it adopted.
+    async fn list_profile_candidates(&self, parent: &str) -> Result<Vec<(String, HarnessKind)>> {
+        let config = tokio::task::spawn_blocking(mj_core::config::Config::load).await??;
+        Ok(super::profile_catalog::candidates(
+            &config.profiles,
+            &config.subagents,
+            parent,
+        ))
     }
 }
 
@@ -1372,6 +1415,9 @@ impl SubagentBackend for ApiBackend {
 mod tests {
     use super::*;
 
+    use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
+    use mj_core::state::SessionRecord;
+
     fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
         ProfileQuota {
             profile_id: profile_id.into(),
@@ -1662,6 +1708,133 @@ mod tests {
                 Ok(SessionHandle::new(session))
             })
         }
+    }
+
+    /// A running parent session, as the durable record the tool path reads it
+    /// from. Only the fields the tool path uses carry meaning.
+    struct ParentExports(SessionRecord);
+
+    impl ExportRuntime for ParentExports {
+        fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
+            (session_id == self.0.id).then(|| self.0.clone())
+        }
+        fn checkpoint_now(
+            &self,
+            session_id: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async move { bail!("session {session_id} cannot be checkpointed in a test") })
+        }
+    }
+
+    fn parent_record(id: &str, profile: &str) -> SessionRecord {
+        SessionRecord {
+            mjolnir_subagents: None,
+            create_managed_worktree: None,
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+            archived: false,
+            container_cpus: None,
+            container_memory: None,
+            id: id.to_owned(),
+            title: "parent".into(),
+            harness_kind: HarnessKind::Codex,
+            last_profile: profile.to_owned(),
+            bundle_id: "hel".into(),
+            project_directory: None,
+            managed_worktree: None,
+            target_template_id: "podman".into(),
+            resource_allocation: None,
+            additional_mounts: Vec::new(),
+            state: SessionState::Running,
+            target: None,
+            native_session_id: None,
+            acp_session_title: None,
+            session_title_override: None,
+            created_at: "2026-08-09T12:00:00Z".into(),
+            updated_at: "2026-08-09T12:01:00Z".into(),
+            viewed_through_event_ordinal: 0,
+            draft_input: String::new(),
+            last_error: None,
+            last_checkpoint_error: None,
+            checkpoint: None,
+        }
+    }
+
+    /// The behaviour the whole change exists for: once the background pass has
+    /// discovered the profiles, the tool call itself discovers nothing.
+    #[tokio::test]
+    async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+        let config = test_config(
+            &[
+                ("parent", HarnessKind::Codex),
+                ("helper", HarnessKind::Claude),
+            ],
+            &["helper"],
+        );
+        catalog.sync_now(&config).await;
+        let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(warmed, 2, "the pass discovers every enabled profile once");
+
+        let backend = Arc::new(
+            ApiBackend::new(
+                SessionControl::new(FakeControl(FakeSession {
+                    session_id: "parent-1".into(),
+                    accepted_ordinal: 1,
+                    submitted: mpsc::unbounded_channel().0,
+                    view: None,
+                })),
+                running_states(),
+                Arc::new(ParentExports(parent_record("parent-1", "parent"))),
+            )
+            .with_profile_catalog(catalog),
+        );
+
+        let result = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    request_id: "request-1".into(),
+                    created_at_ms: 0,
+                    action: mj_core::subagent::SubagentToolAction::ListProfiles,
+                },
+            )
+            .await;
+
+        assert!(!result.is_error, "the tool call failed: {}", result.message);
+        let answer: serde_json::Value =
+            serde_json::from_str(&result.message).expect("the answer is JSON");
+        let profiles = answer["profiles"]
+            .as_array()
+            .expect("the answer names profiles")
+            .clone();
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| (
+                    profile["profile_id"].as_str().unwrap().to_owned(),
+                    profile["harness"].as_str().unwrap().to_owned(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("parent".to_owned(), "codex".to_owned()),
+                ("helper".to_owned(), "claude".to_owned()),
+            ],
+            "the parent's own profile and the eligible one are offered, once per harness"
+        );
+        for profile in &profiles {
+            let id = profile["profile_id"].as_str().unwrap();
+            assert_eq!(
+                profile["default_model"].as_str(),
+                Some(format!("{id}-model").as_str()),
+                "the answer quotes the discovered default model"
+            );
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            warmed,
+            "the call must not discover anything the background pass already did"
+        );
     }
 
     #[tokio::test]
