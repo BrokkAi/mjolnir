@@ -213,8 +213,12 @@ impl SubagentConfig {
         {
             validate_id("sub-agent profile", profile_id)?;
             match profiles.get(profile_id) {
-                Some(profile) if profile.enabled => {}
-                Some(_) => bail!("[subagents] eligible profile {profile_id:?} is disabled"),
+                // A disabled profile is simply not offered for sub-agent use
+                // (see `profile_is_eligible` and the spawn gate), so it does not
+                // stop the daemon from starting; `mj doctor` warns about the
+                // contradiction instead. A profile that is not defined at all is
+                // a configuration mistake, so it still fails to load.
+                Some(_) => {}
                 None => bail!(
                     "[subagents] eligible profile {profile_id:?} is not defined in this config"
                 ),
@@ -3478,7 +3482,6 @@ mod tests {
         for section in [
             "[subagents]\nmax_concurrent = 0\n",
             "[subagents.eligible_profiles]\nmissing = true\n",
-            "[subagents.eligible_profiles]\nwork = true\n",
         ] {
             let error = toml::from_str::<Config>(&format!(
                 "version = {CONFIG_VERSION}\n{section}{profile}"
@@ -3488,12 +3491,26 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(
-                error.contains("max_concurrent")
-                    || error.contains("not defined")
-                    || error.contains("disabled"),
+                error.contains("max_concurrent") || error.contains("not defined"),
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
+        // A profile that is both disabled and listed for sub-agent use must not
+        // stop the daemon from starting. `mj doctor` warns about it, and the
+        // consumers that offer profiles for delegation exclude it because it is
+        // disabled (they filter on `enabled`).
+        let config = toml::from_str::<Config>(&format!(
+            "version = {CONFIG_VERSION}\n\
+             [subagents.eligible_profiles]\nwork = true\n\
+             [profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n"
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        assert!(!config.profiles["work"].enabled);
     }
 
     /// A profile that exists, so a `[review]` section has something to name.

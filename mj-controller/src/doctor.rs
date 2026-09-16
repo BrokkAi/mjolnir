@@ -190,6 +190,7 @@ pub fn run_with_config_path(
     let (config, mut checks) = configuration_checks(config_path);
     checks.push(harness_discovery_check(config.as_ref(), executor));
     checks.extend(harness_checks(config.as_ref(), executor));
+    checks.extend(subagent_eligibility_checks(config.as_ref()));
     checks.extend(podman_checks(config.as_ref(), executor, options.smoke));
     checks.extend(docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(ssh_bare_checks(config.as_ref(), executor));
@@ -456,6 +457,40 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
                     profile.home.display()
                 ),
             )
+        })
+        .collect()
+}
+
+/// Warn about a profile that is both listed for sub-agent use and disabled.
+///
+/// The daemon keeps running and simply does not offer such a profile to a
+/// parent, because the delegation candidates and the spawn gate both require an
+/// enabled profile. This surfaces the contradiction so the eligible list and
+/// the profile's `enabled` flag can be reconciled, rather than leaving a profile
+/// the user meant to use silently unavailable.
+fn subagent_eligibility_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    config
+        .subagents
+        .eligible_profiles
+        .iter()
+        .filter(|(_, eligible)| **eligible)
+        .filter_map(|(id, _)| {
+            let profile = config.profiles.get(id)?;
+            (!profile.enabled).then(|| {
+                DoctorCheck::warning(
+                    format!("subagents.{id}"),
+                    format!("Sub-agent profile {id}"),
+                    format!(
+                        "Profile {id:?} is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use."
+                    ),
+                    format!(
+                        "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
+                    ),
+                )
+            })
         })
         .collect()
 }
