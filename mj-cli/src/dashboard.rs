@@ -53,8 +53,8 @@ use tokio_stream::StreamExt as _;
 use crate::dashboard::composer_drafts::ComposerDraftCache;
 use crate::dashboard::io::{
     ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, checkpoint_archive_targets,
-    spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io, spawn_lifecycle_reload,
-    spawn_materialized_session_projection, spawn_project_source_resolution,
+    report, spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io,
+    spawn_lifecycle_reload, spawn_materialized_session_projection, spawn_project_source_resolution,
     spawn_stored_session_summary,
 };
 use crate::import::{
@@ -1103,9 +1103,13 @@ impl DashboardContext {
                     return;
                 }
             };
-            let _ = updates.send(DashboardIoUpdate::TranscriptTailSeed {
-                materialized: Box::new(materialized),
-            });
+            report(
+                "seeding the transcript tail",
+                &updates,
+                DashboardIoUpdate::TranscriptTailSeed {
+                    materialized: Box::new(materialized),
+                },
+            );
         });
     }
 
@@ -1837,15 +1841,15 @@ impl DashboardContext {
                     }
                 }
                 .await;
-                if let (Err(error), Some(session_id)) = (&result, refusal_session)
-                    && refusals
-                        .send(DashboardIoUpdate::ReviewRefused {
+                if let (Err(error), Some(session_id)) = (&result, refusal_session) {
+                    report(
+                        "persisting chat state",
+                        &refusals,
+                        DashboardIoUpdate::ReviewRefused {
                             session_id,
                             message: format!("{error:#}"),
-                        })
-                        .is_err()
-                {
-                    tracing::debug!("a review refusal was dropped because the dashboard closed");
+                        },
+                    );
                 }
                 if let Err(error) = result {
                     tracing::warn!(%error, "could not persist chat state through the daemon");
@@ -1891,13 +1895,15 @@ impl DashboardContext {
                 .map_err(|error| format!("chat preparation task failed: {error}"))
             },
             move |generation, result| {
-                if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
-                    generation,
-                    session_id: reported_session_id.clone(),
-                    result: Box::new(result),
-                }) {
-                    tracing::debug!(%error, "chat-open result dropped after dashboard shutdown");
-                }
+                report(
+                    "opening a session",
+                    &updates,
+                    DashboardIoUpdate::ChatOpened {
+                        generation,
+                        session_id: reported_session_id.clone(),
+                        result: Box::new(result),
+                    },
+                );
             },
         );
     }

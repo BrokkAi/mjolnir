@@ -16,7 +16,7 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 
 - [x] (2026-09-16 22:49Z) Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
 - [x] (2026-09-16 23:18Z) Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
-- [ ] Milestone 3: background job helpers report panics and share one send path.
+- [x] (2026-09-16 23:43Z) Milestone 3: background job helpers report panics and share one send path.
 - [ ] Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
 - [ ] Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in the staged order given below.
 - [ ] Milestone 6: small single-purpose cleanups (ActiveChat `Deref`, one truncation helper, one text-prompt dialog, one row viewport type).
@@ -46,6 +46,30 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   Evidence: `mj-tui/src/setup.rs` `struct SetupDialog` fields `editor`, `path`, `draft`.
 - Observation: `ContainerEditFocus` was re-exported from `mj-tui/src/dialogs.rs` only under `#[cfg(test)]`, so naming `Dialog<ContainerEditFocus>` in another module did not compile. It is now an unconditional `pub(crate) use`.
   Evidence: `mj-tui/src/dialogs.rs:3-4`.
+- Observation: Milestone 3 does not remove 55 lines either; it adds about 22 non-test
+  lines, plus 70 lines of panic tests. `report` and `blocking_result` cost 30 lines,
+  and rustfmt renders `report("label", &updates, DashboardIoUpdate::X { … })` over
+  five to seven lines where the `if let Err(error) = updates.send(…) { tracing::debug!(…) }`
+  block it replaces took six to eight. The saving is real only where the update value
+  is short. The milestone's benefit is the closed bug class and the single send path,
+  not the line count.
+  Evidence: `git diff --shortstat` for the milestone commit reports 265 insertions and
+  173 deletions across four files.
+- Observation: three send sites in `mj-cli/src` legitimately do not go through `report`,
+  because their send result is control flow rather than a report. `mj-cli/src/dashboard/io.rs:1501`
+  sends a remote-repair request and uses `.context("dashboard closed during remote repair
+  preparation")?` to abandon the creation recipe; `mj-cli/src/dashboard/actions.rs:1384` and
+  `:1392` send inside a web-viewer polling task whose `?` ends the poll when the dashboard
+  is gone.
+- Observation: the panic message survives the trip. Tokio 1.52's `JoinError: Display`
+  writes `task <id> panicked with message "boom"`, so `"{operation} task failed: {error}"`
+  contains both the operation and the payload, and the tests can assert on both without
+  reaching for `into_panic`.
+  Evidence: `~/.cargo/registry/src/*/tokio-1.52.3/src/runtime/task/error.rs:135-152`.
+- Observation: `spawn_io`, `spawn_critical_io` and `spawn_cancellable_io_with_token` each
+  already had a closure parameter named `report`, so the new free function needed the
+  call sites' parameter renamed to `to_update`. The public signatures are unchanged;
+  every caller passes it positionally.
 
 ## Decision Log
 
@@ -104,6 +128,40 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   Date/Author: 2026-09-16 / Claude Opus 5.
 - Decision: Order the milestones 1, 2, 3, 4, 5, 6. Milestone 1 goes first because it deletes hundreds of `mark_render_changed` calls that Milestones 2 and 5 would otherwise have to carry through their rewrites. Milestone 3 is independent of everything and can be done at any time.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
+- Decision: `report` is generic over the message type (`fn report<T>(operation: &str,
+  updates: &UnboundedSender<T>, update: T)`) rather than taking `UnboundedSender<DashboardIoUpdate>`
+  as the milestone text wrote it.
+  Rationale: three of the send sites it replaces post `LifecycleUpdate` on the lifecycle
+  channel (`spawn_lifecycle_operation` and the two in `spawn_dashboard_create_session`).
+  A second near-identical function for that channel would defeat the point. `SendError<T>`
+  implements `Display` for every `T`, so the debug log is unchanged.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: the restructured blocking helpers report first and drop the critical-operation
+  guard second, keeping today's order, rather than the `drop(guard); report(…)` order the
+  milestone text sketched.
+  Rationale: the guard is what holds quit open. Dropping it before the send opens a window
+  in which another thread sees no blockers and quits while the answer is still in flight.
+  Reporting first costs nothing and matches `spawn_async_job`.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `report` is `pub(crate)` and `mj-cli/src/pollers.rs` uses it too, though the
+  milestone named only `io.rs`, `actions.rs` and `dashboard.rs`.
+  Rationale: `spawn_worker_record_persistence` and `spawn_worker_diagnosis` held the same
+  two "send or log a closed channel" blocks, and the acceptance grep is over `mj-cli/src`.
+  Leaving two copies behind would have kept the pattern alive in the one file a future
+  contributor is most likely to copy from.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: a third panic test, `a_panicking_cancellable_job_reports_its_failure_and_releases_quit`,
+  covers `spawn_cancellable_io`.
+  Rationale: it is the third helper the milestone restructures and the one whose blocking
+  closure is wrapped rather than passed straight to `spawn_blocking`, so it is the one
+  most likely to be broken by a later edit. The test is eighteen lines.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `mj-cli/src/dashboard.rs:1106` (`let _ = updates.send(TranscriptTailSeed …)`)
+  also goes through `report`, making four converted sites outside `io.rs` rather than the
+  three the milestone counted.
+  Rationale: it was the one send in the dashboard that discarded its error outright, which
+  the repository guidelines forbid. It now logs like every other one.
+  Date/Author: 2026-09-16 / Claude Opus 5.
 
 ## Outcomes & Retrospective
 
@@ -153,6 +211,27 @@ they were, each with a comment saying so.
 This milestone costs about 90 lines rather than saving 190; see Surprises &
 Discoveries for why the estimate was wrong and why the milestone is still worth
 having.
+
+Milestone 3 (2026-09-16). A background job that panics now says so. The three
+blocking helpers in `mj-cli/src/dashboard/io.rs` (`spawn_io`, `spawn_critical_io`,
+`spawn_cancellable_io_with_token`) run their `spawn_blocking` job from an outer
+`tokio::spawn` and await its join handle, so a panic becomes
+`<operation> task failed: task N panicked with message "boom"` on the I/O
+channel instead of a dialog that waits forever. `blocking_result` does that
+mapping in one place and `report` does every send, which removed twenty-two
+copies of the "send or log a closed channel" block across `io.rs`, `actions.rs`,
+`dashboard.rs` and `pollers.rs`.
+
+Two hand-rolled spawns are gone: `spawn_project_source_resolution` is now one
+call to `spawn_cancellable_io`, and `spawn_config_rename` is one call to
+`spawn_critical_async`. The rename therefore gains the fifteen-second
+acknowledgement timeout (`SAVE_ACK_TIMEOUT`) that every other daemon save has:
+if the daemon goes quiet mid-rename, the dashboard now says the save was not
+confirmed and releases quit instead of holding a blocker until the daemon
+answers. That is the milestone's one user-visible change.
+
+Three sends stay outside `report` because their send result is control flow, not
+a report; they are named in Surprises & Discoveries.
 
 ## Context and Orientation
 
@@ -442,3 +521,14 @@ in place of the last `match &self.mode`, and moving the wizards'
 `text_input_focused` bodies rather than delegating to them), the two facts that
 forced the shape of the code (`SetupDialog`'s private fields, `ContainerEditFocus`
 being test-only), and the honest line count.
+
+2026-09-16, after implementing Milestone 3. Recorded the five decisions that
+departed from the written milestone (`report` generic over the channel message so
+the lifecycle channel can use it, reporting before dropping the critical-operation
+guard, extending the single send path to `mj-cli/src/pollers.rs`, a third panic
+test for the cancellable helper, and converting the one `let _ = …send(…)` in
+`dashboard.rs`), the three send sites that legitimately remain inline, the
+`report` parameter rename that the new free function forced, and the honest line
+count. The reason for each is in the Decision Log; the pattern is the same as
+Milestone 2, where the written estimate also assumed that replacing a block with
+a call always shortens the file.
