@@ -218,7 +218,9 @@ twice, in `refresh_discards_client_when_app_server_is_unsupported` and
 binary passes every time at a bounded thread count and the module passes in
 isolation (`cargo test -p brokk-mj-controller --lib codex_usage`, 18 passed).
 The race lives in that module's fixtures and predates this plan; this change
-adds no process to the suite.
+adds no process to the suite. It is filed as
+https://github.com/BrokkAi/mjolnir/issues/1036 so the fix does not have to be
+rediscovered from a red run.
 
 ## Interfaces and Dependencies
 
