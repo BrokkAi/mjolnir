@@ -1015,7 +1015,17 @@ impl DashboardState {
                 self.begin_profile_rename();
                 DashboardAction::None
             }
-            CommandId::Refresh => DashboardAction::RefreshAll,
+            CommandId::Refresh => {
+                // F5 re-probes target readiness as well. This global Refresh
+                // chord is allowed through an open modal (see
+                // `global_chord_allowed`), so it consumes the key before a New
+                // or Resume wizard's own F5 handler runs; clearing here is what
+                // makes the target step's documented "F5 recheck" work. A
+                // cleared entry is re-probed on the next render.
+                self.target_readiness.clear();
+                self.mark_render_changed();
+                DashboardAction::RefreshAll
+            }
             CommandId::ManageProfiles => {
                 self.begin_settings_section("profiles", None);
                 DashboardAction::None

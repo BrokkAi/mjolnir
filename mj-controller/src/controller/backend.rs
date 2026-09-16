@@ -61,10 +61,18 @@ impl Controller {
                 branch.trim().to_owned()
             }
         } else {
-            format!(
-                "unavailable: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not a git repository") {
+                // A plain folder opened through `mj go` has no branch. Say so
+                // briefly rather than echoing multi-line git stderr, which wraps
+                // the banner.
+                "not a git checkout".to_owned()
+            } else {
+                format!(
+                    "unavailable: {}",
+                    stderr.lines().next().unwrap_or("").trim()
+                )
+            }
         };
         Ok((launch.cwd, branch))
     }
