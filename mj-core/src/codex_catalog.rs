@@ -274,7 +274,19 @@ pub fn merge_overrides(catalog: &mut CodexCatalog, overrides: &CodexCatalog) {
                     existing.insert(field.clone(), value.clone());
                 }
             }
-            None => catalog.models.push(entry.clone()),
+            None => {
+                // A slug the provider did not list becomes a complete entry:
+                // start from the same conservative defaults a translated entry
+                // gets, then overlay the user's fields. Pushing the override
+                // verbatim would leave a partial entry that Codex rejects,
+                // failing the launch, even though the docs promise a few fields
+                // are enough to add a model.
+                let mut complete = entry_from_openai_model(slug, None, catalog.models.len());
+                for (field, value) in entry {
+                    complete.insert(field.clone(), value.clone());
+                }
+                catalog.models.push(complete);
+            }
         }
     }
 }
@@ -493,6 +505,21 @@ mod tests {
             efforts(&catalog.models[0]),
             ["low", "high", "max"],
             "a model the override does not name keeps its backfilled levels"
+        );
+        // An appended slug is completed with the conservative defaults a
+        // translated entry gets, so Codex accepts it rather than rejecting the
+        // catalog for missing required fields and failing the launch.
+        let appended = &catalog.models[2];
+        assert_eq!(
+            appended["display_name"],
+            Value::from("DeepSeek Reasoner"),
+            "the override field is kept on an appended entry"
+        );
+        assert_eq!(appended["context_window"], Value::from(128000));
+        assert_eq!(appended["shell_type"], Value::from("shell_command"));
+        assert!(
+            appended.contains_key("supported_reasoning_levels"),
+            "an appended entry carries the default fields Codex requires"
         );
     }
 
