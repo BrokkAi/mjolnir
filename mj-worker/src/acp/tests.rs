@@ -20,6 +20,7 @@ fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -103,6 +104,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -163,6 +165,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -214,6 +217,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
@@ -418,6 +422,7 @@ fn resumed_session_request_keeps_load_context() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("native".into()),
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
@@ -587,6 +592,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: resume_session.map(str::to_owned),
+            native_session_may_have_history: false,
             accepted_config: Default::default(),
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -1106,6 +1112,7 @@ async fn answer_to_ext_request(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Grok,
         execution_policy,
@@ -1264,6 +1271,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -1658,6 +1666,7 @@ async fn config_change_request(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -1829,6 +1838,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -1907,6 +1917,7 @@ async fn policy_is_enforced_before_session_is_reported(
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: resume_session.map(str::to_owned),
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness,
         execution_policy,
@@ -2082,6 +2093,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -2509,6 +2521,7 @@ async fn exercise_image_steering(with_images: bool) {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -2640,6 +2653,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -2767,6 +2781,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -2847,6 +2862,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session,
+            native_session_may_have_history: false,
             accepted_config: Default::default(),
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -3170,6 +3186,7 @@ mod terminals {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
+            native_session_may_have_history: false,
             accepted_config: Default::default(),
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -3677,6 +3694,7 @@ for line in sys.stdin:
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
+            native_session_may_have_history: false,
             accepted_config: Default::default(),
             harness: HarnessKind::Codex,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -3833,6 +3851,7 @@ while True:
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -3960,6 +3979,7 @@ while True:
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -4059,6 +4079,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: None,
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
@@ -4118,6 +4139,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             extra_mcp_servers: Vec::new(),
             project_memory: None,
             resume_session: None,
+            native_session_may_have_history: false,
             accepted_config: Default::default(),
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::Unconstrained,
@@ -4309,6 +4331,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         extra_mcp_servers: Vec::new(),
         project_memory: None,
         resume_session: Some("gone".into()),
+        native_session_may_have_history: false,
         accepted_config: Default::default(),
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
@@ -4363,4 +4386,206 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
     }
     assert_eq!(methods, vec!["session/load".to_owned()]);
     bridge.abort();
+}
+
+#[test]
+fn only_codex_resume_failures_can_report_a_missing_thread() {
+    fn spec(harness: HarnessKind) -> LaunchSpec {
+        LaunchSpec {
+            subagent_mcp_socket: None,
+            goal_recovery: Default::default(),
+            command: "agent".into(),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cwd: "/workspace/app".into(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session: Some("native".into()),
+            native_session_may_have_history: false,
+            accepted_config: Default::default(),
+            harness,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            acp_activity: AcpActivityClock::default(),
+            step_clock: crate::acp::StepClock::default(),
+        }
+    }
+    // The message as codex-acp wraps it.
+    let missing = anyhow::anyhow!(
+        r#"Internal error: {{"details": "no rollout found for thread id 0199f0ba-0000-7000-8000-000000000001"}}"#
+    )
+    .context("resume ACP session 0199f0ba-0000-7000-8000-000000000001");
+    assert!(codex_reports_missing_thread(
+        &spec(HarnessKind::Codex),
+        &missing
+    ));
+    // Another harness's reload failure never means an unmaterialized thread.
+    assert!(!codex_reports_missing_thread(
+        &spec(HarnessKind::Claude),
+        &missing
+    ));
+    // Any other Codex failure keeps failing the resume.
+    assert!(!codex_reports_missing_thread(
+        &spec(HarnessKind::Codex),
+        &anyhow::anyhow!("Internal error: session store is locked")
+    ));
+}
+
+#[cfg(unix)]
+fn missing_codex_thread_script(directory: &Path) -> std::path::PathBuf {
+    let script = directory.join("missing_codex_thread.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    ident = request.get("id")
+    method = request.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
+    elif method in ("session/load", "session/resume"):
+        details = json.dumps({"details": "no rollout found for thread id missing-thread"})
+        print(json.dumps({"jsonrpc": "2.0", "id": ident,
+                          "error": {"code": -32603, "message": "Internal error: " + details}}),
+              flush=True)
+        continue
+    elif method == "session/new":
+        result = {"sessionId": "replacement",
+                  "modes": {"currentModeId": "agent",
+                            "availableModes": [{"id": "agent", "name": "Guardian"}]}}
+    elif method == "session/prompt":
+        result = {"stopReason": "end_turn"}
+    else:
+        result = {}
+    if ident is not None:
+        print(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}), flush=True)
+"#,
+    )
+    .unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn missing_codex_thread_spec(
+    directory: &Path,
+    script: &Path,
+    native_session_may_have_history: bool,
+) -> LaunchSpec {
+    LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        environment: BTreeMap::new(),
+        cwd: directory.to_path_buf(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: Some("missing-thread".into()),
+        native_session_may_have_history,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Codex,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = missing_codex_thread_script(temp.path());
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    // Work the worker queued before the session opened must survive the
+    // replacement and run on the new thread.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "queued-prompt".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("do the queued work"))],
+        })
+        .await
+        .unwrap();
+    let runtime = tokio::spawn(run(
+        missing_codex_thread_spec(temp.path(), &script, false),
+        request_rx,
+        event_tx,
+    ));
+
+    let mut warnings = Vec::new();
+    let mut opened = None;
+    let mut finished = None;
+    while finished.is_none() {
+        let event = tokio::time::timeout(Duration::from_secs(10), event_rx.recv())
+            .await
+            .expect("the replacement thread must open")
+            .expect("the runtime must keep serving the session");
+        match event {
+            RuntimeEvent::Warning { message } => warnings.push(message),
+            RuntimeEvent::SessionStarted {
+                native_session_id,
+                resumed,
+                ..
+            } => opened = Some((native_session_id, resumed)),
+            RuntimeEvent::PromptFinished { request_id, .. } => finished = Some(request_id),
+            RuntimeEvent::Stopped => {
+                panic!("the runtime stopped instead of replacing the thread: {warnings:?}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(opened, Some(("replacement".into(), false)));
+    assert_eq!(finished.as_deref(), Some("queued-prompt"));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("missing-thread")
+                && warning.contains("new empty thread")),
+        "the replacement must be reported: {warnings:?}"
+    );
+    drop(request_tx);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = missing_codex_thread_script(temp.path());
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(
+        missing_codex_thread_spec(temp.path(), &script, true),
+        request_rx,
+        event_tx,
+    ));
+
+    let error = tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .expect("the runtime must fail rather than hang")
+        .unwrap()
+        .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("no native history for thread missing-thread"),
+        "unexpected failure: {error}"
+    );
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::SessionStarted { .. })),
+        "a used thread must never be replaced: {events:?}"
+    );
+    drop(request_tx);
 }
