@@ -17,3 +17,8 @@ contains the GNU GPL version 3 text. `THIRD_PARTY_LICENSES.html` covers the
 locked Rust graph. `SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt` and the other files in
 this directory cover native libraries, embedded fonts, and standalone notices
 not fully represented by Cargo metadata.
+
+The HTML and supplemental reports are generated during GitHub release packaging
+and included alongside this file in release archives, not stored in the source
+checkout. The license-policy configuration and audited upstream texts remain
+source inputs.

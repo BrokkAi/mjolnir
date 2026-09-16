@@ -3,8 +3,9 @@ name = "brokk-mj-review"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Turn-review engine and prompt construction for Mjolnir"
+license-file.workspace = true
 license.workspace = true
+description = "Turn-review engine and prompt construction for Mjolnir"
 repository.workspace = true
 publish = true
 
