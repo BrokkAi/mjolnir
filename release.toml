@@ -1,0 +1,8 @@
+# Prepare one workspace-wide version commit. Tags explicitly trigger publication.
+shared-version = true
+consolidate-commits = true
+dependent-version = "upgrade"
+pre-release-commit-message = "Release {{version}}"
+publish = false
+tag = false
+push = false
