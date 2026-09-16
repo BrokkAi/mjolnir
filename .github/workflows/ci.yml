@@ -5,7 +5,21 @@ on:
     branches: [ 'master', 'ci/**' ]
   pull_request: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  formatting:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: rustfmt
+    - run: cargo fmt --all -- --check
+
   licenses:
     name: Dependency licenses
     runs-on: ubuntu-latest
@@ -35,7 +49,20 @@ jobs:
     - name: Test release archive assembly and parallel npm publishing
       run: node --test scripts/release-workflow.test.mjs
 
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: licenses-musl
+        build-paths: target/package
+
+    - name: Cache pinned license tool
+      id: license-tool
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/bin/cargo-deny
+        key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-0.20.2-rust-1.96.0
+
     - name: Install pinned license tools
+      if: steps.license-tool.outputs.cache-hit != 'true'
       run: |
         cargo install --locked cargo-deny --version 0.20.2
 
@@ -86,55 +113,20 @@ jobs:
     - uses: actions/checkout@v6
 
     - name: Install Rust toolchain
-      id: toolchain
       uses: dtolnay/rust-toolchain@1.96.0
       with:
-        components: rustfmt, clippy
+        components: clippy
         targets: ${{ matrix.target }}
 
-    - name: Install Linux musl tools
-      if: runner.os == 'Linux'
-      run: |
-        rustup target add x86_64-unknown-linux-musl
-        sudo apt-get update
-        sudo apt-get install --no-install-recommends --assume-yes musl-tools
-
-    - name: Cache cargo registry and build
-      uses: actions/cache@v5
+    - uses: ./.github/actions/cache-rust
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-mj-cargo-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-mj-cargo-${{ steps.toolchain.outputs.cachekey }}-
-          ${{ runner.os }}-mj-cargo-
-
-    - name: Check Rust formatting
-      run: cargo fmt --check
+        lane: cli-tests-${{ matrix.target }}
+        build-paths: |
+          target/debug
+          target/${{ matrix.target }}/debug
 
     - name: Run Clippy lints
       run: cargo clippy --all-targets -- -D warnings
-
-    - name: Check portable worker boundary
-      if: runner.os == 'Linux'
-      run: cargo clippy --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker -- -D warnings
-
-    - name: Run desktop Clippy lints
-      if: runner.os != 'Linux'
-      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
-
-    - name: Build Mjolnir
-      run: cargo build --release
-
-    - name: Build portable worker
-      if: runner.os == 'Linux'
-      run: cargo build --release --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
-
-    - name: Build desktop application
-      if: runner.os != 'Linux'
-      run: cargo build --release --locked -p brokk-mj-desktop
 
     # The runtime suite exercises Unix target paths, directory fsync, and Git
     # worktree byte preservation. Clippy above still compiles every test target
@@ -143,14 +135,94 @@ jobs:
       if: runner.os != 'Windows'
       run: cargo test
 
-    - name: Run desktop tests
-      if: runner.os == 'macOS'
-      run: cargo test --locked -p brokk-mj-desktop
-
     - name: Compile tests on Windows
       if: runner.os == 'Windows'
       run: cargo test --no-run
 
+  cli-release:
+    name: CLI release build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: ubuntu-latest
+          target: x86_64-unknown-linux-gnu
+        - os: macos-latest
+          target: aarch64-apple-darwin
+        - os: windows-latest
+          target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        targets: ${{ matrix.target }}
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: cli-release-${{ matrix.target }}
+        build-paths: |
+          target/release
+          target/${{ matrix.target }}/release
+    - name: Build Mjolnir
+      run: cargo build --release
+
+  portable-worker:
+    name: Portable worker (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: clippy
+        targets: x86_64-unknown-linux-musl
+    - name: Install Linux musl tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --assume-yes musl-tools
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: portable-worker-musl
+        build-paths: target/worker
+    - name: Check portable worker boundary
+      run: cargo clippy --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker -- -D warnings
+    - name: Build portable worker
+      run: cargo build --release --target-dir target/worker --target x86_64-unknown-linux-musl -p brokk-mj-worker --bin mj-worker
+
+  desktop-native:
+    name: Desktop shell (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: macos-latest
+          target: aarch64-apple-darwin
+        - os: windows-latest
+          target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: clippy
+        targets: ${{ matrix.target }}
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: desktop-${{ matrix.target }}
+        build-paths: |
+          target/debug
+          target/release
+          target/${{ matrix.target }}
+    - name: Run desktop Clippy lints
+      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
+    - name: Build desktop application
+      run: cargo build --release --locked -p brokk-mj-desktop
+    - name: Run desktop tests
+      if: runner.os == 'macOS'
+      run: cargo test --locked -p brokk-mj-desktop
     - name: Compile desktop tests on Windows
       if: runner.os == 'Windows'
       run: cargo test --locked -p brokk-mj-desktop --no-run
@@ -171,6 +243,13 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes musl-tools
+
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: reliability-smoke
+        build-paths: |
+          target/debug
+          target/worker
 
     - name: Build the isolated-test controller and portable worker
       run: |
@@ -211,6 +290,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-dev
 
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: desktop-x86_64-unknown-linux-gnu
+        build-paths: |
+          target/debug
+          target/x86_64-unknown-linux-gnu/debug
+
     - name: Clippy over the controller and desktop paths
       run: cargo clippy --locked -p brokk-mjolnir -p brokk-mj-desktop --all-targets -- -D warnings
 
@@ -241,6 +327,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: voice-x86_64-unknown-linux-gnu
+        build-paths: |
+          target/debug
+          target/x86_64-unknown-linux-gnu/debug
+
     - name: Check voice worker
       run: cargo clippy -p brokk-mj-voice-worker --all-targets -- -D warnings
 
@@ -270,6 +363,10 @@ jobs:
         run: node --test scripts/linux-release.test.mjs
       - name: Install pinned Linux CLI toolchain
         run: bash scripts/setup-linux-cli-toolchain.sh
+      - uses: ./.github/actions/cache-rust
+        with:
+          lane: compatibility-${{ matrix.target }}
+          build-paths: target/release-cli
       - name: Build and verify glibc 2.28 CLI
         run: bash scripts/build-linux-cli.sh ${{ matrix.target }}
       - name: Test CLI on older Linux distributions through tmux
