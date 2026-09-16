@@ -1004,20 +1004,28 @@ impl DurableRelay {
     /// replay, and deliberately conservative: it answers `false` only for a
     /// thread this journal created and that nothing has used yet.
     ///
-    /// A `false` answer is what allows Mjolnir to replace a Codex thread that
-    /// Codex says it has no rollout for. Codex writes a thread's rollout only
-    /// at its first user message, so an empty thread can be missing on disk.
+    /// A `false` answer is what allows Mjolnir to replace a native session the
+    /// harness says it has no record of. Codex writes a thread's rollout, and
+    /// Claude Code a session's transcript, only at the first user message, so
+    /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // History before the floor was released to an archive, so the
-        // snapshot no longer describes everything this session did.
-        if self.snapshot.recovery_floor_ordinal != 0 {
-            return true;
-        }
         // Set when the agent sent conversation content, when a prompt was
-        // transmitted, when the thread was resumed rather than created here,
+        // transmitted, when the session was resumed rather than created here,
         // or when its identity arrived from outside this journal.
         if self.snapshot.native_session_used {
             return true;
+        }
+        // History before the recovery floor was released to an archive, so the
+        // snapshot no longer describes everything this session did. That only
+        // hides history belonging to the *current* native session if that
+        // session could have existed then. A session this journal opened above
+        // the floor has every event about it above the floor too, so the
+        // archive cannot hold any of its content. An unknown opening ordinal —
+        // an older snapshot, or no session opened yet — cannot be placed
+        // against the floor, so it counts as history.
+        match self.snapshot.native_session_opened_ordinal {
+            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
+            _ => return true,
         }
         // A prompt that only waits in the durable queue never reached the
         // agent. Anything past admission may have.
@@ -3486,6 +3494,52 @@ mod tests {
         assert!(!relay.native_session_may_have_history());
         let cursor = ready_checkpoint(&mut relay, "checkpoint");
         submit_floor(&mut relay, "archive-installed", cursor);
+        assert!(relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_native_session_opened_after_a_restore_floor_has_no_history() {
+        // A moved session starts from an archive seed, which sets the recovery
+        // floor to the archive's frontier, and then opens a brand-new native
+        // session above it. Nothing in the archive can belong to that session.
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            mj_core::relay::restored_relay_seed_path(temp.path()),
+            serde_json::to_vec(&serde_json::json!({
+                "event_frontier": 227_580,
+                "event_frontier_digest":
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(relay.snapshot.recovery_floor_ordinal, 227_580);
+        // Before any session is opened the answer is unknown, so conservative.
+        assert!(relay.native_session_may_have_history());
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "fresh".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert!(!relay.native_session_may_have_history());
+
+        // The opening ordinal must survive a worker restart and journal replay.
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(!relay.native_session_may_have_history());
+
+        submit_relay(
+            &mut relay,
+            "dispatched-prompt",
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("do work")],
+            },
+        );
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
         assert!(relay.native_session_may_have_history());
     }
 
