@@ -64,10 +64,14 @@ pub struct WorkerOwnership {
     pub profile_id: String,
     pub bundle_id: String,
     pub target_template_id: String,
+    /// Instance that created the worker (`config::instance_identity`).
+    /// Markers written before version 3 omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 impl WorkerOwnership {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     pub fn write(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_vec(self)?;

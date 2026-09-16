@@ -229,6 +229,8 @@ mj recover scan
 mj recover scan --json
 ```
 
+The scan lists only workers this Mjolnir instance created. Two instances that share a target host, such as a QA `--instance` and your default setup, never see each other's workers unless you pass `--all-instances`, which also lists workers from older builds that carry no instance stamp. Adopting or destroying such a worker needs the same flag.
+
 Adopt a resource after checking its reported session and target IDs:
 
 ```sh

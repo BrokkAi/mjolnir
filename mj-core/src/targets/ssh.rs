@@ -548,7 +548,7 @@ pub fn validate_container_template(template: &ContainerTemplate) -> Result<()> {
     }
     if template.extra_run_args.iter().any(|arg| {
         arg == "--label"
-            || [SESSION_LABEL, MANAGED_LABEL]
+            || [SESSION_LABEL, MANAGED_LABEL, INSTANCE_LABEL]
                 .iter()
                 .any(|label| arg.starts_with(&format!("--label={label}=")))
     }) {

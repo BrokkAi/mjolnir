@@ -300,17 +300,21 @@ pub enum DaemonAction {
     CheckpointSession {
         session_id: String,
     },
-    ScanRecovery,
+    ScanRecovery {
+        all_instances: bool,
+    },
     AdoptRecovery {
         session_id: String,
         target_id: String,
         profile: Option<String>,
         bundle: Option<String>,
+        all_instances: bool,
     },
     DestroyRecovery {
         session_id: String,
         target_id: String,
         confirmation: String,
+        all_instances: bool,
     },
     Snapshot {
         workspace_id: String,
@@ -1025,8 +1029,14 @@ impl DaemonClient {
         }
     }
 
-    pub async fn scan_recovery(&mut self) -> Result<mj_core::state::RecoveryScan> {
-        match self.request(DaemonAction::ScanRecovery).await? {
+    pub async fn scan_recovery(
+        &mut self,
+        all_instances: bool,
+    ) -> Result<mj_core::state::RecoveryScan> {
+        match self
+            .request(DaemonAction::ScanRecovery { all_instances })
+            .await?
+        {
             DaemonReply::RecoveryScan(scan) => Ok(scan),
             reply => bail!("unexpected recovery-scan reply {reply:?}"),
         }
@@ -1038,6 +1048,7 @@ impl DaemonClient {
         target_id: String,
         profile: Option<String>,
         bundle: Option<String>,
+        all_instances: bool,
     ) -> Result<()> {
         match self
             .request(DaemonAction::AdoptRecovery {
@@ -1045,6 +1056,7 @@ impl DaemonClient {
                 target_id,
                 profile,
                 bundle,
+                all_instances,
             })
             .await?
         {
@@ -1058,12 +1070,14 @@ impl DaemonClient {
         session_id: String,
         target_id: String,
         confirmation: String,
+        all_instances: bool,
     ) -> Result<()> {
         match self
             .request(DaemonAction::DestroyRecovery {
                 session_id,
                 target_id,
                 confirmation,
+                all_instances,
             })
             .await?
         {
@@ -1385,7 +1399,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

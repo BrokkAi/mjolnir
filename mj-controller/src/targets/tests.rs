@@ -672,20 +672,25 @@ fn setup_smoke_plan_wraps_every_ssh_podman_command_in_ssh() {
 
 #[test]
 fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
+    let instance = mj_core::config::instance_identity();
     assert_eq!(
         managed_resource_identity_args(ManagedResourceKind::Container, SESSION),
         vec![
-            "--label",
-            "dev.mj.session=018f9dd2-a3b4-7c8d-9000-123456789abc",
-            "--label",
-            "dev.mj.managed=true",
+            "--label".to_owned(),
+            "dev.mj.session=018f9dd2-a3b4-7c8d-9000-123456789abc".to_owned(),
+            "--label".to_owned(),
+            "dev.mj.managed=true".to_owned(),
+            "--label".to_owned(),
+            format!("dev.mj.instance={instance}"),
         ]
     );
     assert_eq!(
         managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION),
         vec![
-            "--tag-specifications",
-            "ResourceType=instance,Tags=[{Key=dev.mj.session,Value=018f9dd2-a3b4-7c8d-9000-123456789abc},{Key=dev.mj.managed,Value=true}]",
+            "--tag-specifications".to_owned(),
+            format!(
+                "ResourceType=instance,Tags=[{{Key=dev.mj.session,Value=018f9dd2-a3b4-7c8d-9000-123456789abc}},{{Key=dev.mj.managed,Value=true}},{{Key=dev.mj.instance,Value={instance}}}]"
+            ),
         ]
     );
 }
@@ -937,9 +942,13 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
             .windows(2)
             .any(|args| args == ["--name", &name])
     );
-    assert!(plan.commands[0].args.windows(4).any(
-        |args| args == managed_resource_identity_args(ManagedResourceKind::Container, SESSION)
-    ));
+    let identity = managed_resource_identity_args(ManagedResourceKind::Container, SESSION);
+    assert!(
+        plan.commands[0]
+            .args
+            .windows(identity.len())
+            .any(|args| args == identity)
+    );
     let clone = plan
         .commands
         .iter()
@@ -2086,9 +2095,13 @@ fn apple_plan_preflights_and_uses_container_cli() {
             .windows(2)
             .any(|args| args == ["--name", &name])
     );
-    assert!(plan.commands[2].args.windows(4).any(|args| {
-        args == managed_resource_identity_args(ManagedResourceKind::Container, SESSION)
-    }));
+    let identity = managed_resource_identity_args(ManagedResourceKind::Container, SESSION);
+    assert!(
+        plan.commands[2]
+            .args
+            .windows(identity.len())
+            .any(|args| args == identity)
+    );
 }
 
 #[test]
