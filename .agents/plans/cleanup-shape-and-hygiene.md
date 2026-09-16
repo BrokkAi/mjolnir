@@ -16,10 +16,12 @@ After this plan, every user-facing feature behaves as before. A contributor can 
 - [ ] Stage 1.3 remaining: sha2 0.11 (23 call sites across seven crates plus consolidation of three hex helpers). Moved to stage 3, after the stage-2 merges.
 - [x] (2026-09-16) Stage 1.4: config, state and credentials tests moved to sibling files; `config.rs` split into `config/{harness,targets,ui,loading}.rs`, `relay/snapshot.rs` into `snapshot/{apply,budget,digest}.rs`; `failed_login_never_returns_an_ambient_environment` fixed. Commits 0040e426, 26c5f500, 6fb557d4. Merged as ffbe2f25; full suite 3,409 passed, 0 failed.
 - [ ] Stage 3 additions found in stage 1: `local_sockets` tests race on the process working directory (`a_short_path_binds_without_switching_directory` vs `a_long_path_binds...`); `capture_deadline_includes_descendants_holding_output_pipes` needs a decision about `BoundedProcessExecutor` error wording.
-- [ ] Stage 2A: mj-controller tests out, files split, stage-1 APIs used, fixtures shared, flaky tests fixed, `MJ_UTILITY_LIVE_*` and `doctor.rs` error-text checks handled.
-- [ ] Stage 2B: mj-worker, mj-checkpoint, mj-transcript, mj-review, same four steps; `MJ_CHECKPOINT_BENCH_*` removed; socket-path test fixed.
-- [ ] Stage 2C: mj-tui, mj-chat, mj-cli, mj-client, same four steps; `MJ_CHAT_CAPTURE_*` and `MJ_GO_CAPTURE_PATH` removed.
-- [ ] Stage 3: `.gitignore` pattern fixed, `cargo machete` in CI, kept environment variables documented, measurements re-taken, retrospective written.
+- [x] (2026-09-16) Stage 2A: 24 test modules moved, 12 files split into directory modules (every production file under 2,000 lines), harness facts used, `RefusingExecutor`/`IsolatedTest`/`install_fake_command` shared, #1036 and the npm-upgrade ETXTBSY fixed at the source (symlinked fixture dispatcher, hard-linked binary), relay-proxy stderr tail made incremental, `doctor.rs` error-text checks 11 to 1 (typed `PodmanProbeFailure`, one `classify_ssh_stderr`). `MJ_UTILITY_LIVE_*` were test-only; nothing removed. Merged as 3a1703f3.
+- [x] (2026-09-16) Stage 2B: 5 test modules moved, `relay.rs`/`acp.rs`/`unix.rs`/`checkpoint.rs`/`projection.rs` split (largest production file now 1,250 lines), git test runner shared in mj-worker and mj-checkpoint, long-root socket test fixed at the source (daemon-exit race, now checkpoint-only daemon), `MJ_CHECKPOINT_BENCH_PHASES` removed from production (`ARCHIVE`/`HARNESS_HOME` were test-only), `SESSION_SETUP_GUIDANCE` exported so producer and test share one string. No stage-1 API applied: nothing matched with an identical value.
+- [x] (2026-09-16) Stage 2C: 15 test modules moved, 10 files split (every production file under 2,000 lines), `credential_file_name()` used in mj-client, nine fixture copies collapsed into `test_support` modules, one `rerun_in_isolated_child` helper in mj-cli. `MJ_CHAT_CAPTURE_*` and `MJ_GO_CAPTURE_PATH` are test-only screenshot hooks; nothing removed. `import_label` kept because two of five strings differ from `display_name()`.
+- [x] (2026-09-16) Stage 3, part 1: `.gitignore` pattern fixed, pinned `cargo machete` CI job, kept variables documented in `configuration.md`, `.agents/docs/internal-environment-variables.md` written. Commit 5e62bebb.
+- [ ] Stage 3, part 2 (in progress): sha2 0.11 with one hex helper, dead `MJ_DISCOVER_LOGIN_PATH` constant removed, five more `HarnessKind` fact methods (`mcp_config_file`, `supports_delegation_tools`, `native_session_dirs`, managed entrypoint, `marks_own_turn_end`), `local_sockets` cwd race serialized.
+- [ ] Stage 3, part 3: measurements re-taken, retrospective written.
 
 ## Surprises & Discoveries
 
@@ -39,6 +41,22 @@ After this plan, every user-facing feature behaves as before. A contributor can 
   Evidence: stage 1a report.
 - Observation: A second login-shell test, `capture_deadline_includes_descendants_holding_output_pipes`, failed once under load with "assertion failed: ...contains(\"did not answer\")". The test is about the deadline, so raising it would destroy its purpose. Possible cause: `BoundedProcessExecutor::execute` (`mj-core/src/targets.rs`) rewrites the error as "did not answer" only when the inner call returns `Err`. Not confirmed.
   Evidence: stage 1a report.
+- Observation: Every environment-variable removal the plan named turned out to be a test-only read once checked against `#[cfg(test)]` boundaries: `MJ_E2E_SSH_HOST`, `MJ_UTILITY_LIVE_*`, `MJ_CHAT_CAPTURE_*`, `MJ_GO_CAPTURE_PATH`, `MJ_CHECKPOINT_BENCH_ARCHIVE` and `_HARNESS_HOME`. Only `MJ_CHECKPOINT_BENCH_PHASES` gated production code. The baseline counted variables per file, not per code region, and test modules under 500 lines stayed inline where the count could not see them. `MJ_DISCOVER_LOGIN_PATH` is the opposite case: a constant only ever passed to `environment.remove`, set nowhere.
+  Evidence: stage 2A, 2B, 2C reports; `grep -rn MJ_DISCOVER_LOGIN_PATH` shows only removes.
+- Observation: Splitting a module is not a pure text move. Private items need `pub(super)`, former `pub(super)` items need `pub(in <parent>)` to keep the same reach, explicit `super::` paths point one level deeper, `include_str!` paths gain a `../`, and a new module name can shadow a glob re-export (`relay::protocol`, `unix::proxy`) with only a warning. The compiler catches the first and last; the others need a reviewer.
+  Evidence: stage 2A, 2B, 2C reports.
+- Observation: No duplicate tests exist. Agents hashed normalized test bodies across 1,205 controller tests and every client and worker test and found no two alike. The fixture duplication was real (git runners, refusing executors, key/mouse/draw helpers, self-spawn boilerplate); whole-test duplication was not.
+  Evidence: stage 2A, 2B, 2C reports.
+- Observation: "Write to a temp name and rename" does not cure ETXTBSY. A rename keeps the inode, and a forked child's inherited write descriptor refers to the inode. The cures are a hard link (when the child needs `current_exe()` to resolve inside the fixture) or a symlink to a checked-in dispatcher that this process never opened for writing. The dispatcher may use only shell builtins because tests replace `PATH`.
+  Evidence: stage 2A commit "Stop tests exec'ing files they have just written"; `.agents/plans/instant-list-profiles.md` analysis.
+- Observation: The long-root socket test failed from a daemon-exit race, not an accept race: the daemon returned `Err` (missing ACP bridge) before the status request was served, so the listener dropped and the kernel reset the connection.
+  Evidence: stage 2B report; sibling tests `expect_err` on the same path.
+- Observation: `failed_login_never_returns_an_ambient_environment` failed once more after its deadline went to 600 seconds, so the deadline was not the cause. The assertion now prints the error text; six looped runs did not reproduce it. Cause unknown.
+  Evidence: merged-tree run after stage 2B, `assertion failed: error.contains("42")`.
+- Observation: The session scratchpad is shared between parallel agents; one agent's helper scripts and a validation log were overwritten by another's. Parallel agents should use per-agent subdirectories.
+  Evidence: stage 2A report.
+- Observation: `cargo test` without `--no-fail-fast` stops at the first failing crate, so a late crate's regression can hide behind an early crate's flake. Validation now uses `--no-fail-fast`.
+  Evidence: stage 2B report.
 - Observation: Agent worktrees created with `isolation: "worktree"` branched from the hel3 worktree's line (`1a5be3c6`), not from master. Merging them as-is would have carried the user's in-progress hel3 commits into master; the first cherry-pick attempt conflicted on moved test text that contained hel3 edits. Both branches were rebased onto master before landing.
   Evidence: `git merge-base master <branch>` was 7fd533eb while `git log master..<branch>` showed 13 hel3 commits.
 
@@ -65,6 +83,15 @@ After this plan, every user-facing feature behaves as before. A contributor can 
 - Decision: A move commit contains only moves and re-exports; an edit commit contains only edits.
   Rationale: Git's rename detection makes a pure move reviewable at a glance. Mixing edits into a move forces the reviewer to read every relocated line.
   Date/Author: 2026-09-16, agent.
+- Decision: Tests were not moved out of crates into `tests/` directories. Every self-spawning test drives crate-private code, and making that surface `pub` for an out-of-crate test would widen visibility, the opposite of the split work. They share one spawn helper per crate instead.
+  Rationale: stage 2A and 2C findings.
+  Date/Author: 2026-09-16, agents, accepted by orchestrator.
+- Decision: The worker-binary test table that lists each harness's instructions file keeps its literals rather than calling `agent_instructions_file()`.
+  Rationale: Substituting the method would make the test compare the implementation to itself; the table is the only independent statement of the mapping.
+  Date/Author: 2026-09-16, agent A.
+- Decision: `recovery_backend_locator` keeps its drifted behavior and is not routed through the shared conversion.
+  Rationale: Two of its three differences look like defects (dropped podman workspace storage, dropped `worker_id`); proving that needs the recovery path's history and belongs in its own issue, not a refactor.
+  Date/Author: 2026-09-16, agent 1b, accepted by orchestrator.
 - Decision: No CI size or complexity ratchets are added. `.agents/plans/` history is left alone.
   Rationale: The user declined both.
   Date/Author: 2026-09-16, user.
