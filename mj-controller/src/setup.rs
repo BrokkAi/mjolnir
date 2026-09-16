@@ -298,16 +298,7 @@ fn discover_installed_harnesses(
         else {
             continue;
         };
-        let profile = HarnessProfile {
-            enabled: true,
-            kind,
-            home: home.clone(),
-            environment: BTreeMap::new(),
-            context_window_bytes: None,
-            guardian_review_model: None,
-        };
-        let (program, _) = mj_core::credentials::native_login_command(&profile);
-        let probe = CommandSpec::new(program, ["--version"])
+        let probe = CommandSpec::new(kind.cli_binary_name(), ["--version"])
             .purpose("detect installed harness before first login");
         match executor.execute(&probe) {
             Ok(output) if output.status == 0 => homes.push(DiscoveredHome {

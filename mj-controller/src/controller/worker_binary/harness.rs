@@ -145,51 +145,40 @@ pub(in crate::controller) fn stage_profile(
     let harness = profile.kind;
     let source = profile.home.as_path();
     std::fs::create_dir_all(destination)?;
-    let allowlist: &[&str] = match harness {
-        mj_core::config::HarnessKind::Muse => &[
-            "auth.json",
-            "settings.json",
-            "trust.json",
-            "AGENTS.md",
-            "skills",
-            "rules",
-        ],
-        mj_core::config::HarnessKind::Codex => &[
-            "auth.json",
-            "config.toml",
-            "AGENTS.md",
-            "instructions.md",
-            "rules",
-            "skills",
-        ],
+    // Only the files peculiar to a harness are listed per harness. The
+    // instruction file and the synced skill directories are the same facts the
+    // rest of Hel reads off `HarnessKind`, so they are appended from there
+    // rather than repeated in all five arms.
+    let harness_files: &[&str] = match harness {
+        mj_core::config::HarnessKind::Muse => {
+            &["auth.json", "settings.json", "trust.json", "rules"]
+        }
+        mj_core::config::HarnessKind::Codex => {
+            &["auth.json", "config.toml", "instructions.md", "rules"]
+        }
         mj_core::config::HarnessKind::Claude => &[
             ".claude.json",
             ".credentials.json",
             "settings.json",
-            "CLAUDE.md",
-            "skills",
             "plugins",
         ],
         mj_core::config::HarnessKind::Kimi => &[
             "credentials",
             "config.toml",
             "device_id",
-            "AGENTS.md",
             "SYSTEM.md",
             "mcp.json",
-            "skills",
             "agents",
             "plugins",
         ],
-        mj_core::config::HarnessKind::Grok => &[
-            "auth.json",
-            "config.toml",
-            "AGENTS.md",
-            "agent_id",
-            "skills",
-            "plugins",
-        ],
+        mj_core::config::HarnessKind::Grok => &["auth.json", "config.toml", "agent_id", "plugins"],
     };
+    let allowlist: Vec<&str> = harness_files
+        .iter()
+        .copied()
+        .chain(std::iter::once(harness.agent_instructions_file()))
+        .chain(harness.synced_skill_dirs().iter().copied())
+        .collect();
     // Allowlist entries (and, within each, a copied directory's children) are
     // independent of one another, so copying them concurrently shortens the
     // stage step for profiles with large skills/plugins trees.

@@ -19,14 +19,7 @@ pub(super) fn append_hel_target_environment(
             return Ok(());
         }
     };
-    let instructions = match harness {
-        mj_core::config::HarnessKind::Codex => "AGENTS.md",
-        mj_core::config::HarnessKind::Claude => "CLAUDE.md",
-        mj_core::config::HarnessKind::Kimi => "AGENTS.md",
-        mj_core::config::HarnessKind::Grok => "AGENTS.md",
-        mj_core::config::HarnessKind::Muse => "AGENTS.md",
-    };
-    let path = destination.join(instructions);
+    let path = destination.join(harness.agent_instructions_file());
     let separator = match std::fs::read_to_string(&path) {
         Ok(contents) if !contents.is_empty() && !contents.ends_with('\n') => "\n\n",
         Ok(contents) if !contents.is_empty() => "\n",
