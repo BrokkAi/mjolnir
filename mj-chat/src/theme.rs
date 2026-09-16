@@ -194,6 +194,13 @@ pub fn selection(focused: bool) -> Style {
     }
 }
 
+/// Emphasize a key name without painting it as a selected control.
+pub fn key_hint() -> Style {
+    Style::default()
+        .fg(palette().text)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// Rounded panels keep identical content geometry regardless of focus.
 pub fn panel(focused: bool) -> Block<'static> {
     Block::default()
@@ -221,12 +228,7 @@ pub fn hints(text: &str) -> Line<'static> {
             .find(char::is_whitespace)
             .map_or(hint.len(), |offset| leading + offset);
         spans.push(Span::styled(hint[..leading].to_owned(), muted()));
-        spans.push(Span::styled(
-            hint[leading..key_end].to_owned(),
-            Style::default()
-                .fg(palette().text)
-                .add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(hint[leading..key_end].to_owned(), key_hint()));
         spans.push(Span::styled(hint[key_end..].to_owned(), muted()));
     }
     Line::from(spans)

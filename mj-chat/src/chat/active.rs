@@ -3102,15 +3102,15 @@ pub(super) fn render_composer_band(
         // there instead of advertising a send that would be refused.
         if chat.standby {
             Line::from(vec![
-                Span::styled(" Enter ", theme::selection(false)),
+                Span::styled(" Enter ", theme::key_hint()),
                 Span::styled(" keeps the draft ", theme::muted()),
             ])
             .right_aligned()
         } else {
             Line::from(vec![
-                Span::styled(" Enter ", theme::selection(false)),
+                Span::styled(" Enter ", theme::key_hint()),
                 Span::styled(" send  ", theme::muted()),
-                Span::styled(" / ", theme::selection(false)),
+                Span::styled(" / ", theme::key_hint()),
                 Span::styled(" commands ", theme::muted()),
             ])
             .right_aligned()
@@ -5654,6 +5654,45 @@ mod tests {
             let cell = &buffer[(x, area.y)];
             cell.bg == theme::palette().selection && cell.fg == theme::palette().text
         }));
+    }
+
+    #[test]
+    fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut terminal =
+            Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
+        terminal
+            .draw(|frame| render_full_frame(frame, &mut chat, false))
+            .expect("chat draws");
+        let buffer = terminal.backend().buffer();
+        let (prompt_y, prompt_text) = (0..buffer.area.height)
+            .map(|y| {
+                let text = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                (y, text)
+            })
+            .find(|(_, text)| text.contains(" Enter  send "))
+            .expect("the prompt hints are rendered");
+        let enter_byte = prompt_text
+            .find("Enter")
+            .expect("the Enter hint is rendered");
+        let enter_column = usize::from(buffer.area.x) + prompt_text[..enter_byte].chars().count();
+        let slash_byte = prompt_text[enter_byte..]
+            .find(" / ")
+            .expect("the command hint is rendered")
+            + enter_byte;
+        let slash_column =
+            usize::from(buffer.area.x) + prompt_text[..slash_byte].chars().count() + 1;
+
+        for column in enter_column..enter_column + "Enter".len() {
+            let cell = &buffer[(column as u16, prompt_y)];
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert_ne!(cell.bg, theme::palette().selection);
+        }
+        let slash = &buffer[(slash_column as u16, prompt_y)];
+        assert!(slash.modifier.contains(ratatui::style::Modifier::BOLD));
+        assert_ne!(slash.bg, theme::palette().selection);
     }
 
     #[test]
