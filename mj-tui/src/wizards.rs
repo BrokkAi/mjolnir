@@ -707,21 +707,190 @@ pub(crate) struct PickerNavigation {
     pub(crate) empty_hint: Option<&'static str>,
 }
 
-/// One picker row. A disabled row stays in the list so row numbers keep
-/// matching the underlying map order; it is greyed out and refuses Enter.
+/// One cell of a picker table row.
 #[derive(Debug, Clone)]
-pub(crate) struct PickerChoice {
-    pub(crate) text: String,
-    pub(crate) disabled: bool,
+pub(crate) struct PickerCell {
+    text: String,
+    style: Style,
 }
 
-impl From<String> for PickerChoice {
-    fn from(text: String) -> Self {
+impl PickerCell {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
         Self {
-            text,
-            disabled: false,
+            text: text.into(),
+            style: Style::default(),
         }
     }
+
+    fn styled(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+
+    /// Empty cell that keeps the columns after it aligned on rows that need no
+    /// entry here.
+    fn blank() -> Self {
+        Self::text("")
+    }
+
+    /// The yellow triangle that marks a row the picker footnote explains.
+    fn warning_marker() -> Self {
+        Self::styled("⚠", Style::default().fg(theme::palette().warning))
+    }
+
+    fn width(&self) -> usize {
+        Line::raw(self.text.as_str()).width()
+    }
+}
+
+/// One picker row. A disabled row stays in the list so row numbers keep
+/// matching the underlying map order; it is greyed out and refuses Enter.
+///
+/// Rows of several cells draw as a table: every cell but the row's last is
+/// padded to its column, so the columns line up down the list.
+#[derive(Debug, Clone)]
+pub(crate) struct PickerChoice {
+    cells: Vec<PickerCell>,
+    disabled: bool,
+    /// Heading rows name the columns and carry no item, so the picker leaves
+    /// them out of its row map and item indexes keep naming their own rows.
+    heading: bool,
+}
+
+impl PickerChoice {
+    /// A single cell of plain, unstyled text.
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Self::table(vec![PickerCell::text(text)])
+    }
+
+    /// A row of table cells padded into aligned columns.
+    pub(crate) fn table(cells: Vec<PickerCell>) -> Self {
+        Self {
+            cells,
+            disabled: false,
+            heading: false,
+        }
+    }
+
+    /// A greyed row that keeps its place in the list but refuses Enter.
+    pub(crate) fn disabled(text: impl Into<String>) -> Self {
+        Self {
+            disabled: true,
+            ..Self::text(text)
+        }
+    }
+
+    /// A non-selectable heading row.
+    fn heading(cells: Vec<PickerCell>) -> Self {
+        Self {
+            heading: true,
+            ..Self::table(cells)
+        }
+    }
+
+    /// Appends a trailing note, e.g. the resume step's lossy-transcript
+    /// marker, after the padded columns.
+    fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.cells.push(PickerCell::text(note));
+        self
+    }
+
+    fn line(&self, widths: &[usize]) -> Line<'static> {
+        let mut spans = Vec::new();
+        for (index, cell) in self.cells.iter().enumerate() {
+            let last = index + 1 == self.cells.len();
+            let padding = if last {
+                0
+            } else {
+                widths[index]
+                    .saturating_add(COLUMN_GAP)
+                    .saturating_sub(cell.width())
+            };
+            spans.push(Span::styled(cell.text.clone(), cell.style));
+            if padding > 0 {
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+        }
+        Line::from(spans)
+    }
+}
+
+/// Blank cells between adjacent table columns.
+const COLUMN_GAP: usize = 2;
+
+/// Widest cell of every column across the rows, so each cell can be padded to
+/// its column.
+fn picker_columns(choices: &[PickerChoice]) -> Vec<usize> {
+    let mut widths: Vec<usize> = Vec::new();
+    for choice in choices {
+        for (index, cell) in choice.cells.iter().enumerate() {
+            let width = cell.width();
+            match widths.get_mut(index) {
+                Some(column) => *column = (*column).max(width),
+                None => widths.push(width),
+            }
+        }
+    }
+    widths
+}
+
+/// Heading of the profile tables, in the same columns as their rows.
+fn profile_headings() -> PickerChoice {
+    let style = theme::muted().add_modifier(Modifier::BOLD);
+    PickerChoice::heading(vec![
+        PickerCell::blank(),
+        PickerCell::styled("PROFILE", style),
+        PickerCell::styled("HARNESS", style),
+        PickerCell::styled("QUOTA", style),
+    ])
+}
+
+/// Profiles whose harness cannot guard risky actions carry a warning triangle
+/// in the table and the footnote `guardian_footnote` draws below it.
+fn needs_guardian_warning(harness: HarnessKind) -> bool {
+    !harness.supports_guardian_approvals()
+}
+
+/// The marker cell of a profile row: the warning triangle for a harness that
+/// cannot guard risky actions, and a blank cell that keeps the columns aligned
+/// for one that can.
+pub(crate) fn guardian_warning_marker(harness: HarnessKind) -> PickerCell {
+    if needs_guardian_warning(harness) {
+        PickerCell::warning_marker()
+    } else {
+        PickerCell::blank()
+    }
+}
+
+/// The row below a profile table that explains its warning triangles.
+fn guardian_footnote() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("⚠  ", Style::default().fg(theme::palette().warning)),
+        Span::styled(
+            "No guardian approval mode; do not run on a raw, unsandboxed target.",
+            theme::muted(),
+        ),
+    ])
+}
+
+/// The profile tables of the new-session and resume wizards: the column
+/// headings followed by `rows`. An empty list keeps its hint instead of
+/// rendering a bare heading.
+fn profile_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let mut table = Vec::with_capacity(rows.len() + 1);
+    table.push(profile_headings());
+    table.extend(rows);
+    table
+}
+
+/// Muted help row of a picker step.
+fn picker_help(text: &str) -> Line<'static> {
+    Line::styled(text.to_owned(), theme::muted())
 }
 
 // The form and surface registry are distinct rendering owners.
@@ -731,7 +900,7 @@ pub(crate) fn render_picker(
     area: Rect,
     title: &str,
     choices: Vec<PickerChoice>,
-    help: &[&str],
+    help: Vec<Line<'static>>,
     navigation: PickerNavigation,
     form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
@@ -755,11 +924,21 @@ pub(crate) fn render_picker(
         ))
         .min(content.height.saturating_sub(help.len() as u16 + 2));
     let list_area = Rect::new(content.x, content.y, content.width, list_height);
+    let widths = picker_columns(&choices);
     let rows = choices
         .iter()
-        .map(|choice| Line::raw(choice.text.clone()))
+        .map(|choice| choice.line(&widths))
         .collect::<Vec<_>>();
-    let row_map = (0..rows.len()).map(Some).collect::<Vec<_>>();
+    let mut row_map = Vec::with_capacity(choices.len());
+    let mut items = 0usize;
+    for choice in &choices {
+        if choice.heading {
+            row_map.push(None);
+        } else {
+            row_map.push(Some(items));
+            items += 1;
+        }
+    }
     let row_enabled = choices
         .iter()
         .map(|choice| !choice.disabled)
@@ -791,14 +970,7 @@ pub(crate) fn render_picker(
             list_area,
         );
     }
-    frame.render_widget(
-        Paragraph::new(
-            help.iter()
-                .map(|line| Line::styled(*line, Style::default().fg(theme::palette().muted)))
-                .collect::<Vec<_>>(),
-        ),
-        help_area,
-    );
+    frame.render_widget(Paragraph::new(help), help_area);
     let mut buttons = vec![(WizardControl::Cancel, "Cancel", true)];
     if navigation.has_back {
         buttons.push((WizardControl::Back, "Back", true));
@@ -1218,14 +1390,16 @@ pub(crate) fn render_new_wizard(
         form.end_frame(initial);
         return;
     }
-    let (title, choices, selected): (_, Vec<String>, _) = match wizard.step {
+    let (title, choices, selected): (_, Vec<PickerChoice>, _) = match wizard.step {
         WizardStep::Profile => (
             " New session · 1/4 profile ",
-            dashboard
-                .config
-                .enabled_profiles()
-                .map(|(id, profile)| dashboard.profile_choice(id, profile.kind))
-                .collect(),
+            profile_table(
+                dashboard
+                    .config
+                    .enabled_profiles()
+                    .map(|(id, profile)| dashboard.profile_choice(id, profile.kind))
+                    .collect(),
+            ),
             wizard.profile,
         ),
         WizardStep::Bundle => (
@@ -1234,7 +1408,7 @@ pub(crate) fn render_new_wizard(
                 .into_iter()
                 .map(|id| {
                     let bundle = &dashboard.config.bundles[id];
-                    format!("{id}  {} repositories", bundle.repositories.len())
+                    PickerChoice::text(format!("{id}  {} repositories", bundle.repositories.len()))
                 })
                 .collect(),
             wizard.bundle,
@@ -1254,7 +1428,11 @@ pub(crate) fn render_new_wizard(
                     } else {
                         String::new()
                     };
-                    format!("{id}  {}{size}", target_label(target))
+                    let label = format!("{id}  {}{size}", target_label(target));
+                    match dashboard.target_readiness_rejection(id) {
+                        Some(reason) => PickerChoice::disabled(format!("{label} · {reason}")),
+                        None => PickerChoice::text(label),
+                    }
                 })
                 .collect(),
             wizard.target,
@@ -1264,35 +1442,25 @@ pub(crate) fn render_new_wizard(
         WizardStep::NewBundle => unreachable!("bundle input was rendered above"),
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
-    let help = if wizard.step == WizardStep::Target {
-        "+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck"
+    let mut help = vec![if wizard.step == WizardStep::Target {
+        picker_help("+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck")
     } else {
-        "↑/↓ select · Tab moves focus · Enter activates"
-    };
+        picker_help("↑/↓ select · Tab moves focus · Enter activates")
+    }];
+    if wizard.step == WizardStep::Profile
+        && dashboard
+            .config
+            .enabled_profiles()
+            .any(|(_, profile)| needs_guardian_warning(profile.kind))
+    {
+        help.push(guardian_footnote());
+    }
     render_picker(
         frame,
         area,
         title,
-        choices
-            .into_iter()
-            .enumerate()
-            .map(|(index, text)| {
-                let reason = (wizard.step == WizardStep::Target)
-                    .then(|| {
-                        dashboard
-                            .target_readiness_rejection(&nth_key(&dashboard.config.targets, index))
-                    })
-                    .flatten();
-                match reason {
-                    Some(reason) => PickerChoice {
-                        text: format!("{text} · {reason}"),
-                        disabled: true,
-                    },
-                    None => PickerChoice::from(text),
-                }
-            })
-            .collect(),
-        &[help],
+        choices,
+        help,
         PickerNavigation {
             has_back: wizard.step != WizardStep::Profile,
             selected,
@@ -2145,34 +2313,45 @@ pub(crate) fn render_resume_wizard(
         return;
     }
     let (title, choices, selected, help) = match wizard.step {
-        WizardStep::Profile => (
-            if wizard.moving {
-                " Move · 1/3 profile (cross-harness supported) "
-            } else {
-                " Resume · 1/3 profile (cross-harness supported) "
-            },
-            dashboard
-                .compatible_profiles(&wizard.session_id)
-                .into_iter()
+        WizardStep::Profile => {
+            let profiles = dashboard.compatible_profiles(&wizard.session_id);
+            let session_harness = dashboard
+                .state
+                .sessions
+                .get(&wizard.session_id)
+                .map(|session| session.harness_kind);
+            let rows = profiles
+                .iter()
                 .map(|(id, harness)| {
-                    let mut choice = dashboard.profile_choice(id, harness);
-                    if dashboard
-                        .state
-                        .sessions
-                        .get(&wizard.session_id)
-                        .is_some_and(|session| session.harness_kind != harness)
-                    {
-                        choice.insert_str(id.len(), "  (lossy: text-only transcript)");
+                    let choice = dashboard.profile_choice(id, *harness);
+                    if session_harness.is_some_and(|current| current != *harness) {
+                        choice.with_note("(lossy: text-only transcript)")
+                    } else {
+                        choice
                     }
-                    PickerChoice::from(choice)
                 })
-                .collect(),
-            wizard.profile,
-            &[
-                "↑/↓ select · Tab moves focus · Enter activates",
-                "Lossy: text only; tool calls + reasoning dropped.",
-            ][..],
-        ),
+                .collect();
+            let mut help = vec![
+                picker_help("↑/↓ select · Tab moves focus · Enter activates"),
+                picker_help("Lossy: text only; tool calls + reasoning dropped."),
+            ];
+            if profiles
+                .iter()
+                .any(|(_, harness)| needs_guardian_warning(*harness))
+            {
+                help.push(guardian_footnote());
+            }
+            (
+                if wizard.moving {
+                    " Move · 1/3 profile (cross-harness supported) "
+                } else {
+                    " Resume · 1/3 profile (cross-harness supported) "
+                },
+                profile_table(rows),
+                wizard.profile,
+                help,
+            )
+        }
         WizardStep::Target => (
             if wizard.moving {
                 " Move · 2/3 new target "
@@ -2193,16 +2372,18 @@ pub(crate) fn render_resume_wizard(
                         String::new()
                     };
                     match dashboard.resume_target_rejection(&wizard.session_id, id) {
-                        Some(reason) => PickerChoice {
-                            text: format!("{id}  {}  · {reason}", target_label(target)),
-                            disabled: true,
-                        },
-                        None => PickerChoice::from(format!("{id}  {}{size}", target_label(target))),
+                        Some(reason) => PickerChoice::disabled(format!(
+                            "{id}  {}  · {reason}",
+                            target_label(target)
+                        )),
+                        None => PickerChoice::text(format!("{id}  {}{size}", target_label(target))),
                     }
                 })
                 .collect(),
             wizard.target,
-            &["+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck"][..],
+            vec![picker_help(
+                "+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck",
+            )],
         ),
         WizardStep::Bundle => unreachable!("resume does not select a bundle"),
         WizardStep::Review => unreachable!("review was rendered above"),

@@ -11,7 +11,8 @@ Open **Settings** with **F7** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
 palette (**F2**) also provides **Manage agent profiles** and **Manage machines
 and runtimes**. No setup command or file editing is required. **Detect machine**
-can import existing agent accounts for review.
+on the **Machines and Runtimes** page can import existing agent accounts for
+review.
 
 Standard local targets are supplied automatically: localhost, Podman, Docker,
 and Apple container on macOS. Saved entries override their defaults. The new,
@@ -28,8 +29,9 @@ enablement remain editable. The optional `mj setup` command and direct
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
 and press Enter for repair details, its retained transcript, or Settings.
-The web session menu also provides repair guidance. Restore the named entry in Settings and retry. Detect machine can rediscover installations,
-but cannot reconstruct an arbitrary deleted bundle or custom target. Other
+The web session menu also provides repair guidance. Restore the named entry in
+Settings and retry. Detect machine can rediscover installations, but cannot
+reconstruct an arbitrary deleted bundle or custom target. Other
 sessions remain accessible, and configuration diagnostics do not change the
 affected session's stored lifecycle state.
 

@@ -12,8 +12,8 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide, RowAlign,
-    TextField,
+    ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
+    Interaction, PopupSide, TextField,
 };
 use mj_chat::path_input::PathInput;
 use mj_chat::selection::FrameSurfaces;
@@ -288,18 +288,29 @@ fn preferred_size(draft: &Value) -> SetupSize {
     let mut max_width = 0usize;
     let mut max_height = 20;
     walk(&[], draft, draft, &mut max_width, &mut max_height);
-    for labels in [
-        ["Back", "Add", "Remove", "Detect machine", "Save (Ctrl-S)"].as_slice(),
-        ["Back", "Use default", "Apply"].as_slice(),
-    ] {
-        let width = labels
-            .iter()
-            .map(|label| Line::raw(*label).width() + 4)
-            .sum::<usize>()
-            .saturating_add(labels.len().saturating_sub(1));
-        max_width = max_width.max(width);
-    }
+    // Actions stack in a column at the page's right edge, so the dialog is as
+    // wide as the widest page body plus that column, rather than the whole
+    // action set laid out in a row. Every label any page can show has to fit,
+    // rewrites included.
+    let column = [
+        "Back",
+        "Add",
+        "Create",
+        "Remove",
+        "Detect machine",
+        "Use default",
+        "Apply",
+        "Save and Close",
+        "Saving…",
+    ]
+    .iter()
+    .map(|label| Line::raw(*label).width() + 4)
+    .max()
+    .unwrap_or(0)
+    .saturating_add(usize::from(mj_chat::components::ButtonColumn::BODY_GAP));
+    max_width = max_width.saturating_add(column);
     SetupSize {
+        // The body, its gap to the column, the column, and the inner margin.
         width: u16::try_from(max_width.saturating_add(4))
             .unwrap_or(u16::MAX)
             .clamp(64, 96),
@@ -429,7 +440,7 @@ impl SetupDialog {
             || self.path.last().is_some_and(|key| key == "environment")
     }
 
-    /// The one action row for the current screen. Buttons appear only on the
+    /// The one action set for the current screen. Buttons appear only on the
     /// pages where they apply; the renderer, the inert mirror behind a choice
     /// popup, and `prepare` all read this list so they cannot drift apart.
     fn actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
@@ -454,16 +465,19 @@ impl SetupDialog {
             actions.push((Back, "Back", true));
         }
         if collection {
-            actions.push((Add, "Add", interactive));
+            // The projects page creates a bundle rather than adding a bare
+            // entry, so its button says what it makes.
+            let add_label = if self.path == ["bundles"] {
+                "Create"
+            } else {
+                "Add"
+            };
+            actions.push((Add, add_label, interactive));
             actions.push((Remove, "Remove", interactive && !self.keys().is_empty()));
         }
-        // Detection writes into profiles, targets and bundles; offer it only
-        // where its results land.
-        if self
-            .path
-            .first()
-            .is_none_or(|key| matches!(key.as_str(), "profiles" | "targets" | "bundles"))
-        {
+        // Detection inspects this machine and writes machine profiles, so it
+        // belongs to the machines page alone.
+        if self.path == ["targets"] {
             actions.push((
                 Detect,
                 "Detect machine",
@@ -475,7 +489,7 @@ impl SetupDialog {
             if self.saving {
                 "Saving…"
             } else {
-                "Save (Ctrl-S)"
+                "Save and Close"
             },
             !self.saving && self.read_only.is_none(),
         ));
@@ -1356,19 +1370,23 @@ pub(crate) fn render_setup(
         );
         frame.render_widget(theme::modal().title(title), popup);
         let layout = mj_chat::components::DialogShell::layout(inner, 0);
-        frame.render_widget(
-            Paragraph::new("Enlarge the terminal to edit these settings.")
-                .wrap(Wrap { trim: false }),
-            layout.body,
-        );
         // Too short for the page body: keep only the way out and the commit.
         let actions = dialog
             .actions()
             .into_iter()
             .filter(|(id, _, _)| matches!(id, Back | Apply | Save))
             .collect::<Vec<_>>();
+        let ColumnSplit {
+            body: message,
+            actions: column,
+        } = form.split_actions(layout.body, &actions);
+        frame.render_widget(
+            Paragraph::new("Enlarge the terminal to edit these settings.")
+                .wrap(Wrap { trim: false }),
+            message,
+        );
         let initial = actions.first().map_or(Save, |(id, _, _)| *id);
-        Dialog::render_actions_aligned(frame, layout.actions, &actions, &mut form, RowAlign::Right);
+        Dialog::render_actions_stacked(frame, column, &actions, &mut form, ColumnAlign::Right);
         form.end_frame(initial);
         return;
     }
@@ -1404,7 +1422,7 @@ pub(crate) fn render_setup(
         Rect::new(inner.x, help_y, inner.width, 2),
     );
     let body_y = help_y + 3;
-    let body = Rect::new(
+    let band = Rect::new(
         inner.x,
         body_y,
         inner.width,
@@ -1412,6 +1430,25 @@ pub(crate) fn render_setup(
     );
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
+    // The actions form a column beside the page body rather than a footer row,
+    // so the body gives up exactly the width that column needs.
+    let ColumnSplit {
+        body,
+        actions: column,
+    } = form.split_actions(band, &dialog.actions());
+    let notice = dialog.read_only.as_ref().or(dialog.notice.as_ref());
+    // A column taller than the body may also use the rows the notice would
+    // occupy, but only while no notice is showing in them.
+    let column = if notice.is_some() {
+        column
+    } else {
+        Rect::new(
+            column.x,
+            column.y,
+            column.width,
+            inner.bottom().saturating_sub(column.y),
+        )
+    };
     let title = dismissible_modal_title(
         &mut form,
         popup,
@@ -1495,28 +1532,23 @@ pub(crate) fn render_setup(
         }
         initial = List;
     }
-    let footer = mj_chat::components::DialogShell::layout(inner, 0).actions;
     if choice_editor {
-        // Inert copy of the row, built from the same list so it cannot drift.
-        let mirror = dialog
-            .actions()
-            .iter()
-            .map(|(_, label, _)| format!("  {label}  "))
-            .collect::<Vec<_>>()
-            .join(" ");
-        frame.render_widget(
-            Paragraph::new(mirror)
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(theme::muted()),
-            footer,
+        // Inert copy of the column, built from the same list so it cannot
+        // drift from what the page shows when no popup covers it.
+        Dialog::render_actions_stacked_inert(
+            frame,
+            column,
+            &dialog.actions(),
+            &form,
+            ColumnAlign::Right,
         );
     } else {
-        Dialog::render_actions_aligned(
+        Dialog::render_actions_stacked(
             frame,
-            footer,
+            column,
             &dialog.actions(),
             &mut form,
-            RowAlign::Right,
+            ColumnAlign::Right,
         );
     }
     if choice_editor {
@@ -1560,7 +1592,7 @@ pub(crate) fn render_setup(
         );
         initial = Choices;
     }
-    if let Some(notice) = dialog.read_only.as_ref().or(dialog.notice.as_ref()) {
+    if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
             Rect::new(inner.x, inner.bottom() - 4, inner.width, 3),
@@ -1572,7 +1604,9 @@ pub(crate) fn render_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{buffer_lines, config, dashboard_with_session, key, stopped_session};
+    use crate::test_support::{
+        buffer_lines, cell_column, config, dashboard_with_session, key, stopped_session,
+    };
     use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1847,12 +1881,12 @@ mod tests {
             .draw(|frame| crate::render::render(frame, &mut dashboard))
             .unwrap();
 
-        // A click away from the popup must not activate the visible page
-        // controls behind it or commit the pending choice.
+        // A click away from the popup must not activate the inert mirror of the
+        // page's stacked controls or commit the pending choice.
         let (row, column) = buffer_lines(terminal.backend().buffer())
             .iter()
             .enumerate()
-            .find_map(|(row, line)| line.find("Save (Ctrl-S)").map(|column| (row, column)))
+            .find_map(|(row, line)| line.find("Save and Close").map(|column| (row, column)))
             .expect("mirrored Save row");
         let background_button = (column as u16 + 1, row as u16);
         for kind in [
@@ -2249,25 +2283,39 @@ mod tests {
     }
 
     #[test]
-    fn setup_action_row_offers_only_the_controls_that_apply_to_the_page() {
+    fn setup_action_column_offers_only_the_controls_that_apply_to_the_page() {
         let mut dashboard = dashboard_with_session(stopped_session());
         dashboard.begin_setup();
         assert_eq!(
             action_labels(&dashboard),
-            ["Detect machine", "Save (Ctrl-S)"],
-            "root: no Back, no item actions"
+            ["Save and Close"],
+            "root: no Back, no item actions, and nothing to detect"
         );
         choose(&mut dashboard, "targets");
         assert_eq!(
             action_labels(&dashboard),
-            ["Back", "Add", "Remove", "Detect machine", "Save (Ctrl-S)"],
-            "collection: item actions and detection"
+            ["Back", "Add", "Remove", "Detect machine", "Save and Close"],
+            "machines: item actions and the detection only this page offers"
+        );
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "bundles");
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Create", "Remove", "Save and Close"],
+            "projects: the collection button names what it makes"
+        );
+        dashboard.handle_key(key(KeyCode::Backspace));
+        choose(&mut dashboard, "profiles");
+        assert_eq!(
+            action_labels(&dashboard),
+            ["Back", "Add", "Remove", "Save and Close"],
+            "profiles: a plain collection, so no Create and no detection"
         );
         dashboard.handle_key(key(KeyCode::Backspace));
         choose(&mut dashboard, "phone");
         assert_eq!(
             action_labels(&dashboard),
-            ["Back", "Save (Ctrl-S)"],
+            ["Back", "Save and Close"],
             "leaf outside the detected sections: no Add, Remove, or Detect"
         );
         choose(&mut dashboard, "bind");
@@ -2288,6 +2336,42 @@ mod tests {
             action_labels(&dashboard),
             ["Back", "Apply"],
             "a new name has no default to restore"
+        );
+    }
+
+    #[test]
+    fn the_stacked_action_column_leaves_the_widest_row_its_full_width() {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_setup();
+        let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, &mut dashboard))
+            .unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("settings");
+        };
+        // The root row is `{name:<32}  {summary}`, the widest line this config
+        // renders. The column sits beside the body, so a dialog sized without
+        // it would cut the summary off where the column begins.
+        let summary = value_summary(&[], "targets", &dialog.draft["targets"], &dialog.draft);
+        let row = format!("{:<32}  {summary}", schema::label("targets"));
+        let line = lines
+            .iter()
+            .find(|line| line.contains("Machines and Runtimes"))
+            .unwrap_or_else(|| panic!("missing the machines row in\n{}", lines.join("\n")));
+        assert!(
+            line.contains(&row),
+            "the action column clipped the page row: {line:?}"
+        );
+        let save = lines
+            .iter()
+            .find(|line| line.contains("  Save and Close  "))
+            .unwrap_or_else(|| panic!("missing the save button in\n{}", lines.join("\n")));
+        let column = cell_column(save, "Save and Close");
+        assert!(
+            cell_column(line, &row) + row.chars().count() as u16 <= column,
+            "the row runs into the action column at {column}: {line:?}"
         );
     }
 
@@ -2332,19 +2416,57 @@ mod tests {
             let lines = buffer_lines(terminal.backend().buffer());
             let text = lines.join("\n");
             assert!(text.contains("Settings › Machines and Runtimes"), "{text}");
-            // One right-packed row: every button on the line that holds Save,
-            // nothing after Save but the modal border.
-            let row = lines
+            // Every button keeps its own row in one column at the dialog's
+            // right edge, on top of each other rather than spread along a row.
+            let labels = ["Back", "Add", "Remove", "Detect machine", "Save and Close"];
+            let width = labels
                 .iter()
-                .find(|line| line.contains("Save (Ctrl-S)"))
-                .unwrap_or_else(|| panic!("{text}"));
-            for label in ["Back", "Add", "Remove", "Detect machine"] {
-                assert!(row.contains(label), "{row}");
+                .map(|label| label.len())
+                .max()
+                .expect("labels");
+            let mut rows = Vec::new();
+            for label in labels {
+                // The button's padding separates it from prose that happens to
+                // use the same word, such as the page's help line.
+                let padded = format!("  {label}  ");
+                let (row, line) = lines
+                    .iter()
+                    .enumerate()
+                    .find(|(_, line)| line.contains(&padded))
+                    .unwrap_or_else(|| panic!("missing {label:?} in\n{text}"));
+                // Every button is as wide as the longest of them, so a shorter
+                // label is followed by its share of that width, the button's
+                // padding, the inner margin, and then the modal border.
+                let after = &line[line.find(&padded).unwrap() + 2 + label.len()..];
+                let gap = format!("{}│", " ".repeat(3 + width - label.len()));
+                assert!(
+                    after.starts_with(&gap),
+                    "{label} is not packed against the dialog's right edge: {line}"
+                );
+                rows.push((row, cell_column(line, &padded) + 2, label));
             }
-            assert!(!text.contains("Cancel"), "{text}");
-            let tail = &row[row.find("Save (Ctrl-S)").unwrap() + "Save (Ctrl-S)".len()..];
+            assert!(
+                rows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "the buttons are not stacked in order: {rows:?}\n{text}"
+            );
+            let (_, first_column, _) = rows[0];
+            assert!(
+                rows.iter().all(|(_, column, _)| *column == first_column),
+                "the stacked buttons do not share a column: {rows:?}\n{text}"
+            );
+            assert!(
+                rows.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0),
+                "the stacked buttons leave gaps between them: {rows:?}\n{text}"
+            );
+            let save_row = lines
+                .iter()
+                .find(|line| line.contains("Save and Close"))
+                .expect("save row");
+            let tail =
+                &save_row[save_row.find("Save and Close").unwrap() + "Save and Close".len()..];
             // Button padding, the inner margin, then the modal border.
-            assert!(tail.starts_with("   │"), "{row}");
+            assert!(tail.starts_with("   │"), "{save_row}");
+            assert!(!text.contains("Cancel"), "{text}");
             // Backspace from the root dismisses through the dirty guard.
             dashboard.handle_key(key(KeyCode::Backspace));
             dashboard.handle_key(key(KeyCode::Backspace));

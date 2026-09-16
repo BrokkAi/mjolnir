@@ -57,10 +57,31 @@ impl Button {
         form: &mut Form<K>,
         id: K,
     ) {
+        Self::render_aligned(
+            frame,
+            area,
+            label,
+            enabled,
+            form,
+            id,
+            ratatui::layout::Alignment::Center,
+        );
+    }
+
+    /// Draws and registers one button with an explicit label alignment.
+    pub fn render_aligned<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        label: &str,
+        enabled: bool,
+        form: &mut Form<K>,
+        id: K,
+        alignment: ratatui::layout::Alignment,
+    ) {
         form.register(id, ControlKind::Button, area, enabled);
         let paragraph = Paragraph::new(Line::from(Span::raw(format!("  {label}  "))))
             .style(control_style(form, id, enabled))
-            .alignment(ratatui::layout::Alignment::Center);
+            .alignment(alignment);
         frame.render_widget(paragraph, area);
     }
 }
@@ -73,6 +94,10 @@ impl Button {
 pub enum RowAlign {
     Left,
     Right,
+}
+
+fn button_width(label: &str) -> u16 {
+    u16::try_from(label.width() + 4).unwrap_or(u16::MAX)
 }
 
 /// A row of equally aligned buttons with content-sized hitboxes.
@@ -111,7 +136,7 @@ impl ButtonRow {
         }
         let widths = buttons
             .iter()
-            .map(|(_, label, _)| u16::try_from(label.width() + 4).unwrap_or(u16::MAX))
+            .map(|(_, label, _)| button_width(label))
             .collect::<Vec<_>>();
         // Only a row that fits can be pushed to the right edge; when it
         // overflows the offset is zero and the scroll below behaves as before.
@@ -152,6 +177,165 @@ impl ButtonRow {
             };
             Button::render(frame, rect, label, *enabled, form, *id);
             start = end.saturating_add(1);
+        }
+    }
+}
+
+/// Which edge of its area a [`ButtonColumn`] packs against when it fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnAlign {
+    Left,
+    Right,
+}
+
+/// A vertical stack of buttons sharing one width, one button per row.
+///
+/// The stack is the column counterpart of [`ButtonRow`]: callers set it beside
+/// the page body so the dialog's controls sit in a right-hand column. Every row
+/// is as wide as the longest label, so the buttons line up on both edges, and a
+/// stack taller than its area scrolls to keep the focused button visible.
+pub struct ButtonColumn;
+
+/// The page body and the [`ButtonColumn`] set beside it.
+///
+/// Page content renders into [`Self::body`]; [`Self::actions`] takes the
+/// column, which is packed against the edge of the area that was split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnSplit {
+    pub body: Rect,
+    pub actions: Rect,
+}
+
+impl ButtonColumn {
+    /// The gap between a stacked action column and the body beside it.
+    pub const BODY_GAP: u16 = 2;
+
+    /// The width a column of `buttons` needs, including button padding.
+    pub fn width<K>(buttons: &[(K, &str, bool)]) -> u16 {
+        buttons
+            .iter()
+            .map(|(_, label, _)| button_width(label))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Splits `area` into the page body and the action column beside it.
+    ///
+    /// The column is content-sized and packed against the right edge of
+    /// `area`; the body keeps what is left, minus [`Self::BODY_GAP`].
+    pub fn split<K>(area: Rect, buttons: &[(K, &str, bool)]) -> ColumnSplit {
+        let width = Self::width(buttons).min(area.width);
+        ColumnSplit {
+            body: Rect::new(
+                area.x,
+                area.y,
+                area.width
+                    .saturating_sub(width.saturating_add(Self::BODY_GAP)),
+                area.height,
+            ),
+            actions: Rect::new(
+                area.x.saturating_add(area.width.saturating_sub(width)),
+                area.y,
+                width,
+                area.height,
+            ),
+        }
+    }
+
+    /// Draws and registers buttons from top to bottom, packed to the right.
+    pub fn render<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        form: &mut Form<K>,
+    ) {
+        Self::render_aligned(frame, area, buttons, form, ColumnAlign::Right);
+    }
+
+    /// Draws and registers buttons in order, packed against `align`.
+    pub fn render_aligned<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        form: &mut Form<K>,
+        align: ColumnAlign,
+    ) {
+        if buttons.is_empty() {
+            return;
+        }
+        if area.width == 0 || area.height == 0 {
+            for (id, _, enabled) in buttons {
+                form.register(*id, ControlKind::Button, Rect::default(), *enabled);
+            }
+            return;
+        }
+        for (id, _, enabled) in buttons {
+            form.declare_with_enabled(*id, ControlKind::Button, *enabled);
+        }
+        let width = Self::width(buttons).min(area.width);
+        let x = match align {
+            ColumnAlign::Left => area.x,
+            ColumnAlign::Right => area.x.saturating_add(area.width.saturating_sub(width)),
+        };
+        let mut scroll = 0usize;
+        for (row, (id, _, _)) in buttons.iter().enumerate() {
+            if form.is_focused(*id) {
+                scroll = row
+                    .saturating_add(1)
+                    .saturating_sub(usize::from(area.height))
+                    .min(row);
+            }
+        }
+        for (row, (id, label, enabled)) in buttons.iter().enumerate() {
+            let rect = if row >= scroll && row - scroll < usize::from(area.height) {
+                Rect::new(x, area.y.saturating_add((row - scroll) as u16), width, 1)
+            } else {
+                Rect::default()
+            };
+            // Every row shares one width, so labels line up on the left the way
+            // the rows of a table align.
+            Button::render_aligned(
+                frame,
+                rect,
+                label,
+                *enabled,
+                form,
+                *id,
+                ratatui::layout::Alignment::Left,
+            );
+        }
+    }
+
+    /// Draws the stack as inert text, registering no hitboxes.
+    ///
+    /// A page that stays visible behind a popup draws this mirror so its
+    /// controls keep their places, while a click on the overlay covering them
+    /// cannot reach a control behind it.
+    pub fn render_inert(frame: &mut Frame<'_>, area: Rect, labels: &[&str], align: ColumnAlign) {
+        if labels.is_empty() || area.width == 0 || area.height == 0 {
+            return;
+        }
+        let width = labels
+            .iter()
+            .map(|label| button_width(label))
+            .max()
+            .unwrap_or(0)
+            .min(area.width);
+        let x = match align {
+            ColumnAlign::Left => area.x,
+            ColumnAlign::Right => area.x.saturating_add(area.width.saturating_sub(width)),
+        };
+        for (row, label) in labels.iter().enumerate() {
+            if row >= usize::from(area.height) {
+                return;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("  {label}  "),
+                    theme::muted(),
+                ))),
+                Rect::new(x, area.y.saturating_add(row as u16), width, 1),
+            );
         }
     }
 }
@@ -909,6 +1093,57 @@ mod tests {
     #[test]
     fn a_row_wider_than_its_area_ignores_right_alignment() {
         assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
+    }
+
+    fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
+        let mut form = Form::<u8>::new();
+        form.declare(1, ControlKind::Button);
+        form.declare(2, ControlKind::Button);
+        form.declare(3, ControlKind::Button);
+        form.end_frame(focused);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                ButtonColumn::render(
+                    frame,
+                    frame.area(),
+                    &[(1, "First", true), (2, "Widest", true), (3, "Last", true)],
+                    &mut form,
+                );
+                form.end_frame(focused);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (buffer.area.y..buffer.area.bottom())
+            .map(|y| {
+                (buffer.area.x..buffer.area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stacked_column_gives_every_button_one_row_of_the_widest_label() {
+        // "  Widest  " is the widest button at 10 cells, so the 16-cell area
+        // leaves six cells on the left of every row.
+        assert_eq!(
+            column_lines(16, 3, 1),
+            [
+                format!("{}  First   ", " ".repeat(6)),
+                format!("{}  Widest  ", " ".repeat(6)),
+                format!("{}  Last    ", " ".repeat(6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_column_too_short_for_its_buttons_scrolls_to_the_focused_one() {
+        assert_eq!(
+            column_lines(16, 1, 3),
+            [format!("{}  Last    ", " ".repeat(6))]
+        );
     }
 
     #[test]

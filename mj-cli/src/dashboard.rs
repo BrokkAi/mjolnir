@@ -3837,7 +3837,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(screen.contains("Settings"), "{focus:?}: {screen}");
-            assert!(screen.contains("Detect machine"), "{focus:?}: {screen}");
+            assert!(screen.contains("Save and Close"), "{focus:?}: {screen}");
             assert_eq!(chord(&dashboard, function_key(4)), None);
         }
     }

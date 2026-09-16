@@ -780,11 +780,11 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
     );
 }
 
-/// The review pane warns when a raw target cannot rely on a harness
-/// guardian for risky actions.
+/// The profile table marks a harness that cannot guard risky actions with the
+/// warning triangle and explains the marker once below the table.
 #[test]
-fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
-    let review_text = |kind: HarnessKind| {
+fn profile_picker_marks_harnesses_without_guardian_approvals() {
+    let profile_step = |kind: HarnessKind| {
         let mut config = config();
         config.profiles = BTreeMap::from([(
             "profile".into(),
@@ -816,18 +816,86 @@ fn raw_localhost_warns_for_harnesses_without_guardian_approvals() {
     };
 
     for kind in [HarnessKind::Kimi, HarnessKind::Muse] {
-        let warning = review_text(kind);
-        assert!(warning.contains("DANGER"), "{kind:?}: {warning}");
+        let marked = profile_step(kind);
+        assert!(marked.contains('⚠'), "{kind:?}: {marked}");
         assert!(
-            warning.contains("has no guardian approval mode"),
-            "{kind:?}: {warning}"
+            marked.contains("No guardian approval mode"),
+            "{kind:?}: {marked}"
+        );
+        assert!(
+            marked.contains("do not run on a raw, unsandboxed target"),
+            "{kind:?}: {marked}"
         );
     }
 
     for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
-        let quiet = review_text(kind);
-        assert!(!quiet.contains("DANGER"), "{kind:?}: {quiet}");
+        let quiet = profile_step(kind);
+        assert!(!quiet.contains('⚠'), "{kind:?}: {quiet}");
+        assert!(
+            !quiet.contains("No guardian approval mode"),
+            "{kind:?}: {quiet}"
+        );
     }
+}
+
+/// The profile step reads as a table: the marker, profile, harness, and quota
+/// columns start at the same cell on the heading and on every row.
+#[test]
+fn new_session_profile_step_aligns_its_columns() {
+    let mut config = config();
+    config.profiles.insert(
+        "kimi-1".into(),
+        HarnessProfile {
+            enabled: true,
+            context_window_bytes: None,
+            guardian_review_model: None,
+            kind: HarnessKind::Kimi,
+            home: PathBuf::from("/profiles/kimi"),
+            environment: BTreeMap::new(),
+        },
+    );
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    ready_key(&mut dashboard, alt_key('w'));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let lines = buffer_lines(terminal.backend().buffer());
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing row {needle:?} in {lines:?}"))
+    };
+
+    let headings = row("PROFILE");
+    let claude = row("claude-1");
+    let kimi = row("kimi-1");
+    let profile_column = cell_column(headings, "PROFILE");
+    for (line, profile) in [(claude, "claude-1"), (kimi, "kimi-1")] {
+        assert_eq!(cell_column(line, profile), profile_column);
+        assert_eq!(
+            cell_column(line, "refreshing"),
+            cell_column(headings, "QUOTA")
+        );
+    }
+    assert_eq!(
+        cell_column(claude, "Claude Code"),
+        cell_column(headings, "HARNESS")
+    );
+    assert_eq!(
+        cell_column(kimi, "Kimi Code"),
+        cell_column(headings, "HARNESS")
+    );
+
+    // The triangle occupies the marker column, then the table gap, then the
+    // profile id; only the harness without guardian approvals carries it.
+    assert!(!claude.contains('⚠'));
+    assert!(kimi.contains('⚠'));
+    assert_eq!(
+        cell_column(kimi, "⚠") + 1 + u16::try_from(COLUMN_GAP).unwrap(),
+        profile_column
+    );
 }
 
 #[test]
@@ -861,7 +929,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("DANGER"));
+    assert!(rendered.contains("No guardian approval mode"));
 
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
@@ -1881,6 +1949,77 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("Resume · 3/3"));
+}
+
+#[test]
+fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.profiles.insert(
+        "kimi-1".into(),
+        HarnessProfile {
+            enabled: true,
+            context_window_bytes: None,
+            guardian_review_model: None,
+            kind: HarnessKind::Kimi,
+            home: PathBuf::from("/profiles/kimi"),
+            environment: BTreeMap::new(),
+        },
+    );
+    open_resume_wizard(&mut dashboard);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw resume profile step");
+    let lines = buffer_lines(terminal.backend().buffer());
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing row {needle:?} in {lines:?}"))
+    };
+
+    // The session runs Codex, so the Claude and Kimi rows carry the note that
+    // says the cross-harness resume drops everything but text.
+    let headings = row("PROFILE");
+    let (profile_column, harness_column, quota_column) = (
+        cell_column(headings, "PROFILE"),
+        cell_column(headings, "HARNESS"),
+        cell_column(headings, "QUOTA"),
+    );
+    let mut note_column = None;
+    for (id, harness, lossy) in [
+        ("claude-1", "Claude Code", true),
+        ("codex-1", "Codex", false),
+        ("kimi-1", "Kimi Code", true),
+    ] {
+        let line = row(id);
+        assert_eq!(cell_column(line, id), profile_column, "{id}: {line}");
+        assert_eq!(cell_column(line, harness), harness_column, "{id}: {line}");
+        assert_eq!(
+            cell_column(line, "refreshing"),
+            quota_column,
+            "{id}: {line}"
+        );
+        if lossy {
+            let column = cell_column(line, "(lossy: text-only transcript)");
+            assert!(column > quota_column, "{id}: {line}");
+            assert_eq!(column, *note_column.get_or_insert(column), "{id}: {line}");
+        } else {
+            assert!(!line.contains("(lossy"), "{id}: {line}");
+        }
+    }
+
+    // Only the Kimi row lacks guardian approvals, and the row below the table
+    // explains the marker it carries.
+    assert!(row("kimi-1").contains('⚠'));
+    assert!(!row("claude-1").contains('⚠'));
+    assert!(!row("codex-1").contains('⚠'));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("No guardian approval mode; do not run on a raw")),
+        "{lines:?}"
+    );
 }
 
 #[test]
