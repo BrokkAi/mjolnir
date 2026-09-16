@@ -14,7 +14,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::worker_binary::{bridge_launch, container_upload_ownership_args, stage_profile};
-use super::{Controller, execute_checked, scp_command_spec, ssh_command_spec};
+use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use mj_core::worker_launch::{
     REVIEWER_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
@@ -366,27 +366,27 @@ fn upload_reviewer_profile(
             let incoming = format!("{home}.incoming");
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["mkdir", "-p", worker_root])
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", worker_root])
                     .purpose("create the reviewer directory"),
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["rm", "-rf", "--", &incoming, &home])
+                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &incoming, &home])
                     .purpose("clear the reviewer profile"),
             )?;
             execute_checked(
                 executor,
-                scp_command_spec(ssh, local, &incoming, true)
+                crate::targets::scp_upload(ssh, local, &incoming, true)
                     .purpose("upload the reviewer profile"),
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["mv", &incoming, &home])
+                crate::targets::ssh_command(ssh, ["mv", &incoming, &home])
                     .purpose("install the reviewer profile"),
             )?;
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["chmod", "-R", "go-rwx", &home])
+                crate::targets::ssh_command(ssh, ["chmod", "-R", "go-rwx", &home])
                     .purpose("restrict reviewer profile permissions"),
             )?;
         }
@@ -402,12 +402,12 @@ fn upload_reviewer_profile(
             let upload = format!("{worker_root}/.reviewer-upload-{generation}");
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["rm", "-rf", "--", &upload])
+                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &upload])
                     .purpose("clear remote reviewer staging"),
             )?;
             execute_checked(
                 executor,
-                scp_command_spec(ssh, local, &upload, true)
+                crate::targets::scp_upload(ssh, local, &upload, true)
                     .purpose("upload the remote reviewer profile"),
             )?;
             for arguments in [
@@ -453,12 +453,13 @@ fn upload_reviewer_profile(
             ] {
                 execute_checked(
                     executor,
-                    ssh_command_spec(ssh, arguments).purpose("stage the remote reviewer profile"),
+                    crate::targets::ssh_command(ssh, arguments)
+                        .purpose("stage the remote reviewer profile"),
                 )?;
             }
             execute_checked(
                 executor,
-                ssh_command_spec(ssh, ["rm", "-rf", "--", &upload])
+                crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &upload])
                     .purpose("remove remote reviewer staging"),
             )?;
         }

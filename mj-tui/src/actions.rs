@@ -22,6 +22,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     OpenSession,
     NewSessionWizard,
+    ChangeGoSetup,
     RestartSession,
     ResumeDialog,
     RenameSession,
@@ -232,8 +233,6 @@ fn always_ready(_: &DashboardState) -> Availability {
 fn spinner_available(dashboard: &DashboardState) -> Availability {
     if dashboard.spinner_save_pending {
         Availability::Blocked("The spinner preference is being saved")
-    } else if dashboard.config.newer_config_version.is_some() {
-        Availability::Blocked("This configuration belongs to a newer Mjolnir")
     } else {
         Availability::Ready
     }
@@ -378,6 +377,23 @@ fn operation_in_flight(dashboard: &DashboardState) -> Availability {
 /// Every command the surface has. The order here is the order the footer
 /// prints its hints and the order the help overlay prints each group.
 pub(crate) static COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::ChangeGoSetup,
+        label: "Change fast-start setup",
+        description: "Choose and remember a new account, target, or isolation for this project.",
+        scope: Scope::Settings,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: |dashboard| {
+            if dashboard.go.is_some() {
+                Availability::Ready
+            } else {
+                Availability::Hidden
+            }
+        },
+    },
     CommandSpec {
         id: CommandId::OpenSession,
         label: "Open session",
@@ -902,6 +918,7 @@ impl DashboardState {
         match id {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::NewSessionWizard => self.begin_new(),
+            CommandId::ChangeGoSetup => self.change_go_setup(),
             CommandId::RestartSession => self
                 .selected_session()
                 .map(|s| DashboardAction::RestartSession {
@@ -915,10 +932,6 @@ impl DashboardState {
             }
             CommandId::CycleSpinner => {
                 if self.spinner_save_pending {
-                    return DashboardAction::None;
-                }
-                if let Some(notice) = self.config.newer_build_notice() {
-                    self.set_notice(notice);
                     return DashboardAction::None;
                 }
                 let style = self.config.spinner.next();
@@ -1002,7 +1015,17 @@ impl DashboardState {
                 self.begin_profile_rename();
                 DashboardAction::None
             }
-            CommandId::Refresh => DashboardAction::RefreshAll,
+            CommandId::Refresh => {
+                // F5 re-probes target readiness as well. This global Refresh
+                // chord is allowed through an open modal (see
+                // `global_chord_allowed`), so it consumes the key before a New
+                // or Resume wizard's own F5 handler runs; clearing here is what
+                // makes the target step's documented "F5 recheck" work. A
+                // cleared entry is re-probed on the next render.
+                self.target_readiness.clear();
+                self.mark_render_changed();
+                DashboardAction::RefreshAll
+            }
             CommandId::ManageProfiles => {
                 self.begin_settings_section("profiles", None);
                 DashboardAction::None

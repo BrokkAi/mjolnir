@@ -938,23 +938,29 @@ impl DurableRelay {
     pub fn clear_agent_terminals(&mut self) -> Result<()> {
         self.active_agent_terminals.clear();
         self.closed_agent_terminals.clear();
-        // The harness that owned those processes is gone, and so is whatever
-        // it left running: a restart cannot poll a process it no longer has.
+        self.forget_harness_processes();
+        self.persist_activity_transition()
+    }
+
+    /// The harness that owned its processes is gone, and so is whatever it
+    /// left running: a restart cannot poll a process it no longer has. Every
+    /// piece of in-memory process state a harness reports is cleared here, so
+    /// a restart and a closed terminal set cannot disagree about it.
+    fn forget_harness_processes(&mut self) {
         self.codex_execute_tools.clear();
         self.background_exec_cards.clear();
         self.claude_background_tasks.clear();
         self.claude_pending_stops.clear();
+        self.claude_stoppable_tasks.clear();
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
         self.kimi_observed_task_ids.clear();
         self.kimi_observed_tool_ids.clear();
         self.agent_terminal_tool_calls.clear();
+        self.foreground_tools.clear();
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
         }
-        self.claude_stoppable_tasks.clear();
-        self.foreground_tools.clear();
-        self.persist_activity_transition()
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
@@ -998,20 +1004,28 @@ impl DurableRelay {
     /// replay, and deliberately conservative: it answers `false` only for a
     /// thread this journal created and that nothing has used yet.
     ///
-    /// A `false` answer is what allows Mjolnir to replace a Codex thread that
-    /// Codex says it has no rollout for. Codex writes a thread's rollout only
-    /// at its first user message, so an empty thread can be missing on disk.
+    /// A `false` answer is what allows Mjolnir to replace a native session the
+    /// harness says it has no record of. Codex writes a thread's rollout, and
+    /// Claude Code a session's transcript, only at the first user message, so
+    /// a session that was opened and never prompted can be missing on disk.
     pub fn native_session_may_have_history(&self) -> bool {
-        // History before the floor was released to an archive, so the
-        // snapshot no longer describes everything this session did.
-        if self.snapshot.recovery_floor_ordinal != 0 {
-            return true;
-        }
         // Set when the agent sent conversation content, when a prompt was
-        // transmitted, when the thread was resumed rather than created here,
+        // transmitted, when the session was resumed rather than created here,
         // or when its identity arrived from outside this journal.
         if self.snapshot.native_session_used {
             return true;
+        }
+        // History before the recovery floor was released to an archive, so the
+        // snapshot no longer describes everything this session did. That only
+        // hides history belonging to the *current* native session if that
+        // session could have existed then. A session this journal opened above
+        // the floor has every event about it above the floor too, so the
+        // archive cannot hold any of its content. An unknown opening ordinal —
+        // an older snapshot, or no session opened yet — cannot be placed
+        // against the floor, so it counts as history.
+        match self.snapshot.native_session_opened_ordinal {
+            Some(opened) if opened > self.snapshot.recovery_floor_ordinal => {}
+            _ => return true,
         }
         // A prompt that only waits in the durable queue never reached the
         // agent. Anything past admission may have.
@@ -1171,7 +1185,7 @@ impl DurableRelay {
         }
         if let RelayRequest::Hello { supported, .. } = &envelope.request {
             let writer_range = RelayVersionRange {
-                min: mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION,
+                min: RELAY_PROTOCOL_VERSION,
                 max: RELAY_PROTOCOL_VERSION,
             };
             let Some(negotiated) = writer_range.negotiate(*supported) else {
@@ -1194,20 +1208,7 @@ impl DurableRelay {
                 },
             });
         }
-        if matches!(envelope.request, RelayRequest::Attach { .. })
-            && envelope.protocol_version < mj_core::relay::RELAY_WRITER_MIN_PROTOCOL_VERSION
-        {
-            return Some(relay_error(
-                RelayErrorCode::IncompatibleProtocol,
-                "upgrade the controller to read goal controls and provider details without losing event integrity",
-                false,
-                None,
-            ));
-        }
-        if !envelope.request.supported_at(envelope.protocol_version) {
-            return Some(incompatible_request_protocol(envelope.protocol_version));
-        }
-        None
+        mj_core::relay::protocol::relay_protocol_rejection(envelope)
     }
 
     fn handle_inner(&mut self, envelope: &RelayRequestEnvelope) -> Result<RelayResponseBody> {
@@ -2196,20 +2197,7 @@ impl DurableRelay {
                 | RelayObservation::Closing
                 | RelayObservation::Closed
         ) {
-            self.codex_execute_tools.clear();
-            self.background_exec_cards.clear();
-            self.claude_background_tasks.clear();
-            self.claude_pending_stops.clear();
-            self.kimi_background_tasks.clear();
-            self.kimi_provisional_tasks.clear();
-            self.kimi_observed_task_ids.clear();
-            self.kimi_observed_tool_ids.clear();
-            self.agent_terminal_tool_calls.clear();
-            if self.background_work == BackgroundWorkPolicy::KimiTasks {
-                self.background_work_known = Some(false);
-            }
-            self.claude_stoppable_tasks.clear();
-            self.foreground_tools.clear();
+            self.forget_harness_processes();
         }
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
@@ -3506,6 +3494,52 @@ mod tests {
         assert!(!relay.native_session_may_have_history());
         let cursor = ready_checkpoint(&mut relay, "checkpoint");
         submit_floor(&mut relay, "archive-installed", cursor);
+        assert!(relay.native_session_may_have_history());
+    }
+
+    #[test]
+    fn a_native_session_opened_after_a_restore_floor_has_no_history() {
+        // A moved session starts from an archive seed, which sets the recovery
+        // floor to the archive's frontier, and then opens a brand-new native
+        // session above it. Nothing in the archive can belong to that session.
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            mj_core::relay::restored_relay_seed_path(temp.path()),
+            serde_json::to_vec(&serde_json::json!({
+                "event_frontier": 227_580,
+                "event_frontier_digest":
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert_eq!(relay.snapshot.recovery_floor_ordinal, 227_580);
+        // Before any session is opened the answer is unknown, so conservative.
+        assert!(relay.native_session_may_have_history());
+        relay
+            .record_observation(RelayObservation::SessionOpened {
+                native_session_id: "fresh".into(),
+                resumed: false,
+                native_continuity_lost: false,
+            })
+            .unwrap();
+        assert!(!relay.native_session_may_have_history());
+
+        // The opening ordinal must survive a worker restart and journal replay.
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        assert!(!relay.native_session_may_have_history());
+
+        submit_relay(
+            &mut relay,
+            "dispatched-prompt",
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("do work")],
+            },
+        );
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
         assert!(relay.native_session_may_have_history());
     }
 

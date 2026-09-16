@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url';
 const docsRoot = fileURLToPath(new URL('..', import.meta.url));
 for (const guide of [
   {
-    source: 'PODMAN.md',
+    source: '../mj-controller/docs/PODMAN.md',
     target: 'podman.md',
     title: 'Podman for Mjolnir',
     description: 'Rootless Podman installation, verification postconditions, and remediation for Mjolnir container targets.',
   },
   {
-    source: 'DOCKER.md',
+    source: '../mj-controller/docs/DOCKER.md',
     target: 'docker.md',
     title: 'Docker for Mjolnir',
     description: 'Docker setup, OverlayFS attachments, lifecycle, and verification for Mjolnir container targets.',
@@ -48,7 +48,7 @@ for (const guide of [
     '---',
     `title: ${JSON.stringify(guide.title)}`,
     `description: ${JSON.stringify(guide.description)}`,
-    `editUrl: ${JSON.stringify(`https://github.com/BrokkAi/mjolnir/edit/master/docs/${guide.source}`)}`,
+    `editUrl: ${JSON.stringify(new URL(guide.source, 'https://github.com/BrokkAi/mjolnir/edit/master/docs/').href)}`,
     '---',
     '',
     '',

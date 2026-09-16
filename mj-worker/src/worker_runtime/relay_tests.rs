@@ -4185,6 +4185,65 @@ async fn restored_relay_seed_records_a_restart_marker() {
     assert_eq!(markers, 1);
 }
 
+/// Codex rebuilds a resumed thread from the launch request, so the bridge has
+/// to start with the model this session accepted or the resume reports a
+/// mismatch. That pin belongs to the bridge's environment and nowhere else.
+#[tokio::test]
+async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("relay");
+    let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    "deepseek-flash",
+                    vec![
+                        SessionConfigSelectOption::new("deepseek-flash", "Flash"),
+                        SessionConfigSelectOption::new("deepseek-v4-pro", "Pro"),
+                    ],
+                )
+                .category(SessionConfigOptionCategory::Model),
+            ],
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::ConfigurationUpdated {
+            key: "model".into(),
+            value: "deepseek-flash".into(),
+        })
+        .unwrap();
+    drop(relay);
+
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.cwd = temp.path().to_owned();
+    config.environment.insert(
+        "CODEX_CONFIG".into(),
+        r#"{"default_permissions":"project","tui":"never"}"#.into(),
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unix::run_daemon(root.clone(), config),
+    )
+    .await
+    .expect("the scripted worker child must stop")
+    .expect_err("the test executable is not an ACP supervisor");
+    assert!(!format!("{result:#}").is_empty());
+
+    let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
+    let pinned: serde_json::Value =
+        serde_json::from_str(&spec.environment["CODEX_CONFIG"]).unwrap();
+    assert_eq!(pinned["model"], "deepseek-flash");
+    assert_eq!(pinned["default_permissions"], "project");
+    assert_eq!(pinned["tui"], "never");
+}
+
 #[tokio::test]
 async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open() {
     let temp = tempfile::tempdir().unwrap();
@@ -5424,6 +5483,11 @@ while True: time.sleep(1)
 /// sub-agent sockets only bind under their own configuration, so proving that
 /// `control.sock` binds and serves is enough to show the daemon no longer
 /// trips over `sun_path`.
+///
+/// The daemon runs checkpoint-only so it serves until the test aborts it. A
+/// daemon that starts a harness would exit on its own when the bridge fails
+/// to launch, and under load that exit could land before the status request
+/// is read, resetting the connection.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -5437,9 +5501,19 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
             > mj_core::local_sockets::unix_socket_path_limit(),
         "the test root must be long enough to need the relative-name bind"
     );
+    // Checkpoint-only startup requires existing relay state.
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "saved-native-session".into(),
+            resumed: true,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    drop(durable);
 
     let mut config = launch_config("profile-home-that-must-not-be-used");
-    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     config.cwd = temp.path().to_owned();
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
@@ -5490,8 +5564,5 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
 
     writer.shutdown().await.unwrap();
     daemon.abort();
-    // Under load the daemon's own bridge failure can land before the abort
-    // does. This test is about the socket path, not about how the daemon
-    // eventually stops.
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }

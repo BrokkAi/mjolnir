@@ -3,8 +3,8 @@ name = "brokk-mjolnir"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
+license.workspace = true
 description = "Mjolnir: session control plane for ACP coding agents (installs the `mj` binary)"
-license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 

@@ -320,7 +320,14 @@ pub(super) fn render_config_picker(
     let title = crate::modal::dismissible_modal_title(
         &mut picker.form,
         rect,
-        format!("Choose a {}", picker.key),
+        {
+            let article = if picker.key.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("Choose {article} {}", picker.key)
+        },
         theme::title(true),
         true,
     );

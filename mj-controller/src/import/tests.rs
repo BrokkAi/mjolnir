@@ -925,18 +925,21 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     fs::create_dir_all(&archive_directory).unwrap();
     let mut state = State::default();
 
-    let imported = import_codex_session(
+    let imported = import_native_session(
         &config,
         &mut state,
-        CodexImportRequest {
-            codex_home: &codex_home,
-            source: &source,
+        NativeImportRequest {
+            harness: HarnessKind::Codex,
+            harness_home: &codex_home,
+            native_session_id: &source.native_session_id,
+            source_path: &source.jsonl_path,
             transcript: &transcript,
             bundle_id: "app",
             profile_id: None,
             title: None,
             archive_directory: &archive_directory,
         },
+        None,
     )
     .unwrap();
     let verified =
@@ -1049,21 +1052,24 @@ fn import_codex_fixture(
     bundle_id: &str,
     codex_home: &Path,
     archive_directory: &Path,
-) -> ImportedCodexSession {
+) -> ImportedClaudeSession {
     fs::create_dir_all(archive_directory).unwrap();
     let transcript = read_codex_transcript(&source.jsonl_path).unwrap();
-    import_codex_session(
+    import_native_session(
         config,
         state,
-        CodexImportRequest {
-            codex_home,
-            source,
+        NativeImportRequest {
+            harness: HarnessKind::Codex,
+            harness_home: codex_home,
+            native_session_id: &source.native_session_id,
+            source_path: &source.jsonl_path,
             transcript: &transcript,
             bundle_id,
             profile_id: None,
             title: None,
             archive_directory,
         },
+        None,
     )
     .unwrap()
 }
@@ -1234,18 +1240,21 @@ fn stop_sequence_claude_import_produces_idle_raw_project_session() {
     fs::create_dir_all(&archive_directory).unwrap();
     let mut state = State::default();
 
-    let imported = import_claude_session(
+    let imported = import_native_session(
         &config,
         &mut state,
-        ClaudeImportRequest {
-            claude_home: &claude_home,
-            source: &source,
+        NativeImportRequest {
+            harness: HarnessKind::Claude,
+            harness_home: &claude_home,
+            native_session_id: &source.native_session_id,
+            source_path: &source.jsonl_path,
             transcript: &transcript,
             bundle_id: "app",
             profile_id: None,
             title: None,
             archive_directory: &archive_directory,
         },
+        None,
     )
     .unwrap();
 

@@ -1180,13 +1180,35 @@ impl DashboardState {
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
                 }
+                if let Some(go) = &self.go {
+                    if !is_bare_project_target(target) {
+                        wizard.step = WizardStep::Bundle;
+                        wizard.bundle_creation_in_flight = true;
+                        self.mode = Mode::New(wizard);
+                        return DashboardAction::GoPrepareProject {
+                            target_id: target_template_id,
+                        };
+                    }
+                    wizard.project_directory = if matches!(target, TargetTemplate::LocalBare) {
+                        go.directory.to_string_lossy().into_owned().into()
+                    } else {
+                        go.recipe
+                            .as_ref()
+                            .filter(|recipe| recipe.target_id == target_template_id)
+                            .and_then(|recipe| recipe.project_directory.as_ref())
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                            .into()
+                    };
+                }
                 wizard.step = if is_bare_project_target(target) {
                     wizard.mounts.history.clear();
                     wizard.project_history = project_history_host(target)
                         .map(|host| self.state.project_directories(host).to_vec())
                         .unwrap_or_default();
                     wizard.project_history_index = 0;
-                    if wizard.project_directory.is_empty()
+                    if self.go.is_none()
+                        && wizard.project_directory.is_empty()
                         && let Some(directory) = wizard.project_history.first()
                     {
                         wizard.project_directory = directory.to_string_lossy().into_owned().into();
@@ -1404,19 +1426,19 @@ impl DashboardState {
         if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Target)
             || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Target)
         {
-            let target_ids: Vec<_> = self
-                .config
-                .targets
-                .iter()
-                .filter(|(id, template)| {
-                    !matches!(template, TargetTemplate::LocalBare)
-                        && self
-                            .target_readiness
-                            .get(*id)
-                            .is_none_or(|check| &check.template != *template)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
+            let now = Instant::now();
+            let target_ids: Vec<_> =
+                self.config
+                    .targets
+                    .iter()
+                    .filter(|(id, template)| {
+                        !matches!(template, TargetTemplate::LocalBare)
+                            && self.target_readiness.get(*id).is_none_or(|check| {
+                                &check.template != *template || check.is_stale(now)
+                            })
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
             if !target_ids.is_empty() {
                 self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
                 let generation = self.target_readiness_generation;
@@ -1427,6 +1449,7 @@ impl DashboardState {
                             template: self.config.targets[id].clone(),
                             generation,
                             result: None,
+                            recorded_at: now,
                         },
                     );
                 }
@@ -1508,7 +1531,6 @@ impl DashboardState {
             } else {
                 wizard.mounts.mounts.clone()
             },
-            allow_dirty_local: false,
             resource_allocation: wizard.resource_allocation.clone(),
         }
     }
@@ -1643,7 +1665,7 @@ impl DashboardState {
         match self
             .target_readiness
             .get(target_id)
-            .filter(|check| &check.template == template)
+            .filter(|check| &check.template == template && !check.is_stale(Instant::now()))
             .and_then(|check| check.result.as_ref())
         {
             Some(Ok(())) => None,
@@ -1667,6 +1689,7 @@ impl DashboardState {
             return;
         }
         check.result = Some(result);
+        check.recorded_at = Instant::now();
         self.mark_render_changed();
     }
 
@@ -1931,7 +1954,13 @@ impl DashboardState {
                             old_target != &target || old_directory != &value
                         },
                     ) {
-                        wizard.create_managed_worktree = options.default_create;
+                        wizard.create_managed_worktree =
+                            self.go.as_ref().map_or(options.default_create, |go| {
+                                go.recipe
+                                    .as_ref()
+                                    .and_then(|recipe| recipe.create_managed_worktree)
+                                    .unwrap_or(false)
+                            });
                     }
                     if !options.available {
                         wizard.create_managed_worktree = false;
@@ -2651,7 +2680,18 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
-        self.target_readiness.clear();
+        if let Some(go) = &self.go {
+            if let Some(recipe) = &go.recipe {
+                return DashboardAction::GoLaunch {
+                    recipe: recipe.clone(),
+                };
+            }
+            return self.change_go_setup();
+        }
+        self.begin_new_wizard()
+    }
+
+    pub(crate) fn begin_new_wizard(&mut self) -> DashboardAction {
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.begin_settings_section("profiles", None);
             return DashboardAction::None;
@@ -2721,7 +2761,6 @@ impl DashboardState {
     /// this for a failed but checkpointed session; the resume dialog reaches it
     /// for a stopped one.
     pub fn begin_resume_for(&mut self, session_id: &str) -> DashboardAction {
-        self.target_readiness.clear();
         let Some(session) = self.state.sessions.get(session_id).cloned() else {
             return DashboardAction::None;
         };
@@ -2780,7 +2819,6 @@ impl DashboardState {
     /// The source workspace and session identity are fixed; only the
     /// destination profile, target, sizing, and attachments are editable.
     pub(crate) fn begin_move(&mut self) -> DashboardAction {
-        self.target_readiness.clear();
         let Some(session) = self.selected_session().cloned() else {
             return DashboardAction::None;
         };
@@ -2840,7 +2878,6 @@ impl DashboardState {
     /// live. The failed destination is prefilled so the user can inspect the
     /// exact interruption and queue choice before retrying it.
     pub fn begin_move_recovery(&mut self, operation: MoveOperation) {
-        self.target_readiness.clear();
         let Some(session) = self
             .state
             .sessions

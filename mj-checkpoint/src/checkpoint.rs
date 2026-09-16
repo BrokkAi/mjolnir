@@ -2369,13 +2369,7 @@ pub fn restrict_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
+pub use mj_core::config::sync_directory;
 
 pub fn remove_failed_checkpoint_install(path: &Path, error: anyhow::Error) -> anyhow::Error {
     match fs::remove_file(path) {

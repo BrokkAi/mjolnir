@@ -1581,6 +1581,20 @@ impl TargetTemplate {
 }
 
 impl TargetLocator {
+    /// The target kind spelling shared with [`crate::config::TargetTemplate`].
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::LocalBare { .. } => "local-bare",
+            Self::LocalPodman { .. } => "local-podman",
+            Self::LocalDocker { .. } => "local-docker",
+            Self::AppleContainer { .. } => "apple-container",
+            Self::AwsEc2 { .. } => "aws-ec2",
+            Self::SshBare { .. } => "ssh-bare",
+            Self::SshPodman { .. } => "ssh-podman",
+            Self::SshDocker { .. } => "ssh-docker",
+        }
+    }
+
     pub const fn container_engine(&self) -> Option<&'static str> {
         match self {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
@@ -1715,19 +1729,26 @@ pub fn command_on_locator(
     if args.is_empty() {
         bail!("target command must not be empty");
     }
-    let command = match locator {
+    Ok(locator_command(locator, args).purpose(purpose))
+}
+
+/// Wrap a non-empty argv vector for execution at a target, without checking
+/// that the locator belongs to a particular session. Every per-target command
+/// is built here, so each target kind is spelled out once.
+pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpec {
+    match locator {
         TargetLocator::LocalBare { .. } => {
             let mut args = args.into_iter();
-            let program = args.next().expect("checked non-empty target command");
+            let program = args.next().expect("target command must not be empty");
             CommandSpec::new(program, args)
         }
-        TargetLocator::LocalPodman { container_id, .. } => {
-            container_exec("podman", container_id, args)
-        }
-        TargetLocator::LocalDocker { container_id } => container_exec("docker", container_id, args),
-        TargetLocator::AppleContainer { container_id } => {
-            container_exec("container", container_id, args)
-        }
+        TargetLocator::LocalPodman { container_id, .. }
+        | TargetLocator::LocalDocker { container_id }
+        | TargetLocator::AppleContainer { container_id } => container_exec(
+            locator.container_engine().expect("local container"),
+            container_id,
+            args,
+        ),
         TargetLocator::AwsEc2 { ssh, .. } | TargetLocator::SshBare { ssh, .. } => {
             ssh_command_owned(ssh, args)
         }
@@ -1747,8 +1768,7 @@ pub fn command_on_locator(
             remote.extend(args);
             ssh_command_owned(ssh, remote)
         }
-    };
-    Ok(command.purpose(purpose))
+    }
 }
 pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> {
     verify_locator(locator, session_id)?;

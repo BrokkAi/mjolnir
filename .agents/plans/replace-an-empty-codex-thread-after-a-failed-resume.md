@@ -288,3 +288,16 @@ only to veto a replacement, depends on far less.
 Revision note: written at implementation time, 2026-09-16, recording the
 design as built, the snapshot-versus-journal decision, and the live
 verification that remains outstanding.
+
+Revision note, 2026-09-16: the recovery now covers Claude Code as well as
+Codex. Claude Code writes a session's transcript at the first prompt, so an
+unprompted session fails `session/resume` with the ACP error
+`Resource not found: <session id>`, which is matched together with the session
+id so an unrelated resource error can never trigger a replacement. The
+classifier is now `mj_core::acp::error_reports_missing_native_session(harness,
+native_session_id, error)`, and the warning and failure messages name the
+harness instead of Codex. The history proof also changed: a nonzero recovery
+floor no longer counts as history by itself. The snapshot records
+`native_session_opened_ordinal`, and a native session opened above the floor is
+treated as having no hidden history, because every event about it is above the
+floor. An unknown opening ordinal still counts as history.

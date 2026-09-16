@@ -118,7 +118,6 @@ pub(crate) struct ReviewSettingsDialog {
     pub(crate) discovery_error: Option<String>,
     pub(crate) saving: bool,
     pub(crate) save_error: Option<String>,
-    pub(crate) read_only_reason: Option<String>,
     /// Profiles whose definitions differ from the saved Setup config. Their
     /// workers must not be queried until Setup persists the account changes.
     pub(crate) blocked_profile_ids: BTreeSet<String>,
@@ -183,7 +182,6 @@ impl ReviewSettingsDialog {
             discovery_error: None,
             saving: false,
             save_error: None,
-            read_only_reason: config.newer_build_notice(),
             blocked_profile_ids: BTreeSet::new(),
         };
         dialog.prepare();
@@ -314,7 +312,7 @@ impl ReviewSettingsDialog {
     }
 
     fn can_save(&self) -> bool {
-        if self.saving || self.read_only_reason.is_some() {
+        if self.saving {
             return false;
         }
         // A disabled review remains a useful draft even while discovery is
@@ -904,12 +902,6 @@ pub(crate) fn render_review_settings(
     if let Some(error) = &dialog.discovery_error {
         notes.push(Line::styled(
             format!("Discovery: {error}"),
-            Style::default().fg(theme::palette().warning),
-        ));
-    }
-    if let Some(reason) = &dialog.read_only_reason {
-        notes.push(Line::styled(
-            reason.clone(),
             Style::default().fg(theme::palette().warning),
         ));
     }

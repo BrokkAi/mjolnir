@@ -297,47 +297,56 @@ fn podman_preflight_rejects_a_uid_map_without_subordinate_ids() {
     assert!(error.contains(PODMAN_DOCUMENTATION_PATH));
 }
 
+/// Stand in for the remote host: one batched command, framed exactly as the
+/// remote script prints it.
+fn batched_ssh_probes(probes: &[(&str, i32, &str, &str)]) -> CommandOutput {
+    CommandOutput {
+        status: 0,
+        stdout: ssh_podman_probe_fixture(probes),
+        stderr: vec![],
+    }
+}
+
+fn passing_ssh_probes(linger: (i32, &'static str, &'static str)) -> CommandOutput {
+    batched_ssh_probes(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        ("rootless", 0, "true\n", ""),
+        (
+            "uid_map",
+            0,
+            "         0       1000          1\n         1     100000      65536\n",
+            "",
+        ),
+        ("linger", linger.0, linger.1, linger.2),
+    ])
+}
+
 #[test]
-fn ssh_podman_preflight_runs_every_probe_through_noninteractive_ssh() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
-        podman_output(b"         0       1000          1\n         1     100000      65536\n"),
-        podman_output(b"yes\n"),
-    ]);
+fn ssh_podman_preflight_runs_every_probe_in_one_noninteractive_ssh_command() {
+    let executor = PodmanPreflightExecutor::with_outputs([passing_ssh_probes((0, "yes\n", ""))]);
 
     let preflight = verify_ssh_podman(&ssh(), &executor).unwrap();
 
     assert_eq!(preflight.version, "5.4.2");
     let seen = executor.seen.borrow();
-    assert_eq!(seen.len(), 4);
-    for command in seen.iter() {
-        assert_eq!(command.program, "ssh");
-        assert!(command.args.contains(&"BatchMode=yes".to_owned()));
-        assert!(command.args.contains(&"ConnectTimeout=3".to_owned()));
-        assert!(command.args.contains(&"dev@example.test".to_owned()));
-    }
-    assert!(
-        seen[2]
-            .args
-            .last()
-            .unwrap()
-            .contains("'/proc/self/uid_map'")
-    );
-    assert!(seen[3].args.last().unwrap().contains("'loginctl show-user"));
-    assert!(seen[3].args.last().unwrap().contains("'sh' '-c'"));
-    assert!(!seen[3].args.last().unwrap().contains("'-lc'"));
+    assert_eq!(seen.len(), 1);
+    let command = &seen[0];
+    assert_eq!(command.program, "ssh");
+    assert!(command.args.contains(&"BatchMode=yes".to_owned()));
+    assert!(command.args.contains(&"ConnectTimeout=3".to_owned()));
+    assert!(command.args.contains(&"dev@example.test".to_owned()));
+    let remote = command.args.last().unwrap();
+    assert!(remote.contains("'sh' '-c'"));
+    assert!(!remote.contains("'-lc'"));
+    assert!(remote.contains("podman --version"));
+    assert!(remote.contains("/proc/self/uid_map"));
+    assert!(remote.contains("loginctl show-user"));
     assert!(preflight.warnings.is_empty());
 }
 
 #[test]
 fn ssh_podman_preflight_warns_when_remote_user_lingering_is_disabled() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
-        podman_output(b"         0       1000          1\n         1     100000      65536\n"),
-        podman_output(b"no\n"),
-    ]);
+    let executor = PodmanPreflightExecutor::with_outputs([passing_ssh_probes((0, "no\n", ""))]);
 
     let preflight = verify_ssh_podman(&ssh(), &executor).unwrap();
 
@@ -354,16 +363,11 @@ fn ssh_podman_preflight_warns_when_remote_user_lingering_is_disabled() {
 
 #[test]
 fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"true\n"),
-        podman_output(b"         0       1000          1\n         1     100000      65536\n"),
-        CommandOutput {
-            status: 127,
-            stdout: vec![],
-            stderr: b"sh: loginctl: not found\n".to_vec(),
-        },
-    ]);
+    let executor = PodmanPreflightExecutor::with_outputs([passing_ssh_probes((
+        127,
+        "",
+        "sh: loginctl: not found\n",
+    ))]);
 
     let preflight = verify_ssh_podman(&ssh(), &executor).unwrap();
 
@@ -379,8 +383,12 @@ fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
 
 #[test]
 fn ssh_podman_preflight_failures_name_the_destination_and_remote_scope() {
-    let executor =
-        PodmanPreflightExecutor::with_outputs([podman_output(b"podman version 3.4.7\n")]);
+    let executor = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[(
+        "version",
+        0,
+        "podman version 3.4.7\n",
+        "",
+    )])]);
 
     let error = verify_ssh_podman(&ssh(), &executor)
         .unwrap_err()
@@ -422,6 +430,200 @@ fn ssh_podman_preflight_rejects_an_unusable_destination_without_running_ssh() {
 
     assert!(error.contains("SSH destination is unusable"));
     assert!(executor.seen.borrow().is_empty());
+}
+
+#[test]
+fn ssh_podman_preflight_reports_each_failing_batched_probe() {
+    let missing_podman = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[(
+        "version",
+        127,
+        "",
+        "sh: podman: not found",
+    )])]);
+    let error = verify_ssh_podman(&ssh(), &missing_podman)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Remote Podman preflight failed on dev@example.test"));
+    assert!(error.contains("Podman 4.3.0 or newer"));
+    assert!(
+        error.contains("Podman reported: sh: podman: not found"),
+        "{error}"
+    );
+
+    let rooted = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        ("rootless", 0, "false\n", ""),
+    ])]);
+    let error = verify_ssh_podman(&ssh(), &rooted).unwrap_err().to_string();
+    assert!(
+        error.contains("prints `true` returned \"false\""),
+        "{error}"
+    );
+    assert!(error.contains("On dev@example.test: Run Mjolnir as the ordinary user"));
+
+    let uid_map = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        ("rootless", 0, "true\n", ""),
+        ("uid_map", 0, "         0       1000          1\n", ""),
+    ])]);
+    let error = verify_ssh_podman(&ssh(), &uid_map).unwrap_err().to_string();
+    assert!(
+        error.contains("maps container UIDs 0 and 1 was not met"),
+        "{error}"
+    );
+    assert!(error.contains("On dev@example.test: Add subordinate ranges"));
+
+    let uid_map_failed = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        ("rootless", 0, "true\n", ""),
+        ("uid_map", 1, "", "cannot find newuidmap executable"),
+    ])]);
+    let error = verify_ssh_podman(&ssh(), &uid_map_failed)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Podman reported: cannot find newuidmap executable"),
+        "{error}"
+    );
+    assert!(error.contains("apt install -y uidmap"));
+}
+
+#[test]
+fn ssh_podman_preflight_reports_unparsable_batched_output_as_a_transport_failure() {
+    for stdout in [
+        b"".to_vec(),
+        b"nothing framed here\n".to_vec(),
+        // Truncated mid-probe: the version block never closes.
+        {
+            let mut truncated =
+                ssh_podman_probe_fixture(&[("version", 0, "podman version 5.4.2\n", "")]);
+            truncated.truncate(40);
+            truncated
+        },
+    ] {
+        let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+            status: 0,
+            stdout,
+            stderr: b"broken pipe".to_vec(),
+        }]);
+
+        let error = verify_ssh_podman(&ssh(), &executor)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("SSH could not run the probes on dev@example.test"),
+            "{error}"
+        );
+        assert!(error.contains("unparsable output"), "{error}");
+    }
+}
+
+#[test]
+fn ssh_podman_preflight_warns_when_the_linger_value_is_unrecognized() {
+    let unrecognized =
+        PodmanPreflightExecutor::with_outputs([passing_ssh_probes((0, "maybe\n", ""))]);
+    let warnings = verify_ssh_podman(&ssh(), &unrecognized).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .detail
+            .contains("unrecognized Linger value \"maybe\""),
+        "{}",
+        warnings[0].detail
+    );
+
+    let failed = PodmanPreflightExecutor::with_outputs([passing_ssh_probes((
+        1,
+        "",
+        "Failed to connect to bus\n",
+    ))]);
+    let warnings = verify_ssh_podman(&ssh(), &failed).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .detail
+            .contains("`loginctl` exited with status 1: Failed to connect to bus"),
+        "{}",
+        warnings[0].detail
+    );
+
+    // Output that ends after the Podman probes still yields a usable target.
+    let missing = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        ("rootless", 0, "true\n", ""),
+        (
+            "uid_map",
+            0,
+            "         0       1000          1\n         1     100000      65536\n",
+            "",
+        ),
+    ])]);
+    let warnings = verify_ssh_podman(&ssh(), &missing).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .detail
+            .contains("durability check is unavailable")
+    );
+}
+
+/// The parser and the remote script have to agree about the framing markers.
+#[test]
+fn batched_preflight_script_frames_output_the_parser_expects() {
+    for marker in [PROBE_BLOCK_BEGIN, PROBE_BLOCK_END, PROBE_STATUS_PREFIX] {
+        assert!(
+            SSH_PODMAN_PREFLIGHT_SCRIPT.contains(marker),
+            "script is missing {marker}"
+        );
+    }
+    for probe in [
+        PodmanProbe::Version,
+        PodmanProbe::Rootless,
+        PodmanProbe::UidMap,
+    ] {
+        assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {} ", probe.key())));
+    }
+    assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {LINGER_PROBE_KEY} ")));
+}
+
+#[test]
+fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
+    let stdout = ssh_podman_probe_fixture(&[
+        (
+            "version",
+            0,
+            "podman version 5.4.2\n",
+            "warning: one\nwarning: two\n",
+        ),
+        (
+            "uid_map",
+            3,
+            "         0       1000          1\n         1     100000      65536\n",
+            "no trailing newline",
+        ),
+    ]);
+
+    let probes = parse_podman_probe_output(&stdout);
+
+    assert_eq!(probes.len(), 2);
+    let version = &probes["version"];
+    assert_eq!(version.status, 0);
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "podman version 5.4.2"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version.stderr).trim(),
+        "warning: one\nwarning: two"
+    );
+    let uid_map = &probes["uid_map"];
+    assert_eq!(uid_map.status, 3);
+    assert_eq!(String::from_utf8_lossy(&uid_map.stdout).lines().count(), 2);
+    assert_eq!(
+        String::from_utf8_lossy(&uid_map.stderr).trim(),
+        "no trailing newline"
+    );
 }
 
 #[test]

@@ -76,6 +76,60 @@ pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Resul
         .configure_execution_environment(config.execution_policy, &mut config.environment)
 }
 
+/// Environment variable codex-acp reads as its startup configuration.
+const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
+
+/// Pin the model this session accepted into the Codex bridge's environment.
+///
+/// Codex derives a resumed thread's turn context from the launch request, not
+/// from what the thread recorded, and codex-acp sends the profile's provider
+/// but never a model. A resume therefore opens on the `model` in the profile's
+/// `config.toml` — and Codex reports that as a mismatch ("This session was
+/// recorded with X but is resuming with Y") before the worker can restore the
+/// accepted selector after the handshake. `CODEX_CONFIG` is the only pre-start
+/// channel codex-acp exposes for this; the model cannot travel in the ACP
+/// request, the way Claude's `claudeCode.options.model` does.
+///
+/// Keys already in `CODEX_CONFIG` are kept, and only `model` is written: mode
+/// and permission keys set here would be discarded, because codex-acp merges
+/// this configuration ahead of the policy keys it derives from the target.
+///
+/// The accepted reasoning effort is deliberately not pinned. Codex does not
+/// warn about it, and the worker restores it on the live session once the
+/// handshake completes, so pinning it here would only risk changing the
+/// effort the resumed thread starts on.
+#[cfg(unix)]
+pub(crate) fn pin_accepted_codex_model(
+    harness: HarnessKind,
+    environment: &mut std::collections::BTreeMap<String, String>,
+    accepted: &mj_core::acp::AcceptedSessionConfig,
+) -> Result<()> {
+    if harness != HarnessKind::Codex {
+        return Ok(());
+    }
+    let Some(model) = accepted.model.as_deref() else {
+        return Ok(());
+    };
+    let mut config = match environment.get(CODEX_CONFIG_ENV) {
+        None => serde_json::Map::new(),
+        Some(existing) => serde_json::from_str::<serde_json::Value>(existing)
+            .ok()
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            })
+            .with_context(|| {
+                format!("{CODEX_CONFIG_ENV} must be a JSON object to restore this session's model")
+            })?,
+    };
+    config.insert("model".to_owned(), model.into());
+    environment.insert(
+        CODEX_CONFIG_ENV.to_owned(),
+        serde_json::Value::Object(config).to_string(),
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
@@ -199,6 +253,98 @@ pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Res
 #[cfg(not(unix))]
 pub async fn run_acp_supervisor(_spec: AcpSupervisorSpec) -> anyhow::Result<()> {
     anyhow::bail!("ACP supervision requires Unix")
+}
+
+#[cfg(all(test, unix))]
+mod model_pin_tests {
+    use super::*;
+    use mj_core::acp::AcceptedSessionConfig;
+
+    fn accepted(model: &str) -> AcceptedSessionConfig {
+        AcceptedSessionConfig {
+            model: Some(model.to_owned()),
+            effort: Some("high".to_owned()),
+        }
+    }
+
+    fn codex_config(environment: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
+        serde_json::from_str(&environment[CODEX_CONFIG_ENV]).unwrap()
+    }
+
+    #[test]
+    fn codex_launch_starts_a_resumed_bridge_on_the_accepted_model() {
+        let mut environment = std::collections::BTreeMap::new();
+        pin_accepted_codex_model(HarnessKind::Codex, &mut environment, &accepted("flash")).unwrap();
+        assert_eq!(
+            codex_config(&environment),
+            serde_json::json!({ "model": "flash" })
+        );
+    }
+
+    /// A profile may already set `CODEX_CONFIG`. Only the model this session
+    /// accepted may change, because everything else in there is the host's.
+    #[test]
+    fn codex_launch_keeps_the_rest_of_a_host_supplied_config() {
+        let mut environment = std::collections::BTreeMap::from([(
+            CODEX_CONFIG_ENV.to_owned(),
+            r#"{"default_permissions":"project","model":"configured-model","tui":"never"}"#
+                .to_owned(),
+        )]);
+        pin_accepted_codex_model(HarnessKind::Codex, &mut environment, &accepted("flash")).unwrap();
+        assert_eq!(
+            codex_config(&environment),
+            serde_json::json!({
+                "default_permissions": "project",
+                "model": "flash",
+                "tui": "never",
+            })
+        );
+    }
+
+    #[test]
+    fn sessions_without_an_accepted_model_keep_their_environment() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            let mut environment = std::collections::BTreeMap::from([(
+                CODEX_CONFIG_ENV.to_owned(),
+                r#"{"model":"configured-model"}"#.to_owned(),
+            )]);
+            pin_accepted_codex_model(harness, &mut environment, &AcceptedSessionConfig::default())
+                .unwrap();
+            assert_eq!(
+                environment[CODEX_CONFIG_ENV],
+                r#"{"model":"configured-model"}"#
+            );
+        }
+    }
+
+    #[test]
+    fn other_harnesses_never_receive_a_codex_config() {
+        let mut environment = std::collections::BTreeMap::new();
+        pin_accepted_codex_model(HarnessKind::Claude, &mut environment, &accepted("flash"))
+            .unwrap();
+        pin_accepted_codex_model(HarnessKind::Kimi, &mut environment, &accepted("flash")).unwrap();
+        assert!(environment.is_empty());
+    }
+
+    /// codex-acp parses this variable at startup, so a value it cannot parse
+    /// is a broken profile rather than a reason to launch without the model.
+    #[test]
+    fn an_unparsable_codex_config_is_reported_rather_than_overwritten() {
+        for broken in ["[]", "not json"] {
+            let mut environment = std::collections::BTreeMap::from([(
+                CODEX_CONFIG_ENV.to_owned(),
+                broken.to_owned(),
+            )]);
+            let error =
+                pin_accepted_codex_model(HarnessKind::Codex, &mut environment, &accepted("flash"))
+                    .expect_err("a non-object configuration cannot be merged");
+            assert!(
+                format!("{error:#}").contains(CODEX_CONFIG_ENV),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(environment[CODEX_CONFIG_ENV], broken);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

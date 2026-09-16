@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 mod api;
 mod api_activity;
+mod profile_catalog;
 
 use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
 use mj_core::remote_git::{default_branch, display_url, resolve_repository};
@@ -689,6 +690,11 @@ pub async fn run_server(
     let resolved = resolve_server_args(args, termination.clone()).await?;
     let bind = resolved.bind;
     let mut controller = Controller::load()?;
+    // `list_profiles` is called in the middle of a model's turn, so the
+    // catalogue discovers the profiles' capabilities in the background and
+    // the call only waits for what is already under way.
+    let profile_catalog = profile_catalog::ProfileCatalog::new(termination.child_token());
+    profile_catalog.sync(&controller.config);
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     let mut phone_workspaces = workspace_updates.borrow_and_update().clone();
@@ -811,7 +817,8 @@ pub async fn run_server(
             Arc::new(move |session_id: &str| api_runtime.session_state(session_id)),
             daemon_runtime.clone(),
         )
-        .with_quota_reports(subagent_quota_reports.clone()),
+        .with_quota_reports(subagent_quota_reports.clone())
+        .with_profile_catalog(profile_catalog.clone()),
     );
     options.set_subagent_backend(api_backend.clone());
     let renewal_cancellation = termination.child_token();
@@ -2081,6 +2088,14 @@ pub async fn run_server(
                                 &mut quota_batch,
                                 &quota_profiles_tx,
                             );
+                            // A changed profile set or sub-agent policy makes
+                            // the catalogue's answers wrong, so it drops them,
+                            // adopts the configuration it is given here, and
+                            // discovers the new one in the background. A
+                            // `list_profiles` call that arrives first waits on
+                            // that pass's discoveries rather than starting its
+                            // own.
+                            profile_catalog.sync(&controller.config);
                             queued_prompts.retain(|session_id, _| {
                                 controller.state.sessions.contains_key(session_id)
                             });
@@ -2612,10 +2627,6 @@ async fn apply_phone_action(
                 format!("{project} via {profile_id}")
             });
             let session_title_override = Some(title.clone());
-            // Isolated creation always starts from the network default branch;
-            // the legacy field remains accepted on the wire for old phones but
-            // cannot opt local commits or dirty files into a new session.
-            let allow_dirty_local = false;
             let (published, publication) = tokio::sync::oneshot::channel();
             let registered = services
                 .daemon_runtime
@@ -2630,7 +2641,6 @@ async fn apply_phone_action(
                         project_directory,
                         target_template_id: target_id,
                         additional_mounts: Vec::new(),
-                        allow_dirty_local,
                         resource_allocation: None,
                         title,
                         session_title_override,
@@ -4239,7 +4249,6 @@ mod tests {
                 sessions_side: Default::default(),
                 advanced: Default::default(),
                 show_stopped_sessions: false,
-                newer_config_version: None,
                 spinner: Default::default(),
                 theme: Default::default(),
                 phone: Default::default(),

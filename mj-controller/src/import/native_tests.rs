@@ -327,7 +327,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
     let mut state = State::default();
     let cancelled = AtomicBool::new(false);
     let control = progress_control(&cancelled);
-    let error = import_native_session_with_control(
+    let error = import_native_session(
         &config,
         &mut state,
         NativeImportRequest {
@@ -341,7 +341,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
             title: None,
             archive_directory: &archive_directory,
         },
-        &control,
+        Some(&control),
     )
     .unwrap_err();
     assert!(format!("{error:#}").contains("native session changed"));
@@ -357,7 +357,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
     let mut state = State::default();
     let cancelled = AtomicBool::new(true);
     let control = progress_control(&cancelled);
-    let error = import_native_session_with_control(
+    let error = import_native_session(
         &config,
         &mut state,
         NativeImportRequest {
@@ -371,7 +371,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
             title: None,
             archive_directory: &archive_directory,
         },
-        &control,
+        Some(&control),
     )
     .unwrap_err();
     assert!(format!("{error:#}").contains("import cancelled"));

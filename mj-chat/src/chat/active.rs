@@ -966,6 +966,15 @@ impl ActiveChat {
         self.refresh_voice_availability();
     }
 
+    /// Let a focused surface supply a readable title for unnamed conversations.
+    pub fn set_display_title(&mut self, title: String) {
+        self.state.set_header_summary(
+            self.state.header_target.clone(),
+            self.state.header_profile.clone(),
+            title,
+        );
+    }
+
     /// The composer's current draft. Image-bearing drafts use a versioned
     /// envelope so detach and session switching preserve the embedded bytes.
     pub fn draft(&self) -> String {

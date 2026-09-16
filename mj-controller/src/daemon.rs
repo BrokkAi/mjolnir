@@ -1130,7 +1130,6 @@ impl RuntimeState {
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
-                    allow_dirty_local: request.allow_dirty_local,
                     resource_allocation: request.resource_allocation,
                     project_directory,
                     session_title_override: request.session_title_override,
@@ -2480,7 +2479,6 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool, owner_pid: Option<u32
         .await
         .context("worker source snapshot task failed")??;
     Controller::recover_config_id_rename()?;
-    Config::migrate_legacy_localhost_target()?;
     let config = Config::load()?;
     crate::database::recover_interrupted_checkpointing_sessions(
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2894,6 +2892,15 @@ fn spawn_manager_target_refresher(
                                 *current = controller;
                                 changed
                             };
+                            // Prune the review host's retained transcripts to the
+                            // same live set, so a stopped or destroyed session's
+                            // MaterializedSession does not linger there forever.
+                            state.review_host().retain_sessions(
+                                refreshed
+                                    .iter()
+                                    .map(|target| target.session_id.clone())
+                                    .collect(),
+                            );
                             targets.send_replace(refreshed);
                             if changed {
                                 state.publish_revision();
@@ -3767,7 +3774,7 @@ fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot> {
             title: session.display_title().to_owned(),
             project: session.project_name(&controller.config),
             harness: session.harness_kind.display_name().to_owned(),
-            state: session_state_label(session.state).to_owned(),
+            state: session.state.as_str().to_owned(),
             active: session.state.is_active(),
             updated_at: session.updated_at.clone(),
         })
@@ -3787,21 +3794,6 @@ fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot> {
         sessions,
         drafts,
     })
-}
-
-fn session_state_label(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Provisioning => "provisioning",
-        SessionState::Running => "running",
-        SessionState::Disconnected => "disconnected",
-        SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing => "closing",
-        SessionState::Destroying => "destroying",
-        SessionState::Stopped => "stopped",
-        SessionState::Lost => "lost",
-        SessionState::Error => "error",
-        SessionState::DestroyedWithDataLoss => "destroyed-with-data-loss",
-    }
 }
 
 #[cfg(test)]

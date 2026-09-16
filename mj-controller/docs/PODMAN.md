@@ -127,6 +127,19 @@ wrapped in a noninteractive `ssh` call to the configured host. Every
 remediation below then applies on that remote host, as the user that SSH logs
 in as.
 
+An `ssh-podman` target also gets a second check, `Host limits for target
+<id>`, for the two host limits that cause failures when many sessions start
+at once. It reports how many kernel keys the SSH login user holds against its
+quota in `/proc/key-users`, because every container takes a session keyring
+and `podman run` fails with `crun: create keyring` once the quota is gone; fix
+that on the host by raising `kernel.keys.maxkeys` and `kernel.keys.maxbytes`
+with sysctl. It also reports the `MaxStartups` value set in
+`/etc/ssh/sshd_config` or a readable drop-in, which caps how many
+unauthenticated connections sshd accepts at once; raise it there and reload
+sshd if provisioning sees dropped connections. Doctor reads the files rather
+than running `sshd -T`, which needs root, so it says when a drop-in was
+unreadable instead of guessing sshd's default.
+
 Mjolnir's bundled agent-development image is published at
 `ghcr.io/brokkai/mjolnir/agent-dev:latest` (multi-arch: `linux/amd64` and
 `linux/arm64`, public, no authentication needed to pull). Pull it directly:

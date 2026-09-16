@@ -1545,6 +1545,12 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
                             false
                         }
                     });
+                    // Drop the reseed view for every session that is no longer a
+                    // live target. `latest` is only ever inserted into otherwise,
+                    // so without this it keeps a full MaterializedSession per
+                    // session ever seen — a slow memory leak the actor
+                    // reconciliation above does not cover.
+                    latest.retain(|session_id, _| desired.contains_key(session_id));
                     for session_id in desired.keys() {
                         if !actors.contains_key(session_id)
                             && let Some(view) = latest.get(session_id).cloned()

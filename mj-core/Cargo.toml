@@ -3,10 +3,11 @@ name = "brokk-mj-core"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
+license.workspace = true
 description = "Session control plane for ACP coding agents"
-license = "GPL-3.0-only"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
+readme.workspace = true
 include = [
     "src/**/*.rs",
     # Recorded ACP bridge traffic the step-clock tests replay.
@@ -15,8 +16,6 @@ include = [
     "Cargo.lock",
     "/README.md",
     "/LICENSE",
-    "licenses/THIRD_PARTY_LICENSES.html",
-    "licenses/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt",
 ]
 
 [lib]

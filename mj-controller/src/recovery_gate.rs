@@ -220,13 +220,4 @@ impl RecoveryObserver {
     pub fn cancel_busy(&self, session_id: &str) {
         self.gate.cancel_busy(session_id);
     }
-
-    pub async fn wait_idle(&self, session_id: &str) {
-        let mut busy = self.gate.subscribe();
-        while self.is_busy(session_id) {
-            if busy.changed().await.is_err() {
-                break;
-            }
-        }
-    }
 }

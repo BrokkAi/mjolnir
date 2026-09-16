@@ -90,6 +90,16 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    GoSelectionSaved(std::result::Result<(), String>),
+    GoContext {
+        session_id: String,
+        result: std::result::Result<(std::path::PathBuf, String), String>,
+    },
+    GoPrepared {
+        workspace_id: String,
+        retry: Box<DashboardAction>,
+        result: Box<std::result::Result<(Config, mj_core::go::GoRecipe), String>>,
+    },
     RemotePreflight {
         generation: u64,
         launch: Box<DashboardAction>,
@@ -824,7 +834,7 @@ pub(crate) fn spawn_setup_save(
         "saving setup",
         updates,
         move || {
-            let state = mj_controller::database::load_state_migrating()?;
+            let state = mj_controller::database::load_state()?;
             save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
         },
         move |result| DashboardIoUpdate::SetupSaved { generation, result },
@@ -1431,6 +1441,7 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 /// so this stays separate from [`spawn_lifecycle_operation`].
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
+    go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<LifecycleUpdate>,
     runtime: tokio::runtime::Handle,
@@ -1449,13 +1460,21 @@ pub(crate) fn spawn_dashboard_create_session(
             project_directory,
             target_template_id,
             additional_mounts,
-            allow_dirty_local: _allow_dirty_local,
             resource_allocation,
         } = action.clone()
         else {
             return;
         };
         let registered = (|| -> Result<Option<RegisteredDashboardSession>> {
+            if let Some((directory, recipe, global)) = go_save {
+                mj_core::go::GoPreferences::save_recipe(
+                    &mj_core::go::GoPreferences::path(),
+                    directory,
+                    recipe,
+                    global,
+                )
+                .context("save fast-start setup; session has not been started")?;
+            }
             let controller = Controller::load()?;
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
@@ -1510,7 +1529,6 @@ pub(crate) fn spawn_dashboard_create_session(
                         additional_mounts,
                         // Local changes are never part of isolated creation;
                         // the compatibility field is intentionally ignored.
-                        allow_dirty_local: false,
                         resource_allocation,
                         title,
                         session_title_override: None,
@@ -1821,6 +1839,38 @@ impl DashboardContext {
                 }
                 self.dirty = true;
             }
+            DashboardIoUpdate::GoSelectionSaved(result) => {
+                self.go_selection_in_flight = false;
+                if let Err(error) = result {
+                    self.dashboard.set_failure_notice(format!(
+                        "Could not remember this conversation: {error}"
+                    ));
+                }
+            }
+            DashboardIoUpdate::GoContext { session_id, result } => {
+                self.go_context_in_flight = false;
+                self.dashboard.set_go_context(session_id, result);
+            }
+            DashboardIoUpdate::GoPrepared {
+                workspace_id,
+                retry,
+                result,
+            } => match *result {
+                Ok((config, recipe)) => {
+                    self.controller.config = config.clone();
+                    let action = self
+                        .dashboard
+                        .go_launch_action(workspace_id, config, recipe);
+                    super::actions::start_session_launch(self, action);
+                }
+                Err(error) => {
+                    if self.dashboard.active_workspace_id() == Some(workspace_id.as_str()) {
+                        self.dashboard.show_launch_failure(error, Some(*retry));
+                    } else {
+                        self.dashboard.set_failure_notice(format!("Session preparation failed in workspace {workspace_id}: {error}. Return to that workspace to retry."));
+                    }
+                }
+            },
             DashboardIoUpdate::CreateSession(update) => self.apply_create_session_update(*update),
             DashboardIoUpdate::RemotePreflight {
                 generation,

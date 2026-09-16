@@ -269,10 +269,6 @@ pub(crate) enum Confirmation {
         mode: Box<Mode>,
         intent: DismissalIntent,
     },
-    DirtyLocal {
-        action: DashboardAction,
-        repositories: Vec<String>,
-    },
     CloseFailed {
         session_id: String,
         error: String,
@@ -454,8 +450,10 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::ConfigurationRepair { .. } => {
             &["Dismiss", "Open transcript", "Open settings"]
         }
-        Confirmation::LaunchFailed { retry: Some(_), .. } => &["Dismiss", "Retry launch"],
-        Confirmation::LaunchFailed { .. } => &["Dismiss"],
+        Confirmation::LaunchFailed { retry: Some(_), .. } => {
+            &["Dismiss", "Retry launch", "Settings"]
+        }
+        Confirmation::LaunchFailed { .. } => &["Dismiss", "Settings"],
         Confirmation::Dismiss {
             intent: DismissalIntent::DiscardSetup,
             ..
@@ -464,7 +462,6 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             intent: DismissalIntent::CancelImport,
             ..
         } => &["Keep importing", "Cancel import"],
-        Confirmation::DirtyLocal { .. } => &["Cancel", "Continue"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
         Confirmation::DestroyStopped { .. } => &["No", "Yes"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
@@ -1331,23 +1328,6 @@ fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'st
             }
             (" Move this checkout into the target? ", lines)
         }
-        Confirmation::DirtyLocal { repositories, .. } => {
-            let mut lines = vec![
-                Line::raw("The initial worker will include these uncommitted changes:"),
-                Line::raw(""),
-            ];
-            lines.extend(repositories.iter().map(|repository| {
-                Line::styled(
-                    repository.clone(),
-                    Style::default().fg(theme::palette().warning),
-                )
-            }));
-            lines.extend([
-                Line::raw(""),
-                Line::raw("Pushes back to origin are rejected until the local checkout is clean."),
-            ]);
-            (" Local repository has uncommitted changes ", lines)
-        }
         Confirmation::DestroyStopped { session_id, .. } => (
             " Permanently destroy stopped session? ",
             vec![
@@ -1493,7 +1473,6 @@ pub(crate) fn render_confirmation(
         | Confirmation::LaunchFailed { .. }
         | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
-        Confirmation::DirtyLocal { .. } => 11,
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::StopWithSubagents { .. } => 10,
@@ -2217,18 +2196,6 @@ impl DashboardState {
         self.mark_render_changed();
     }
 
-    pub fn show_dirty_local_confirmation(
-        &mut self,
-        action: DashboardAction,
-        repositories: Vec<String>,
-    ) {
-        self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::DirtyLocal {
-            action,
-            repositories,
-        }));
-        self.mark_render_changed();
-    }
-
     pub fn finish_import(&mut self) {
         self.cancel_modal();
     }
@@ -2515,7 +2482,10 @@ impl DashboardState {
                 index,
             ) => {
                 self.restore_dismissed_mode(previous);
-                if index == 1 {
+                if (retry.is_some() && index == 2) || (retry.is_none() && index == 1) {
+                    self.begin_setup();
+                    DashboardAction::None
+                } else if index == 1 {
                     retry.map(|action| *action).unwrap_or(DashboardAction::None)
                 } else {
                     DashboardAction::None
@@ -2528,16 +2498,6 @@ impl DashboardState {
                     DismissalIntent::DiscardSetup => DashboardAction::None,
                     DismissalIntent::CancelImport => DashboardAction::CancelImport,
                 }
-            }
-            (Confirmation::DirtyLocal { mut action, .. }, 1) => {
-                if let DashboardAction::CreateSession {
-                    allow_dirty_local, ..
-                } = &mut action
-                {
-                    *allow_dirty_local = true;
-                }
-                self.cancel_modal();
-                action
             }
             (
                 Confirmation::ConvertRawCheckout {
@@ -2662,7 +2622,6 @@ mod tests {
             project_directory: None,
             create_managed_worktree: Some(false),
             additional_mounts: Vec::new(),
-            allow_dirty_local: false,
             resource_allocation: None,
         };
         dashboard.show_remote_repair_confirmation(
@@ -2743,7 +2702,6 @@ mod tests {
             project_directory: None,
             target_template_id: "docker".into(),
             additional_mounts: Vec::new(),
-            allow_dirty_local: false,
             resource_allocation: None,
         };
         dashboard.show_launch_failure("upload failed", Some(retry.clone()));
@@ -3117,7 +3075,6 @@ mod tests {
                 sessions_side: Default::default(),
                 advanced: Default::default(),
                 show_stopped_sessions: false,
-                newer_config_version: None,
                 spinner: Default::default(),
                 theme: Default::default(),
                 phone: Default::default(),
@@ -3925,10 +3882,6 @@ mod tests {
                 session_id: "session-1".into(),
                 error: "archive unavailable".into(),
             },
-            Confirmation::DirtyLocal {
-                action: DashboardAction::None,
-                repositories: vec!["/work/repo".into(), "/work/other".into()],
-            },
             Confirmation::ForceDestroy {
                 session_id: "session-1".into(),
             },
@@ -3975,44 +3928,6 @@ mod tests {
         );
         // Destroying from the dialog leaves the user in the dialog.
         assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
-    }
-
-    #[test]
-    fn dirty_local_confirmation_continues_or_cancels_from_its_buttons() {
-        let create = |allow_dirty_local| DashboardAction::CreateSession {
-            mjolnir_subagents: None,
-            create_managed_worktree: None,
-            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-            profile_id: "codex-1".into(),
-            bundle_id: "hel".into(),
-            project_directory: None,
-            target_template_id: "podman".into(),
-            additional_mounts: Vec::new(),
-            allow_dirty_local,
-            resource_allocation: None,
-        };
-
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.show_dirty_local_confirmation(create(false), vec!["project".into()]);
-        dashboard.set_active_workspace(Some("workspace-other".into()));
-        assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), create(true));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.show_dirty_local_confirmation(create(false), vec!["project".into()]);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('y'))),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 
     #[test]

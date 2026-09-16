@@ -17,8 +17,8 @@ use crate::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec,
     ContainerTemplate as RuntimeContainerTemplate, ProcessExecutor, SshTarget as RuntimeSshTarget,
     TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test, ssh_command,
-    ssh_connectivity_probe, verify_local_docker, verify_local_podman, verify_ssh_docker,
-    verify_ssh_podman,
+    ssh_connectivity_probe, ssh_validation_command, verify_local_docker, verify_local_podman,
+    verify_ssh_docker, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -190,6 +190,7 @@ pub fn run_with_config_path(
     let (config, mut checks) = configuration_checks(config_path);
     checks.push(harness_discovery_check(config.as_ref(), executor));
     checks.extend(harness_checks(config.as_ref(), executor));
+    checks.extend(subagent_eligibility_checks(config.as_ref()));
     checks.extend(podman_checks(config.as_ref(), executor, options.smoke));
     checks.extend(docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(ssh_bare_checks(config.as_ref(), executor));
@@ -344,23 +345,31 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
             )],
         );
     }
+    // A config a newer build wrote is not broken TOML: replacing it with
+    // `mj setup` would discard that build's settings. Say what is actually
+    // wrong before the load below reports it as invalid.
+    if let Some(found) = mj_core::config::newer_version_on_disk(path) {
+        return (
+            None,
+            vec![DoctorCheck::fixable(
+                "config",
+                "Mjolnir configuration",
+                format!(
+                    "{} was written by a newer Mjolnir (config version {found}; this build supports {})",
+                    path.display(),
+                    mj_core::config::CONFIG_VERSION
+                ),
+                "Update Mjolnir to that build or newer. Do not lower the version value by hand or replace the file.",
+            )],
+        );
+    }
     match Config::load_from(path) {
         Ok(config) => {
-            let mut checks = vec![match config.newer_build_notice() {
-                // Hel still runs on a config a newer build owns, but every
-                // save refuses, so say so rather than reporting it as valid.
-                Some(notice) => DoctorCheck::warning(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{}: {notice}", path.display()),
-                    "Update Mjolnir, or change settings with the newer build.",
-                ),
-                None => DoctorCheck::ready(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{} is valid", path.display()),
-                ),
-            }];
+            let mut checks = vec![DoctorCheck::ready(
+                "config",
+                "Mjolnir configuration",
+                format!("{} is valid", path.display()),
+            )];
             if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
@@ -448,6 +457,40 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
                     profile.home.display()
                 ),
             )
+        })
+        .collect()
+}
+
+/// Warn about a profile that is both listed for sub-agent use and disabled.
+///
+/// The daemon keeps running and simply does not offer such a profile to a
+/// parent, because the delegation candidates and the spawn gate both require an
+/// enabled profile. This surfaces the contradiction so the eligible list and
+/// the profile's `enabled` flag can be reconciled, rather than leaving a profile
+/// the user meant to use silently unavailable.
+fn subagent_eligibility_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    config
+        .subagents
+        .eligible_profiles
+        .iter()
+        .filter(|(_, eligible)| **eligible)
+        .filter_map(|(id, _)| {
+            let profile = config.profiles.get(id)?;
+            (!profile.enabled).then(|| {
+                DoctorCheck::warning(
+                    format!("subagents.{id}"),
+                    format!("Sub-agent profile {id}"),
+                    format!(
+                        "Profile {id:?} is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use."
+                    ),
+                    format!(
+                        "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
+                    ),
+                )
+            })
         })
         .collect()
 }
@@ -863,7 +906,8 @@ fn ssh_bare_check(
     }
 }
 
-/// One check per `ssh-podman` target: the same Podman probes, run over SSH.
+/// Two checks per `ssh-podman` target: the same Podman probes run over SSH,
+/// then the host limits that only bite under provisioning load.
 fn ssh_podman_checks(
     config: Option<&Config>,
     executor: &impl CommandExecutor,
@@ -875,29 +919,34 @@ fn ssh_podman_checks(
     config
         .targets
         .iter()
-        .filter_map(|(id, target)| match target {
-            TargetTemplate::SshPodman { ssh, container, .. } => Some(ssh_podman_check(
-                id,
-                &backend_ssh(ssh),
-                &container.image,
-                executor,
-                smoke,
-            )),
-            _ => None,
+        .flat_map(|(id, target)| match target {
+            TargetTemplate::SshPodman { ssh, container, .. } => {
+                let ssh = backend_ssh(ssh);
+                let (check, reachable) =
+                    ssh_podman_check(id, &ssh, &container.image, executor, smoke);
+                let mut checks = vec![check];
+                // An unreachable host has one problem, not two.
+                if reachable {
+                    checks.push(ssh_podman_limits_check(id, &ssh, executor));
+                }
+                checks
+            }
+            _ => Vec::new(),
         })
         .collect()
 }
 
+/// The Podman check for one target, paired with whether the host answered SSH
+/// at all: the caller skips its follow-up probes when it did not.
 fn ssh_podman_check(
     id: &str,
     ssh: &RuntimeSshTarget,
     image: &str,
     executor: &impl CommandExecutor,
     smoke: bool,
-) -> DoctorCheck {
+) -> (DoctorCheck, bool) {
     let check_id = format!("runtime.ssh-podman.{id}");
     let title = format!("Remote Podman for target {id}");
-    let destination = &ssh.destination;
     // Connectivity first: a remote Podman probe on an unreachable host reports
     // a Podman problem the user does not have.
     if let SshConnectivity::Failed {
@@ -905,8 +954,27 @@ fn ssh_podman_check(
         remediation,
     } = ssh_connectivity(ssh, executor)
     {
-        return DoctorCheck::fixable(check_id, title, detail, remediation);
+        return (
+            DoctorCheck::fixable(check_id, title, detail, remediation),
+            false,
+        );
     }
+    (
+        ssh_podman_runtime_check(check_id, title, ssh, image, executor, smoke),
+        true,
+    )
+}
+
+/// The Podman half of the target's checks, on a host already known reachable.
+fn ssh_podman_runtime_check(
+    check_id: String,
+    title: String,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let destination = &ssh.destination;
     let preflight = match verify_ssh_podman(ssh, executor) {
         Ok(preflight) => preflight,
         Err(error) => {
@@ -983,6 +1051,207 @@ fn ssh_podman_check(
             ),
         ),
     }
+}
+
+/// Host limits that cause provisioning failures under load, read on their own SSH
+/// round trip so the provisioning preflight never pays for them.
+///
+/// Every crun container takes a session keyring, so `podman run` fails with
+/// `crun: create keyring` once the login user's keyring quota is exhausted, and
+/// sshd refuses new connections past `MaxStartups`. `sshd -T` needs root, so the
+/// directive is read from the config files instead; drop-ins may be unreadable,
+/// which the script reports rather than guessing.
+const SSH_PODMAN_HOST_LIMITS_SCRIPT: &str = r#"
+if [ -r /proc/sys/kernel/keys/maxkeys ]; then
+    printf 'keys.max=%s\n' "$(cat /proc/sys/kernel/keys/maxkeys)"
+fi
+if [ -r /proc/key-users ]; then
+    awk -v uid="$(id -u)" '
+        { user = $1; sub(/:$/, "", user) }
+        user == uid {
+            split($4, quota, "/")
+            printf "keys.used=%s\nkeys.quota=%s\n", quota[1], quota[2]
+        }
+    ' /proc/key-users
+fi
+unreadable=0
+maxstartups=
+# A drop-in directory that cannot be listed hides any override it holds.
+if [ -d /etc/ssh/sshd_config.d ] && ! [ -r /etc/ssh/sshd_config.d ]; then
+    unreadable=1
+fi
+for file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+    [ -e "$file" ] || continue
+    if [ -r "$file" ]; then
+        match=$(grep -i '^[[:space:]]*maxstartups[[:space:]]' "$file" 2>/dev/null | tail -n 1)
+        [ -n "$match" ] && maxstartups=$(printf '%s\n' "$match" | awk '{ print $2 }')
+    else
+        unreadable=1
+    fi
+done
+[ -n "$maxstartups" ] && printf 'maxstartups=%s\n' "$maxstartups"
+[ "$unreadable" = 1 ] && printf 'maxstartups.unreadable=1\n'
+exit 0
+"#;
+
+/// Keyring use at or above this share of the quota is reported as a warning:
+/// the remaining headroom is a few concurrent containers, not a comfortable
+/// margin.
+const KEYRING_PRESSURE_PERCENT: u64 = 80;
+
+/// What `SSH_PODMAN_HOST_LIMITS_SCRIPT` managed to read. Every field is
+/// optional: an unreadable file is reported, never guessed at.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HostLimits {
+    keys_used: Option<u64>,
+    keys_quota: Option<u64>,
+    keys_max: Option<u64>,
+    max_startups: Option<String>,
+    max_startups_unreadable: bool,
+}
+
+fn parse_host_limits(stdout: &[u8]) -> HostLimits {
+    let text = String::from_utf8_lossy(stdout);
+    let mut limits = HostLimits::default();
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim() {
+            "keys.used" => limits.keys_used = value.parse().ok(),
+            "keys.quota" => limits.keys_quota = value.parse().ok(),
+            "keys.max" => limits.keys_max = value.parse().ok(),
+            "maxstartups" if !value.is_empty() => limits.max_startups = Some(value.to_owned()),
+            "maxstartups.unreadable" => limits.max_startups_unreadable = value == "1",
+            _ => {}
+        }
+    }
+    limits
+}
+
+impl HostLimits {
+    /// True when the script produced nothing a reader could act on.
+    fn is_empty(&self) -> bool {
+        self.keys_used.is_none()
+            && self.keys_quota.is_none()
+            && self.keys_max.is_none()
+            && self.max_startups.is_none()
+            && !self.max_startups_unreadable
+    }
+
+    fn keyring_is_under_pressure(&self) -> bool {
+        match (self.keys_used, self.keys_quota) {
+            (Some(used), Some(quota)) if quota > 0 => {
+                used.saturating_mul(100) >= quota.saturating_mul(KEYRING_PRESSURE_PERCENT)
+            }
+            _ => false,
+        }
+    }
+
+    fn keyring_sentence(&self, destination: &str) -> String {
+        match (self.keys_used, self.keys_quota) {
+            (Some(used), Some(quota)) => {
+                let system = match self.keys_max {
+                    Some(max) => format!(", and `kernel.keys.maxkeys` is {max}"),
+                    None => String::new(),
+                };
+                format!(
+                    "The login user on {destination} holds {used} of its {quota} kernel keyring quota{system}."
+                )
+            }
+            _ => format!(
+                "The kernel keyring quota for the login user on {destination} could not be read."
+            ),
+        }
+    }
+
+    fn max_startups_sentence(&self) -> String {
+        match (&self.max_startups, self.max_startups_unreadable) {
+            (Some(value), _) => format!("sshd MaxStartups is {value}."),
+            (None, true) => "sshd MaxStartups is not set in a readable sshd_config file, so sshd's default applies unless an unreadable drop-in overrides it.".to_owned(),
+            (None, false) => {
+                "sshd MaxStartups is not set in sshd_config, so sshd's default applies.".to_owned()
+            }
+        }
+    }
+}
+
+/// Report the two host limits that made provisioning fail under load. The
+/// target still works when they cannot be read, so an unreadable host is a
+/// warning with a manual command, never a `fixable` runtime failure.
+fn ssh_podman_limits_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-podman.{id}.limits");
+    let title = format!("Host limits for target {id}");
+    let destination = &ssh.destination;
+    let manual = || {
+        format!(
+            "Read them by hand on {destination}: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`."
+        )
+    };
+    let command = ssh_validation_command(
+        ssh,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            SSH_PODMAN_HOST_LIMITS_SCRIPT.to_owned(),
+        ],
+        "read ssh-podman host limits",
+    );
+    let limits = match executor.execute(&command) {
+        Ok(output) if output.status == 0 => parse_host_limits(&output.stdout),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return DoctorCheck::warning(
+                check_id,
+                title,
+                format!(
+                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {stderr}"
+                ),
+                manual(),
+            );
+        }
+        Err(error) => {
+            return DoctorCheck::warning(
+                check_id,
+                title,
+                format!(
+                    "Could not read the kernel keyring quota or sshd MaxStartups from {destination}: {error}"
+                ),
+                manual(),
+            );
+        }
+    };
+    if limits.is_empty() {
+        return DoctorCheck::warning(
+            check_id,
+            title,
+            format!("{destination} reported no readable kernel keyring or sshd limits."),
+            manual(),
+        );
+    }
+    let detail = format!(
+        "{} {}",
+        limits.keyring_sentence(destination),
+        limits.max_startups_sentence()
+    );
+    if limits.keyring_is_under_pressure() {
+        return DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "{detail} Every container takes a session keyring, so `podman run` fails with `crun: create keyring` once the quota is gone."
+            ),
+            format!(
+                "Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on {destination}, and close finished sessions promptly."
+            ),
+        );
+    }
+    DoctorCheck::ready(check_id, title, detail)
 }
 
 /// One check per `ssh-docker` target: Docker daemon, image, and optional
@@ -1638,10 +1907,24 @@ mod tests {
         all
     }
 
+    /// The remote probes arrive in one batched SSH command, framed the way the
+    /// remote script prints them.
+    fn ssh_podman_probes(linger: (i32, &str, &str)) -> Vec<Result<CommandOutput>> {
+        vec![Ok(output(crate::targets::ssh_podman_probe_fixture(&[
+            ("version", 0, "podman version 5.4.2\n", ""),
+            ("rootless", 0, "true\n", ""),
+            (
+                "uid_map",
+                0,
+                "         0       1000          1\n         1     100000      65536\n",
+                "",
+            ),
+            ("linger", linger.0, linger.1, linger.2),
+        ])))]
+    }
+
     fn passing_ssh_podman_probes() -> Vec<Result<CommandOutput>> {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(output(b"yes\n")));
-        responses
+        ssh_podman_probes((0, "yes\n", ""))
     }
 
     fn passing_podman_probes() -> Vec<Result<CommandOutput>> {
@@ -1677,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_a_config_owned_by_a_newer_hel_as_read_only() {
+    fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(
@@ -1691,10 +1974,13 @@ mod tests {
 
         let (config, checks) = configuration_checks(&path);
 
-        assert!(config.is_some());
+        assert!(config.is_none());
         let check = checks.iter().find(|check| check.id == "config").unwrap();
-        assert_eq!(check.status, CheckStatus::Warning);
-        assert!(check.detail.contains("read-only"), "{}", check.detail);
+        assert_eq!(check.status, CheckStatus::Fixable);
+        assert!(check.detail.contains("newer Mjolnir"), "{}", check.detail);
+        let remediation = check.remediation.as_deref().unwrap_or_default();
+        assert!(remediation.contains("Update Mjolnir"), "{remediation}");
+        assert!(!remediation.contains("mj setup"), "{remediation}");
     }
 
     fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>) -> Config {
@@ -1956,7 +2242,8 @@ mod tests {
     fn ssh_podman_check_is_ready_after_ssh_wrapped_probes_without_smoke() {
         let executor = FakeExecutor::new(reachable_then(passing_ssh_podman_probes()));
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
         assert_eq!(check.id, "runtime.ssh-podman.remote");
         assert_eq!(check.title, "Remote Podman for target remote");
@@ -1964,28 +2251,27 @@ mod tests {
         assert!(check.detail.contains("Remote rootless Podman 5.4.2"));
         assert!(check.detail.contains("dev@example.test"));
         let commands = executor.commands.borrow();
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].args.last().unwrap(), "'true'");
         for command in commands.iter().skip(1) {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"dev@example.test".to_owned()));
         }
         assert!(
-            commands[4]
+            commands[1]
                 .args
                 .last()
                 .unwrap()
-                .contains("'loginctl show-user")
+                .contains("loginctl show-user")
         );
     }
 
     #[test]
     fn ssh_podman_check_warns_when_remote_user_lingering_is_disabled() {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(output(b"no\n")));
-        let executor = FakeExecutor::new(reachable_then(responses));
+        let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((0, "no\n", ""))));
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
         assert_eq!(check.status, CheckStatus::Warning);
         assert!(all_ready(std::slice::from_ref(&check)));
@@ -2002,15 +2288,14 @@ mod tests {
 
     #[test]
     fn ssh_podman_check_explains_when_durability_cannot_be_verified() {
-        let mut responses = passing_podman_probes();
-        responses.push(Ok(CommandOutput {
-            status: 127,
-            stdout: vec![],
-            stderr: b"sh: loginctl: not found\n".to_vec(),
-        }));
-        let executor = FakeExecutor::new(reachable_then(responses));
+        let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((
+            127,
+            "",
+            "sh: loginctl: not found\n",
+        ))));
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
         assert_eq!(check.status, CheckStatus::Warning);
         assert!(all_ready(std::slice::from_ref(&check)));
@@ -2024,9 +2309,17 @@ mod tests {
 
     #[test]
     fn ssh_podman_check_failure_scopes_the_remediation_to_the_remote_host() {
-        let executor = FakeExecutor::new(reachable_then([Ok(output(b"podman version 3.4.7\n"))]));
+        let executor = FakeExecutor::new(reachable_then([Ok(output(
+            crate::targets::ssh_podman_probe_fixture(&[(
+                "version",
+                0,
+                "podman version 3.4.7\n",
+                "",
+            )]),
+        ))]));
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
         assert_eq!(check.status, CheckStatus::Fixable);
         assert!(check.detail.contains("dev@example.test"));
@@ -2045,7 +2338,8 @@ mod tests {
             b"dev@example.test: Permission denied (publickey).",
         ))]);
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
 
         assert_eq!(check.status, CheckStatus::Fixable);
         assert_eq!(
@@ -2066,18 +2360,142 @@ mod tests {
         ]);
         let executor = FakeExecutor::new(reachable_then(responses));
 
-        let check = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, true);
+        let (check, _) =
+            ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, true);
 
         assert_eq!(check.status, CheckStatus::Ready);
         let commands = executor.commands.borrow();
-        assert_eq!(commands.len(), 8);
-        for command in commands.iter().skip(5) {
+        assert_eq!(commands.len(), 5);
+        for command in commands.iter().skip(2) {
             assert_eq!(command.program, "ssh");
             assert!(command.args.contains(&"dev@example.test".to_owned()));
         }
-        assert!(commands[5].args.last().unwrap().contains("'run' '--init'"));
-        assert!(commands[6].args.last().unwrap().ends_with("'true'"));
-        assert!(commands[7].args.last().unwrap().contains("'rm' '--force'"));
+        assert!(commands[2].args.last().unwrap().contains("'run' '--init'"));
+        assert!(commands[3].args.last().unwrap().ends_with("'true'"));
+        assert!(commands[4].args.last().unwrap().contains("'rm' '--force'"));
+    }
+
+    /// Everything the limits script can print, as one host would report it.
+    fn host_limits_output() -> Vec<u8> {
+        b"keys.max=200\nkeys.used=101\nkeys.quota=4096\nmaxstartups=100:30:200\n".to_vec()
+    }
+
+    #[test]
+    fn host_limits_parse_reports_every_field_the_script_printed() {
+        let limits = parse_host_limits(&host_limits_output());
+
+        assert_eq!(limits.keys_max, Some(200));
+        assert_eq!(limits.keys_used, Some(101));
+        assert_eq!(limits.keys_quota, Some(4096));
+        assert_eq!(limits.max_startups.as_deref(), Some("100:30:200"));
+        assert!(!limits.max_startups_unreadable);
+        assert!(!limits.is_empty());
+        assert!(!limits.keyring_is_under_pressure());
+    }
+
+    #[test]
+    fn host_limits_report_pressure_when_keys_reach_the_quota() {
+        let limits = parse_host_limits(b"keys.used=3300\nkeys.quota=4096\n");
+
+        assert!(limits.keyring_is_under_pressure());
+        assert!(
+            limits
+                .keyring_sentence("dev@example.test")
+                .contains("3300 of its 4096")
+        );
+    }
+
+    #[test]
+    fn host_limits_report_an_explicit_max_startups_directive() {
+        let limits = parse_host_limits(b"maxstartups=10:30:60\n");
+
+        assert_eq!(
+            limits.max_startups_sentence(),
+            "sshd MaxStartups is 10:30:60."
+        );
+    }
+
+    #[test]
+    fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
+        let limits =
+            parse_host_limits(b"keys.used=10\nkeys.quota=4096\nmaxstartups.unreadable=1\n");
+
+        assert!(limits.max_startups_unreadable);
+        let sentence = limits.max_startups_sentence();
+        assert!(sentence.contains("unreadable drop-in"), "{sentence}");
+        assert!(!sentence.contains("10:30"), "{sentence}");
+    }
+
+    #[test]
+    fn host_limits_say_the_sshd_default_applies_when_every_file_was_readable() {
+        let limits = parse_host_limits(b"keys.used=10\nkeys.quota=4096\n");
+
+        assert_eq!(
+            limits.max_startups_sentence(),
+            "sshd MaxStartups is not set in sshd_config, so sshd's default applies."
+        );
+    }
+
+    #[test]
+    fn host_limits_are_empty_when_the_script_printed_nothing() {
+        assert!(parse_host_limits(b"").is_empty());
+        assert!(parse_host_limits(b"unrelated line\n").is_empty());
+    }
+
+    #[test]
+    fn ssh_podman_checks_report_host_limits_after_the_podman_check() {
+        let mut responses = passing_ssh_podman_probes();
+        responses.push(Ok(output(host_limits_output())));
+        let executor = FakeExecutor::new(reachable_then(responses));
+        let config = config_with([(
+            "remote",
+            TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container("ubuntu:24.04"),
+            },
+        )]);
+
+        let checks = ssh_podman_checks(Some(&config), &executor, false);
+
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].id, "runtime.ssh-podman.remote");
+        assert_eq!(checks[1].id, "runtime.ssh-podman.remote.limits");
+        assert_eq!(checks[1].title, "Host limits for target remote");
+        assert_eq!(checks[1].status, CheckStatus::Ready);
+        assert!(
+            checks[1].detail.contains("101 of its 4096"),
+            "{}",
+            checks[1].detail
+        );
+        assert!(
+            checks[1].detail.contains("sshd MaxStartups is 100:30:200"),
+            "{}",
+            checks[1].detail
+        );
+        let commands = executor.commands.borrow();
+        assert_eq!(commands.len(), 3);
+        assert!(commands[2].args.last().unwrap().contains("key-users"));
+    }
+
+    #[test]
+    fn ssh_podman_checks_skip_host_limits_when_the_host_is_unreachable() {
+        let executor = FakeExecutor::new([Ok(failed(
+            b"dev@example.test: Permission denied (publickey).",
+        ))]);
+        let config = config_with([(
+            "remote",
+            TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: container("ubuntu:24.04"),
+            },
+        )]);
+
+        let checks = ssh_podman_checks(Some(&config), &executor, false);
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].id, "runtime.ssh-podman.remote");
+        assert_eq!(checks[0].status, CheckStatus::Fixable);
+        assert_eq!(executor.commands.borrow().len(), 1);
     }
 
     #[test]

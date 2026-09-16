@@ -2,13 +2,14 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mj_core::subagent::{MAX_WAIT_SECONDS, SourceRange, SubagentToolAction, SubagentToolRequest};
+use mj_core::subagent::{
+    FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction, SubagentToolRequest,
+};
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
@@ -30,86 +31,22 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
     run(stdin.lock(), std::io::stdout(), socket)
 }
 
-/// Serve MCP over `reader`/`writer` against the worker `socket`.
-///
-/// Each `tools/call` runs on its own thread and its own socket connection, so a
-/// long `wait` never head-of-line blocks a cheap `list_agents` queued after it.
-/// JSON-RPC lets a response arrive in any order because it carries the request
-/// id, and every write to `writer` is serialized behind one lock so concurrent
-/// responses never interleave.
+/// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
+/// dispatched concurrently, each on its own socket connection, so a long
+/// `wait` never blocks a cheap `list_agents` queued after it.
 fn run<R: BufRead, W: Write + Send + 'static>(reader: R, writer: W, socket: &Path) -> Result<()> {
-    let output = Arc::new(Mutex::new(writer));
     let socket = socket.to_path_buf();
-    let mut calls = Vec::new();
-    for line in reader.lines() {
-        let line = line.context("read sub-agent MCP request")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_line(&output, &rpc_error(Value::Null, -32700, error.to_string()))?;
-                continue;
-            }
-        };
-        let Some(id) = request.get("id").cloned() else {
-            continue;
-        };
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        match method {
-            "initialize" => write_line(
-                &output,
-                &rpc_result(
-                    id,
-                    json!({
-                        "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
-                        "capabilities":{"tools":{"listChanged":false}},
-                        "serverInfo":{"name":"mj-agents","version":env!("CARGO_PKG_VERSION")},
-                        "instructions": SERVER_INSTRUCTIONS
-                    }),
-                ),
-            )?,
-            "ping" => write_line(&output, &rpc_result(id, json!({})))?,
-            "tools/list" => write_line(
-                &output,
-                &rpc_result(id, json!({"tools": tool_definitions()})),
-            )?,
-            "tools/call" => {
-                // Dispatch on its own thread and socket connection. The read
-                // loop stays free to accept and dispatch the next request while
-                // this call blocks on the worker (a `wait` can block for up to
-                // an hour).
-                let output = Arc::clone(&output);
-                let socket = socket.clone();
-                let params = request.get("params").cloned();
-                calls.push(std::thread::spawn(move || {
-                    let response = match call(&socket, params.as_ref()) {
-                        Ok((value, is_error)) => rpc_result(
-                            id,
-                            json!({
-                                "content":[{"type":"text","text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())}],
-                                "structuredContent":value,
-                                "isError":is_error
-                            }),
-                        ),
-                        Err(error) => rpc_error(id, -32602, format!("{error:#}")),
-                    };
-                    let _ = write_line(&output, &response);
-                }));
-            }
-            _ => write_line(
-                &output,
-                &rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
-            )?,
-        }
-    }
-    // stdin closed: the harness is gone. Let in-flight calls finish so their
-    // worker sockets close cleanly rather than being torn down mid-exchange.
-    for call in calls {
-        let _ = call.join();
-    }
-    Ok(())
+    crate::mcp_stdio::serve(
+        reader,
+        writer,
+        crate::mcp_stdio::McpServer {
+            name: "mj-agents",
+            instructions: SERVER_INSTRUCTIONS,
+            tools: tool_definitions(),
+            dispatch: crate::mcp_stdio::Dispatch::Concurrent,
+            call: move |params: Option<&Value>| call(&socket, params),
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -134,7 +71,7 @@ struct SpawnArgs {
     #[serde(default)]
     context: Option<String>,
     #[serde(default)]
-    files: Vec<SourceRange>,
+    files: Vec<FileSourceRanges>,
     #[serde(default)]
     request_key: Option<String>,
 }
@@ -230,28 +167,8 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     Ok((pending_reply(&request_id), false))
 }
 
-#[cfg(unix)]
 fn send(socket: &Path, request: &SubagentToolRequest) -> Result<Value> {
-    let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
-        .with_context(|| format!("connect to sub-agent socket {}", socket.display()))?;
-    let mut body = serde_json::to_vec(request)?;
-    body.push(b'\n');
-    stream.write_all(&body).context("send sub-agent request")?;
-    stream.flush().context("flush sub-agent request")?;
-    let mut reader = std::io::BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .context("read sub-agent reply")?;
-    serde_json::from_str(line.trim()).context("parse sub-agent reply")
-}
-
-#[cfg(not(unix))]
-fn send(socket: &Path, _request: &SubagentToolRequest) -> Result<Value> {
-    bail!(
-        "sub-agent sockets are unavailable on this platform: {}",
-        socket.display()
-    )
+    crate::mcp_stdio::socket_request(socket, request, "sub-agent")
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -271,7 +188,7 @@ fn tool_definitions() -> Vec<Value> {
                     "task_name":{"type":"string"},"instructions":{"type":"string"},
                     "profile_id":{"type":"string"},"model":{"type":"string"},"effort":{"type":"string"},
                     "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},"request_key":{"type":"string","description":"Optional idempotency key. Repeating a call with the same key returns the original result instead of duplicating the work; useful for retries and long waits."},
-                    "files":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["file","start","end"],"additionalProperties":false}}
+                    "files":{"type":"array","description":"Source excerpts to include in the child's first prompt, grouped by file. Each entry names one relative file and a list of one or more one-based, inclusive line ranges to pull from it.","items":{"type":"object","properties":{"file":{"type":"string"},"ranges":{"type":"array","minItems":1,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["start","end"],"additionalProperties":false}}},"required":["file","ranges"],"additionalProperties":false}}
                 },
                 "required":["task_name","instructions"],"additionalProperties":false
             }),
@@ -308,28 +225,10 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":input_schema})
 }
 
-fn rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"result":result})
-}
-
-fn rpc_error(id: Value, code: i64, message: String) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
-}
-
-fn write_line<W: Write>(output: &Mutex<W>, value: &Value) -> Result<()> {
-    // Serialize into one buffer, then take the lock for a single write, so a
-    // response from one call thread never interleaves with another's.
-    let mut buf = serde_json::to_vec(value)?;
-    buf.push(b'\n');
-    let mut output = output.lock().expect("sub-agent MCP stdout lock poisoned");
-    output.write_all(&buf)?;
-    output.flush()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn wait_advertises_the_shared_runtime_timeout_limit() {
@@ -393,28 +292,27 @@ mod tests {
         assert!(description.contains("relative"), "{description}");
     }
 
-    /// A writer shared with the test so `run` (which takes the writer by value)
-    /// can be observed after it returns.
-    #[derive(Clone)]
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("shared writer poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
+    #[cfg(unix)]
     #[test]
     fn a_slow_tool_call_does_not_block_a_later_one() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
+
+        // Observe output after `run` consumes the writer.
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("shared writer poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");

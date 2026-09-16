@@ -120,12 +120,13 @@ pub struct LaunchSpec {
     /// Private Mjolnir delegation socket for supported parent sessions.
     pub subagent_mcp_socket: Option<PathBuf>,
     pub resume_session: Option<String>,
-    /// Whether Mjolnir's durable state shows the native thread named by
+    /// Whether Mjolnir's durable state shows the native session named by
     /// `resume_session` may already hold conversation history. Codex writes a
-    /// thread's rollout only at its first user message, so a thread that was
-    /// created and never prompted is missing on disk; when this is false, a
-    /// resume that fails because Codex has no such thread is answered with a
-    /// fresh thread in the same Mjolnir session instead of a dead worker.
+    /// thread's rollout, and Claude Code a session's transcript, only at the
+    /// first user message, so a native session that was created and never
+    /// prompted is missing on disk; when this is false, a resume that fails
+    /// because the harness has no such session is answered with a fresh
+    /// session in the same Mjolnir session instead of a dead worker.
     pub native_session_may_have_history: bool,
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
@@ -2385,13 +2386,20 @@ fn drain_requests_from_the_previous_bridge(requests: &mut mpsc::Receiver<Command
     }
 }
 
-/// Whether a failed `session/resume` or `session/load` failed because Codex
-/// has no such thread. Only Codex defers writing a thread to disk until its
-/// first user message, so only Codex can report a thread Mjolnir believes it
-/// created; every other harness's reload failure means something else.
-fn codex_reports_missing_thread(spec: &LaunchSpec, error: &anyhow::Error) -> bool {
-    spec.harness == HarnessKind::Codex
-        && mj_core::acp::codex_error_reports_missing_thread(&format!("{error:#}"))
+/// Whether a failed `session/resume` or `session/load` failed because the
+/// harness has no such native session. Only harnesses that defer writing a
+/// session to disk until its first user message can report a session Mjolnir
+/// believes it created; every other harness's reload failure means something
+/// else, and the classifier answers `false` for them.
+fn harness_reports_missing_native_session(spec: &LaunchSpec, error: &anyhow::Error) -> bool {
+    let Some(existing) = spec.resume_session.as_deref() else {
+        return false;
+    };
+    mj_core::acp::error_reports_missing_native_session(
+        spec.harness,
+        existing,
+        &format!("{error:#}"),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2548,31 +2556,33 @@ async fn serve_session(
         };
         // A failed reload normally means state a checkpoint restored would be
         // discarded by starting fresh, so it fails the worker. The one
-        // exception is a Codex thread that both sides agree is empty: Codex
-        // writes a thread's rollout at its first user message, so a thread
-        // created and never prompted does not exist to resume, and failing
-        // over it forever would strand the session. Replace such a thread only
-        // when Mjolnir's own durable state also shows it was never used.
+        // exception is a native session that both sides agree is empty: Codex
+        // writes a thread's rollout, and Claude Code a session's transcript,
+        // at the first user message, so a session created and never prompted
+        // does not exist to resume, and failing over it forever would strand
+        // the session. Replace such a native session only when Mjolnir's own
+        // durable state also shows it was never used.
         let reloaded = match reloaded {
             Ok(reloaded) => Some(reloaded),
             Err(error) => {
-                if !codex_reports_missing_thread(spec, &error) {
+                if !harness_reports_missing_native_session(spec, &error) {
                     return Err(error);
                 }
+                let harness = spec.harness.display_name();
                 if spec.native_session_may_have_history {
-                    // The thread was used, so a new one would silently drop
-                    // the conversation. Say what is missing instead.
+                    // The native session was used, so a new one would silently
+                    // drop the conversation. Say what is missing instead.
                     return Err(error.context(format!(
-                        "Codex has no native history for thread {existing}, which this session \
-                         has already used, so the conversation cannot be resumed"
+                        "{harness} has no native history for session {existing}, which this \
+                         session has already used, so the conversation cannot be resumed"
                     )));
                 }
                 emit_runtime_event(
                     events,
                     RuntimeEvent::Warning {
                         message: format!(
-                            "Codex has no thread {existing} and this session never used it; \
-                             continuing in a new empty thread"
+                            "{harness} has no native session {existing} and this session never \
+                             used it; continuing in a new empty session"
                         ),
                     },
                 )

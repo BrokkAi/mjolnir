@@ -103,7 +103,6 @@ pub(crate) struct SetupDialog {
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
-    read_only: Option<String>,
     preferred_width: u16,
     preferred_height: u16,
 }
@@ -409,7 +408,6 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             notice: None,
-            read_only: config.newer_build_notice(),
             preferred_width: preferred.width,
             preferred_height: preferred.height,
         };
@@ -491,7 +489,7 @@ impl SetupDialog {
             } else {
                 "Save and Close"
             },
-            !self.saving && self.read_only.is_none(),
+            !self.saving,
         ));
         actions
     }
@@ -812,7 +810,7 @@ impl SetupDialog {
     }
 
     fn save(&mut self) -> DashboardAction {
-        if self.saving || self.read_only.is_some() {
+        if self.saving {
             return DashboardAction::None;
         }
         let result = config_from_draft(self.draft.clone())
@@ -876,7 +874,6 @@ impl SetupDialog {
             }
         };
         let mut review = ReviewSettingsDialog::new(&config);
-        review.read_only_reason = dashboard.config.newer_build_notice();
         review.blocked_profile_ids = changed_profile_ids(&config, &dashboard.config);
         let action = if review.review.profile.is_some() {
             review.start_initial_discovery(dashboard)
@@ -1436,7 +1433,7 @@ pub(crate) fn render_setup(
         body,
         actions: column,
     } = form.split_actions(band, &dialog.actions());
-    let notice = dialog.read_only.as_ref().or(dialog.notice.as_ref());
+    let notice = dialog.notice.as_ref();
     // A column taller than the body may also use the rows the notice would
     // occupy, but only while no notice is showing in them.
     let column = if notice.is_some() {

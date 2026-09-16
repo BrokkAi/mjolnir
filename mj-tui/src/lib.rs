@@ -45,6 +45,7 @@ mod actions;
 mod combined;
 mod component_events;
 mod dialogs;
+mod go;
 mod help;
 mod ingest;
 mod palette;
@@ -66,6 +67,7 @@ mod test_support;
 pub use crate::actions::{CommandId, global_chord};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
+pub use crate::go::GoMode;
 pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
@@ -100,6 +102,12 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
     None,
+    GoLaunch {
+        recipe: mj_core::go::GoRecipe,
+    },
+    GoPrepareProject {
+        target_id: String,
+    },
     Open {
         session_id: String,
     },
@@ -118,7 +126,6 @@ pub enum DashboardAction {
         project_directory: Option<std::path::PathBuf>,
         target_template_id: String,
         additional_mounts: Vec<AdditionalMount>,
-        allow_dirty_local: bool,
         resource_allocation: Option<SessionResourceAllocation>,
     },
     /// Resolve all network sources for an isolated session and leave the
@@ -618,6 +625,9 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    pub(crate) go: Option<go::GoMode>,
+    pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
+    pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -717,6 +727,9 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
+            go: None,
+            go_workspaces: BTreeMap::new(),
+            go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             move_operations: BTreeMap::new(),
@@ -891,6 +904,7 @@ impl DashboardState {
                 .insert(current, WorkspaceViewState::from_dashboard(self));
         }
 
+        self.switch_go_workspace(workspace_id.as_deref());
         self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()
@@ -910,7 +924,10 @@ impl DashboardState {
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
-                self.selected_session_id = None;
+                self.selected_session_id = self
+                    .go
+                    .as_ref()
+                    .and_then(|mode| mode.last_session_id.clone());
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
@@ -1345,9 +1362,13 @@ impl DashboardState {
             profile: session
                 .as_ref()
                 .map_or(String::new(), |session| session.last_profile.clone()),
-            title: session
-                .as_ref()
-                .map_or(String::new(), |session| session.display_title().to_owned()),
+            title: session.as_ref().map_or(String::new(), |session| {
+                if self.go.is_some() {
+                    self.go_conversation_title(&session.id)
+                } else {
+                    session.display_title().to_owned()
+                }
+            }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
             subagent_count: self
                 .state
@@ -1523,20 +1544,6 @@ impl DashboardState {
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
-        // For one release, the two chords that moved off Control say where
-        // they went instead of doing nothing. Remove this arm in the release
-        // after the one that introduces Alt-G and Alt-Q.
-        if dashboard_accelerator(key.modifiers)
-            && let KeyCode::Char(moved @ ('g' | 'q')) = key.code
-        {
-            self.set_notice(if moved == 'g' {
-                "Ctrl-G moved to Alt-G"
-            } else {
-                "Ctrl-Q moved to Alt-Q"
-            });
-            self.record_event_handled();
-            return DashboardAction::None;
-        }
         if !self.modal_open() && key.modifiers.contains(KeyModifiers::CONTROL) {
             let workspace_command = match key.code {
                 KeyCode::PageUp => Some(CommandId::SelectWorkspacePrevious),
@@ -2947,9 +2954,6 @@ mod tests {
             assert_eq!(dashboard.pane_size(pane), PaneSize::Standard);
         }
         assert_eq!(dashboard.focus, Focus::Quota);
-
-        assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
-        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-G moved to Alt-G"));
     }
 
     #[test]
@@ -3090,18 +3094,6 @@ mod tests {
         );
         assert_eq!(dashboard.handle_key(alt_key('a')), DashboardAction::None);
         assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
-    }
-
-    /// Muscle memory for the old quit chord meets a sentence rather than
-    /// silence, for one release.
-    #[test]
-    fn ctrl_q_explains_the_move_instead_of_quitting() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-
-        assert_eq!(dashboard.handle_key(ctrl_key('q')), DashboardAction::None);
-        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-Q moved to Alt-Q"));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     #[test]
@@ -3669,7 +3661,11 @@ mod tests {
         );
 
         let mut confirm = dashboard_with_session(stopped_session());
-        confirm.show_dirty_local_confirmation(DashboardAction::None, vec!["project".into()]);
+        confirm.mode = Mode::Confirm(dialogs::ConfirmDialog::new(
+            dialogs::Confirmation::ForceDestroy {
+                session_id: "session-1".into(),
+            },
+        ));
 
         let mut resume_dialog = dashboard_with_session(stopped_session());
         resume_dialog.show_resume_dialog(1, Vec::new());

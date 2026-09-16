@@ -3,8 +3,8 @@ name = "brokk-mj-checkpoint"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Checkpoint archives and native session relocation for Mjolnir"
 license.workspace = true
+description = "Checkpoint archives and native session relocation for Mjolnir"
 repository.workspace = true
 publish = true
 

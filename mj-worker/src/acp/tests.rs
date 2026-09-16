@@ -4389,7 +4389,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
 }
 
 #[test]
-fn only_codex_resume_failures_can_report_a_missing_thread() {
+fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
             subagent_mcp_socket: None,
@@ -4411,33 +4411,57 @@ fn only_codex_resume_failures_can_report_a_missing_thread() {
         }
     }
     // The message as codex-acp wraps it.
-    let missing = anyhow::anyhow!(
-        r#"Internal error: {{"details": "no rollout found for thread id 0199f0ba-0000-7000-8000-000000000001"}}"#
+    let missing_thread = anyhow::anyhow!(
+        r#"Internal error: {{"details": "no rollout found for thread id native"}}"#
     )
-    .context("resume ACP session 0199f0ba-0000-7000-8000-000000000001");
-    assert!(codex_reports_missing_thread(
+    .context("resume ACP session native");
+    // The ACP standard resource error as claude-agent-acp answers it.
+    let missing_transcript =
+        anyhow::anyhow!("Resource not found: native: {{\n  \"uri\": \"native\"\n}}")
+            .context("resume ACP session native");
+    assert!(harness_reports_missing_native_session(
         &spec(HarnessKind::Codex),
-        &missing
+        &missing_thread
     ));
-    // Another harness's reload failure never means an unmaterialized thread.
-    assert!(!codex_reports_missing_thread(
+    assert!(harness_reports_missing_native_session(
         &spec(HarnessKind::Claude),
-        &missing
+        &missing_transcript
     ));
-    // Any other Codex failure keeps failing the resume.
-    assert!(!codex_reports_missing_thread(
+    // Each harness only recognizes its own wording.
+    assert!(!harness_reports_missing_native_session(
+        &spec(HarnessKind::Claude),
+        &missing_thread
+    ));
+    assert!(!harness_reports_missing_native_session(
+        &spec(HarnessKind::Codex),
+        &missing_transcript
+    ));
+    // A harness that always materializes its session never reports one gone.
+    assert!(!harness_reports_missing_native_session(
+        &spec(HarnessKind::Kimi),
+        &missing_thread
+    ));
+    // Any other failure keeps failing the resume.
+    assert!(!harness_reports_missing_native_session(
         &spec(HarnessKind::Codex),
         &anyhow::anyhow!("Internal error: session store is locked")
     ));
+    assert!(!harness_reports_missing_native_session(
+        &spec(HarnessKind::Claude),
+        &anyhow::anyhow!("resume ACP session native: connection closed")
+    ));
 }
 
+/// A fake ACP bridge that refuses every reload of `missing-thread` with
+/// `reload_error`, the text the harness under test really answers, and opens a
+/// fresh session for `session/new`.
 #[cfg(unix)]
-fn missing_codex_thread_script(directory: &Path) -> std::path::PathBuf {
-    let script = directory.join("missing_codex_thread.py");
-    std::fs::write(
-        &script,
-        r#"
+fn missing_native_session_script(directory: &Path, reload_error: &str) -> std::path::PathBuf {
+    let script = directory.join("missing_native_session.py");
+    let source = r#"
 import json, sys
+
+RELOAD_ERROR = __RELOAD_ERROR__
 
 for line in sys.stdin:
     request = json.loads(line)
@@ -4446,31 +4470,51 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
     elif method in ("session/load", "session/resume"):
-        details = json.dumps({"details": "no rollout found for thread id missing-thread"})
         print(json.dumps({"jsonrpc": "2.0", "id": ident,
-                          "error": {"code": -32603, "message": "Internal error: " + details}}),
+                          "error": {"code": -32603, "message": RELOAD_ERROR}}),
               flush=True)
         continue
     elif method == "session/new":
+        # Both harnesses' guardian modes, so either can select its own.
         result = {"sessionId": "replacement",
                   "modes": {"currentModeId": "agent",
-                            "availableModes": [{"id": "agent", "name": "Guardian"}]}}
+                            "availableModes": [{"id": "agent", "name": "Guardian"},
+                                               {"id": "auto", "name": "Auto"}]}}
     elif method == "session/prompt":
         result = {"stopReason": "end_turn"}
     else:
         result = {}
     if ident is not None:
         print(json.dumps({"jsonrpc": "2.0", "id": ident, "result": result}), flush=True)
-"#,
+"#;
+    // A JSON string literal is also a Python string literal, so the error text
+    // reaches the script exactly as the harness would send it.
+    std::fs::write(
+        &script,
+        source.replace(
+            "__RELOAD_ERROR__",
+            &serde_json::to_string(reload_error).unwrap(),
+        ),
     )
     .unwrap();
     script
 }
 
+/// Codex's wrapped refusal for a thread whose rollout was never written.
 #[cfg(unix)]
-fn missing_codex_thread_spec(
+const MISSING_CODEX_THREAD_ERROR: &str =
+    r#"Internal error: {"details": "no rollout found for thread id missing-thread"}"#;
+
+/// Claude Code's ACP resource error for a session with no transcript on disk.
+#[cfg(unix)]
+const MISSING_CLAUDE_SESSION_ERROR: &str =
+    "Resource not found: missing-thread: {\n  \"uri\": \"missing-thread\"\n}";
+
+#[cfg(unix)]
+fn missing_native_session_spec(
     directory: &Path,
     script: &Path,
+    harness: HarnessKind,
     native_session_may_have_history: bool,
 ) -> LaunchSpec {
     LaunchSpec {
@@ -4486,18 +4530,20 @@ fn missing_codex_thread_spec(
         resume_session: Some("missing-thread".into()),
         native_session_may_have_history,
         accepted_config: Default::default(),
-        harness: HarnessKind::Codex,
+        harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
     }
 }
 
+/// Drive the runtime against a bridge that cannot find `missing-thread`, with
+/// Mjolnir's state showing the native session was never used, and prove the
+/// queued work finishes on a replacement session in the same Mjolnir session.
 #[cfg(unix)]
-#[tokio::test]
-async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_session() {
+async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_error: &str) {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_codex_thread_script(temp.path());
+    let script = missing_native_session_script(temp.path(), reload_error);
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     // Work the worker queued before the session opened must survive the
@@ -4510,7 +4556,7 @@ async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_sessio
         .await
         .unwrap();
     let runtime = tokio::spawn(run(
-        missing_codex_thread_spec(temp.path(), &script, false),
+        missing_native_session_spec(temp.path(), &script, harness, false),
         request_rx,
         event_tx,
     ));
@@ -4532,7 +4578,7 @@ async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_sessio
             } => opened = Some((native_session_id, resumed)),
             RuntimeEvent::PromptFinished { request_id, .. } => finished = Some(request_id),
             RuntimeEvent::Stopped => {
-                panic!("the runtime stopped instead of replacing the thread: {warnings:?}")
+                panic!("the runtime stopped instead of replacing the session: {warnings:?}")
             }
             _ => {}
         }
@@ -4543,7 +4589,8 @@ async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_sessio
         warnings
             .iter()
             .any(|warning| warning.contains("missing-thread")
-                && warning.contains("new empty thread")),
+                && warning.contains("new empty session")
+                && warning.contains(harness.display_name())),
         "the replacement must be reported: {warnings:?}"
     );
     drop(request_tx);
@@ -4556,13 +4603,26 @@ async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_sessio
 
 #[cfg(unix)]
 #[tokio::test]
+async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_session() {
+    assert_unused_native_session_is_replaced(HarnessKind::Codex, MISSING_CODEX_THREAD_ERROR).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unused_claude_session_claude_cannot_find_is_replaced_in_the_same_session() {
+    assert_unused_native_session_is_replaced(HarnessKind::Claude, MISSING_CLAUDE_SESSION_ERROR)
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() {
     let temp = tempfile::tempdir().unwrap();
-    let script = missing_codex_thread_script(temp.path());
+    let script = missing_native_session_script(temp.path(), MISSING_CODEX_THREAD_ERROR);
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
-        missing_codex_thread_spec(temp.path(), &script, true),
+        missing_native_session_spec(temp.path(), &script, HarnessKind::Codex, true),
         request_rx,
         event_tx,
     ));
@@ -4574,7 +4634,7 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
         .unwrap_err();
     let error = format!("{error:#}");
     assert!(
-        error.contains("no native history for thread missing-thread"),
+        error.contains("no native history for session missing-thread"),
         "unexpected failure: {error}"
     );
     let mut events = Vec::new();
