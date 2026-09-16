@@ -51,7 +51,6 @@ pub(super) enum ProvisioningFailureDisposition {
 }
 
 impl Controller {
-
     pub async fn provision_session_controlled_with_commit(
         &mut self,
         session_id: &str,

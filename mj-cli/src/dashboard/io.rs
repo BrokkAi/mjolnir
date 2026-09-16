@@ -824,7 +824,7 @@ pub(crate) fn spawn_setup_save(
         "saving setup",
         updates,
         move || {
-            let state = mj_controller::database::load_state_migrating()?;
+            let state = mj_controller::database::load_state()?;
             save_setup_at(&mj_core::config::config_path(), &original, &updated, &state)
         },
         move |result| DashboardIoUpdate::SetupSaved { generation, result },

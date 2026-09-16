@@ -478,7 +478,7 @@ fn selected_host_container_size(
 impl Controller {
     pub fn load() -> Result<Self> {
         let config = Config::load()?;
-        let state = crate::database::load_state_migrating()?;
+        let state = crate::database::load_state()?;
         // Missing session dependencies must not lock users out of the tools
         // needed to repair them. Operations validate the session they act on.
         state.validate()?;
@@ -2098,9 +2098,7 @@ mod tests {
         };
         assert_eq!(controller.state.container_sizes["local"], expected);
         assert_eq!(
-            crate::database::load_state_migrating()
-                .unwrap()
-                .container_sizes["local"],
+            crate::database::load_state().unwrap().container_sizes["local"],
             expected
         );
 
@@ -2114,9 +2112,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            crate::database::load_state_migrating()
-                .unwrap()
-                .container_sizes["local"],
+            crate::database::load_state().unwrap().container_sizes["local"],
             expected
         );
     }

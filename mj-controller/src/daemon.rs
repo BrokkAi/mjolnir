@@ -2479,7 +2479,6 @@ async fn run_daemon_runtime(epilogue_started: &AtomicBool, owner_pid: Option<u32
         .await
         .context("worker source snapshot task failed")??;
     Controller::recover_config_id_rename()?;
-    Config::migrate_legacy_localhost_target()?;
     let config = Config::load()?;
     crate::database::recover_interrupted_checkpointing_sessions(
         &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

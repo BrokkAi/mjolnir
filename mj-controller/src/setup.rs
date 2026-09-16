@@ -152,7 +152,7 @@ pub fn initialize_local_startup_config(config_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let config = Config::load_from(config_path)?;
-        if config.is_unconfigured() && config.newer_config_version.is_none() {
+        if config.is_unconfigured() {
             let kind = HarnessKind::Codex;
             let home = std::env::var_os(kind.home_env())
                 .map(|value| kind.home_from_environment(value))
@@ -1555,7 +1555,7 @@ mod tests {
 
         let newer = "version = 999\nfuture_field = true\n";
         fs::write(&path, newer).unwrap();
-        initialize_local_startup_config(&path).unwrap();
+        assert!(initialize_local_startup_config(&path).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), newer);
     }
 

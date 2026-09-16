@@ -1522,20 +1522,6 @@ impl DashboardState {
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
-        // For one release, the two chords that moved off Control say where
-        // they went instead of doing nothing. Remove this arm in the release
-        // after the one that introduces Alt-G and Alt-Q.
-        if dashboard_accelerator(key.modifiers)
-            && let KeyCode::Char(moved @ ('g' | 'q')) = key.code
-        {
-            self.set_notice(if moved == 'g' {
-                "Ctrl-G moved to Alt-G"
-            } else {
-                "Ctrl-Q moved to Alt-Q"
-            });
-            self.record_event_handled();
-            return DashboardAction::None;
-        }
         if !self.modal_open() && key.modifiers.contains(KeyModifiers::CONTROL) {
             let workspace_command = match key.code {
                 KeyCode::PageUp => Some(CommandId::SelectWorkspacePrevious),
@@ -2946,9 +2932,6 @@ mod tests {
             assert_eq!(dashboard.pane_size(pane), PaneSize::Standard);
         }
         assert_eq!(dashboard.focus, Focus::Quota);
-
-        assert_eq!(dashboard.handle_key(ctrl_key('g')), DashboardAction::None);
-        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-G moved to Alt-G"));
     }
 
     #[test]
@@ -3089,18 +3072,6 @@ mod tests {
         );
         assert_eq!(dashboard.handle_key(alt_key('a')), DashboardAction::None);
         assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
-    }
-
-    /// Muscle memory for the old quit chord meets a sentence rather than
-    /// silence, for one release.
-    #[test]
-    fn ctrl_q_explains_the_move_instead_of_quitting() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-
-        assert_eq!(dashboard.handle_key(ctrl_key('q')), DashboardAction::None);
-        assert_eq!(dashboard.notice().as_deref(), Some("Ctrl-Q moved to Alt-Q"));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     #[test]

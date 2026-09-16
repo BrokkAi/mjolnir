@@ -342,11 +342,6 @@ where
     }
 }
 
-pub fn load_state_migrating() -> Result<State> {
-    migrate_legacy_state()?;
-    load_state()
-}
-
 pub fn load_state() -> Result<State> {
     load_state_from(&database_path())
 }
@@ -5053,32 +5048,6 @@ fn query_history_page(
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
-}
-
-pub fn migrate_legacy_state() -> Result<()> {
-    let legacy = mj_core::state::state_path();
-    let database = database_path();
-    migrate_legacy_state_from(&legacy, &database)
-}
-
-fn migrate_legacy_state_from(legacy: &Path, database: &Path) -> Result<()> {
-    if !legacy.exists() {
-        return Ok(());
-    }
-    // The database may exist after an interrupted migration. The legacy file
-    // remains the authority until the import commits and this file is renamed.
-    let mut state = State::load_json_from(legacy)?;
-    // Legacy worker sequence numbers are not relay event ordinals. Carrying
-    // them across the new compatibility floor could mark unseen relay events
-    // as read.
-    for session in state.sessions.values_mut() {
-        session.viewed_through_event_ordinal = 0;
-    }
-    save_state_to(database, &state)?;
-    let migrated = legacy.with_file_name("state.json.migrated-v1");
-    fs::rename(legacy, &migrated)
-        .with_context(|| format!("retain migrated Mjolnir state as {}", migrated.display()))?;
-    Ok(())
 }
 
 fn session_state_name(value: SessionState) -> &'static str {

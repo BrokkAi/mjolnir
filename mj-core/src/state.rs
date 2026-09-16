@@ -1,16 +1,13 @@
 //! Durable controller-side state for Hel-managed sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    Config, HarnessKind, ProjectRepository, TargetTemplate, atomic_write, data_dir, validate_id,
-};
+use crate::config::{Config, HarnessKind, ProjectRepository, TargetTemplate, validate_id};
 use crate::credentials::CredentialSyncSignal;
 use crate::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RelayOperationalState, SequencedEvent, WorkerEvent,
@@ -1462,36 +1459,10 @@ impl State {
         }
         Ok(())
     }
-
-    pub fn load_from(path: &Path) -> Result<Self> {
-        Self::load_json_from(path)
-    }
-
-    pub fn load_json_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let body =
-            fs::read(path).with_context(|| format!("read Mjolnir state {}", path.display()))?;
-        let state: Self = serde_json::from_slice(&body)
-            .with_context(|| format!("parse Mjolnir state {}", path.display()))?;
-        state.validate()?;
-        Ok(state)
-    }
-
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        self.validate()?;
-        let body = serde_json::to_vec_pretty(self).context("serialize Mjolnir state")?;
-        atomic_write(path, &body)
-    }
 }
 
 fn project_history_key(host: &str) -> String {
     format!("project:{host}")
-}
-
-pub fn state_path() -> PathBuf {
-    data_dir().join("state.json")
 }
 
 /// Generate an opaque, filesystem-safe stable id for a new logical session.
@@ -1777,7 +1748,6 @@ mod tests {
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
             show_stopped_sessions: false,
-            newer_config_version: None,
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
@@ -2288,26 +2258,6 @@ mod tests {
 
         let state = serde_json::from_value::<State>(without_draft).unwrap();
         assert_eq!(state.sessions[session_id].draft_input, "");
-    }
-
-    #[test]
-    fn json_state_round_trip_is_atomic() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested/state.json");
-        let state = sample_state();
-        state.save_to(&path).unwrap();
-        assert_eq!(State::load_from(&path).unwrap(), state);
-        assert!(
-            fs::read_dir(directory.path().join("nested"))
-                .unwrap()
-                .all(|entry| {
-                    !entry
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with(".tmp")
-                })
-        );
     }
 
     #[test]

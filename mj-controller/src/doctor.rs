@@ -346,21 +346,11 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
     }
     match Config::load_from(path) {
         Ok(config) => {
-            let mut checks = vec![match config.newer_build_notice() {
-                // Hel still runs on a config a newer build owns, but every
-                // save refuses, so say so rather than reporting it as valid.
-                Some(notice) => DoctorCheck::warning(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{}: {notice}", path.display()),
-                    "Update Mjolnir, or change settings with the newer build.",
-                ),
-                None => DoctorCheck::ready(
-                    "config",
-                    "Mjolnir configuration",
-                    format!("{} is valid", path.display()),
-                ),
-            }];
+            let mut checks = vec![DoctorCheck::ready(
+                "config",
+                "Mjolnir configuration",
+                format!("{} is valid", path.display()),
+            )];
             if config.enabled_profiles().next().is_none() || config.bundles.is_empty() {
                 checks.push(DoctorCheck::fixable(
                     "config.session-prerequisites",
@@ -1668,27 +1658,6 @@ mod tests {
             identity_file: None,
             extra_args: vec![],
         }
-    }
-
-    #[test]
-    fn doctor_reports_a_config_owned_by_a_newer_hel_as_read_only() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "version = {}\n\n[targets.localhost]\nkind = \"local-bare\"\n",
-                mj_core::config::CONFIG_VERSION + 1
-            ),
-        )
-        .unwrap();
-
-        let (config, checks) = configuration_checks(&path);
-
-        assert!(config.is_some());
-        let check = checks.iter().find(|check| check.id == "config").unwrap();
-        assert_eq!(check.status, CheckStatus::Warning);
-        assert!(check.detail.contains("read-only"), "{}", check.detail);
     }
 
     fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>) -> Config {

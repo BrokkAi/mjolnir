@@ -83,7 +83,7 @@ const CHECKPOINT_BARRIER_TIMEOUT_AFTER_RESTART: Duration = Duration::from_secs(3
 /// database transaction committed. Call this only while holding the
 /// machine-wide controller-store guard and before starting background work.
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
-    let mut state = crate::database::load_state_migrating()?;
+    let mut state = crate::database::load_state()?;
     // Include operation-owned recovery copies even after a ready destination
     // installs a newer ordinary checkpoint.
     for operation in crate::database::load_move_operations()? {

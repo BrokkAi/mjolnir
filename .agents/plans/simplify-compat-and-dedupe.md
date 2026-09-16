@@ -17,7 +17,7 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 - [x] (2026-09-16) Filed #1043 and #1044.
 - [x] (2026-09-16) Milestone 1: delete dead code. Daemon protocol raised to 20 because `CreateSessionRequest` lost `allow_dirty_local`.
 - [x] (2026-09-16) Milestone 2a, database part: `mj-controller/src/database/baseline.sql` creates a new store at revision 33 and replaces migration steps 1–33. Stores older than revision 33 are refused.
-- [ ] Milestone 2a, remaining: config and small compatibility shims below 2.8.0.
+- [x] (2026-09-16) Milestone 2a, remaining: loading a newer build's config read-only, the `raw-localhost` rename, the 1.x `state.json` import, the two-part web login cookie, and the Ctrl-G/Ctrl-Q "moved" notices are removed.
 - [ ] Milestone 2b: relay protocol, journal format v1, and worker-export fallbacks.
 - [ ] Milestone 3: merge duplicated target and process plumbing.
 - [ ] Milestone 4: merge duplicated feature paths.
@@ -34,6 +34,15 @@ Two larger merges were found but are out of scope for this plan. They are tracke
 
 ## Decision Log
 
+- Decision: Milestone 2a keeps shims that read old *content* rather than serve old *installs*. These are the `[startup]` section and top-level `show_stopped_sessions` in config files, config versions 1–8, `WirePolicy::Legacy`/`force_unrestricted_mode` in launch specs stored inside checkpoint archives, and `LEGACY_HANDOFF_PREAMBLE` in stored transcripts.
+  Rationale: The 2.8.0 floor says nothing about how old a file's contents are. A config file is rewritten only when a setting changes, and archives and transcripts are never rewritten, so a current 2.8+ install can still hold this content. With `deny_unknown_fields`, dropping the config aliases would stop such a config from loading.
+  Date/Author: 2026-09-16, agent.
+- Decision: Deferred three planned shim removals.
+  Rationale:
+  - `ViewerPromptImage.data_base64` inline images: the web API still accepts them, and many image-limit tests are written against them, so removing them saves little now.
+  - `inspector_move_preparation` in `server.rs`: it duplicates the image stripping in `controller/move_session.rs`, and it is the only place that behavior is tested. It moves to Milestone 4 as a DRY merge, together with a test at the daemon boundary.
+  - `incompatible_resume_targets` is not a shim: request validation uses it.
+  Date/Author: 2026-09-16, agent.
 - Decision: Keep the database compatibility floor (`schema_compatibility`, `read_schema_state`) and the writer's schema re-read before each write. Only the migration steps are replaced.
   Rationale: The repository's CLAUDE.md "Testing Guidelines" require every migration to be classified as compatible or breaking and the minimum compatible revision to be raised for breaking ones. The floor is how that rule works, and it lets an older build keep using a store that a newer compatible build migrated. Removing it would contradict a standing repository rule, so it is out of scope for "no downgrades".
   Date/Author: 2026-09-16, agent.

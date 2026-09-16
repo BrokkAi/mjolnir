@@ -232,8 +232,6 @@ fn always_ready(_: &DashboardState) -> Availability {
 fn spinner_available(dashboard: &DashboardState) -> Availability {
     if dashboard.spinner_save_pending {
         Availability::Blocked("The spinner preference is being saved")
-    } else if dashboard.config.newer_config_version.is_some() {
-        Availability::Blocked("This configuration belongs to a newer Mjolnir")
     } else {
         Availability::Ready
     }
@@ -915,10 +913,6 @@ impl DashboardState {
             }
             CommandId::CycleSpinner => {
                 if self.spinner_save_pending {
-                    return DashboardAction::None;
-                }
-                if let Some(notice) = self.config.newer_build_notice() {
-                    self.set_notice(notice);
                     return DashboardAction::None;
                 }
                 let style = self.config.spinner.next();

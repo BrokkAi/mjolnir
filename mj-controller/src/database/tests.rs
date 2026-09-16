@@ -1985,7 +1985,8 @@ fn the_transcript_tail_reader_returns_the_end_without_reading_the_head() {
         .unwrap();
     drop(connection);
 
-    let tail = read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(2)).unwrap();
+    let tail = read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(2))
+        .unwrap();
 
     assert_eq!(
         tail.iter()
@@ -1995,7 +1996,10 @@ fn the_transcript_tail_reader_returns_the_end_without_reading_the_head() {
     );
     // Asking for more than exists returns what exists, and the corrupt head is
     // what makes that an error rather than a short read.
-    assert!(read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(256)).is_err());
+    assert!(
+        read_materialized_transcript(&open_reader(&database).unwrap(), "session-1", Some(256))
+            .is_err()
+    );
     assert!(
         read_materialized_transcript(&open_reader(&database).unwrap(), "unknown", Some(256))
             .unwrap()
@@ -2880,29 +2884,6 @@ fn independent_session_writes_preserve_both_updates() {
             .as_deref(),
         Some("second changed")
     );
-}
-
-#[test]
-fn legacy_json_migration_commits_before_retaining_source_backup() {
-    let directory = tempfile::tempdir().unwrap();
-    let legacy = directory.path().join("state.json");
-    let database = directory.path().join("hel.sqlite3");
-    let mut state = State::default();
-    state
-        .sessions
-        .insert("session-1".into(), session("session-1", "project-1"));
-    state.save_to(&legacy).unwrap();
-
-    migrate_legacy_state_from(&legacy, &database).unwrap();
-
-    state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .viewed_through_event_ordinal = 0;
-    assert_eq!(load_state_from(&database).unwrap(), state);
-    assert!(!legacy.exists());
-    assert!(directory.path().join("state.json.migrated-v1").exists());
 }
 
 #[test]

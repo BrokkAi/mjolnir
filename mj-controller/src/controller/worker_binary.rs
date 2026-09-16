@@ -15,9 +15,7 @@ use crate::session_manager::{
     ProjectMemorySyncTarget, RemoteWorkerBinaryRefresh, WorkerBinaryRefresh,
     WorkerBinaryRefreshPlan, WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
-use crate::targets::{
-    self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget,
-};
+use crate::targets::{self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget};
 use mj_core::config::{
     HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, atomic_write, data_dir,
 };

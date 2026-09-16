@@ -2640,21 +2640,9 @@ impl ChatState {
         // projection state: it is rebuilt from `pending_elicitations` the next
         // time the session is opened, so stepping out loses nothing but field
         // text that was typed and not submitted.
-        // The pane dial, detach, and the web viewer are global chords now
+        // The pane dial, detach, and the web viewer are global chords
         // (Alt-G, Alt-Q, F4). The host catches them before the composer sees
-        // them, so the composer has no escape hatch of its own left. For one
-        // release the two chords that moved off Control say where they went;
-        // remove this arm in the release after.
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && let KeyCode::Char(moved @ ('g' | 'q')) = code
-        {
-            self.set_notice(if moved == 'g' {
-                "Ctrl-G moved to Alt-G"
-            } else {
-                "Ctrl-Q moved to Alt-Q"
-            });
-            return ChatAction::None;
-        }
+        // them, so the composer has no escape hatch of its own left.
 
         // A reviewing harness that asked a question is blocked until it is
         // answered, and its dialog is drawn over the split, so the dialog
@@ -4931,26 +4919,6 @@ mod tests {
     #[test]
     fn a_fresh_chat_for_a_session_with_no_saved_draft_opens_empty() {
         assert_eq!(freshly_opened_chat("").input, "");
-    }
-
-    /// The pane dial and detach are global chords now, caught by the host
-    /// before the composer sees the key. For one release the old Control
-    /// chords say where they went rather than doing nothing.
-    #[test]
-    fn control_g_and_control_q_say_where_they_moved() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        let control_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        assert_eq!(chat.handle_key(control_g), ChatAction::None);
-        assert_eq!(
-            chat.notices.current().as_deref(),
-            Some("Ctrl-G moved to Alt-G")
-        );
-
-        assert_eq!(chat.handle_key(ctrl('q')), ChatAction::None);
-        assert_eq!(
-            chat.notices.current().as_deref(),
-            Some("Ctrl-Q moved to Alt-Q")
-        );
     }
 
     #[test]

@@ -278,7 +278,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let transcript = read_native_transcript(harness, &located.source_path)?;
     println!("Original cwd: {}", transcript.cwd.display());
 
-    let mut state = mj_controller::database::load_state_migrating()?;
+    let mut state = mj_controller::database::load_state()?;
     state.validate()?;
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
