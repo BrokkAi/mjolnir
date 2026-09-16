@@ -117,6 +117,9 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            // A child shares its parent's container, so it shares the build
+            // cache that container was created with.
+            build_cache: parent.build_cache.clone(),
             // A child never receives the Mjolnir sub-agent tools, so it can
             // never spawn a grandchild.
             mjolnir_subagents: Some(false),
@@ -124,6 +127,9 @@ impl Controller {
             archived: false,
             container_cpus: None,
             container_memory: None,
+            // A child runs inside its parent's container, so it works in the
+            // parent's workspace, including the legacy shared one.
+            container_workspace: parent.container_workspace.clone(),
             id: child_id.clone(),
             workspace_id: parent.workspace_id.clone(),
             title: request.task_name.clone(),

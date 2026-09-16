@@ -119,7 +119,17 @@ impl Controller {
                         .map(|ownership| ownership.workspace_id.as_str())
                         .unwrap_or(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 )?;
-                let record = adopted_session_record(
+                let container_workspace = self
+                    .config
+                    .targets
+                    .get(target_id)
+                    .and_then(|template| {
+                        recovery_backend_locator(template, &candidate.locator, session_id).ok()
+                    })
+                    .and_then(|backend| {
+                        adopted_container_workspace(&backend, session_id, executor)
+                    });
+                let mut record = adopted_session_record(
                     session_id,
                     target_id,
                     profile_id,
@@ -128,6 +138,7 @@ impl Controller {
                     workspace_id,
                     candidate.locator,
                 );
+                record.container_workspace = container_workspace;
                 (record, true)
             }
         };
@@ -249,6 +260,51 @@ fn resolve_recovery_workspace_id(marked_workspace_id: &str) -> Result<String> {
     Ok(crate::database::create_or_get_workspace("Recovered")?.id)
 }
 
+/// The workspace a running container actually holds. A container created
+/// before per-session workspaces has only the shared `/workspace`, so an
+/// adoption that cannot see `/workspace/<session id>` keeps the legacy path
+/// rather than pointing the recovered harness at a directory that is not there.
+fn adopted_container_workspace(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Option<PathBuf> {
+    if !matches!(
+        backend,
+        targets::TargetLocator::LocalPodman { .. }
+            | targets::TargetLocator::LocalDocker { .. }
+            | targets::TargetLocator::AppleContainer { .. }
+            | targets::TargetLocator::SshPodman { .. }
+            | targets::TargetLocator::SshDocker { .. }
+    ) {
+        return None;
+    }
+    let workspace = targets::new_container_workspace(session_id).ok()?;
+    let command = targets::command_on_locator(
+        backend,
+        session_id,
+        vec![
+            "test".to_owned(),
+            "-d".to_owned(),
+            workspace.to_string_lossy().into_owned(),
+        ],
+        "probe the adopted session workspace",
+    )
+    .ok()?;
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => Some(workspace),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(
+                session_id,
+                %error,
+                "could not probe the adopted session workspace; assuming the shared one"
+            );
+            None
+        }
+    }
+}
+
 /// The session record adoption commits before it tries the relay handshake.
 fn adopted_session_record(
     session_id: &str,
@@ -261,7 +317,10 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        build_cache: None,
         mjolnir_subagents: None,
+        // The adopting caller probes the running container for this.
+        container_workspace: None,
         create_managed_worktree: None,
         workspace_id,
         archived: false,
@@ -1107,6 +1166,7 @@ mod tests {
     fn recovery_container_scan_requires_both_managed_and_session_labels() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1135,6 +1195,7 @@ mod tests {
     fn recovery_docker_scan_accepts_json_lines_and_builds_a_docker_locator() {
         let template = TargetTemplate::LocalDocker {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,

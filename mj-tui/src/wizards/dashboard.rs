@@ -260,6 +260,19 @@ fn declare_wizard_buttons(form: &mut Dialog<WizardControl>, has_back: bool, next
     ]);
 }
 
+fn open_mount_access(mounts: &mut MountWizard) {
+    let selected = crate::wizards::access_index(&mounts.access_choices(), mounts.access);
+    mounts
+        .access_combo
+        .open(WizardControl::MountAccess, selected);
+}
+
+fn commit_mount_access(mounts: &mut MountWizard, index: usize) {
+    if let Some(access) = mounts.access_choices().get(index) {
+        mounts.access = *access;
+    }
+}
+
 fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard) {
     form.declare_with_enabled(WizardControl::MountSource, ControlKind::TextField, true);
     form.declare_with_enabled(
@@ -268,9 +281,14 @@ fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard
         true,
     );
     form.declare_with_enabled(
-        WizardControl::MountReadOnly,
-        ControlKind::Checkbox,
-        mounts.forced_read_only().is_none(),
+        WizardControl::MountAccess,
+        crate::wizards::access_combo_kind(
+            &mounts.access_combo,
+            &mounts.access_choices(),
+            mounts.access,
+            WizardControl::MountAccess,
+        ),
+        true,
     );
     form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, true);
     form.declare_with_enabled(WizardControl::Back, ControlKind::Button, true);
@@ -336,7 +354,7 @@ impl DashboardState {
             &self.render_change_revision,
             &result,
         );
-        if let Some(interaction) = result.action {
+        if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
             return self.apply_new_interaction(wizard, interaction);
         }
         if result.outcome.is_consumed() {
@@ -375,7 +393,7 @@ impl DashboardState {
     pub(crate) fn handle_resume_event(
         &mut self,
         event: Event,
-        wizard: ResumeWizard,
+        mut wizard: ResumeWizard,
     ) -> DashboardAction {
         declare_resume_controls(self, &wizard);
         if let Event::Key(key) = &event
@@ -411,7 +429,7 @@ impl DashboardState {
             &self.render_change_revision,
             &result,
         );
-        if let Some(interaction) = result.action {
+        if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
             return self.apply_resume_interaction(wizard, interaction);
         }
         if result.outcome.is_consumed() {
@@ -530,9 +548,14 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            Interaction::Toggle(WizardControl::MountReadOnly) => {
-                wizard.mounts.toggle_read_only();
-                wizard.form.get_mut().focus(WizardControl::MountReadOnly);
+            Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
+                commit_mount_access(&mut wizard.mounts, index);
+                wizard.form.get_mut().focus(WizardControl::MountAccess);
+                self.mark_render_changed();
+                self.mode = Mode::New(wizard);
+                DashboardAction::None
+            }
+            Interaction::ComboBoxDismiss(WizardControl::MountAccess) => {
                 self.mark_render_changed();
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -617,10 +640,15 @@ impl DashboardState {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
-            Interaction::Toggle(WizardControl::MountReadOnly) => {
+            Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
                 invalidate_move_preparation(&mut wizard);
-                wizard.mounts.toggle_read_only();
-                wizard.form.get_mut().focus(WizardControl::MountReadOnly);
+                commit_mount_access(&mut wizard.mounts, index);
+                wizard.form.get_mut().focus(WizardControl::MountAccess);
+                self.mark_render_changed();
+                self.mode = Mode::Resume(wizard);
+                DashboardAction::None
+            }
+            Interaction::ComboBoxDismiss(WizardControl::MountAccess) => {
                 self.mark_render_changed();
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
@@ -949,7 +977,7 @@ impl DashboardState {
             | WizardControl::ProjectDirectory
             | WizardControl::MountSource
             | WizardControl::MountDestination
-            | WizardControl::MountReadOnly
+            | WizardControl::MountAccess
             | WizardControl::ReviewAttachments
             | WizardControl::CreateManagedWorktree
             | WizardControl::MjolnirSubagents
@@ -1271,8 +1299,9 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            WizardControl::MountReadOnly => {
-                wizard.mounts.toggle_read_only();
+            WizardControl::MountAccess => {
+                open_mount_access(&mut wizard.mounts);
+                self.mark_render_changed();
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
@@ -1862,7 +1891,7 @@ impl DashboardState {
                     mounts
                         .forced_sources
                         .insert(source.trim().to_owned(), reason);
-                    mounts.read_only = true;
+                    mounts.forbid_overlay();
                 }
                 mounts.add_validated_mount();
                 form.forget_draft_part("attachment editor");
@@ -1984,26 +2013,26 @@ impl DashboardState {
     pub fn path_input_context(&self) -> String {
         let draft = match &self.mode {
             Mode::New(w) => format!(
-                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
+                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.project_directory.value(),
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
-                w.mounts.read_only
+                w.mounts.access
             ),
             Mode::Resume(w) => format!(
-                "resume:{}:{:?}:{:?}:{:?}:{:?}:{}",
+                "resume:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
                 w.session_id,
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
-                w.mounts.read_only
+                w.mounts.access
             ),
             Mode::Setup(dialog) => dialog.path_input_context(),
             Mode::EditContainer(e) => format!(
-                "container:{}:{:?}:{:?}:{:?}:{}",
+                "container:{}:{:?}:{:?}:{:?}:{:?}",
                 e.session_id,
                 self.state
                     .sessions
@@ -2011,7 +2040,7 @@ impl DashboardState {
                     .and_then(|session| self.config.targets.get(&session.target_template_id)),
                 e.source.value(),
                 e.destination.value(),
-                e.read_only
+                e.access
             ),
             _ => String::new(),
         };
@@ -2283,8 +2312,9 @@ impl DashboardState {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
-            WizardControl::MountReadOnly => {
-                wizard.mounts.toggle_read_only();
+            WizardControl::MountAccess => {
+                open_mount_access(&mut wizard.mounts);
+                self.mark_render_changed();
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }

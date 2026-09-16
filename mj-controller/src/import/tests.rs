@@ -2,6 +2,7 @@ use super::*;
 
 fn container_template() -> mj_core::config::ContainerTemplate {
     mj_core::config::ContainerTemplate {
+        build_cache: None,
         image: "agent-dev:latest".into(),
         pull_policy: Default::default(),
         platform: None,

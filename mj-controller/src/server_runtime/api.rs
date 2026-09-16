@@ -289,10 +289,15 @@ impl ApiBackend {
                 }
                 let ranges = files
                     .iter()
-                    .map(|range| crate::server::api::SubagentSourceRange {
-                        file: range.file.clone(),
-                        start: range.start,
-                        end: range.end,
+                    .flat_map(|entry| {
+                        let file = entry.file.clone();
+                        entry.ranges.iter().map(move |range| {
+                            crate::server::api::SubagentSourceRange {
+                                file: file.clone(),
+                                start: range.start,
+                                end: range.end,
+                            }
+                        })
                     })
                     .collect::<Vec<_>>();
                 let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
@@ -1718,6 +1723,8 @@ mod tests {
         SessionRecord {
             mjolnir_subagents: None,
             create_managed_worktree: None,
+            container_workspace: None,
+            build_cache: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,

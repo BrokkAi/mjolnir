@@ -7,13 +7,22 @@ use serde::{Deserialize, Serialize};
 /// Longest time a sub-agent completion wait may remain pending.
 pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
-/// Inclusive, one-based source lines captured for a child's initial context.
+/// An inclusive, one-based line range within a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceRange {
-    pub file: PathBuf,
+pub struct LineRange {
     pub start: u64,
     pub end: u64,
+}
+
+/// One or more line ranges captured from a single file for a child's initial
+/// context. Grouping by file lets a parent pull several disjoint ranges out of
+/// the same file in one entry, rather than one range per file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSourceRanges {
+    pub file: PathBuf,
+    pub ranges: Vec<LineRange>,
 }
 
 /// One MCP request created inside a parent worker and consumed by the
@@ -52,7 +61,7 @@ pub enum SubagentToolAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        files: Vec<SourceRange>,
+        files: Vec<FileSourceRanges>,
     },
     ListAgents,
     SendInput {

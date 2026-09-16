@@ -674,16 +674,10 @@ impl Controller {
                     .bundles
                     .get(&session.bundle_id)
                     .context("session bundle is missing")?;
-                let workspace_root = match &backend {
-                    targets::TargetLocator::LocalPodman { .. }
-                    | targets::TargetLocator::LocalDocker { .. }
-                    | targets::TargetLocator::AppleContainer { .. }
-                    | targets::TargetLocator::SshPodman { .. }
-                    | targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
-                    targets::TargetLocator::AwsEc2 { workspace, .. }
-                    | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-                    targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
-                };
+                let workspace_root = super::network_git::workspace_root(
+                    &backend,
+                    session.container_workspace.as_deref(),
+                );
                 let repositories = bundle
                     .repositories
                     .iter()

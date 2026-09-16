@@ -1,9 +1,11 @@
 //! Controller-side lifecycle transitions and canonical-to-backend conversion.
 
 mod backend;
+mod cache_host;
 mod checkpoint;
 mod git_cache;
 mod lifecycle;
+mod mbx;
 pub mod move_session;
 mod network_git;
 pub mod profile_config;
@@ -794,11 +796,17 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            build_cache: None,
             create_managed_worktree,
             mjolnir_subagents,
             archived: false,
             container_cpus: None,
             container_memory: None,
+            // Recorded for every new session, container-backed or not, so a
+            // later move into a container already knows the path its checkout
+            // will occupy. Only sessions that predate per-session container
+            // workspaces leave it unset.
+            container_workspace: Some(targets::new_container_workspace(&id)?),
             id: id.clone(),
             workspace_id,
             title: title.into(),
@@ -1418,6 +1426,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -2105,7 +2114,7 @@ mod tests {
                 launch_options(vec![AdditionalMount {
                     source: PathBuf::from("/host/models"),
                     destination: PathBuf::from("/mnt/models"),
-                    read_only: false,
+                    access: crate::targets::MountAccess::Cow,
                 }]),
             )
             .expect("a suggestion list that cannot be written must not fail a registration");
@@ -2192,6 +2201,7 @@ mod tests {
             "local".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,

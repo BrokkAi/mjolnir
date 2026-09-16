@@ -8,66 +8,26 @@ use sha2::{Digest, Sha256};
 
 use crate::targets::{
     self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, ProjectBundleSpec,
-    ProvisionStage, ProvisionStageGuard, SshTarget,
+    ProvisionStage, ProvisionStageGuard,
 };
 
 const CACHE_CONTAINER_ROOT: &str = "/run/hel/git-cache";
 const CACHE_RELATIVE_ROOT: &str = ".cache/mjolnir/git";
 const CACHE_MAX_KIB: u64 = 20 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-enum CacheHost {
-    LocalPodman,
-    LocalDocker,
-    Apple,
-    SshPodman(SshTarget),
-    SshDocker(SshTarget),
-}
+use super::cache_host::CacheHost;
 
 impl CacheHost {
-    fn for_target(target: &targets::TargetTemplate) -> Option<Self> {
-        match target {
-            targets::TargetTemplate::LocalPodman(_) => Some(Self::LocalPodman),
-            targets::TargetTemplate::LocalDocker(_) => Some(Self::LocalDocker),
-            targets::TargetTemplate::AppleContainer(_) => Some(Self::Apple),
-            targets::TargetTemplate::SshPodman { ssh, .. } => Some(Self::SshPodman(ssh.clone())),
-            targets::TargetTemplate::SshDocker { ssh, .. } => Some(Self::SshDocker(ssh.clone())),
-            targets::TargetTemplate::LocalBare
-            | targets::TargetTemplate::AwsEc2(_)
-            | targets::TargetTemplate::SshBare { .. } => None,
-        }
-    }
-
-    fn command(&self, remote: Vec<String>, purpose: impl Into<String>) -> CommandSpec {
-        let command = match self {
-            Self::LocalPodman | Self::LocalDocker | Self::Apple => {
-                CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned())
-            }
-            Self::SshPodman(ssh) | Self::SshDocker(ssh) => {
-                let mut args = ssh.ssh_args.clone();
-                targets::push_connection_sharing_args(&mut args);
-                args.push(ssh.destination.clone());
-                args.push(targets::join_remote_command(&remote));
-                CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
-            }
-        };
-        command.purpose(purpose).stage(ProvisionStage::Cloning)
-    }
-
-    fn shell_command(
+    /// `CacheHost::shell_command` with this cache's `$0` label and lifecycle
+    /// stage, so every clone-cache command reports as cloning work.
+    fn git_shell_command(
         &self,
         script: &str,
         arguments: impl IntoIterator<Item = String>,
         purpose: impl Into<String>,
     ) -> CommandSpec {
-        let mut remote = vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            script.to_owned(),
-            "hel-git-cache".to_owned(),
-        ];
-        remote.extend(arguments);
-        self.command(remote, purpose)
+        self.shell_command(script, "hel-git-cache", arguments, purpose)
+            .stage(ProvisionStage::Cloning)
     }
 
     fn managed_sessions(&self, executor: &impl CommandExecutor) -> Result<Vec<String>> {
@@ -107,7 +67,9 @@ impl CacheHost {
                 "json".to_owned(),
             ],
         };
-        let command = self.command(remote, "find live container Git cache snapshots");
+        let command = self
+            .command(remote, "find live container Git cache snapshots")
+            .stage(ProvisionStage::Cloning);
         let output = checked(executor.execute(&command)?, &command)?;
         super::recovery_scan::managed_sessions_from_container_json(&output.stdout)
     }
@@ -117,11 +79,30 @@ impl CacheHost {
 pub(super) struct PreparedCloneCache {
     host: CacheHost,
     session_root: PathBuf,
+    /// Host mirror of each cached repository, by its bundle destination. The
+    /// mirror is a real bare repository on the host, so it answers questions
+    /// about the session's code before any container exists.
+    mirrors: BTreeMap<String, PathBuf>,
 }
 
 impl PreparedCloneCache {
     pub(super) fn cleanup(&self, executor: &impl CommandExecutor) -> Result<()> {
         cleanup_session_root(&self.host, &self.session_root, executor)
+    }
+
+    /// The host mirror for the repository checked out at `destination`.
+    pub(super) fn mirror_for(&self, destination: &str) -> Option<&Path> {
+        self.mirrors.get(destination).map(PathBuf::as_path)
+    }
+
+    /// A prepared cache with only the mirrors a test needs.
+    #[cfg(test)]
+    pub(super) fn from_mirrors(mirrors: BTreeMap<String, PathBuf>) -> Self {
+        Self {
+            host: CacheHost::LocalPodman,
+            session_root: PathBuf::from("/tmp/hel-git-cache"),
+            mirrors,
+        }
     }
 }
 
@@ -231,6 +212,7 @@ pub(super) fn prepare(
         let _ = cleanup_session_root(&host, &session_root, executor);
         return None;
     }
+    let mut mirrors = BTreeMap::new();
     for repository in &mut bundle.repositories {
         let Some(source) = repository.url.as_deref() else {
             continue;
@@ -239,11 +221,17 @@ pub(super) fn prepare(
             continue;
         };
         repository.reference = references.get(&key).cloned();
+        if references.contains_key(&key) {
+            mirrors.insert(
+                repository.destination.clone(),
+                cache_root.join("mirrors").join(&key).join("repo.git"),
+            );
+        }
     }
     mounts.push(AdditionalMount {
         source: session_root.clone(),
         destination: PathBuf::from(CACHE_CONTAINER_ROOT),
-        read_only: true,
+        access: crate::targets::MountAccess::Ro,
     });
 
     let mut live_sessions = match host.managed_sessions(executor) {
@@ -261,11 +249,15 @@ pub(super) fn prepare(
     if let Err(error) = collect_garbage(&host, &cache_root, &live_sessions, executor) {
         executor.notify_notice(&format!("Clone-cache cleanup was skipped: {error:#}"));
     }
-    Some(PreparedCloneCache { host, session_root })
+    Some(PreparedCloneCache {
+        host,
+        session_root,
+        mirrors,
+    })
 }
 
 fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
-    let command = host.shell_command(
+    let command = host.git_shell_command(
         "command -v git >/dev/null 2>&1 || exit 127; printf '%s' \"$HOME\"",
         [],
         "locate the container host Git cache",
@@ -361,7 +353,7 @@ fn prepare_repository(
     executor: &impl CommandExecutor,
 ) -> Result<()> {
     let token = github_token.is_some();
-    let mut command = host.shell_command(
+    let mut command = host.git_shell_command(
         PREPARE_REPOSITORY_SCRIPT,
         [
             cache_root.to_string_lossy().into_owned(),
@@ -457,7 +449,7 @@ fn collect_garbage_with_limit(
         limit_kib.to_string(),
     ];
     arguments.extend(live_sessions.iter().cloned());
-    let command = host.shell_command(
+    let command = host.git_shell_command(
         CACHE_GC_SCRIPT,
         arguments,
         "prune the container host Git cache",
@@ -471,7 +463,7 @@ fn cleanup_session_root(
     session_root: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let command = host.shell_command(
+    let command = host.git_shell_command(
         "set -eu; root=$1; case $root in */.cache/mjolnir/git/sessions/*) rm -rf -- \"$root\" ;; *) echo 'refusing unsafe clone-cache cleanup path' >&2; exit 2 ;; esac",
         [session_root.to_string_lossy().into_owned()],
         "remove failed session Git cache snapshot",
@@ -497,7 +489,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::targets::{ContainerTemplate, ProcessExecutor, RepositorySpec, TargetTemplate};
+    use crate::targets::{
+        ContainerTemplate, ProcessExecutor, RepositorySpec, SshTarget, TargetTemplate,
+    };
     use mj_core::config::ImagePullPolicy;
 
     #[test]
@@ -543,6 +537,7 @@ mod tests {
             ..Default::default()
         };
         let target = TargetTemplate::LocalPodman(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: Vec::new(),
@@ -603,14 +598,14 @@ mod tests {
 
     #[test]
     fn apple_and_ssh_hosts_use_their_native_command_boundaries() {
-        let apple = CacheHost::Apple.shell_command("true", [], "probe");
+        let apple = CacheHost::Apple.git_shell_command("true", [], "probe");
         assert_eq!(apple.program, "sh");
 
         let ssh = CacheHost::SshPodman(SshTarget {
             destination: "dev@example.test".to_owned(),
             ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
         })
-        .shell_command("true", [], "probe");
+        .git_shell_command("true", [], "probe");
         assert_eq!(ssh.program, "ssh");
         assert!(ssh.args.last().unwrap().contains("'sh' '-c' 'true'"));
     }
@@ -628,6 +623,7 @@ mod tests {
             ..Default::default()
         };
         let target = TargetTemplate::LocalDocker(ContainerTemplate {
+            build_cache: None,
             image: "ubuntu:24.04".to_owned(),
             pull_policy: ImagePullPolicy::Auto,
             extra_run_args: Vec::new(),

@@ -884,6 +884,26 @@ impl CheckpointMetadata {
     }
 }
 
+/// The mbx build cache a container session was provisioned with. The
+/// directory is a host path that is mounted read-write at the same absolute
+/// path inside the container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBuildCache {
+    /// The container host this cache was resolved on. A session moved to a
+    /// different host cannot reuse it, so the decision is made again there.
+    pub host: String,
+    pub directory: PathBuf,
+    /// An mbx size string passed as `MBX_GC_MAX_SIZE`, or `None` when the
+    /// host's own mbx configuration file already carries the budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+    /// A `[target] root` the host's mbx configuration relocates outside the
+    /// cache directory, mounted read-write at the same path as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
@@ -924,6 +944,18 @@ pub struct SessionRecord {
     /// template's value. It is applied the next time the container is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_memory: Option<String>,
+    /// In-container workspace root this session's repositories live under.
+    /// `None` is a session whose container predates per-session workspaces and
+    /// therefore keeps the shared legacy `/workspace`; every session created
+    /// since records `/workspace/<session id>`, so two checkouts of one project
+    /// on a host never share an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_workspace: Option<PathBuf>,
+    /// The mbx build cache this session's container runs with, decided once at
+    /// provisioning. `None` means the session runs without a build cache;
+    /// resume, move, and sub-agent children reuse the recorded value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_cache: Option<SessionBuildCache>,
     pub state: SessionState,
     /// Legacy visibility preference, retained for record compatibility.
     /// Current surfaces do not hide sessions based on this flag.
@@ -1602,6 +1634,7 @@ mod tests {
         CONFIG_VERSION, ContainerTemplate, HarnessProfile, ProjectBundle, ProjectRepository,
         TargetTemplate,
     };
+    use crate::targets::MountAccess;
 
     fn user_item(position: u64, text: &str) -> Arc<TranscriptItem> {
         Arc::new(TranscriptItem {
@@ -1723,12 +1756,14 @@ mod tests {
 
     fn sample_state() -> State {
         let session = SessionRecord {
+            build_cache: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
             archived: false,
             container_cpus: None,
             container_memory: None,
+            container_workspace: None,
             id: "0123456789abcdef".into(),
             title: "Build Hel".into(),
             harness_kind: HarnessKind::Codex,
@@ -1741,7 +1776,7 @@ mod tests {
             additional_mounts: vec![AdditionalMount {
                 source: PathBuf::from("/home/test/cache"),
                 destination: PathBuf::from("/mnt/cache"),
-                read_only: false,
+                access: MountAccess::Cow,
             }],
             state: SessionState::Running,
             target: Some(TargetLocator::LocalPodman {
@@ -1778,6 +1813,7 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
+            build_cache: Default::default(),
             advanced: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -1816,6 +1852,7 @@ mod tests {
                 "podman".into(),
                 TargetTemplate::LocalPodman {
                     container: ContainerTemplate {
+                        build_cache: None,
                         image: "ubuntu:24.04".into(),
                         pull_policy: Default::default(),
                         platform: None,
@@ -2303,12 +2340,12 @@ mod tests {
                 AdditionalMount {
                     source: "/srv/first".into(),
                     destination: "/mnt/first".into(),
-                    read_only: false,
+                    access: MountAccess::Cow,
                 },
                 AdditionalMount {
                     source: "/srv/second".into(),
                     destination: "/mnt/second".into(),
-                    read_only: false,
+                    access: MountAccess::Cow,
                 },
             ],
         );
@@ -2317,7 +2354,7 @@ mod tests {
             &[AdditionalMount {
                 source: "/srv/first".into(),
                 destination: "/mnt/again".into(),
-                read_only: false,
+                access: MountAccess::Cow,
             }],
         );
 

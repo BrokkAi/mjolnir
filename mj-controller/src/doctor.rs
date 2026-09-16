@@ -612,6 +612,7 @@ fn podman_image_check(
     let title = format!("Podman image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalPodman(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -739,6 +740,7 @@ fn docker_image_check(
     let title = format!("Docker image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalDocker(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -1012,6 +1014,7 @@ fn ssh_podman_runtime_check(
     let target = RuntimeTargetTemplate::SshPodman {
         ssh: ssh.clone(),
         container: RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -1314,6 +1317,7 @@ fn ssh_docker_check(
         let target = RuntimeTargetTemplate::SshDocker {
             ssh: ssh.clone(),
             container: RuntimeContainerTemplate {
+                build_cache: None,
                 image: image.to_owned(),
                 pull_policy: Default::default(),
                 extra_run_args: vec![],
@@ -1404,7 +1408,7 @@ fn podman_remediation(detail: &str) -> &'static str {
 
 /// Map a Podman preflight failure to its specific remediation, if one applies.
 fn podman_remediation_match(detail: &str) -> Option<&'static str> {
-    if detail.contains("Podman 4.0.0") {
+    if detail.contains("Podman 4.3.0") {
         Some(
             "Upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`.",
         )
@@ -1744,6 +1748,7 @@ pub fn apple_container_check(
     }
 
     let target = RuntimeTargetTemplate::AppleContainer(RuntimeContainerTemplate {
+        build_cache: None,
         image,
         pull_policy: Default::default(),
         extra_run_args: vec![],
@@ -1934,6 +1939,7 @@ mod tests {
 
     fn container(image: &str) -> ContainerTemplate {
         ContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             platform: None,
@@ -3115,7 +3121,7 @@ mod tests {
         assert!(instructions.contains("mj doctor --json"));
         assert!(instructions.contains("mj doctor --json --smoke"));
         assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
-        assert!(instructions.contains("Podman **4.0.0 or newer**"));
+        assert!(instructions.contains("Podman **4.3.0 or newer**"));
         assert!(instructions.contains("kind = \"local-docker\""));
         assert!(instructions.contains("--opt type=overlay"));
     }

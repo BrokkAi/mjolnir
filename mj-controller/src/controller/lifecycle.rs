@@ -859,6 +859,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -1211,6 +1212,7 @@ mod tests {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -1542,6 +1544,7 @@ mod tests {
             "apple".into(),
             TargetTemplate::AppleContainer {
                 container: ConfigContainer {
+                    build_cache: None,
                     image: "test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,

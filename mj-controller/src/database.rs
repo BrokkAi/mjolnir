@@ -25,13 +25,13 @@ use mj_core::state::{
 };
 use mj_core::subagent::SubagentRecord;
 
-use crate::targets::AdditionalMount;
+use crate::targets::{AdditionalMount, MountAccess};
 use mj_core::workspace::{
     DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 36;
 
 mod session_move;
 pub use session_move::*;
@@ -1303,7 +1303,8 @@ pub fn load_state_from(path: &Path) -> Result<State> {
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
-                , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents
+                , c.workspace_id, s.create_managed_worktree, s.mjolnir_subagents,
+                s.container_workspace, s.build_cache_json
          FROM sessions s JOIN session_contexts c USING(session_id)
          ORDER BY s.session_id",
     )?;
@@ -1325,6 +1326,17 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             harness_kind,
             create_managed_worktree: row.get(23)?,
             mjolnir_subagents: row.get(24)?,
+            container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
+            build_cache: row
+                .get::<_, Option<String>>(26)?
+                .as_deref()
+                .and_then(|text| match serde_json::from_str(text) {
+                    Ok(build_cache) => Some(build_cache),
+                    Err(error) => {
+                        tracing::warn!(%error, "session build cache record is unreadable");
+                        None
+                    }
+                }),
             workspace_id: row.get(22)?,
             archived: row.get(21)?,
             container_cpus: row.get(19)?,
@@ -1860,23 +1872,7 @@ fn set_session_container_settings_to(
     if changed != 1 {
         bail!("unknown session {session_id}");
     }
-    tx.execute(
-        "DELETE FROM session_mounts WHERE session_id = ?1",
-        [session_id],
-    )?;
-    for (ordinal, mount) in mounts.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                session_id,
-                ordinal as i64,
-                path_to_blob(&mount.source),
-                path_to_blob(&mount.destination),
-                mount.read_only
-            ],
-        )?;
-    }
+    replace_mounts(&tx, session_id, mounts)?;
     tx.commit()?;
     Ok(())
 }
@@ -4402,8 +4398,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
-             mjolnir_subagents
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+             mjolnir_subagents, container_workspace, build_cache_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -4427,7 +4423,9 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
              container_memory = excluded.container_memory,
              archived = excluded.archived,
              create_managed_worktree = excluded.create_managed_worktree,
-             mjolnir_subagents = excluded.mjolnir_subagents",
+             mjolnir_subagents = excluded.mjolnir_subagents,
+             container_workspace = excluded.container_workspace,
+             build_cache_json = excluded.build_cache_json",
         params![
             session.id,
             session.title,
@@ -4462,6 +4460,15 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
             session.draft_input,
             session.create_managed_worktree,
             session.mjolnir_subagents,
+            session
+                .container_workspace
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            session
+                .build_cache
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     tx.execute(
@@ -4470,23 +4477,7 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
         [session.id.as_str()],
     )?;
     replace_targets(tx, session)?;
-    tx.execute(
-        "DELETE FROM session_mounts WHERE session_id = ?1",
-        [session.id.as_str()],
-    )?;
-    for (ordinal, mount) in session.additional_mounts.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                session.id,
-                ordinal as i64,
-                path_to_blob(&mount.source),
-                path_to_blob(&mount.destination),
-                mount.read_only
-            ],
-        )?;
-    }
+    replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
     Ok(())
 }
@@ -4743,18 +4734,76 @@ fn load_targets(connection: &Connection, state: &mut State) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite a session's attached directories.
+///
+/// `session_mounts.read_only` keeps the meaning older builds understand, so
+/// read-write mounts are stored there as not read-only and recorded again in
+/// `session_mount_access`. Older builds rewrite `session_mounts` without
+/// touching that table, which is what keeps the read-write choice.
+fn replace_mounts(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    mounts: &[AdditionalMount],
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM session_mounts WHERE session_id = ?1",
+        [session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_mount_access WHERE session_id = ?1",
+        [session_id],
+    )?;
+    for (ordinal, mount) in mounts.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                ordinal as i64,
+                path_to_blob(&mount.source),
+                path_to_blob(&mount.destination),
+                mount.access == MountAccess::Ro
+            ],
+        )?;
+        if mount.access == MountAccess::Rw {
+            tx.execute(
+                "INSERT INTO session_mount_access(session_id, source, destination, access)
+                 VALUES (?1, ?2, ?3, 'rw')",
+                params![
+                    session_id,
+                    path_to_blob(&mount.source),
+                    path_to_blob(&mount.destination)
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn load_mounts(connection: &Connection, state: &mut State) -> Result<()> {
     let mut statement = connection.prepare(
-        "SELECT session_id, source, destination, read_only
-         FROM session_mounts ORDER BY session_id, ordinal",
+        "SELECT m.session_id, m.source, m.destination, m.read_only, a.access IS NOT NULL
+         FROM session_mounts m
+         LEFT JOIN session_mount_access a
+             ON a.session_id = m.session_id
+             AND a.source = m.source
+             AND a.destination = m.destination
+         ORDER BY m.session_id, m.ordinal",
     )?;
     let rows = statement.query_map([], |row| {
+        // An older build that made the mount read-only left the access row
+        // behind; its later choice wins.
+        let access = match (row.get::<_, bool>(3)?, row.get::<_, bool>(4)?) {
+            (true, _) => MountAccess::Ro,
+            (false, true) => MountAccess::Rw,
+            (false, false) => MountAccess::Cow,
+        };
         Ok((
             row.get::<_, String>(0)?,
             AdditionalMount {
                 source: blob_to_path(row.get_ref(1)?.as_blob()?),
                 destination: blob_to_path(row.get_ref(2)?.as_blob()?),
-                read_only: row.get(3)?,
+                access,
             },
         ))
     })?;

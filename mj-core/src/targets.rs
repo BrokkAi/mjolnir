@@ -23,6 +23,9 @@ pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
+/// The shared in-container workspace every container session used before
+/// per-session workspaces existed. New sessions record a path under it; see
+/// `container_workspace_root`.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
 /// The launch phase a command belongs to, reported as launch progress.
@@ -228,15 +231,123 @@ pub struct DeploymentCapacityUsage {
 /// controller-packed snapshot at the destination while retaining this shared
 /// persisted shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "AdditionalMountRepr", into = "AdditionalMountRepr")]
 pub struct AdditionalMount {
     pub source: PathBuf,
     pub destination: PathBuf,
-    /// Attach the source read-only instead of behind the container runtime's
-    /// copy-on-write overlay. Defaults to false so archives and records written
-    /// before the option existed keep the overlay they were provisioned with.
+    pub access: MountAccess,
+}
+
+/// How a container sees an attached directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountAccess {
+    /// The container can read the directory but not change it.
+    Ro,
+    /// The container writes to a private copy-on-write overlay; the host
+    /// directory never changes.
+    Cow,
+    /// The container writes straight through to the host directory.
+    Rw,
+}
+
+impl MountAccess {
+    pub const ALL: [Self; 3] = [Self::Ro, Self::Cow, Self::Rw];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ro => "ro",
+            Self::Cow => "cow",
+            Self::Rw => "rw",
+        }
+    }
+
+    /// The mode this attachment takes where the host filesystem cannot carry
+    /// a copy-on-write overlay. Read-only is the substitute, because the
+    /// alternative would let the container write through to the host
+    /// directory the user asked to keep unchanged.
+    ///
+    /// This is the one rule for an unavailable overlay: the wizard offers the
+    /// same modes [`Self::offered`] lists, and the runtime downgrades a stored
+    /// mount the same way.
+    pub fn without_overlay(self) -> Self {
+        match self {
+            Self::Cow => Self::Ro,
+            kept => kept,
+        }
+    }
+
+    /// The modes an attachment may be given, given whether the host filesystem
+    /// can carry the copy-on-write overlay.
+    pub fn offered(overlay_available: bool) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|access| overlay_available || access.without_overlay() == *access)
+            .collect()
+    }
+}
+
+/// The numeric identity of a container image's configured user, read from the
+/// image on the host that runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUser {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Podman's user-namespace option for a session container, or `None` when the
+/// container keeps Podman's default mapping.
+///
+/// A rootless Podman container maps the image's user onto the host user
+/// running the daemon, so a file the container writes into an attached
+/// directory is owned by that host user instead of a subordinate id. The
+/// mapping has to name the image's own ids: plain `keep-id` maps the host user
+/// onto uid 1000 inside the container and demotes an image that runs as root,
+/// which is a change in how the container runs. Without the ids there is no
+/// safe option to pass, so the container runs the way it did before.
+pub fn podman_userns_option(image_user: Option<ImageUser>) -> Option<String> {
+    image_user.map(|ImageUser { uid, gid }| format!("--userns=keep-id:uid={uid},gid={gid}"))
+}
+
+/// The persisted shape. Read-only and copy-on-write mounts keep the original
+/// `read_only` boolean alone, so archives and API payloads that older builds
+/// read stay unchanged; only read-write adds `access`, which older builds
+/// cannot represent.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdditionalMountRepr {
+    source: PathBuf,
+    destination: PathBuf,
     #[serde(default)]
-    pub read_only: bool,
+    read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access: Option<MountAccess>,
+}
+
+impl From<AdditionalMountRepr> for AdditionalMount {
+    fn from(repr: AdditionalMountRepr) -> Self {
+        let access = repr.access.unwrap_or(if repr.read_only {
+            MountAccess::Ro
+        } else {
+            MountAccess::Cow
+        });
+        Self {
+            source: repr.source,
+            destination: repr.destination,
+            access,
+        }
+    }
+}
+
+impl From<AdditionalMount> for AdditionalMountRepr {
+    fn from(mount: AdditionalMount) -> Self {
+        Self {
+            source: mount.source,
+            destination: mount.destination,
+            read_only: mount.access == MountAccess::Ro,
+            access: (mount.access == MountAccess::Rw).then_some(MountAccess::Rw),
+        }
+    }
 }
 
 /// Why a filesystem cannot host a container target's copy-on-write overlay,
@@ -1186,6 +1297,10 @@ pub struct ContainerTemplate {
     pub extra_run_args: Vec<String>,
     #[serde(default)]
     pub workspace_storage: PodmanWorkspaceStorage,
+    /// Per-target mbx build cache overrides, carried from the user
+    /// configuration so cache resolution can read them off a runtime target.
+    #[serde(default)]
+    pub build_cache: Option<crate::config::TargetBuildCache>,
 }
 
 impl ImagePullPolicy {
@@ -1553,15 +1668,39 @@ pub fn podman_workspace_locator(
     }
 }
 
+/// The in-container workspace root a session's repositories live under.
+///
+/// `recorded` is the session record's `container_workspace`. A session whose
+/// container predates per-session workspaces has none and keeps the legacy
+/// shared `/workspace`; every session created since records
+/// `/workspace/<session id>`, so a build cache shared by every container on a
+/// host never sees two checkouts of one project at the same absolute path.
+pub fn container_workspace_root(recorded: Option<&Path>) -> String {
+    recorded.map_or_else(
+        || CONTAINER_WORKSPACE.to_owned(),
+        |path| path.to_string_lossy().into_owned(),
+    )
+}
+
+/// The per-session container workspace recorded for a session created now.
+pub fn new_container_workspace(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
+    Ok(Path::new(CONTAINER_WORKSPACE).join(session_id))
+}
+
 pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<String> {
     validate_session_id(session_id)?;
     match template {
         TargetTemplate::LocalBare => bail!("local bare projects use their selected directory"),
+        // A container workspace is per session and recorded on the session
+        // record, so it is read with `container_workspace_root` instead.
         TargetTemplate::LocalPodman(_)
         | TargetTemplate::LocalDocker(_)
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
-        | TargetTemplate::SshDocker { .. } => Ok(CONTAINER_WORKSPACE.to_owned()),
+        | TargetTemplate::SshDocker { .. } => {
+            bail!("container targets use the session's recorded container workspace")
+        }
         TargetTemplate::AwsEc2(_) => Ok(format!(".local/share/hel/workspaces/{session_id}")),
         TargetTemplate::SshBare {
             workspace_prefix, ..

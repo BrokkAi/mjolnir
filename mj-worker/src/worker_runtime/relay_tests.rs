@@ -45,6 +45,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         subagent_tools: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
+        seed_image_environment: false,
         run_mode: Default::default(),
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,

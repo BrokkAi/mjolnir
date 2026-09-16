@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -26,7 +26,9 @@ pub const PODMAN_DOCUMENTATION: &str = include_str!("../docs/PODMAN.md");
 /// The Docker postconditions page, verbatim.
 pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
-const PODMAN_MINIMUM_MAJOR_VERSION: u32 = 4;
+/// `--userns=keep-id:uid=,gid=`, which maps a session container's image user
+/// onto the host user, landed in Podman 4.3.0.
+const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedResourceKind {
@@ -260,7 +262,7 @@ impl PodmanProbe {
 
     fn postcondition(self) -> &'static str {
         match self {
-            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
+            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.3.0 or newer",
             Self::Rootless => {
                 "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`"
             }
@@ -599,21 +601,21 @@ fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Result<String> {
         .find(|part| part.as_bytes().first().is_some_and(u8::is_ascii_digit))
     else {
         bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
         );
     };
-    let Some(major) = candidate
-        .split('.')
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-    else {
+    let mut numbers = candidate.split('.').map(|part| part.parse::<u32>().ok());
+    let Some(Some(major)) = numbers.next() else {
         bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
         );
     };
-    if major < PODMAN_MINIMUM_MAJOR_VERSION {
+    // A version with no minor component, such as `podman version 4`, names
+    // the earliest release of that series.
+    let minor = numbers.next().flatten().unwrap_or(0);
+    if (major, minor) < PODMAN_MINIMUM_VERSION {
         bail!(
-            "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.0.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+            "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.3.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
         );
     }
     Ok(candidate.to_owned())
@@ -642,13 +644,21 @@ fn valid_rootless_uid_map(stdout: &[u8]) -> bool {
 
 /// Create the initial resource. AWS address discovery and all SSH bootstrap
 /// happen after parsing the `run-instances` response and constructing a locator.
+///
+/// `container_workspace` is the session record's recorded container workspace.
+/// Container targets clone into it and mount their workspace storage there;
+/// a session that predates per-session workspaces records none and keeps the
+/// shared `/workspace`.
 pub fn provision_plan(
     template: &TargetTemplate,
     session_id: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
+    image_user: Option<ImageUser>,
+    container_workspace: Option<&Path>,
 ) -> Result<CommandPlan> {
     bundle.validate()?;
+    let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
         && !matches!(
             template,
@@ -668,6 +678,8 @@ pub fn provision_plan(
             session_id,
             bundle,
             additional_mounts,
+            image_user,
+            container_workspace,
         )?;
         plan.commands = plan
             .commands
@@ -689,7 +701,9 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                image_user,
                 None,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -698,7 +712,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("podman", &name, args)
             }));
         }
@@ -709,6 +723,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -717,7 +732,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("docker", &name, args)
             }));
         }
@@ -735,6 +750,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -743,7 +759,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("container", &name, args)
             }));
         }
@@ -810,7 +826,9 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                image_user,
                 Some(ssh),
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshContainer {
@@ -820,7 +838,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.clone()];
                 remote.extend(args);
                 ssh_command_owned(ssh, remote)
@@ -890,6 +908,8 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         smoke_id,
         &[],
         None,
+        None,
+        CONTAINER_WORKSPACE,
     )?);
     let exec = vec![
         engine.to_owned(),
@@ -967,11 +987,11 @@ fn run_ssh_docker_overlay_smoke_test(
     let mount = AdditionalMount {
         source: PathBuf::from(lower),
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
-        read_only: false,
+        access: MountAccess::Cow,
     };
     let result = (|| {
         let create = command_over_ssh(
-            docker_container_run(container, &name, smoke_id, &[mount])?,
+            docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?,
             ssh,
         );
         execute_checked(executor, &create)?;
@@ -1049,9 +1069,9 @@ fn run_docker_overlay_smoke_test(
     let mount = AdditionalMount {
         source: lower.path().to_path_buf(),
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
-        read_only: false,
+        access: MountAccess::Cow,
     };
-    let create = docker_container_run(container, &name, smoke_id, &[mount])?
+    let create = docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?
         .purpose("create disposable Docker OverlayFS smoke container");
     let probe = container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE])
         .purpose("verify Docker OverlayFS copy-on-write attachment");
@@ -2452,10 +2472,20 @@ fn container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     Ok(CommandSpec::new(
         engine,
-        container_run_args(engine, template, name, session_id, additional_mounts, None)?,
+        container_run_args(
+            engine,
+            template,
+            name,
+            session_id,
+            additional_mounts,
+            None,
+            None,
+            workspace_root,
+        )?,
     )
     .purpose("start session container")
     .stage(ProvisionStage::Provisioning)
@@ -2540,7 +2570,9 @@ fn podman_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    image_user: Option<ImageUser>,
     ssh: Option<&SshTarget>,
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let workspace = podman_workspace_locator(template, session_id)?;
     let run_args = container_run_args(
@@ -2550,6 +2582,8 @@ fn podman_container_run(
         session_id,
         additional_mounts,
         Some(&workspace),
+        image_user,
+        workspace_root,
     )?;
     let mut wrapped = match &workspace {
         PodmanWorkspaceLocator::ContainerLayer => {
@@ -2736,6 +2770,7 @@ fn docker_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let run_args = container_run_args(
         "docker",
@@ -2744,14 +2779,23 @@ fn docker_container_run(
         session_id,
         additional_mounts,
         None,
+        None,
+        workspace_root,
     )?;
-    let writable = additional_mounts
+    let overlaid = additional_mounts
         .iter()
         .enumerate()
-        .filter(|(_, mount)| !mount.read_only)
+        .filter(|(_, mount)| mount.access == MountAccess::Cow)
         .collect::<Vec<_>>();
-    if writable.is_empty() {
-        return container_run("docker", template, name, session_id, additional_mounts);
+    if overlaid.is_empty() {
+        return container_run(
+            "docker",
+            template,
+            name,
+            session_id,
+            additional_mounts,
+            workspace_root,
+        );
     }
     let mut args = vec![
         "-c".to_owned(),
@@ -2762,7 +2806,7 @@ fn docker_container_run(
         template.image.clone(),
         docker_pull_policy(template).to_owned(),
     ];
-    for (ordinal, mount) in writable {
+    for (ordinal, mount) in overlaid {
         args.extend([
             ordinal.to_string(),
             mount.source.to_string_lossy().into_owned(),
@@ -2777,6 +2821,19 @@ fn docker_container_run(
         .creates_target())
 }
 
+/// Podman's `--pull` flag for this template, or `None` when the resolved
+/// policy is Podman's own default. Every `podman run` Hel issues for a
+/// template — the session container and the image-user probe alike — uses this
+/// one answer, so a probe never pulls an image the launch would not.
+fn podman_pull_argument(template: &ContainerTemplate) -> Option<String> {
+    let pull_policy = template.pull_policy.at_launch(&template.image);
+    (pull_policy != ImagePullPolicy::Missing)
+        .then(|| format!("--pull={}", pull_policy.podman_value()))
+}
+
+// Every argument is an independent input the engine needs: the template, the
+// resource identity, the mounts, and the workspace the session runs in.
+#[allow(clippy::too_many_arguments)]
 fn container_run_args(
     engine: &str,
     template: &ContainerTemplate,
@@ -2784,18 +2841,23 @@ fn container_run_args(
     session_id: &str,
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
+    image_user: Option<ImageUser>,
+    workspace_root: &str,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
     if engine == "podman" {
-        let pull_policy = template.pull_policy.at_launch(&template.image);
-        if pull_policy != ImagePullPolicy::Missing {
-            args.push(format!("--pull={}", pull_policy.podman_value()));
-        }
+        args.extend(podman_pull_argument(template));
         // PID 1 is `sleep infinity`, which reaps nothing, so every exec that
         // outlives its parent leaves a zombie behind. Apple's `container`
         // engine is left alone: its support for the flag is unverified.
         args.push("--init".to_owned());
+        // Rootless Podman otherwise runs the container's user as a
+        // subordinate id, which cannot write to anything the host user owns
+        // and leaves unreadable files behind where it can. Every container
+        // whose image user is known maps that user back to the host user,
+        // whatever its mounts are.
+        args.extend(podman_userns_option(image_user));
     } else if engine == "docker" {
         let pull = docker_pull_policy(template);
         args.push(format!("--pull={pull}"));
@@ -2810,14 +2872,17 @@ fn container_run_args(
     if engine == "podman" {
         match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
             PodmanWorkspaceLocator::ContainerLayer => {}
+            // `:U` chowns the volume to the container user, so the session's
+            // workspace is writable wherever it is mounted.
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
-                format!("{name}:{CONTAINER_WORKSPACE}:rw,U"),
+                format!("{name}:{workspace_root}:rw,U"),
             ]),
-            PodmanWorkspaceLocator::HostPath { path, .. } => args.extend([
-                "--volume".to_owned(),
-                format!("{path}:{CONTAINER_WORKSPACE}:rw"),
-            ]),
+            // The host directory belongs to the host user, which
+            // `--userns=keep-id` maps to the container user.
+            PodmanWorkspaceLocator::HostPath { path, .. } => {
+                args.extend(["--volume".to_owned(), format!("{path}:{workspace_root}:rw")])
+            }
         }
     }
     for (ordinal, mount) in additional_mounts.iter().enumerate() {
@@ -2825,27 +2890,41 @@ fn container_run_args(
         let destination = mount.destination.to_string_lossy();
         match engine {
             "podman" => {
-                let mode = if mount.read_only { "ro" } else { "O" };
+                let mode = match mount.access {
+                    MountAccess::Ro => "ro",
+                    MountAccess::Cow => "O",
+                    MountAccess::Rw => "rw",
+                };
                 args.extend([
                     "--volume".to_owned(),
                     format!("{source}:{destination}:{mode}"),
                 ]);
             }
             "docker" => {
-                let source = if mount.read_only {
-                    source.into_owned()
-                } else {
+                let source = if mount.access == MountAccess::Cow {
                     docker_overlay_volume_name(name, ordinal)
+                } else {
+                    source.into_owned()
                 };
-                let suffix = if mount.read_only { ":ro" } else { "" };
+                let suffix = if mount.access == MountAccess::Ro {
+                    ":ro"
+                } else {
+                    ""
+                };
                 args.extend([
                     "--volume".to_owned(),
                     format!("{source}:{destination}{suffix}"),
                 ]);
             }
+            // Apple's runtime has no copy-on-write overlay, so those mounts
+            // stay read-only rather than silently writing through.
             "container" => args.extend([
                 "--mount".to_owned(),
-                format!("type=bind,source={source},target={destination},readonly"),
+                if mount.access == MountAccess::Rw {
+                    format!("type=bind,source={source},target={destination}")
+                } else {
+                    format!("type=bind,source={source},target={destination},readonly")
+                },
             ]),
             _ => bail!("additional mounts are unsupported for container engine {engine:?}"),
         }
@@ -2912,6 +2991,58 @@ fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) -> CommandSpe
 
 #[cfg(test)]
 mod tests;
+
+/// The uid and gid of the container image's configured user, read on the host
+/// that runs the container engine. `ssh` names that host for a remote Podman
+/// target; `None` reads it on this machine.
+///
+/// The image is asked rather than assumed, because `--userns=keep-id` has to
+/// name the ids the container will actually run as. The probe carries the
+/// template's own pull policy, so it reads the same image the launch will run
+/// and never pulls one the launch would not. The entrypoint is cleared so the
+/// answer comes from an image whose entrypoint is a long-running program.
+pub fn probe_image_user(
+    ssh: Option<&SshTarget>,
+    template: &ContainerTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<ImageUser> {
+    let host = match ssh {
+        Some(ssh) => PodmanHost::Ssh(ssh),
+        None => PodmanHost::Local,
+    };
+    let mut args = vec!["podman".to_owned(), "run".to_owned(), "--rm".to_owned()];
+    args.extend(podman_pull_argument(template));
+    args.extend([
+        "--entrypoint".to_owned(),
+        String::new(),
+        template.image.clone(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "id -u; id -g".to_owned(),
+    ]);
+    let output = executor.execute(&host.command_owned(args, "read the container image user"))?;
+    if output.status != 0 {
+        bail!(
+            "image user probe failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ids = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let mut next = |field: &str| -> Result<u32> {
+        ids.next()
+            .with_context(|| format!("image user probe reported no {field}"))?
+            .parse()
+            .with_context(|| format!("image user probe reported an unreadable {field}"))
+    };
+    let uid = next("uid")?;
+    let gid = next("gid")?;
+    Ok(ImageUser { uid, gid })
+}
 
 /// Filesystem type of each directory, probed on the host that runs the
 /// container engine. `ssh` names that host for a remote Podman target; `None`

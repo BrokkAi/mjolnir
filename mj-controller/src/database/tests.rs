@@ -436,6 +436,8 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
@@ -457,7 +459,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         additional_mounts: vec![AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }],
         state: SessionState::Stopped,
         target: Some(TargetLocator::LocalPodman {
@@ -790,7 +792,7 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
         &[AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
-            read_only: true,
+            access: crate::targets::MountAccess::Ro,
         }],
         "2026-08-13T00:00:00Z",
     )
@@ -806,7 +808,7 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
         vec![AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
-            read_only: true,
+            access: crate::targets::MountAccess::Ro,
         }]
     );
     assert_eq!(session.updated_at, "2026-08-13T00:00:00Z");
@@ -825,12 +827,17 @@ fn mount_read_only_round_trips_through_both_writers() {
         AdditionalMount {
             source: PathBuf::from("/host/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         },
         AdditionalMount {
             source: PathBuf::from("/net/share"),
             destination: PathBuf::from("/mnt/share"),
-            read_only: true,
+            access: crate::targets::MountAccess::Ro,
+        },
+        AdditionalMount {
+            source: PathBuf::from("/host/build-cache"),
+            destination: PathBuf::from("/mnt/build-cache"),
+            access: crate::targets::MountAccess::Rw,
         },
     ];
 
@@ -839,6 +846,47 @@ fn mount_read_only_round_trips_through_both_writers() {
         load_state_from(&database).unwrap().sessions["session-1"].additional_mounts,
         record.additional_mounts
     );
+}
+
+#[test]
+fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.additional_mounts = vec![
+        AdditionalMount {
+            source: PathBuf::from("/host/build-cache"),
+            destination: PathBuf::from("/mnt/build-cache"),
+            access: crate::targets::MountAccess::Rw,
+        },
+        AdditionalMount {
+            source: PathBuf::from("/host/scratch"),
+            destination: PathBuf::from("/mnt/scratch"),
+            access: crate::targets::MountAccess::Rw,
+        },
+    ];
+    save_session_to(&database, &record).unwrap();
+
+    // An older build rewrites `session_mounts` from its own view, where a
+    // read-write mount is merely not read-only, and knows nothing of the
+    // access table. Here it keeps the first mount and makes the second one
+    // read-only.
+    let connection = open(&database).unwrap();
+    connection
+        .execute_batch(
+            "DELETE FROM session_mounts WHERE session_id = 'session-1';
+             INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
+                 VALUES ('session-1', 0, CAST('/host/build-cache' AS BLOB),
+                         CAST('/mnt/build-cache' AS BLOB), 0),
+                        ('session-1', 1, CAST('/host/scratch' AS BLOB),
+                         CAST('/mnt/scratch' AS BLOB), 1);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let loaded = &load_state_from(&database).unwrap().sessions["session-1"].additional_mounts;
+    assert_eq!(loaded[0].access, crate::targets::MountAccess::Rw);
+    assert_eq!(loaded[1].access, crate::targets::MountAccess::Ro);
 }
 
 #[test]
@@ -853,7 +901,7 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     let attached = AdditionalMount {
         source: PathBuf::from("/host/models"),
         destination: PathBuf::from("/mnt/models"),
-        read_only: true,
+        access: crate::targets::MountAccess::Ro,
     };
     set_session_container_settings_to(
         &database,
@@ -1188,7 +1236,7 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     let attached = AdditionalMount {
         source: PathBuf::from("/host/models"),
         destination: PathBuf::from("/mnt/models"),
-        read_only: true,
+        access: crate::targets::MountAccess::Ro,
     };
     set_session_container_settings_to(
         &database,

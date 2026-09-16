@@ -7,10 +7,12 @@ of `mj doctor --json` to the coding agent. The host is ready only when every
 postcondition in [Verification](#verification) passes for the same unprivileged
 user that will run `mj`.
 
-Mjolnir supports Podman **4.0.0 or newer**. Version 4 is the minimum because Mjolnir's
-local target relies on the mature rootless user-namespace behavior and CLI
-interfaces that Mjolnir probes (`podman info` and `podman unshare`). Podman 3.x is
-not a supported Mjolnir runtime.
+Mjolnir supports Podman **4.3.0 or newer**. 4.3.0 is the minimum because Mjolnir
+maps each session container's image user onto your host user with
+`--userns=keep-id:uid=,gid=`, which that release added, and because the local
+target relies on the mature rootless user-namespace behavior and CLI interfaces
+that Mjolnir probes (`podman info` and `podman unshare`). Podman 3.x and Podman
+4.0 through 4.2 are not supported Mjolnir runtimes.
 
 ## How Mjolnir uses Podman
 
@@ -171,10 +173,10 @@ sudo apt update
 sudo apt install -y podman uidmap slirp4netns ca-certificates
 ```
 
-Older distribution releases can package Podman 3.x. The verification command
-below is authoritative: if it reports less than 4.0.0, upgrade to a currently
-supported Debian/Ubuntu release or install a distribution-supported Podman 4+
-package before using Mjolnir.
+Older distribution releases can package Podman 3.x or an early Podman 4. The
+verification command below is authoritative: if it reports less than 4.3.0,
+upgrade to a currently supported Debian/Ubuntu release or install a
+distribution-supported Podman 4.3+ package before using Mjolnir.
 
 ### Fedora
 

@@ -1104,9 +1104,12 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     );
     assert_eq!(preview.branch.as_deref(), Some("master"));
     assert_eq!(preview.default_branch, "master");
+    // The move builds this session its first container, so the checkout lands
+    // in the session's own workspace rather than the shared legacy one.
     assert_eq!(
         preview.destination,
-        PathBuf::from(mj_core::targets::CONTAINER_WORKSPACE)
+        mj_core::targets::new_container_workspace(session_id)
+            .unwrap()
             .join(repository.path().file_name().unwrap())
     );
     assert_eq!(preview.unpushed_commits, 0);

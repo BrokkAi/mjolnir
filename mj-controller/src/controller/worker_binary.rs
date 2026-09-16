@@ -81,17 +81,26 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let subagent = crate::database::load_subagent(session_id)?;
-        let workspace_session_id = subagent.as_ref().map_or_else(
-            || session_id.to_owned(),
-            |child| child.parent_session_id.clone(),
-        );
+        // A sub-agent child shares its parent's container, so it works in the
+        // parent's workspace. The parent record is authoritative for that path.
+        let (workspace_session_id, workspace_container) = match subagent.as_ref() {
+            Some(child) => {
+                let parent = self
+                    .state
+                    .sessions
+                    .get(&child.parent_session_id)
+                    .context("sub-agent parent session is missing")?;
+                (parent.id.clone(), parent.container_workspace.clone())
+            }
+            None => (session_id.to_owned(), session.container_workspace.clone()),
+        };
         let (mut launch, project_memory, target_profile_home) = worker_launch_config(
             session,
             profile,
             bundle,
             backend,
-            session_id,
             &workspace_session_id,
+            workspace_container.as_deref(),
             target,
         )?;
         launch.subagent_tools =
@@ -128,7 +137,7 @@ impl Controller {
                 parent_bundle,
                 &parent_backend,
                 &parent.id,
-                &parent.id,
+                parent.container_workspace.as_deref(),
                 parent_target,
             )?;
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
@@ -209,7 +218,68 @@ impl Controller {
             &ownership_path,
             &profile_stage,
         )?;
+        // The build cache is an optimization: a failure here leaves the
+        // session running the image's own Cargo.
+        if session.build_cache.is_some()
+            && let Err(error) = self.install_build_cache_shim(session, backend, executor)
+        {
+            tracing::warn!(
+                session_id,
+                "installing the mbx build cache failed: {error:#}"
+            );
+        }
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)
+    }
+
+    /// Put the pinned mbx binary and its `cargo` shim in the session's `bin`
+    /// directory, which the worker prepends to `PATH` for the harness, its
+    /// terminals, and `bash -lc` shells. mbx invoked as `cargo` removes that
+    /// directory from `PATH` and runs the image's real Cargo underneath.
+    fn install_build_cache_shim(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let worker_root = targets::worker_root(backend, &session.id)?;
+        // The download is the one build-cache failure worth telling the user
+        // about: it is fixable, and it is the only step that reaches the
+        // network.
+        let binary = super::mbx::binary_for(backend, executor).inspect_err(|error| {
+            executor.notify_notice(&format!(
+                "The Rust build cache is unavailable: {error:#}; this session builds without it."
+            ));
+        })?;
+        let configuration = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .map(|template| {
+                super::backend::backend_target(
+                    template,
+                    session.resource_allocation.as_ref(),
+                    super::backend::ContainerOverrides::for_session(session),
+                )
+            })
+            .transpose()?
+            .and_then(|target| {
+                super::mbx::host_configuration(&target, &self.config.build_cache, executor)
+            });
+        install_mbx_files(
+            executor,
+            backend,
+            &session.id,
+            &worker_root,
+            &binary,
+            configuration.as_deref(),
+        )
+    }
+
+    /// Probe the installed binary and collect the dead worker's exit record
+    /// and log tail after a session becomes unreachable. Best-effort; returns
+    /// `None` when the target no longer exists or has no diagnostics.
+    pub fn diagnose_worker(&self, session_id: &str) -> Option<String> {
+        self.diagnose_worker_controlled(session_id, &crate::targets::ProcessExecutor)
     }
 
     pub fn diagnose_worker_controlled(
@@ -306,7 +376,13 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let (mut launch, _, _) = worker_launch_config(
-            session, profile, bundle, backend, session_id, session_id, target,
+            session,
+            profile,
+            bundle,
+            backend,
+            session_id,
+            session.container_workspace.as_deref(),
+            target,
         )?;
         if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
@@ -361,6 +437,7 @@ impl Controller {
                 &backend,
                 bundle.context("session bundle is missing")?,
                 session_id,
+                session.container_workspace.as_deref(),
             )?
         };
         let target_home = target_profile_home(&backend, session_id, profile);
@@ -417,10 +494,11 @@ fn worker_launch_config(
     profile: &mj_core::config::HarnessProfile,
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
-    session_id: &str,
     workspace_session_id: &str,
+    workspace_container: Option<&Path>,
     target: &mj_core::config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    let session_id = session.id.as_str();
     let execution_policy = profile
         .kind
         .effective_execution_policy(target.execution_policy());
@@ -432,6 +510,7 @@ fn worker_launch_config(
             backend,
             bundle.context("session bundle is missing")?,
             workspace_session_id,
+            workspace_container,
         )?
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -457,6 +536,18 @@ fn worker_launch_config(
         | TargetTemplate::SshDocker { container, .. } => container.environment.clone(),
         _ => Default::default(),
     };
+    let mut target_environment = target_environment;
+    // The build cache reaches the harness, its terminals, and the reviewer
+    // sidecar, all of which run Cargo through the mbx shim.
+    if let Some(build_cache) = &session.build_cache {
+        target_environment.insert(
+            "MBX_CACHE_DIR".into(),
+            build_cache.directory.to_string_lossy().into_owned(),
+        );
+        if let Some(max_size) = &build_cache.max_size {
+            target_environment.insert("MBX_GC_MAX_SIZE".into(), max_size.clone());
+        }
+    }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.clone());
     profile
@@ -484,6 +575,7 @@ fn worker_launch_config(
         WorkerLaunchConfig {
             goal_resume_request: None,
             target_environment,
+            seed_image_environment: backend.container_engine().is_some(),
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagent_tools: false,
@@ -1372,7 +1464,7 @@ pub(super) fn worker_binary_for(
     }
 }
 
-fn target_architecture(
+pub(super) fn target_architecture(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<&'static str> {
@@ -1464,10 +1556,14 @@ fn validate_worker_sha256(expected_sha256: &str) -> Result<()> {
     Ok(())
 }
 
+/// The repository paths a worker opens. `session_id` and `container_workspace`
+/// identify the session whose workspace is used, which for a sub-agent child is
+/// its parent.
 fn workspace_paths(
     locator: &targets::TargetLocator,
     bundle: &ProjectBundle,
     session_id: &str,
+    container_workspace: Option<&Path>,
 ) -> Result<(String, Vec<String>)> {
     let root = match locator {
         targets::TargetLocator::LocalBare { .. } => {
@@ -1477,7 +1573,9 @@ fn workspace_paths(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
+        | targets::TargetLocator::SshDocker { .. } => {
+            targets::container_workspace_root(container_workspace)
+        }
         targets::TargetLocator::AwsEc2 { workspace, .. }
         | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
     };
@@ -2042,6 +2140,169 @@ pub(super) fn container_upload_ownership_args(
     ];
     args.extend(paths.iter().map(|path| (*path).to_owned()));
     args
+}
+
+/// Shell that writes the host's mbx configuration into the container user's
+/// own home, where the container's mbx reads it.
+const MBX_CONFIG_SCRIPT: &str =
+    r#"set -eu; mkdir -p "$HOME/.config/mbx"; cat > "$HOME/.config/mbx/config.toml""#;
+
+/// Install `bin/mbx` and its `bin/cargo` shim beside the worker, and hand the
+/// container the host's mbx configuration when the host has one.
+///
+/// `bin` is the directory the worker later writes its `gh` wrapper into and
+/// prepends to `PATH`; it creates that directory without clearing it, so these
+/// two files survive and the shim is found before the image's own Cargo.
+fn install_mbx_files(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+    binary: &Path,
+    configuration: Option<&str>,
+) -> Result<()> {
+    let bin = format!("{worker_root}/bin");
+    let mbx = format!("{bin}/mbx");
+    let cargo = format!("{bin}/cargo");
+    // A hard link keeps one copy of a 30 MB binary; a copy is the fallback for
+    // images whose layer cannot link.
+    let shim_script = format!(r#"ln -f "{mbx}" "{cargo}" 2>/dev/null || cp -f "{mbx}" "{cargo}""#);
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker { ssh, container_id } => {
+            ("docker", container_id, Some(ssh))
+        }
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
+        }
+    };
+    // Remote hosts keep the binary in a content-addressed cache so it crosses
+    // the network once per unique mbx, exactly as the worker binary does.
+    let source = match ssh {
+        None => binary.to_string_lossy().into_owned(),
+        Some(ssh) => {
+            let digest = mj_core::worker_launch::worker_executable_digest(binary)?;
+            let cache_dir = format!(".cache/mjolnir/mbx/{digest}");
+            let cached = format!("{cache_dir}/mbx");
+            let present = matches!(
+                executor.execute(
+                    &crate::targets::ssh_command(ssh, ["test", "-f", &cached])
+                        .purpose("probe the cached remote mbx binary"),
+                ),
+                Ok(output) if output.status == 0
+            );
+            if !present {
+                execute_checked(
+                    executor,
+                    crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
+                        .purpose("create the remote mbx cache"),
+                )?;
+                let partial = format!("{cache_dir}/mbx.partial-{session_id}");
+                execute_checked(
+                    executor,
+                    crate::targets::scp_upload(ssh, binary, &partial, false)
+                        .purpose("upload the remote mbx binary"),
+                )?;
+                execute_checked(
+                    executor,
+                    crate::targets::ssh_command(ssh, ["mv", &partial, &cached])
+                        .purpose("publish the cached remote mbx binary"),
+                )?;
+            }
+            cached
+        }
+    };
+    let steps: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "mkdir".into(),
+                "-p".into(),
+                bin.clone(),
+            ],
+            "create the session binary directory",
+        ),
+        (
+            vec![
+                engine.into(),
+                "cp".into(),
+                source,
+                format!("{container_id}:{mbx}"),
+            ],
+            "upload the mbx build cache binary",
+        ),
+        (
+            std::iter::once(engine.to_owned())
+                .chain(container_upload_ownership_args(
+                    container_id,
+                    worker_root,
+                    &[&bin],
+                ))
+                .collect(),
+            "assign the mbx binary to the worker user",
+        ),
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "sh".into(),
+                "-c".into(),
+                shim_script,
+            ],
+            "install the mbx Cargo shim",
+        ),
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "chmod".into(),
+                "755".into(),
+                mbx.clone(),
+                cargo.clone(),
+            ],
+            "make the mbx build cache executable",
+        ),
+    ];
+    for (args, purpose) in steps {
+        let command = match ssh {
+            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+            Some(ssh) => crate::targets::ssh_command(ssh, args),
+        }
+        .purpose(purpose)
+        .stage(ProvisionStage::Syncing);
+        execute_checked(executor, command)?;
+    }
+    if let Some(configuration) = configuration {
+        let args = vec![
+            engine.to_owned(),
+            "exec".into(),
+            "-i".into(),
+            container_id.clone(),
+            "sh".into(),
+            "-c".into(),
+            MBX_CONFIG_SCRIPT.to_owned(),
+        ];
+        let command = match ssh {
+            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+            Some(ssh) => crate::targets::ssh_command(ssh, args),
+        }
+        .purpose("install the host mbx configuration")
+        .stage(ProvisionStage::Syncing)
+        .with_sensitive_stdin(configuration.as_bytes().to_vec());
+        execute_checked(executor, command)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3519,6 +3780,7 @@ mod tests {
     /// platform matters here; the rest is the smallest valid template.
     fn container_template(platform: Option<&str>) -> mj_core::config::ContainerTemplate {
         mj_core::config::ContainerTemplate {
+            build_cache: None,
             image: "example.invalid/mj-test:latest".into(),
             pull_policy: Default::default(),
             platform: platform.map(str::to_owned),
@@ -5255,6 +5517,206 @@ mod tests {
     }
 
     #[test]
+    fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let workspace = targets::new_container_workspace(session_id).unwrap();
+        let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+        let locator = targets::TargetLocator::LocalPodman {
+            container_id: targets::resource_name(session_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        };
+        let template = mj_core::config::TargetTemplate::LocalPodman {
+            container: mj_core::config::ContainerTemplate {
+                build_cache: None,
+                image: "ubuntu:24.04".to_owned(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+            },
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
+        session.harness_kind = HarnessKind::Codex;
+        session.last_profile = "glm".into();
+        session.project_directory = None;
+        session.container_workspace = Some(workspace.clone());
+
+        let without = worker_launch_config(
+            &session,
+            &profile,
+            Some(&bundle),
+            &locator,
+            session_id,
+            Some(&workspace),
+            &template,
+        )
+        .unwrap()
+        .0;
+        assert!(!without.target_environment.contains_key("MBX_CACHE_DIR"));
+        assert!(!without.environment.contains_key("MBX_CACHE_DIR"));
+
+        session.build_cache = Some(mj_core::state::SessionBuildCache {
+            host: "local-podman".into(),
+            directory: PathBuf::from("/mnt/fast/mbx-cache"),
+            max_size: Some("100000000000B".into()),
+            target_root: None,
+        });
+        let with = worker_launch_config(
+            &session,
+            &profile,
+            Some(&bundle),
+            &locator,
+            session_id,
+            Some(&workspace),
+            &template,
+        )
+        .unwrap()
+        .0;
+        // `target_environment` is what reaches the harness, its terminals, and
+        // the reviewer sidecar, not just the harness process.
+        assert_eq!(
+            with.target_environment
+                .get("MBX_CACHE_DIR")
+                .map(String::as_str),
+            Some("/mnt/fast/mbx-cache")
+        );
+        assert_eq!(
+            with.target_environment
+                .get("MBX_GC_MAX_SIZE")
+                .map(String::as_str),
+            Some("100000000000B")
+        );
+        assert_eq!(
+            with.environment.get("MBX_CACHE_DIR").map(String::as_str),
+            Some("/mnt/fast/mbx-cache")
+        );
+    }
+
+    #[test]
+    fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path() {
+        #[derive(Default)]
+        struct RecordingExecutor {
+            commands: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl RecordingExecutor {
+            fn commands(&self) -> Vec<String> {
+                self.commands.lock().unwrap().clone()
+            }
+        }
+
+        impl CommandExecutor for RecordingExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.commands.lock().unwrap().push(format!(
+                    "{} {}",
+                    command.program,
+                    command.args.join(" ")
+                ));
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        let binary = tempfile::NamedTempFile::new().unwrap();
+        let executor = RecordingExecutor::default();
+        let locator = targets::TargetLocator::LocalPodman {
+            container_id: "hel-session".into(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        };
+
+        install_mbx_files(
+            &executor,
+            &locator,
+            "session-1",
+            "/home/hel/.hel/worker",
+            binary.path(),
+            Some("[gc]\nmax_size = \"500GiB\"\n"),
+        )
+        .unwrap();
+
+        let commands = executor.commands();
+        assert!(
+            commands.iter().any(|line| line
+                == &format!(
+                    "podman cp {} hel-session:/home/hel/.hel/worker/bin/mbx",
+                    binary.path().display()
+                )),
+            "{commands:#?}"
+        );
+        assert!(
+            commands.iter().any(|line| line.contains("ln -f")
+                && line.contains("/home/hel/.hel/worker/bin/mbx")
+                && line.contains("/home/hel/.hel/worker/bin/cargo")),
+            "{commands:#?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|line| line.contains("exec -i hel-session sh -c")
+                    && line.contains("config/mbx")),
+            "the host mbx configuration is written into the container: {commands:#?}"
+        );
+    }
+
+    #[test]
+    fn a_child_opens_its_parents_container_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = zai_profile(home.path());
+        let parent_id = "0123456789abcdef0123456789abcdef";
+        let child_id = "1123456789abcdef0123456789abcdef";
+        let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+        let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+        let locator = targets::TargetLocator::LocalPodman {
+            container_id: targets::resource_name(parent_id).unwrap(),
+            workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+        };
+        let template = mj_core::config::TargetTemplate::LocalPodman {
+            container: mj_core::config::ContainerTemplate {
+                build_cache: None,
+                image: "ubuntu:24.04".to_owned(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+            },
+        };
+        // The child record copies its parent's workspace when it is created,
+        // and `prepare_worker_files` reads the same value off the parent, so
+        // both point the child's harness at the parent's checkout rather than
+        // at a workspace named after the child.
+        let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+        child.harness_kind = HarnessKind::Codex;
+        child.last_profile = "glm".into();
+        child.project_directory = None;
+        child.container_workspace = Some(parent_workspace.clone());
+
+        let (launch, _, _) = worker_launch_config(
+            &child,
+            &profile,
+            Some(&bundle),
+            &locator,
+            parent_id,
+            Some(&parent_workspace),
+            &template,
+        )
+        .unwrap();
+
+        assert_eq!(
+            launch.cwd,
+            PathBuf::from(format!("/workspace/{parent_id}/project"))
+        );
+    }
+
+    #[test]
     fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -5276,7 +5738,7 @@ mod tests {
                 worker_root: "/home/me/.local/share/hel/worker".into(),
             },
             &session.id,
-            &session.id,
+            None,
             &mj_core::config::TargetTemplate::LocalBare,
         )
         .unwrap();
@@ -5331,7 +5793,7 @@ mod tests {
                 worker_root: "/home/me/.local/share/hel/worker".into(),
             },
             &session.id,
-            &session.id,
+            None,
             &mj_core::config::TargetTemplate::LocalBare,
         )
         .unwrap();
@@ -5652,6 +6114,7 @@ mod tests {
             subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
+            seed_image_environment: false,
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Codex,
@@ -5750,6 +6213,7 @@ mod tests {
             subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
+            seed_image_environment: false,
             run_mode: Default::default(),
             session_id: "session-local".into(),
             harness: HarnessKind::Codex,
@@ -5833,6 +6297,7 @@ mod tests {
             subagent_tools: false,
             goal_resume_request: Default::default(),
             target_environment: Default::default(),
+            seed_image_environment: false,
             run_mode: Default::default(),
             session_id: session.into(),
             harness: HarnessKind::Kimi,
