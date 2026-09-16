@@ -15,15 +15,15 @@ The user sees two new settings and no prompts. A global switch, "Enable MBX for 
 - [x] (2026-09-16) Design settled with the user; this ExecPlan written.
 - [x] (2026-09-16) Milestone 0 on morannon (rootless Podman 5.7.0, cache on ZFS): ownership, session separation, mount path and garbage collection, limits approach, speed. All five answered; see Surprises & Discoveries and Decision Log.
 - [ ] Milestone 0 on localhost: blocked. Rootless Podman cannot run in the current WSL session because `/run/user/1000` does not exist (`loginctl`: "User ID 1000 is not logged in or lingering"). Needs the user to enable a systemd user session or lingering; repeat the morannon checks afterwards against `/mnt/optane/mbx-cache`.
-- [ ] Milestone 1: configuration types and setup screens.
-- [ ] Milestone 1: host cache resolution, limits, and reflink probe (`mj-controller/src/controller/mbx.rs`).
-- [ ] Milestone 1: pinned mbx binary download and installation into containers.
-- [ ] Milestone 1: Rust detection, session record flag, and migration.
+- [x] (2026-09-16) Milestone 1: configuration types (`Config.build_cache`, `ContainerTemplate.build_cache`) and the setup editor entries (`mj-tui/src/setup/schema.rs`).
+- [x] (2026-09-16) Milestone 1: host cache resolution, limits, and reflink probe in `mj-controller/src/controller/mbx.rs`, with `CacheHost` moved to `controller/cache_host.rs`; a resolution is tied to the host it was made on and is redone when a session moves.
+- [x] (2026-09-16) Milestone 1: pinned mbx 1.12.0 download (both musl triples, SHA-256 checked, `MJ_MBX_BINARY` override) and installation of `bin/mbx` plus the `bin/cargo` link beside the worker; the host's `~/.config/mbx/config.toml` is written into the container at worker install.
+- [x] (2026-09-16) Milestone 1: Rust detection from the primary Git mirror (`HEAD:Cargo.toml`), `SessionRecord.build_cache` (compatible migration 36, JSON column `build_cache_json`), children copy the parent's value.
 - [ ] Milestone 1: three-way mount access mode (read-only, copy-on-write, read-write) in the model, database, container arguments, and the attached-directory editors. (2026-09-16: implemented and validated in the working tree together with unconditional Podman `keep-id`; awaiting review fixes and commit.)
 - [x] (2026-09-16) Milestone 1a: per-session container workspace path. New sessions record `/workspace/<session id>` (`SessionRecord.container_workspace`, compatible migration 35); sessions created earlier keep `/workspace`; children use the parent's path; orphan adoption probes the container for the path. Consequence for 1b: mbx is enabled only for sessions with a recorded per-session workspace, because legacy sessions could still collide.
-- [ ] Milestone 1: mbx cache mount and environment.
-- [ ] Milestone 1: native mbx version check against the pin.
-- [ ] Milestone 1: end-to-end validation on localhost and morannon.
+- [x] (2026-09-16) Milestone 1: read-write mounts of the cache directory and a relocated target root at their host paths; `MBX_CACHE_DIR` and optional `MBX_GC_MAX_SIZE` in the worker's target environment.
+- [x] (2026-09-16) Milestone 1: native mbx version check against the pin (older native mbx disables the cache on that host).
+- [ ] Milestone 1: end-to-end validation on localhost (in progress: isolated instance `mbxtest`, dev worker rebuilt) and morannon.
 
 ## Surprises & Discoveries
 
