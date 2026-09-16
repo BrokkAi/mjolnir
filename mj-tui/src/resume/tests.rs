@@ -1,0 +1,1183 @@
+use std::collections::BTreeMap;
+
+use crossterm::event::KeyCode;
+use mj_core::state::STATE_VERSION;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+use super::*;
+use crate::test_support::*;
+use crate::{DashboardState, Focus};
+
+/// Later than `stopped_session`'s checkpoint, so a native row built with
+/// it sorts above the Hel record.
+const NEWER_THAN_THE_CHECKPOINT: i64 = 4_000_000_000_000;
+
+fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionOption {
+    crate::ImportSessionOption {
+        native_session_id: id.into(),
+        title: title.into(),
+        project_directory: "~/Projects/hel".into(),
+        details: "master · 1.0KB · ~/Projects/hel".into(),
+        unavailable_reason: None,
+        last_activity_ms,
+        natively_archived: false,
+    }
+}
+
+fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOption {
+    ImportProfileOption {
+        profile_id: "codex-1".into(),
+        harness_kind: HarnessKind::Codex,
+        sessions,
+        scan_progress: Some((1, 1)),
+        error: None,
+    }
+}
+
+fn state_with(sessions: Vec<SessionRecord>) -> State {
+    State {
+        subagents: Default::default(),
+        version: STATE_VERSION,
+        sessions: sessions
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+        mount_history: BTreeMap::new(),
+        container_sizes: BTreeMap::new(),
+    }
+}
+
+fn incomplete_move() -> MoveOperation {
+    MoveOperation {
+        source_checkpoint_only: false,
+        operation_id: "move-1".into(),
+        selection: mj_core::state::MoveSelection {
+            clear_resource_allocation: false,
+            session_id: "session-1".into(),
+            profile_id: Some("codex-1".into()),
+            target_template_id: Some("target-1".into()),
+            additional_mounts: None,
+            resource_allocation: None,
+        },
+        source_profile_id: "codex-1".into(),
+        source_target_template_id: "target-1".into(),
+        source_target: None,
+        source_native_session_id: None,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: "fingerprint".into(),
+        checkpoint: None,
+        recovery_session: None,
+        queue: mj_core::state::ResumeQueueDisposition::Start,
+        phase: mj_core::state::MovePhase::Cancelled,
+        queue_admission_started: true,
+        queue_admission_finished: false,
+        cancellation_requested: true,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        error: Some("queue admission interrupted".into()),
+    }
+}
+
+fn rows(dashboard: &DashboardState) -> Vec<ResumeRow> {
+    assert!(
+        matches!(dashboard.mode, Mode::ResumeDialog(_)),
+        "expected the resume dialog"
+    );
+    dashboard.resume_rows().to_vec()
+}
+
+fn titles(rows: &[ResumeRow]) -> Vec<&str> {
+    rows.iter().map(|row| row.title.as_str()).collect()
+}
+
+#[test]
+fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.set_move_operations([incomplete_move()]);
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    let row = dashboard
+        .resume_rows()
+        .iter()
+        .find(|row| row.session_id() == Some("session-1"))
+        .expect("stopped session remains in resume rows");
+    assert!(row.move_recovery.is_some());
+    assert_eq!(
+        crate::dialogs::confirmation_buttons(&Confirmation::RecoverMove {
+            operation: Box::new(incomplete_move()),
+        }),
+        &["Cancel", "Open transcript", "Retry move"]
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(
+        dashboard.mode,
+        Mode::Confirm(ConfirmDialog {
+            confirmation: Confirmation::RecoverMove { .. },
+            ..
+        })
+    ));
+}
+
+fn replace_search(dashboard: &mut DashboardState, search: &str) {
+    let Mode::ResumeDialog(dialog) = &mut dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    dialog.search = search.to_owned().into();
+    dashboard.rebuild_resume_rows();
+}
+
+/// Tabs forward until `control` has keyboard focus.
+fn focus_resume_control(dashboard: &mut DashboardState, control: ResumeFocus) {
+    for _ in 0..8 {
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        if dialog.focused() == control {
+            return;
+        }
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    panic!("{control:?} never received focus");
+}
+
+fn switch_to_import(dashboard: &mut DashboardState) {
+    if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+        dialog.form.get_mut().focus(ResumeFocus::Tabs);
+    }
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Right)),
+        DashboardAction::None
+    );
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Import);
+    if dialog.focused() == ResumeFocus::Tabs {
+        dashboard.handle_key(key(KeyCode::Enter));
+    }
+}
+
+#[test]
+fn last_active_uses_words_through_seven_days_then_a_local_date() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-23T12:00:00-05:00").unwrap();
+    let before = |milliseconds| now.timestamp_millis() - milliseconds;
+
+    assert_eq!(format_last_active(&now, before(30_000)), "just now");
+    assert_eq!(format_last_active(&now, before(60_000)), "1 minute ago");
+    assert_eq!(
+        format_last_active(&now, before(2 * 60_000)),
+        "2 minutes ago"
+    );
+    assert_eq!(format_last_active(&now, before(60 * 60_000)), "1 hour ago");
+    assert_eq!(
+        format_last_active(&now, before(24 * 60 * 60_000)),
+        "1 day ago"
+    );
+    assert_eq!(
+        format_last_active(&now, before(SEVEN_DAYS_MS)),
+        "7 days ago"
+    );
+    assert_eq!(
+        format_last_active(&now, before(SEVEN_DAYS_MS + 1)),
+        "Aug 16, 2026"
+    );
+    assert_eq!(
+        format_last_active(&now, before(9 * 24 * 60 * 60_000)),
+        "Aug 14, 2026"
+    );
+    assert_eq!(
+        format_last_active(&now, now.timestamp_millis() + 1),
+        "just now"
+    );
+    assert_eq!(format_last_active(&now, 0), "unknown");
+    assert_eq!(format_last_active(&now, i64::MAX), "unknown");
+}
+
+/// A Hel record and the native session it was imported from are one
+/// conversation, so the dialog shows the Hel record's row and drops the
+/// native duplicate.
+#[test]
+fn a_hel_record_replaces_the_native_session_it_was_imported_from() {
+    // `stopped_session` carries native_session_id "native-1".
+    let dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    let merged = merged_resume_rows(
+        &dashboard.config,
+        &dashboard.state,
+        &[codex_profile(vec![
+            native("native-1", "Same conversation", 10),
+            native("native-2", "A different conversation", 5),
+        ])],
+    );
+
+    assert_eq!(merged.len(), 2, "{:?}", titles(&merged));
+    let adopted = merged
+        .iter()
+        .find(|row| row.key == ResumeRowKey::Hel("session-1".into()))
+        .expect("the hel record keeps its row");
+    assert_eq!(adopted.title, "ACP pretty name");
+    assert_eq!(adopted.origin, "podman");
+    assert!(
+        !merged
+            .iter()
+            .any(|row| row.key == ResumeRowKey::Native(HarnessKind::Codex, "native-1".into())),
+        "the native duplicate is gone"
+    );
+    // A native session with no Hel record still shows, marked local.
+    let native_only = merged
+        .iter()
+        .find(|row| row.key == ResumeRowKey::Native(HarnessKind::Codex, "native-2".into()))
+        .expect("the unadopted native session keeps its row");
+    assert_eq!(native_only.origin, "local/hel");
+}
+
+#[test]
+fn resume_and_import_targets_include_the_project_like_live_summaries() {
+    let mut local = stopped_session();
+    local.id = "local-session".into();
+    local.native_session_id = None;
+    local.target_template_id = "localhost".into();
+    local.project_directory = Some("/mnt/optane/bifrost-fird".into());
+
+    let mut remote = stopped_session();
+    remote.id = "remote-session".into();
+    remote.native_session_id = None;
+    remote.target_template_id = "precision-3260".into();
+    remote.project_directory = Some("/home/jonathan/Projects/bifrost".into());
+
+    let mut config = config();
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    config.targets.insert(
+        "precision-3260".into(),
+        mj_core::config::TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "precision-3260".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let mut dashboard =
+        DashboardState::new(config, state_with(vec![local, remote]), BTreeMap::new());
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-only",
+            "Native project",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+
+    let targets = rows(&dashboard)
+        .into_iter()
+        .map(|row| row.origin)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        targets,
+        BTreeSet::from([
+            "localhost/bifrost-fird".to_owned(),
+            "precision-3260/bifrost".to_owned(),
+        ])
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 34)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    for target in ["localhost/bifrost-fird", "precision-3260/bifrost"] {
+        assert!(rendered.contains(target), "{rendered}");
+    }
+
+    switch_to_import(&mut dashboard);
+    assert_eq!(rows(&dashboard)[0].origin, "local/hel");
+}
+
+/// The native session behind a live Hel session must not be offered as an
+/// import: that would start a second Hel session on the same conversation.
+#[test]
+fn a_live_session_hides_its_native_counterpart_from_the_dialog() {
+    let mut live = stopped_session();
+    live.state = SessionState::Running;
+    let merged = merged_resume_rows(
+        &config(),
+        &state_with(vec![live]),
+        &[codex_profile(vec![
+            native("native-1", "Running under Hel right now", 10),
+            native("native-2", "Idle native session", 5),
+        ])],
+    );
+    assert_eq!(titles(&merged), ["Idle native session"]);
+}
+
+/// A record whose target was renamed or removed from config still reports
+/// the target it actually ran on.
+#[test]
+fn the_origin_chip_shows_the_stored_target_even_when_config_forgot_it() {
+    let mut session = stopped_session();
+    session.target_template_id = "retired-target".into();
+    let mut config = config();
+    config.targets.clear();
+    let merged = merged_resume_rows(&config, &state_with(vec![session]), &[]);
+    assert_eq!(merged[0].origin, "retired-target");
+}
+
+/// One order across the merged list: newest activity first, whichever
+/// source the row came from. Hel records date from their checkpoint,
+/// native sessions from the file's modification time.
+#[test]
+fn rows_sort_by_last_activity_descending_across_both_sources() {
+    let mut old_record = stopped_session();
+    old_record.id = "old-record".into();
+    old_record.native_session_id = None;
+    old_record.checkpoint.as_mut().unwrap().created_at = "2026-01-01T00:00:00Z".into();
+    let mut new_record = stopped_session();
+    new_record.id = "new-record".into();
+    new_record.native_session_id = None;
+    new_record.acp_session_title = Some("Newest record".into());
+    new_record.checkpoint.as_mut().unwrap().created_at = "2026-06-01T00:00:00Z".into();
+
+    let january = 1_767_225_600_000; // 2026-01-01T00:00:00Z
+    let march = 1_772_409_600_000; // 2026-03-01T00:00:00Z
+    let july = 1_782_950_400_000; // 2026-07-01T00:00:00Z
+    let merged = merged_resume_rows(
+        &config(),
+        &state_with(vec![old_record, new_record]),
+        &[codex_profile(vec![
+            native("native-mid", "Native March", march),
+            native("native-new", "Native July", july),
+        ])],
+    );
+
+    assert_eq!(
+        titles(&merged),
+        [
+            "Native July",
+            "Newest record",
+            "Native March",
+            "ACP pretty name",
+        ]
+    );
+    assert_eq!(merged[3].last_activity_ms, january);
+}
+
+/// A record archived by an older Mjolnir version remains part of stopped
+/// history. Archive state is retained in storage for compatibility, but
+/// it no longer separates rows in the resume dialog.
+#[test]
+fn previously_archived_history_remains_visible() {
+    let mut archived_record = stopped_session();
+    archived_record.id = "archived-record".into();
+    archived_record.native_session_id = None;
+    archived_record.acp_session_title = Some("Archived record".into());
+    archived_record.archived = true;
+    let mut current_record = stopped_session();
+    current_record.id = "current-record".into();
+    current_record.native_session_id = None;
+    current_record.acp_session_title = Some("Current record".into());
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![archived_record, current_record]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    assert_eq!(
+        titles(&rows(&dashboard)),
+        ["Archived record", "Current record"]
+    );
+}
+
+/// Native archive metadata is retained on the row for display consumers,
+/// while the resume dialog always lists the row and never writes back to
+/// the provider.
+#[test]
+fn native_archive_metadata_is_informational() {
+    let mut natively_archived = native("native-codex", "Archived in Codex", 1);
+    natively_archived.natively_archived = true;
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(vec![natively_archived])]);
+    switch_to_import(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
+    assert!(rows(&dashboard)[0].natively_archived);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('a'))),
+        DashboardAction::None
+    );
+    assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
+}
+
+/// A lost or force-destroyed session cannot be resumed; deleting its
+/// record is the only thing left to do with it.
+#[test]
+fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
+    for (state, marker, reason) in [
+        (
+            SessionState::Lost,
+            "⚠ lost",
+            "lost without a verified checkpoint",
+        ),
+        (
+            SessionState::DestroyedWithDataLoss,
+            "⚠ data lost",
+            "force-destroyed",
+        ),
+    ] {
+        let mut session = stopped_session();
+        session.state = state;
+        let mut dashboard =
+            DashboardState::new(config(), state_with(vec![session]), BTreeMap::new());
+        dashboard.show_resume_dialog(1, Vec::new());
+
+        let row = &rows(&dashboard)[0];
+        assert!(!row.status.is_recoverable());
+        assert_eq!(row.status.warning(), Some(marker));
+        assert!(row.details.contains(reason), "{}", row.details);
+
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Enter)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+        let notice = dashboard.notices.current().unwrap_or_default();
+        assert!(notice.contains(reason), "{notice}");
+        assert!(notice.contains("Use Destroy"), "{notice}");
+
+        focus_resume_control(&mut dashboard, ResumeFocus::Destroy);
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    }
+}
+
+/// The letter key used to destroy; that job now belongs to the Destroy
+/// button, which reaches the same confirmation by keyboard or mouse.
+#[test]
+fn the_destroy_button_replaces_the_d_key() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('d'))),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let lines = buffer_lines(terminal.backend().buffer());
+    let (row, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains("  Destroy  "))
+        .expect("Destroy button between Cancel and Resume");
+    let cancel = cell_column(line, "Cancel");
+    let destroy = cell_column(line, "Destroy");
+    let resume = cell_column(line, "Resume");
+    assert!(cancel < destroy && destroy < resume, "{line}");
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(crossterm::event::MouseEvent {
+            kind,
+            column: destroy,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+    }
+    let Mode::Confirm(confirm) = &dashboard.mode else {
+        panic!(
+            "expected the destroy confirmation, got {:?}",
+            dashboard.mode
+        );
+    };
+    assert!(matches!(
+        confirm.confirmation,
+        Confirmation::DestroyStopped { .. }
+    ));
+}
+
+/// The active tab is highlighted whether or not the strip has focus, so
+/// the current tab is visible at a glance.
+#[test]
+fn the_active_tab_is_highlighted_without_focus() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.focused(), ResumeFocus::Sessions);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let buffer = terminal.backend().buffer();
+    let lines = buffer_lines(buffer);
+    let row = lines
+        .iter()
+        .position(|line| line.contains(" Mjolnir ") && line.contains(" Import "))
+        .expect("tab strip");
+    let y = buffer.area.y + row as u16;
+    let active = buffer.area.x + cell_column(&lines[row], "Mjolnir");
+    let inactive = buffer.area.x + cell_column(&lines[row], "Import");
+    assert_eq!(buffer[(active, y)].bg, theme::palette().accent);
+    assert_eq!(buffer[(inactive, y)].bg, theme::palette().surface_raised);
+}
+
+/// Hel never modifies a harness home, so a native-only row has no destroy action.
+#[test]
+fn a_native_only_row_cannot_be_destroyed_from_hel() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    switch_to_import(&mut dashboard);
+
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert!(!dialog.form.borrow().is_enabled(ResumeFocus::Destroy));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Delete)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+    assert!(
+        dashboard
+            .notices
+            .current()
+            .unwrap_or_default()
+            .contains("never destroys")
+    );
+}
+
+/// The default Hel tab and the Import tab each expose only the source they
+/// name, with a valid selection after every switch.
+#[test]
+fn tabs_separate_hel_records_from_importable_native_sessions() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Hel);
+    assert_eq!(dialog.selected, Some(ResumeRowKey::Hel("session-1".into())));
+
+    switch_to_import(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["Native"]);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.selected,
+        Some(ResumeRowKey::Native(HarnessKind::Codex, "native-2".into()))
+    );
+
+    dashboard.handle_key(key(KeyCode::Left));
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+}
+
+#[test]
+fn search_arrows_edit_the_cursor_and_tabs_have_their_own_focus() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_paste("nat");
+    dashboard.handle_key(key(KeyCode::Left));
+    dashboard.handle_key(key(KeyCode::Char('X')));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("resume")
+    };
+    assert_eq!(dialog.tab, ResumeTab::Hel);
+    assert_eq!(dialog.search.value(), "naXt");
+    assert_eq!(dialog.focused(), ResumeFocus::Search);
+    dashboard.handle_key(key(KeyCode::BackTab));
+    dashboard.handle_key(key(KeyCode::Right));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("resume")
+    };
+    assert_eq!(dialog.tab, ResumeTab::Import);
+    assert_eq!(dialog.focused(), ResumeFocus::Tabs);
+}
+
+/// Selecting a row dispatches to the flow that suits its source: the
+/// resume wizard for a Hel record, the import flow for a native session.
+#[test]
+fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
+
+    dashboard.show_resume_dialog(
+        2,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    switch_to_import(&mut dashboard);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ImportSession {
+            profile_id: "codex-1".into(),
+            native_session_id: "native-2".into(),
+            display_title: "Native".into(),
+        }
+    );
+}
+
+/// The dashboard lists live sessions; the dialog lists the rest. Nothing
+/// appears in both, and a stop in progress stays on the dashboard until
+/// the state machine reaches Stopped.
+#[test]
+fn the_sidebar_shows_live_work_and_resume_lists_settled_history() {
+    let mut sessions = Vec::new();
+    for (index, state) in [
+        SessionState::Provisioning,
+        SessionState::Running,
+        SessionState::Disconnected,
+        SessionState::Checkpointing,
+        SessionState::Closing,
+        SessionState::Destroying,
+        SessionState::Error,
+        SessionState::Stopped,
+        SessionState::Lost,
+        SessionState::DestroyedWithDataLoss,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut session = stopped_session();
+        session.id = format!("session-{index:02}");
+        session.native_session_id = None;
+        session.state = state;
+        sessions.push(session);
+    }
+    let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
+    dashboard.show_resume_dialog(1, Vec::new());
+
+    let on_dashboard = dashboard
+        .ordered_sessions()
+        .iter()
+        .map(|session| session.state)
+        .collect::<Vec<_>>();
+    assert_eq!(on_dashboard.len(), 7);
+    assert!(!on_dashboard.contains(&SessionState::Stopped));
+    // Closing and Checkpointing are mid-stop and must not vanish.
+    assert!(on_dashboard.contains(&SessionState::Closing));
+    assert!(on_dashboard.contains(&SessionState::Checkpointing));
+
+    let in_dialog = rows(&dashboard)
+        .into_iter()
+        .map(|row| row.key)
+        .collect::<Vec<_>>();
+    assert_eq!(in_dialog.len(), 3);
+    let dashboard_ids = dashboard
+        .ordered_sessions()
+        .iter()
+        .map(|session| ResumeRowKey::Hel(session.id.clone()))
+        .collect::<Vec<_>>();
+    assert!(
+        in_dialog.iter().all(|key| !dashboard_ids.contains(key)),
+        "settled history stays in Resume rather than the active sidebar"
+    );
+}
+
+/// Scans arrive one profile at a time; folding one in must not move the
+/// Import-tab selection off the native row the user was on.
+#[test]
+fn an_incremental_scan_update_keeps_the_selected_row() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, vec![codex_profile(vec![native("native-2", "Older", 1)])]);
+    switch_to_import(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["Older"]);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.row_index, 0);
+
+    // A newer native session arrives and sorts above the selected row.
+    dashboard.apply_resume_profile(
+        1,
+        codex_profile(vec![
+            native("native-2", "Older", 1),
+            native("native-3", "Newer", NEWER_THAN_THE_CHECKPOINT),
+        ]),
+    );
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.selected,
+        Some(ResumeRowKey::Native(HarnessKind::Codex, "native-2".into()))
+    );
+    assert_eq!(dialog.row_index, 1);
+    // A late update for another discovery is ignored.
+    dashboard.apply_resume_profile(99, codex_profile(Vec::new()));
+    assert_eq!(rows(&dashboard).len(), 2);
+}
+
+#[test]
+fn provider_archive_metadata_does_not_move_the_selected_row() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![
+            native("native-new", "Newer", NEWER_THAN_THE_CHECKPOINT),
+            native("native-old", "Older", 1),
+        ])],
+    );
+    switch_to_import(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Down));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.row_index, 1);
+    assert_eq!(
+        dialog.selected,
+        Some(ResumeRowKey::Native(
+            HarnessKind::Codex,
+            "native-old".into()
+        ))
+    );
+
+    let mut old = native("native-old", "Older", 1);
+    old.natively_archived = true;
+    dashboard.apply_resume_profile(
+        1,
+        codex_profile(vec![
+            native("native-new", "Newer", NEWER_THAN_THE_CHECKPOINT),
+            old,
+        ]),
+    );
+
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.row_index, 1);
+    assert_eq!(
+        dialog.selected,
+        Some(ResumeRowKey::Native(
+            HarnessKind::Codex,
+            "native-old".into()
+        ))
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ImportSession {
+            profile_id: "codex-1".into(),
+            native_session_id: "native-old".into(),
+            display_title: "Older".into(),
+        }
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+/// A scan that failed is reported rather than dropped.
+#[test]
+fn a_failed_profile_scan_is_reported_in_the_dialog() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(
+        1,
+        vec![ImportProfileOption {
+            profile_id: "codex-1".into(),
+            harness_kind: HarnessKind::Codex,
+            sessions: Vec::new(),
+            scan_progress: None,
+            error: Some("permission denied".into()),
+        }],
+    );
+    switch_to_import(&mut dashboard);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Scan failed for codex-1"), "{rendered}");
+}
+
+#[test]
+fn resume_table_has_headers_repeated_profiles_and_last_active_values() {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![
+            native("native-1", "Recent session", now_ms - 2 * 60_000),
+            native("native-2", "Older session", now_ms - 60 * 60_000),
+        ])],
+    );
+    switch_to_import(&mut dashboard);
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 34)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+
+    for heading in ["PROFILE", "TARGET", "LAST ACTIVE", "SESSION"] {
+        assert!(rendered.contains(heading), "{rendered}");
+    }
+    for title in ["Recent session", "Older session"] {
+        let row = rendered
+            .lines()
+            .find(|line| line.contains(title))
+            .expect("rendered session row");
+        assert!(row.contains("codex-1"), "{row}");
+    }
+    assert!(rendered.contains("2 minutes ago"), "{rendered}");
+    assert!(rendered.contains("1 hour ago"), "{rendered}");
+    assert!(rendered.contains("Search:"), "{rendered}");
+}
+
+/// The dialog is the only surface for non-live sessions, and `Alt-S`
+/// opens it from anywhere.
+#[test]
+fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
+    let mut dashboard = dashboard_with_session(running_session());
+    assert_eq!(
+        dashboard.handle_key(alt_key('s')),
+        DashboardAction::OpenResumeDialog
+    );
+    assert_eq!(dashboard.handle_key(ctrl_key('t')), DashboardAction::None);
+    assert_eq!(dashboard.focus, Focus::Sessions);
+
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the dashboard");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Alt-S resume"), "{rendered}");
+    assert!(!rendered.contains("Import"), "{rendered}");
+}
+
+/// The rows are derived state, rebuilt where their inputs change. A state
+/// reload and a checkpoint size that arrives from the background reach the
+/// open dialog straight away.
+#[test]
+fn the_row_list_follows_state_reloads_and_background_updates_while_the_dialog_is_open() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+
+    let mut reloaded = stopped_session();
+    reloaded.id = "session-2".into();
+    reloaded.native_session_id = None;
+    reloaded.acp_session_title = Some("Reloaded record".into());
+    dashboard.set_state(state_with(vec![stopped_session(), reloaded]));
+    assert!(
+        titles(&rows(&dashboard)).contains(&"Reloaded record"),
+        "{:?}",
+        titles(&rows(&dashboard))
+    );
+
+    dashboard
+        .apply_checkpoint_archive_sizes(BTreeMap::from([("session-1".to_owned(), Some(2_048))]));
+    let listed = rows(&dashboard);
+    let sized = listed
+        .iter()
+        .find(|row| row.key == ResumeRowKey::Hel("session-1".into()))
+        .expect("the checkpointed record");
+    assert!(sized.details.contains("2.0K"), "{}", sized.details);
+
+    switch_to_import(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["Native"]);
+    assert_eq!(titles(&rows(&dashboard)), ["Native"]);
+}
+
+/// Walking the list moves the selection over rows that stay put: an arrow
+/// key changes nothing the rows are built from.
+#[test]
+fn arrow_navigation_moves_the_selection_without_changing_the_row_list() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![
+            native("native-2", "Native newer", NEWER_THAN_THE_CHECKPOINT),
+            native("native-3", "Native older", 1),
+        ])],
+    );
+    switch_to_import(&mut dashboard);
+    let before = rows(&dashboard);
+    assert_eq!(before.len(), 2, "{:?}", titles(&before));
+
+    dashboard.handle_key(key(KeyCode::Down));
+
+    assert_eq!(rows(&dashboard), before, "navigation rebuilt the rows");
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.row_index, 1);
+    assert_eq!(dialog.selected, Some(before[1].key.clone()));
+}
+
+/// Search is one of the inputs the rows are built from, so each keystroke
+/// narrows what the dialog lists, and erasing it restores them.
+#[test]
+fn typing_a_search_narrows_the_visible_rows() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![
+            native("native-2", "Native alpha", NEWER_THAN_THE_CHECKPOINT),
+            native("native-3", "Native beta", 1),
+        ])],
+    );
+    switch_to_import(&mut dashboard);
+    assert_eq!(rows(&dashboard).len(), 2);
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "alpha".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Native alpha"]);
+
+    for _ in 0.."alpha".len() {
+        dashboard.handle_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(rows(&dashboard).len(), 2);
+}
+
+#[test]
+fn search_matches_every_row_text_field_case_insensitively() {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(
+        1,
+        vec![codex_profile(vec![
+            native("native-2", "Native alpha", now_ms - 2 * 60_000),
+            native("native-3", "Native beta", 1),
+        ])],
+    );
+
+    for (query, expected) in [
+        ("ACP PRETTY", vec!["ACP pretty name"]),
+        ("PODMAN", vec!["ACP pretty name"]),
+        ("CODEX-1", vec!["ACP pretty name"]),
+    ] {
+        replace_search(&mut dashboard, query);
+        assert_eq!(titles(&rows(&dashboard)), expected, "query {query:?}");
+    }
+
+    replace_search(&mut dashboard, "");
+    switch_to_import(&mut dashboard);
+    for (query, expected) in [
+        ("LOCAL", vec!["Native alpha", "Native beta"]),
+        ("MINUTES AGO", vec!["Native alpha"]),
+        ("MASTER", vec!["Native alpha", "Native beta"]),
+        ("CODEX-1", vec!["Native alpha", "Native beta"]),
+    ] {
+        replace_search(&mut dashboard, query);
+        assert_eq!(titles(&rows(&dashboard)), expected, "query {query:?}");
+    }
+}
+
+/// Cost of the merged row list and of one keypress, on a dialog the size a
+/// long-lived harness home produces. Run with
+/// `cargo test -p brokk-mj-tui resume_row_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement, not a behavior assertion"]
+fn resume_row_cost_for_a_few_thousand_sessions() {
+    const NATIVE: usize = 4_000;
+    const RECORDS: usize = 400;
+    const ROUNDS: usize = 200;
+
+    let records = (0..RECORDS)
+        .map(|index| {
+            let mut session = stopped_session();
+            session.id = format!("session-{index:04}");
+            session.native_session_id = None;
+            session.acp_session_title = Some(format!("Record {index}"));
+            session
+        })
+        .collect::<Vec<_>>();
+    let sessions = (0..NATIVE)
+        .map(|index| {
+            native(
+                &format!("native-{index:04}"),
+                &format!("Native conversation {index}"),
+                index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut dashboard = DashboardState::new(config(), state_with(records), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(sessions)]);
+    switch_to_import(&mut dashboard);
+
+    let Mode::ResumeDialog(dialog) = dashboard.mode.clone() else {
+        panic!("expected the resume dialog");
+    };
+    // What one rebuild costs: the merge, the sizes, and search.
+    let started = Instant::now();
+    let mut built = 0;
+    for _ in 0..ROUNDS {
+        built += build_resume_rows(
+            &dashboard.config,
+            &dashboard.state,
+            &dialog,
+            &dashboard.checkpoint_archive_sizes,
+            &chrono::Local::now(),
+        )
+        .len();
+    }
+    let rebuild = started.elapsed();
+
+    // What the dialog actually pays per key press, which reads the rows
+    // rather than rebuilding them.
+    let started = Instant::now();
+    for _ in 0..ROUNDS {
+        dashboard.handle_key(key(KeyCode::Down));
+    }
+    let keypresses = started.elapsed();
+
+    println!(
+        "rows={} rebuild={:?} per_rebuild={:?} keypresses={:?} per_key={:?}",
+        built / ROUNDS,
+        rebuild,
+        rebuild / ROUNDS as u32,
+        keypresses,
+        keypresses / ROUNDS as u32,
+    );
+}
+
+/// The in-dialog keys are advertised where the user can see them.
+#[test]
+fn the_dialog_footer_names_its_own_keys() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+    let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    for hint in [
+        "Mjolnir",
+        "Import",
+        "Delete destroys",
+        "  Destroy  ",
+        "←/→ tabs",
+        "/ searches",
+    ] {
+        assert!(rendered.contains(hint), "{rendered}");
+    }
+
+    switch_to_import(&mut dashboard);
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the Import tab");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Enter imports"), "{rendered}");
+    assert!(!rendered.contains("destroys"), "{rendered}");
+    assert!(!rendered.contains("  Destroy  "), "{rendered}");
+    assert!(!rendered.contains("archives"), "{rendered}");
+}
