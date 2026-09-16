@@ -5423,6 +5423,11 @@ while True: time.sleep(1)
 /// sub-agent sockets only bind under their own configuration, so proving that
 /// `control.sock` binds and serves is enough to show the daemon no longer
 /// trips over `sun_path`.
+///
+/// The daemon runs checkpoint-only so it serves until the test aborts it. A
+/// daemon that starts a harness would exit on its own when the bridge fails
+/// to launch, and under load that exit could land before the status request
+/// is read, resetting the connection.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -5436,9 +5441,19 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
             > mj_core::local_sockets::unix_socket_path_limit(),
         "the test root must be long enough to need the relative-name bind"
     );
+    // Checkpoint-only startup requires existing relay state.
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "saved-native-session".into(),
+            resumed: true,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    drop(durable);
 
     let mut config = launch_config("profile-home-that-must-not-be-used");
-    config.bridge_command = temp.path().join("missing-acp-bridge");
+    config.run_mode = mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     config.cwd = temp.path().to_owned();
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
@@ -5489,8 +5504,5 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
 
     writer.shutdown().await.unwrap();
     daemon.abort();
-    // Under load the daemon's own bridge failure can land before the abort
-    // does. This test is about the socket path, not about how the daemon
-    // eventually stops.
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }
