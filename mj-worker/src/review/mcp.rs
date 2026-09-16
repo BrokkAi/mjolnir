@@ -14,13 +14,9 @@
 //! because a supervisor that blocks inside a tool call cannot be reading the
 //! reports its lanes are producing.
 //!
-//! Hel's MCP servers are hand-rolled JSON-lines loops rather than an SDK
-//! (`crate::memory_mcp::run_mcp_stdio` is the other one), so this file
-//! follows that pattern deliberately: one dependency-free `initialize`,
-//! `tools/list`, `tools/call` loop.
+//! The JSON-RPC loop is the worker's shared `crate::mcp_stdio::serve`.
 
 use mj_core::review::mcp::REVIEW_MCP_SERVER_NAME;
-use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -30,56 +26,18 @@ use mj_review::lanes::{LaneDispatch, LaneDispatchReply, REVIEW_LANES, validate_d
 
 /// Serve the review dispatch tool over MCP's JSON-lines stdio transport.
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    for line in stdin.lock().lines() {
-        let line = line.context("read MCP request")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_json_line(
-                    &mut output,
-                    &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}}),
-                )?;
-                continue;
-            }
-        };
-        let Some(id) = request.get("id").cloned() else {
-            continue;
-        };
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let response = match method {
-            "initialize" => json_rpc_result(
-                id,
-                json!({
-                    "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
-                    "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": REVIEW_MCP_SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "Launch read-only specialist reviewers for the turn under review. The tool returns immediately; their reports arrive as later messages in this session."
-                }),
-            ),
-            "ping" => json_rpc_result(id, json!({})),
-            "tools/list" => json_rpc_result(id, json!({"tools": [tool_definition()]})),
-            "tools/call" => match call_tool(socket, request.get("params")) {
-                Ok((structured, is_error)) => json_rpc_result(
-                    id,
-                    json!({
-                        "content": [{"type":"text", "text": serde_json::to_string_pretty(&structured)?}],
-                        "structuredContent": structured,
-                        "isError": is_error
-                    }),
-                ),
-                Err(error) => json_rpc_error(id, -32602, format!("{error:#}")),
-            },
-            _ => json_rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
-        };
-        write_json_line(&mut output, &response)?;
-    }
-    Ok(())
+    let socket = socket.to_path_buf();
+    crate::mcp_stdio::serve(
+        std::io::stdin().lock(),
+        std::io::stdout(),
+        crate::mcp_stdio::McpServer {
+            name: REVIEW_MCP_SERVER_NAME,
+            instructions: "Launch read-only specialist reviewers for the turn under review. The tool returns immediately; their reports arrive as later messages in this session.",
+            tools: vec![tool_definition()],
+            dispatch: crate::mcp_stdio::Dispatch::Sequential,
+            call: move |params: Option<&Value>| call_tool(&socket, params),
+        },
+    )
 }
 
 fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
@@ -117,29 +75,8 @@ fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
 
 /// One request, one line, one reply. The socket lives in the worker root and
 /// is only reachable from inside this container.
-#[cfg(unix)]
 pub fn send_dispatch(socket: &Path, dispatch: &LaneDispatch) -> Result<LaneDispatchReply> {
-    let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
-        .with_context(|| format!("connect to the review dispatch socket {}", socket.display()))?;
-    let mut body = serde_json::to_vec(dispatch)?;
-    body.push(b'\n');
-    stream
-        .write_all(&body)
-        .context("send the review dispatch")?;
-    stream.flush().ok();
-    let mut reader = std::io::BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .context("read the review dispatch reply")?;
-    serde_json::from_str(line.trim()).context("parse the review dispatch reply")
-}
-
-/// Hel's workers run on Unix; the tool is compiled everywhere so the CLI and
-/// the controller stay one shape, and says plainly where it cannot run.
-#[cfg(not(unix))]
-pub fn send_dispatch(_socket: &Path, _dispatch: &LaneDispatch) -> Result<LaneDispatchReply> {
-    bail!("the review dispatch socket needs a Unix platform")
+    crate::mcp_stdio::socket_request(socket, dispatch, "review dispatch")
 }
 
 fn tool_definition() -> Value {
@@ -183,21 +120,6 @@ fn tool_definition() -> Value {
             "additionalProperties": false
         }
     })
-}
-
-fn json_rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-fn json_rpc_error(id: Value, code: i64, message: String) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-}
-
-fn write_json_line(output: &mut impl Write, value: &Value) -> Result<()> {
-    let mut body = serde_json::to_vec(value)?;
-    body.push(b'\n');
-    output.write_all(&body).context("write MCP response")?;
-    output.flush().context("flush MCP response")
 }
 
 #[cfg(test)]

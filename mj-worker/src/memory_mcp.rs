@@ -2,63 +2,25 @@
 use anyhow::{Context, Result, bail};
 use mj_core::project_memory::*;
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
 use std::path::Path;
 /// Serve the project memory tools over MCP's JSON-lines stdio transport.
 pub fn run_mcp_stdio(root: &Path) -> Result<()> {
     fs::create_dir_all(root)
         .with_context(|| format!("create project memory root {}", root.display()))?;
     let store = ProjectMemoryStore::new(root);
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    for line in stdin.lock().lines() {
-        let line = line.context("read MCP request")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                write_json_line(
-                    &mut output,
-                    &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}}),
-                )?;
-                continue;
-            }
-        };
-        let Some(id) = request.get("id").cloned() else {
-            continue;
-        };
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let response = match method {
-            "initialize" => json_rpc_result(
-                id,
-                json!({
-                    "protocolVersion": request.pointer("/params/protocolVersion").cloned().unwrap_or_else(|| json!("2025-03-26")),
-                    "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": "mj-memory", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": MEMORY_GUIDANCE
-                }),
-            ),
-            "ping" => json_rpc_result(id, json!({})),
-            "tools/list" => json_rpc_result(id, json!({"tools": tool_definitions()})),
-            "tools/call" => match call_tool(&store, request.get("params")) {
-                Ok((structured, is_error)) => json_rpc_result(
-                    id,
-                    json!({
-                        "content": [{"type":"text", "text": serde_json::to_string_pretty(&structured)?}],
-                        "structuredContent": structured,
-                        "isError": is_error
-                    }),
-                ),
-                Err(error) => json_rpc_error(id, -32602, format!("{error:#}")),
-            },
-            _ => json_rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
-        };
-        write_json_line(&mut output, &response)?;
-    }
-    Ok(())
+    crate::mcp_stdio::serve(
+        std::io::stdin().lock(),
+        std::io::stdout(),
+        crate::mcp_stdio::McpServer {
+            name: "mj-memory",
+            instructions: MEMORY_GUIDANCE,
+            tools: tool_definitions(),
+            // Writes compare versions; answering one call at a time keeps two
+            // edits from racing inside one harness.
+            dispatch: crate::mcp_stdio::Dispatch::Sequential,
+            call: move |params: Option<&Value>| call_tool(&store, params),
+        },
+    )
 }
 
 fn call_tool(store: &ProjectMemoryStore, params: Option<&Value>) -> Result<(Value, bool)> {
@@ -146,21 +108,6 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
     ]
-}
-
-fn json_rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc":"2.0", "id":id, "result":result})
-}
-
-fn json_rpc_error(id: Value, code: i64, message: String) -> Value {
-    json!({"jsonrpc":"2.0", "id":id, "error":{"code":code, "message":message}})
-}
-
-fn write_json_line(output: &mut impl Write, value: &Value) -> Result<()> {
-    serde_json::to_writer(&mut *output, value)?;
-    output.write_all(b"\n")?;
-    output.flush()?;
-    Ok(())
 }
 
 use serde::Deserialize;
