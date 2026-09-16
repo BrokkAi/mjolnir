@@ -3910,6 +3910,102 @@ mod tests {
         assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
     }
 
+    /// A daemon-created child that arrives through a later runtime snapshot,
+    /// rather than through a full `Controller::load()`, must still hide from
+    /// the parent's real workspace. This is the contract the dashboard's
+    /// `apply_runtime_records` relies on when it assigns `state.subagents`
+    /// alongside `state.sessions` on every `set_state` call.
+    #[test]
+    fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
+        let mut parent = stopped_session();
+        parent.id = "parent-session".into();
+        parent.state = SessionState::Running;
+        let mut first_child = stopped_session();
+        first_child.id = "first-child".into();
+        first_child.state = SessionState::Running;
+        let first_relation = mj_core::subagent::SubagentRecord {
+            child_session_id: first_child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "First task".into(),
+            profile_id: first_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "Do the first task".into(),
+            request_key: "request-1".into(),
+            created_at: first_child.created_at.clone(),
+            noticed_turn: None,
+        };
+        let mut dashboard = DashboardState::new(
+            config(),
+            State {
+                subagents: BTreeMap::from([(first_child.id.clone(), first_relation.clone())]),
+                version: STATE_VERSION,
+                sessions: BTreeMap::from([
+                    (parent.id.clone(), parent.clone()),
+                    (first_child.id.clone(), first_child.clone()),
+                ]),
+                mount_history: BTreeMap::new(),
+                container_sizes: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+        );
+
+        let mut second_child = stopped_session();
+        second_child.id = "second-child".into();
+        second_child.state = SessionState::Running;
+        let second_relation = mj_core::subagent::SubagentRecord {
+            child_session_id: second_child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Second task".into(),
+            profile_id: second_child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "Do the second task".into(),
+            request_key: "request-2".into(),
+            created_at: second_child.created_at.clone(),
+            noticed_turn: None,
+        };
+        dashboard.set_state(State {
+            subagents: BTreeMap::from([
+                (first_child.id.clone(), first_relation),
+                (second_child.id.clone(), second_relation),
+            ]),
+            version: STATE_VERSION,
+            sessions: BTreeMap::from([
+                (parent.id.clone(), parent.clone()),
+                (first_child.id.clone(), first_child.clone()),
+                (second_child.id.clone(), second_child.clone()),
+            ]),
+            mount_history: BTreeMap::new(),
+            container_sizes: BTreeMap::new(),
+        });
+
+        assert_eq!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![parent.id.as_str()],
+            "a child arriving through set_state alone must still leave the real workspace"
+        );
+
+        dashboard.open_subagent_workspace(parent.id.clone());
+        let mut virtual_workspace_ids = dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        virtual_workspace_ids.sort();
+        assert_eq!(
+            virtual_workspace_ids,
+            vec![first_child.id.clone(), second_child.id.clone()],
+            "both children must appear in the virtual workspace"
+        );
+    }
+
     #[test]
     fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
         let mut dashboard = dashboard_with_session(stopped_session());

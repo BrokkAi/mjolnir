@@ -29,6 +29,7 @@ use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::{Config, config_path};
 use mj_core::credentials::CredentialSyncHandle;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
+use mj_core::subagent::SubagentRecord;
 
 use mj_chat::chat::ChatElicitationDraft;
 use mj_chat::components::Outcome;
@@ -2093,7 +2094,7 @@ impl DashboardContext {
         };
         self.dashboard.set_workspace_names(update.workspace_names);
         self.select_workspace(next_workspace);
-        self.apply_runtime_records(update.records);
+        self.apply_runtime_records(update.records, update.subagents);
         self.dashboard.set_move_operations(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
         self.controller_changed = true;
@@ -2230,10 +2231,18 @@ impl DashboardContext {
         );
     }
 
-    fn apply_runtime_records(&mut self, records: Vec<SessionRecord>) {
+    fn apply_runtime_records(
+        &mut self,
+        records: Vec<SessionRecord>,
+        subagents: Vec<SubagentRecord>,
+    ) {
         let sessions: BTreeMap<String, SessionRecord> = records
             .into_iter()
             .map(|session| (session.id.clone(), session))
+            .collect();
+        let subagents: BTreeMap<String, SubagentRecord> = subagents
+            .into_iter()
+            .map(|subagent| (subagent.child_session_id.clone(), subagent))
             .collect();
         if let Some(chat) = self.active_chat.as_mut() {
             let feed_expected = sessions
@@ -2259,10 +2268,13 @@ impl DashboardContext {
             // Order matters: an expected feed clears the retiring flag.
             chat.set_session_feed_expected(feed_expected);
         }
-        if self.controller.state.sessions == sessions {
+        if self.controller.state.sessions == sessions
+            && self.controller.state.subagents == subagents
+        {
             return;
         }
         self.controller.state.sessions = sessions;
+        self.controller.state.subagents = subagents;
         self.dashboard.set_state(self.controller.state.clone());
         self.reconcile_question_drafts();
         self.refresh_chat_context();

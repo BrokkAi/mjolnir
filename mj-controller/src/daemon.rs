@@ -25,6 +25,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
 use mj_core::relay::RelayCommand;
 use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
+use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
     Controller, ControllerStoreGuard, SessionLaunchOptions, SessionResumeOptions,
@@ -778,6 +779,7 @@ impl RuntimeState {
             .cloned()
             .collect();
         let records = runtime_records_for_workspace(&controller, &session_ids);
+        let subagents = runtime_subagents_for_workspace(&controller, &records);
         Ok(RuntimeSnapshot {
             workspace_names,
             moves: moves
@@ -791,6 +793,7 @@ impl RuntimeState {
             lifecycles,
             reviews,
             notices,
+            subagents,
         })
     }
 
@@ -2268,6 +2271,25 @@ fn runtime_records_for_workspace(
             !session.state.is_active() || session_ids.contains(*session_id)
         })
         .map(|(_, session)| session.clone())
+        .collect()
+}
+
+/// Relations for the children carried in `records`, so a surface can keep a
+/// daemon-created child out of the real workspace without a full state
+/// reload. Filtering by the returned records, rather than by `session_ids`
+/// directly, keeps this in step with `runtime_records_for_workspace`, which
+/// also includes inactive sessions outside that set.
+fn runtime_subagents_for_workspace(
+    controller: &Controller,
+    records: &[SessionRecord],
+) -> Vec<SubagentRecord> {
+    let record_ids: BTreeSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
+    controller
+        .state
+        .subagents
+        .iter()
+        .filter(|(child_session_id, _)| record_ids.contains(child_session_id.as_str()))
+        .map(|(_, subagent)| subagent.clone())
         .collect()
 }
 
@@ -4335,6 +4357,87 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(ids, BTreeSet::from(["history", "local"]));
+    }
+
+    fn runtime_test_subagent(child_session_id: &str, parent_session_id: &str) -> SubagentRecord {
+        SubagentRecord {
+            child_session_id: child_session_id.into(),
+            parent_session_id: parent_session_id.into(),
+            task_name: "task".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "do the task".into(),
+            request_key: format!("request-{child_session_id}"),
+            created_at: "2026-09-03T00:00:00Z".into(),
+            noticed_turn: None,
+        }
+    }
+
+    #[test]
+    fn runtime_subagents_include_only_relations_whose_child_is_in_the_returned_records() {
+        let parent_a = runtime_test_session("parent-a", "workspace-a", SessionState::Running);
+        let child_a1 = runtime_test_session("child-a1", "workspace-a", SessionState::Running);
+        let child_a2 = runtime_test_session("child-a2", "workspace-a", SessionState::Running);
+        let parent_b = runtime_test_session("parent-b", "workspace-b", SessionState::Running);
+        let child_b1 = runtime_test_session("child-b1", "workspace-b", SessionState::Running);
+        let mut state = mj_core::state::State {
+            sessions: [
+                parent_a.clone(),
+                child_a1.clone(),
+                child_a2.clone(),
+                parent_b.clone(),
+                child_b1.clone(),
+            ]
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect(),
+            ..mj_core::state::State::default()
+        };
+        state.subagents = [
+            runtime_test_subagent(&child_a1.id, &parent_a.id),
+            runtime_test_subagent(&child_a2.id, &parent_a.id),
+            runtime_test_subagent(&child_b1.id, &parent_b.id),
+        ]
+        .into_iter()
+        .map(|subagent| (subagent.child_session_id.clone(), subagent))
+        .collect();
+        let controller = Controller {
+            config: Config::default(),
+            state,
+        };
+
+        let workspace_a_ids = BTreeSet::from([
+            "parent-a".to_owned(),
+            "child-a1".to_owned(),
+            "child-a2".to_owned(),
+        ]);
+        let workspace_a_records = runtime_records_for_workspace(&controller, &workspace_a_ids);
+        let workspace_a_subagents =
+            runtime_subagents_for_workspace(&controller, &workspace_a_records);
+        let mut workspace_a_child_ids = workspace_a_subagents
+            .iter()
+            .map(|subagent| subagent.child_session_id.as_str())
+            .collect::<Vec<_>>();
+        workspace_a_child_ids.sort_unstable();
+        assert_eq!(workspace_a_child_ids, ["child-a1", "child-a2"]);
+
+        let all_ids = BTreeSet::from([
+            "parent-a".to_owned(),
+            "child-a1".to_owned(),
+            "child-a2".to_owned(),
+            "parent-b".to_owned(),
+            "child-b1".to_owned(),
+        ]);
+        let all_records = runtime_records_for_workspace(&controller, &all_ids);
+        let all_subagents = runtime_subagents_for_workspace(&controller, &all_records);
+        let mut all_child_ids = all_subagents
+            .iter()
+            .map(|subagent| subagent.child_session_id.as_str())
+            .collect::<Vec<_>>();
+        all_child_ids.sort_unstable();
+        assert_eq!(all_child_ids, ["child-a1", "child-a2", "child-b1"]);
     }
 
     #[tokio::test]

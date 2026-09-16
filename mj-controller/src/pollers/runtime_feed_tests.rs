@@ -138,6 +138,7 @@ fn snapshot(
         moves: Vec::new(),
         reviews: Vec::new(),
         notices: Vec::new(),
+        subagents: Vec::new(),
     }
 }
 
