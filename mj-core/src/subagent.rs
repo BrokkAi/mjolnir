@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Longest time a sub-agent completion wait may remain pending.
 pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
+/// How long a `wait` call blocks when the caller gives no timeout.
+pub const DEFAULT_WAIT_SECONDS: u64 = 300;
+
 /// An inclusive, one-based line range within a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -252,14 +252,14 @@ pub fn transfer_plan(
             )
             .purpose("download checkpoint from local Podman"),
         ],
-        TargetLocator::LocalDocker { container_id } => vec![
+        TargetLocator::LocalDocker { container_id, .. } => vec![
             CommandSpec::new(
                 "docker",
                 ["cp", &format!("{container_id}:{remote_archive}"), &local],
             )
             .purpose("download checkpoint from local Docker"),
         ],
-        TargetLocator::AppleContainer { container_id } => vec![
+        TargetLocator::AppleContainer { container_id, .. } => vec![
             CommandSpec::new(
                 "container",
                 ["cp", &format!("{container_id}:{remote_archive}"), &local],
@@ -275,7 +275,9 @@ pub fn transfer_plan(
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | TargetLocator::SshDocker { ssh, container_id } => {
+        | TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             vec![
                 crate::targets::ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
                     .purpose("create remote checkpoint staging directory"),
@@ -378,10 +380,12 @@ mod tests {
                 worker_root: format!("/var/lib/hel/workers/{SESSION}"),
             },
             TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: name.clone(),
                 workspace_storage: Default::default(),
             },
             TargetLocator::AppleContainer {
+                borrowed_from: None,
                 container_id: name.clone(),
             },
             TargetLocator::AwsEc2 {
@@ -397,6 +401,7 @@ mod tests {
                 workspace: format!("~/hel/{SESSION}"),
             },
             TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: ssh(),
                 container_id: name,
                 workspace_storage: Default::default(),
@@ -626,6 +631,7 @@ mod tests {
 
     fn ssh_docker_locator() -> TargetLocator {
         TargetLocator::SshDocker {
+            borrowed_from: None,
             ssh: ssh(),
             container_id: mj_core::targets::resource_name(SESSION).unwrap(),
         }

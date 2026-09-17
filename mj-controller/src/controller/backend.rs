@@ -842,6 +842,7 @@ pub(super) fn locator_after_provision(
                 bail!("session locator/template mismatch")
             };
             TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: generated,
                 workspace_storage: durable_workspace_locator(targets::podman_workspace_locator(
                     container, session_id,
@@ -849,9 +850,11 @@ pub(super) fn locator_after_provision(
             }
         }
         TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: generated,
         },
         TargetTemplate::AppleContainer { .. } => TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: generated,
         },
         TargetTemplate::SshBare { ssh, .. } => TargetLocator::SshBare {
@@ -864,6 +867,7 @@ pub(super) fn locator_after_provision(
                 bail!("session locator/template mismatch")
             };
             TargetLocator::SshPodman {
+                borrowed_from: None,
                 host: ssh.host.clone(),
                 container_id: generated,
                 workspace_storage: durable_workspace_locator(targets::podman_workspace_locator(
@@ -872,6 +876,7 @@ pub(super) fn locator_after_provision(
             }
         }
         TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+            borrowed_from: None,
             host: ssh.host.clone(),
             container_id: generated,
         },
@@ -989,14 +994,24 @@ pub(super) fn backend_locator(
         TargetLocator::LocalPodman {
             container_id,
             workspace_storage,
+            borrowed_from,
         } => targets::TargetLocator::LocalPodman {
+            borrowed_from: borrowed_from.clone(),
             container_id: container_id.clone(),
             workspace_storage: backend_workspace_locator(workspace_storage),
         },
-        TargetLocator::LocalDocker { container_id } => targets::TargetLocator::LocalDocker {
+        TargetLocator::LocalDocker {
+            container_id,
+            borrowed_from,
+        } => targets::TargetLocator::LocalDocker {
+            borrowed_from: borrowed_from.clone(),
             container_id: container_id.clone(),
         },
-        TargetLocator::AppleContainer { container_id } => targets::TargetLocator::AppleContainer {
+        TargetLocator::AppleContainer {
+            container_id,
+            borrowed_from,
+        } => targets::TargetLocator::AppleContainer {
+            borrowed_from: borrowed_from.clone(),
             container_id: container_id.clone(),
         },
         TargetLocator::SshBare {
@@ -1016,18 +1031,24 @@ pub(super) fn backend_locator(
         TargetLocator::SshPodman {
             container_id,
             workspace_storage,
+            borrowed_from,
             ..
         } => {
             let TargetTemplate::SshPodman { ssh, .. } = template else {
                 bail!("session locator/template mismatch")
             };
             targets::TargetLocator::SshPodman {
+                borrowed_from: borrowed_from.clone(),
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: backend_workspace_locator(workspace_storage),
             }
         }
-        TargetLocator::SshDocker { host, container_id } => {
+        TargetLocator::SshDocker {
+            host,
+            container_id,
+            borrowed_from,
+        } => {
             let TargetTemplate::SshDocker { ssh, .. } = template else {
                 bail!("session locator/template mismatch")
             };
@@ -1036,6 +1057,7 @@ pub(super) fn backend_locator(
                 "session locator/template SSH host mismatch"
             );
             targets::TargetLocator::SshDocker {
+                borrowed_from: borrowed_from.clone(),
                 ssh: backend_ssh(ssh),
                 container_id: container_id.clone(),
             }

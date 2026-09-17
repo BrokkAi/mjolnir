@@ -2246,6 +2246,7 @@ mod tests {
                 additional_mounts: Vec::new(),
                 state,
                 target: Some(mj_core::state::TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: "a".repeat(64),
                     workspace_storage: Default::default(),
                 }),
@@ -2869,10 +2870,12 @@ mod tests {
 
         let remotes = [
             TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "podman".into(),
                 workspace_storage: Default::default(),
             },
             TargetLocator::AppleContainer {
+                borrowed_from: None,
                 container_id: "apple".into(),
             },
             TargetLocator::AwsEc2 {
@@ -2885,11 +2888,13 @@ mod tests {
                 worker_id: None,
             },
             TargetLocator::SshPodman {
+                borrowed_from: None,
                 host: "ssh.example".into(),
                 container_id: "remote-podman".into(),
                 workspace_storage: Default::default(),
             },
             TargetLocator::SshDocker {
+                borrowed_from: None,
                 host: "ssh.example".into(),
                 container_id: "remote-docker".into(),
             },

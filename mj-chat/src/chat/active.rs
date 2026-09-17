@@ -2976,15 +2976,15 @@ pub(super) fn render_composer_band(
         if chat.standby {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" keeps the draft ", theme::muted()),
+                Span::styled(" keeps the draft ", theme::hint_description()),
             ])
             .right_aligned()
         } else {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" send  ", theme::muted()),
+                Span::styled(" send  ", theme::hint_description()),
                 Span::styled(" / ", theme::key_hint()),
-                Span::styled(" commands ", theme::muted()),
+                Span::styled(" commands ", theme::hint_description()),
             ])
             .right_aligned()
         }
@@ -5526,7 +5526,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
+    fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let mut terminal =
             Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
@@ -5553,6 +5553,17 @@ mod tests {
             + enter_byte;
         let slash_column =
             usize::from(buffer.area.x) + prompt_text[..slash_byte].chars().count() + 1;
+        let send_byte = prompt_text[enter_byte..]
+            .find("send")
+            .expect("the send description is rendered")
+            + enter_byte;
+        let send_column = usize::from(buffer.area.x) + prompt_text[..send_byte].chars().count();
+        let commands_byte = prompt_text[slash_byte..]
+            .find("commands")
+            .expect("the commands description is rendered")
+            + slash_byte;
+        let commands_column =
+            usize::from(buffer.area.x) + prompt_text[..commands_byte].chars().count();
 
         for column in enter_column..enter_column + "Enter".len() {
             let cell = &buffer[(column as u16, prompt_y)];
@@ -5562,6 +5573,12 @@ mod tests {
         let slash = &buffer[(slash_column as u16, prompt_y)];
         assert!(slash.modifier.contains(ratatui::style::Modifier::BOLD));
         assert_ne!(slash.bg, theme::palette().selection);
+        for (start, word) in [(send_column, "send"), (commands_column, "commands")] {
+            for column in start..start + word.len() {
+                let cell = &buffer[(column as u16, prompt_y)];
+                assert!(!cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            }
+        }
     }
 
     #[test]

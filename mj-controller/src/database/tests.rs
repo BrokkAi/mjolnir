@@ -463,6 +463,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         }],
         state: SessionState::Stopped,
         target: Some(TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container-1".into(),
             workspace_storage: Default::default(),
         }),
@@ -652,6 +653,7 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
     let mut record = session("session-1", "project-1");
     record.target_template_id = "docker".into();
     record.target = Some(TargetLocator::LocalDocker {
+        borrowed_from: None,
         container_id: "hel-session-1".into(),
     });
 
@@ -673,11 +675,50 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
 }
 
 #[test]
+fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.target_template_id = "podman".into();
+    record.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: Some("parent-session".into()),
+        container_id: "hel-parent-session".into(),
+        workspace_storage: Default::default(),
+    });
+
+    save_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"],
+        record
+    );
+
+    // A row an older build wrote, or rewrote without the column, is an
+    // ordinary session-owned target.
+    let connection = open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE session_targets SET borrowed_from = NULL WHERE session_id = 'session-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let Some(TargetLocator::LocalPodman { borrowed_from, .. }) =
+        load_state_from(&database).unwrap().sessions["session-1"]
+            .target
+            .clone()
+    else {
+        panic!("Podman locator changed kind")
+    };
+    assert_eq!(borrowed_from, None);
+}
+
+#[test]
 fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_layer() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "hel-session-1".into(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: "hel-session-1-workspace".into(),

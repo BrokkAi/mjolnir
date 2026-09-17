@@ -2132,6 +2132,28 @@ pub fn data_dir() -> PathBuf {
     )
 }
 
+/// Identity stamped on every worker this Mjolnir instance creates, so a
+/// recovery scan from another instance can tell the worker is not its own.
+/// A named `--instance` uses its name; otherwise the data directory path is
+/// fingerprinted so an explicit `MJ_DATA_DIR` override also gets its own
+/// identity.
+pub fn instance_identity() -> String {
+    instance_identity_for(instance_name().as_deref(), &data_dir())
+}
+
+/// Pure form of [`instance_identity`] for callers that already resolved the
+/// instance name and data directory.
+pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String {
+    if let Some(name) = instance
+        && is_valid_instance_name(name)
+    {
+        return name.to_owned();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(data_dir.to_string_lossy().as_bytes());
+    format!("{digest:x}")[..16].to_owned()
+}
+
 pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
@@ -3994,6 +4016,32 @@ image = "ubuntu:24.04"
                 "unexpected error for {invalid:?}: {error:#}"
             );
         }
+    }
+
+    #[test]
+    fn instance_identity_prefers_a_valid_instance_name() {
+        let dir = Path::new("/home/user/.local/share/mjolnir");
+        assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
+        assert_eq!(
+            instance_identity_for(Some("../escape"), dir),
+            instance_identity_for(None, dir),
+            "an invalid name falls back to the data-dir fingerprint"
+        );
+    }
+
+    #[test]
+    fn instance_identity_fingerprints_the_data_dir_stably() {
+        let first = instance_identity_for(None, Path::new("/srv/mj/one"));
+        let same = instance_identity_for(None, Path::new("/srv/mj/one"));
+        let other = instance_identity_for(None, Path::new("/srv/mj/two"));
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert_eq!(first.len(), 16);
+        assert!(
+            first
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
     }
 
     #[test]

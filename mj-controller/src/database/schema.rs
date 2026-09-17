@@ -224,10 +224,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version == 0 {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
+        // Every release from 2.7.2 through 2.9.x still carries the migration
+        // chain below the baseline; every later release refuses, as this one
+        // does. That range is closed, so the advice never goes stale.
         bail!(
             "Mjolnir database schema {version} was written by a Mjolnir release older than 2.7.2, \
-             which this build cannot upgrade; upgrade through Mjolnir 2.7.2 or 2.9 first, or start \
-             with a fresh data directory (--instance NAME or MJ_DATA_DIR)"
+             which this build cannot upgrade; upgrade through any Mjolnir release from 2.7.2 \
+             through 2.9.x first, or start with a fresh data directory (--instance NAME or \
+             MJ_DATA_DIR)"
         );
     }
     // Compatible: adds one table. Older readers ignore it and treat read-write
@@ -281,6 +285,21 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (36, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 36;
+             COMMIT;",
+        )?;
+    }
+    // Compatible: adds one nullable column to `session_targets`. Only a
+    // container sub-agent child row ever carries a value, and older builds
+    // could never start such a child, so an older update that rewrites the row
+    // without the column loses nothing usable. Older readers ignore it. The
+    // compatibility floor stays where it is.
+    if version < 37 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_targets ADD COLUMN borrowed_from TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (37, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 37;
              COMMIT;",
         )?;
     }
@@ -539,9 +558,11 @@ mod reader_tests {
 
         let error = open_writer(&path).unwrap_err();
 
+        let message = format!("{error:#}");
+        assert!(message.contains("older than 2.7.2"), "{message}");
         assert!(
-            format!("{error:#}").contains("older than 2.7.2"),
-            "{error:#}"
+            message.contains("from 2.7.2 through 2.9.x"),
+            "advice must name the closed range of releases that can migrate: {message}"
         );
     }
 

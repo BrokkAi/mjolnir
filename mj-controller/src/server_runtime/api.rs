@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::MAX_WAIT_SECONDS;
+use mj_core::subagent::{DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS};
 
 use crate::quota::ProfileQuota;
 
@@ -409,7 +409,9 @@ impl ApiBackend {
                 }
                 let deadline = tokio::time::Instant::now()
                     + Duration::from_secs(
-                        timeout_seconds.unwrap_or(300).clamp(1, MAX_WAIT_SECONDS),
+                        timeout_seconds
+                            .unwrap_or(DEFAULT_WAIT_SECONDS)
+                            .clamp(1, MAX_WAIT_SECONDS),
                     );
                 loop {
                     let ids = child_session_ids.clone();
