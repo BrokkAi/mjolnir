@@ -23,7 +23,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-17 02:15Z) Milestone 6: web viewer parity, commit 77f7cc80.
 - [x] (2026-09-17 03:30Z) Milestone 7: documentation, commits `b345b976` (docs site) and `fd16c8d9` (`.agents/docs/sessionwiki-fork.md`); follow-up ticket https://github.com/BrokkAi/mjolnir/issues/1066. The docs build the Docs workflow runs passes, including its internal link check.
 - [x] (2026-09-17 04:30Z) Milestone 8: `brokk-sessionwiki` 0.28.0 published to crates.io from the fork's `publish` branch (commit 33f67f6, tag `brokk-v0.28.0`) at the user's request; Mjolnir's workspace dependency switched to the registry crate and re-locked; install command in `sessions.md` updated.
-- [ ] Milestone 9: SessionWiki always on. Daemon side: remove the `enabled` switch, isolate the index for overridden data directories, refuse an index at another schema version, explicit startup sync, persisted "first build done" marker, sync status in the search response, title and project matching, live sessions indexed from the stored transcript.
+- [x] (2026-09-17 04:00Z) Milestone 9: SessionWiki always on, daemon side; commits `4ce2f9a7` (the milestone) and `94c06ef0` (re-index on rename, which the live check found). Live check: a running session found by a word from its reply, a renamed session found by a title in none of its messages, a fresh `MJ_DATA_DIR` creating its own index while the user's own index stayed absent, and a copy at `user_version = 7` answering `version_mismatch` with the file untouched.
 - [ ] Milestone 10: one search path in both UIs. The search box is disabled and reads "Indexing…" until the first build completes; typing queries the index only; the local filter is removed; the archive-restore wizard shows the archived session's title; background results verified to redraw in a live terminal.
 
 ## Surprises & Discoveries
@@ -70,6 +70,12 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: a search for a phrase that appears in a transcript returned the row from `/wiki/search` while the list showed nothing. The filter now also keeps a session whose id has a wiki snippet.
 - Observation: The archived detail card overflowed a 420 px phone viewport. Long briefing lines and long titles have no spaces to break on.
   Evidence: horizontal page scroll at 420 px in the Playwright run. Fixed with `overflow-wrap` on the card body and a cap on the heading.
+- Observation: A rename does not move any change token the index had. A checkpoint's modification time never changes again, and a running session's activity watermark only moves when something is said, so a renamed session kept its old title in the index indefinitely.
+  Evidence: the milestone 9 live check renamed a running session and the next sync re-indexed nothing. Fixed in `MjolnirAdapter::store`: the token is the later of the conversation's own token and the record's `updated_at`, which a rename does move (`Controller::rename_session` writes both).
+- Observation: A read-only open of the index creates an `index.db-shm` beside it. The schema-version guard opens the file read-only to read `PRAGMA user_version`, and SQLite creates the shared-memory file for a WAL database even for a reader.
+  Evidence: the milestone 9 version-mismatch check: `index.db` kept its modification time and size exactly, and a zero-length `-wal` and a 32 KB `-shm` appeared beside it. This is ordinary SQLite behaviour and does not touch the index's contents.
+- Observation: A first index build on this machine's corpus took about seven minutes with a fresh `MJ_DATA_DIR`, not the twenty the earlier note recorded, and searches answer from the part already built while it runs.
+  Evidence: the milestone 9 daemon reached `status.state = "ready"` seven minutes after starting, and an empty query returned Claude Code rows two minutes in.
 - Observation: The viewer selects the first workspace in the snapshot, which in the isolated environment was not the default workspace holding the sessions.
   Evidence: the archived section was empty until the workspace was switched by hand. Not changed; recorded because it makes a live check look like a failure.
 
@@ -150,6 +156,19 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - Decision: Live sessions are indexed from the daemon's stored transcript, not only checkpointed ones. The daemon's search also matches title and project, which SessionWiki's own search does not (it matches message text only, `src/index.rs` `search` and `search_like`).
   Rationale: With the local filter gone, a running session that has never been checkpointed, or a session known by a title that never appears in its messages, would otherwise be unfindable.
   Date/Author: 2026-09-17, Fable, accepted by Jonathan Ellis.
+
+- Decision: A process may only touch the index once startup has chosen where the index belongs, which `mj_core::config::apply_instance_flag` records. Everything else indexes nothing unless it names an index with `SESSIONWIKI_DATA`.
+  Rationale: The plan's rule covers every real binary, because they all pass through that startup step and inherit the variable into the daemon child. It does not cover a unit test that builds a daemon runtime directly against the real environment, and several do. A flag set by that one startup step is a test for "this is a real Mjolnir process that settled its own data directory", which is exactly the condition, rather than a `cfg!(test)` guess.
+  Date/Author: 2026-09-17, Fable.
+- Decision: Title and project matching scans the 2000 most recent indexed sessions through `index::recent` rather than adding SQL of its own.
+  Rationale: Neither column is indexed, so any form of this is a scan. Going through the public function keeps one reader of SessionWiki's row shape, and the cap keeps a keystroke's cost bounded. Full-text hits still come first and a name match never displaces one.
+  Date/Author: 2026-09-17, Fable.
+- Decision: A session's change token is the later of its conversation's token and its record's `updated_at`.
+  Rationale: Renaming a session changes nothing the conversation token can see, so without this the index keeps the old title. `updated_at` moves on a rename and on every other record change, and taking the later of the two never loses a conversation change.
+  Date/Author: 2026-09-17, Fable.
+- Decision: `WikiRow` and the search rows are unchanged; the status travels beside them as `{ rows, status }` on both the HTTP route and the daemon protocol, and `DaemonReply::WikiRows` now carries that pair.
+  Rationale: Milestone 10 needs the state and the rows together from one request, and a client that only wants rows reads one field. The protocol version already gates older clients.
+  Date/Author: 2026-09-17, Fable.
 
 ## Outcomes & Retrospective
 
@@ -455,6 +474,45 @@ up, so restarting it is enough:
     MJ_PRUNE_TICK_SECONDS=30 ./target/debug/mj sessions   # restarts the daemon
     ./target/debug/mj daemon stop                          # afterwards
 
+Milestone 9, run on 2026-09-17. A third isolated environment, with no
+`SESSIONWIKI_DATA` at all, which is what proves the startup rule:
+
+    S=/tmp/claude-1000/-home-jonathan-Projects-hel3/68c2d9bc-4218-4756-9eaa-7d0de76bb3b9/scratchpad
+    M=$S/m9
+    mkdir -p $M/mj-config $M/project
+    cp $S/mj-config/config.toml $M/mj-config/config.toml
+    sed -i 's/127.0.0.1:37650/127.0.0.1:37652/' $M/mj-config/config.toml
+    # the copied config still says `[sessionwiki] enabled = true`, which this
+    # build reads and ignores
+    (cd $M/project && git init -q && echo hello > README.md && git add README.md &&
+     git -c user.email=a@b -c user.name=t commit -qm init)
+    export MJ_CONFIG_DIR=$M/mj-config MJ_DATA_DIR=$M/mj-data
+    unset SESSIONWIKI_DATA
+    ./target/debug/mj sessions            # starts the isolated daemon
+    ./target/debug/mj new --profile deepseek --target localhost \
+      --project-directory $M/project --workspace-id default \
+      "Reply with exactly this sentence and nothing else: the marmalade telescope hums."
+    ./target/debug/mj wait --session 323a5869f20026c5ccd77a5d2ba1f7a1
+    # the session is NOT closed: it is indexed from the stored transcript
+
+Renaming it, with the daemon stopped so it does not write over the row:
+
+    ./target/debug/mj daemon stop
+    sqlite3 $M/mj-data/mj.sqlite3 \
+      "UPDATE sessions SET session_title_override='zephyr custard vault',
+       updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+       WHERE session_id='323a5869f20026c5ccd77a5d2ba1f7a1';"
+    ./target/debug/mj sessions            # restarts the daemon
+
+The schema-version check, on a copy of that environment's own index:
+
+    ./target/debug/mj daemon stop
+    sqlite3 $M/mj-data/sessionwiki/index.db "PRAGMA wal_checkpoint(TRUNCATE);"
+    mkdir -p $M/wiki-v7 && cp $M/mj-data/sessionwiki/index.db $M/wiki-v7/index.db
+    sqlite3 $M/wiki-v7/index.db "PRAGMA user_version = 7;"
+    export SESSIONWIKI_DATA=$M/wiki-v7
+    ./target/debug/mj sessions            # restarts the daemon against the copy
+
 Update this section with the exact commands and observed output as each milestone lands.
 
 ## Validation and Acceptance
@@ -696,6 +754,114 @@ Validation for this commit: 31 node unit tests in
 `tests/e2e/web/resume.spec.js` pass; `cargo build` and
 `cargo clippy --all-targets -- -D warnings` are clean.
 
+Milestone 9, 2026-09-17. All four acceptance checks, against the isolated
+daemon on port 37652.
+
+Its own index, and the user's: the client's environment named `MJ_DATA_DIR`
+and no `SESSIONWIKI_DATA`, and the daemon it started had both:
+
+    $ tr '\0' '\n' < /proc/<daemon pid>/environ | grep -E "SESSIONWIKI|MJ_DATA"
+    MJ_DATA_DIR=.../scratchpad/m9/mj-data
+    SESSIONWIKI_DATA=.../scratchpad/m9/mj-data/sessionwiki
+    $ ls .../m9/mj-data/sessionwiki
+    index.db  index.db-shm  index.db-wal
+    $ ls ~/.local/share/sessionwiki
+    ls: cannot access '/home/jonathan/.local/share/sessionwiki': No such file or directory
+
+The user's own index does not exist on this machine at all, before or after
+the whole workspace test suite and every check below, which is a stronger
+result than an unchanged modification time.
+
+The first build, and the status beside the rows. Seven minutes after the
+daemon started:
+
+    {"rows":[],"status":{"state":"indexing","topping_up":true}}     # while building
+    {"rows":[...],"status":{"state":"ready","topping_up":false}}    # after
+    $ cat $M/mj-data/sessionwiki-built
+    8
+
+A running session, never closed, found by a word from its reply:
+
+    $ curl -s -H "Authorization: Bearer $TOKEN" "$B/wiki/search?q=marmalade%20telescope&limit=5"
+    {"rows":[{"id":"323a5869f20026c5ccd77a5d2ba1f7a1","tool":"mjolnir",
+      "project":".../m9/project/.mj/worktrees/323a5869f20026c5ccd77a5d2ba1f7a1/",
+      "title":"project via deepseek","started":"2026-09-17T03:32:50+00:00","msgs":2,
+      "archived":false,"native_id":null,
+      "snippet":"the \u0002marmalade telesc\u0003…",
+      "hel_session_id":"323a5869f20026c5ccd77a5d2ba1f7a1"}],
+     "status":{"state":"ready","topping_up":false}}
+
+`hel_session_id` is set, so a surface offers to resume it rather than restore
+it. This session has no checkpoint at all; the conversation came from the
+daemon's own projection.
+
+The same session renamed to a phrase that appears in none of its messages, and
+found by it, with no snippet because it is a name match and not a full-text
+one:
+
+    $ curl -s -H "Authorization: Bearer $TOKEN" "$B/wiki/search?q=zephyr%20custard&limit=5"
+    {"rows":[{"id":"323a5869f20026c5ccd77a5d2ba1f7a1","tool":"mjolnir",
+      "title":"zephyr custard vault","msgs":2,"archived":false,
+      "preview":"the marmalade telescope hums.","snippet":null,
+      "hel_session_id":"323a5869f20026c5ccd77a5d2ba1f7a1"}],
+     "status":{"state":"ready","topping_up":false}}
+
+An index at another schema version, answered without opening it:
+
+    $ curl -s -H "Authorization: Bearer $TOKEN" "$B/wiki/search?q=zephyr%20custard&limit=3"
+    {"rows":[],"status":{"state":"version_mismatch","topping_up":false}}
+    $ stat -c '%Y %s' $M/wiki-v7/index.db     # before and after the daemon ran
+    1789616550 2922754048
+    1789616550 2922754048
+
+and one line in the daemon's log:
+
+    WARN mj_controller::sessionwiki: the SessionWiki index was written by
+      another version; Mjolnir will not open it, because opening it would
+      rebuild it. Install the matching sessionwiki command found=7 expected=8
+      path=.../m9/wiki-v7/index.db
+
+Isolation audit for this milestone. Everything that starts a daemon or reaches
+the sync or query code, and how each is kept away from the user's index:
+
+- `mj-cli/src/main.rs` is the only caller of `apply_instance_flag`, and every
+  `mj` subcommand including `daemon-run` passes through it. With `MJ_DATA_DIR`
+  set and `SESSIONWIKI_DATA` unset it points the index at
+  `$MJ_DATA_DIR/sessionwiki`; the daemon child inherits the variable (the spawn
+  in `mj-cli/src/daemon.rs` clears one unrelated variable and nothing else) and
+  resolves it again for itself.
+- `tests/e2e/reliability_lab.py`, `tests/e2e/prepare-luna-lab.py` and
+  `tests/e2e/web_viewer_recovery.py` set `MJ_CONFIG_DIR` and `MJ_DATA_DIR` and
+  run the real binary, so the rule above covers them.
+- `mj-cli/tests/common/mod.rs` sets both variables for every `mj-cli`
+  integration test, which covers `daemon_startup.rs`, `import_e2e.rs`,
+  `instance.rs`, `logging.rs`, `store_divergence.rs`; `termination_pty.rs` sets
+  `MJ_DATA_DIR` itself.
+- `scripts/test-codex-import-e2e.sh`, `test-kimi-import-e2e.sh`,
+  `test-grok-import-e2e.sh` and `test-linux-cli-runtime.sh` export
+  `MJ_DATA_DIR` before running the binary.
+- `mj-controller`'s own unit tests build a `RuntimeState` directly
+  (`test_runtime_state`, `test_runtime_state_with_manager` in `daemon.rs`),
+  which spawns a `WikiIndexer`. They never call `apply_instance_flag`, so
+  `session_index_is_resolved()` is false and `sync_blocking`, `query_rows`,
+  `brief`, `archived_session` and `indexed_with_messages` all refuse before
+  opening anything. The re-executed child processes in `checkpoint.rs`,
+  `session_manager.rs`, `recovery_scan.rs`, `provisioning.rs`, `worktree.rs`
+  and `move_session/tests.rs` set `MJ_DATA_DIR` but are the test binary rather
+  than `mj`, so the same refusal covers them.
+- The adapter's own unit tests never open an index: they build an
+  `MjolnirAdapter` over a `tempfile` directory and call `store` and
+  `parse_key` directly.
+
+Proof: `~/.local/share/sessionwiki/index.db` does not exist. It did not exist
+before `cargo test`, and it did not exist after two full runs of the workspace
+suite and all four live checks.
+
+Workspace validation for these commits: `cargo build`, `cargo test` (3509
+passed, 0 failed), `cargo clippy --all-targets -- -D warnings`,
+`cargo fmt --check`, and the viewer's 31 node unit tests in
+`tests/e2e/web/viewer.unit.test.mjs`.
+
 ## Interfaces and Dependencies
 
 SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.2`):
@@ -710,16 +876,26 @@ SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.2`):
 Mjolnir:
 
     // mj-core/src/config.rs
-    pub struct SessionWikiConfig { pub enabled: bool, pub archive_after_days: Option<u32> }
+    pub struct SessionWikiConfig { pub enabled: bool /* deprecated, read and ignored */, pub archive_after_days: Option<u32> }
+    pub const SESSION_INDEX_ENV: &str = "SESSIONWIKI_DATA";
+    pub fn session_index_is_resolved() -> bool;   // set by apply_instance_flag
+    // mj-controller/src/database.rs
+    pub fn load_transcribed_session_activity() -> Result<BTreeMap<String, Option<i64>>>;
     // mj-controller/src/sessionwiki.rs
     pub struct MjolnirAdapter;            // implements sessionwiki::adapters::Adapter
     impl MjolnirAdapter { pub fn from_state(state: &mj_core::state::State) -> Self; }
     pub struct WikiIndexer;               // request_sync(full: bool), sync_now(full: bool) -> Result<()>
     pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<Vec<WikiRow>>;
+    pub fn index_state() -> WikiIndexState;
+    impl WikiIndexer { pub fn status(&self) -> WikiStatus; }
     pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>>;
     pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>>;
     // mj-client/src/daemon.rs (the protocol needs it, and mj-controller depends on mj-client)
     pub struct WikiRow { id, tool, project, title, started, msgs, preview, archived, native_id, snippet, hel_session_id }
+    pub enum WikiIndexState { Ready, Indexing, VersionMismatch }   // serialized snake_case
+    pub struct WikiStatus { state: WikiIndexState, topping_up: bool }
+    pub struct WikiSearchPage { rows: Vec<WikiRow>, status: WikiStatus }
+    // GET /wiki/search answers a WikiSearchPage; DaemonReply::WikiRows carries one
     pub struct WikiRestoreRequest { wiki_id, workspace_id, profile_id, target_template_id, project_directory, additional_mounts, resource_allocation }
     // mj-controller/src/controller/lifecycle.rs
     pub enum BranchDisposition { Delete, Keep }
@@ -728,7 +904,7 @@ Mjolnir:
     pub fn sessions_ready_to_archive(sessions: &BTreeMap<String, SessionRecord>, subagents: &BTreeMap<String, SubagentRecord>, now: DateTime<Utc>, older_than_days: u32) -> Vec<String>;
     pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>>;
     // mj-client/src/daemon.rs
-    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<Vec<WikiRow>>;
+    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage>;
     pub async fn wiki_brief(&mut self, wiki_id: String, max_chars: usize) -> Result<String>;
     pub async fn wiki_restore(&mut self, request: WikiRestoreRequest) -> Result<RegisteredSession>;
     // mj-tui/src/resume.rs
@@ -744,3 +920,9 @@ Revision note (2026-09-16): first version, written after a review of an earlier 
 Revision note (2026-09-17): milestone 8 completed. The first draft said the publish step needed credentials the automated work lacked; that was an unchecked assumption, and a crates.io credentials file was present. The user authorized the publish explicitly. The version number matches upstream's 0.28.0 deliberately: crate versions are scoped to the crate name, so there is no clash.
 
 Revision note (2026-09-17): added milestones 9 and 10 after the user decided SessionWiki should be always on with one search path. The three hazards of always-on and their direct guards, and the finding that SessionWiki's search does not match titles, are recorded in the Decision Log and in milestone 9.
+
+Revision note (2026-09-17): milestone 9 completed. Two things the plan did not
+have: a rename moves no conversation token, so the change token had to take in
+the record's own `updated_at`; and the plan's `MJ_DATA_DIR` rule does not reach
+a unit test that builds a daemon runtime directly, so the daemon also refuses
+an index until process startup has chosen one.
