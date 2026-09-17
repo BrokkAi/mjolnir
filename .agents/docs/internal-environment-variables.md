@@ -29,6 +29,14 @@ target, a value set for the daemon process is carried to the workers it starts,
 because the worker re-execs with a cleared environment and could not inherit it
 otherwise (`mj-controller/src/controller/worker_binary/launch.rs`).
 
+`RUST_LOG` is carried to workers the same way and for the same reason: a worker
+that has gone quiet is diagnosed from its own log, at
+`<worker root>/worker.log`, and its level cannot be raised after the fact on a
+process that started with a cleared environment. `RUST_LOG=warn,mj_worker::acp=debug`
+makes the turn stall watchdog report, about once a second while a turn runs,
+which tool calls it can see, how long the session has been silent, the bounds it
+is applying, and its verdict.
+
 `MJ_CONTROLLER_LOCK_EXPECTED`, `MJ_CONTROLLER_LOCK_PROBE` and
 `MJ_WORKER_BINARY_OVERRIDE_CHILD` appear in the source but only inside
 `#[cfg(test)]` modules, where a test re-runs the test binary as a child.

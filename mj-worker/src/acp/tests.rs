@@ -4754,6 +4754,40 @@ fn the_stall_message_says_what_happened_and_what_to_do() {
     );
 }
 
+/// The message tells the user which variable raises the limit, and the code
+/// has to read that same variable. It did not: the lookup said
+/// `MJ_TURN_TOOL_CALL_TIMEOUT_MS` while the message, the documentation and the
+/// daemon's passthrough all said `MJ_TURN_TOOL_STALL_TIMEOUT_MS`, so setting
+/// the documented variable did nothing and the bound was always the four-hour
+/// default. Nothing caught it because every test asserted on the message.
+#[test]
+fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
+    let message = turn_stall_message(
+        HarnessKind::Muse,
+        &mj_core::activity::StallVerdict::ToolCall {
+            tool_call_id: "bash-1".into(),
+            running_ms: 1,
+            silent_ms: 1,
+        },
+    );
+    assert!(
+        message.contains(TOOL_CALL_STALL_TIMEOUT_VARIABLE),
+        "the message names the variable the code reads: {message}"
+    );
+
+    // And the daemon carries that same name to the workers it starts, which
+    // is the only way it reaches a worker at all.
+    let carried = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../mj-controller/src/controller/worker_binary/launch.rs"
+    ))
+    .expect("read the launch configuration that carries the knob");
+    assert!(
+        carried.contains(TOOL_CALL_STALL_TIMEOUT_VARIABLE),
+        "the daemon carries the variable the worker reads"
+    );
+}
+
 /// The default bounds: ten minutes of silence, four hours for one tool call.
 /// The tool-call bound is long on purpose — failing a healthy long build loses
 /// work silently, while a bound that is too long only delays a failure the

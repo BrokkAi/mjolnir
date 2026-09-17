@@ -925,7 +925,7 @@ pub(super) fn salvage_tool_call_update(update: &serde_json::Value) -> Option<Ses
 pub(super) const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
 
 /// How long one tool call may run before the worker gives up on the turn.
-/// `MJ_TURN_TOOL_CALL_TIMEOUT_MS` overrides it; `0` removes the bound.
+/// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] overrides it; `0` removes the bound.
 ///
 /// Four hours, because failing a healthy long tool call loses work silently:
 /// the run in issue #1020 was ninety-seven minutes in, and evaluation lanes
@@ -936,6 +936,15 @@ pub(super) const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
 /// that exits is detected separately and at once, by the `child.wait()` arm of
 /// the select in `mj-worker/src/acp.rs`, and does not wait for this.
 pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
+
+/// The name of the tool-call bound's override, in one place.
+///
+/// It was spelled one way here and another way in the message that tells a
+/// user to set it, so the documented variable did nothing and the bound was
+/// always the default. Everything that names it now reads this constant, and
+/// `the_tool_call_bound_reads_the_variable_its_message_advertises` proves the
+/// message and the lookup agree.
+pub(super) const TOOL_CALL_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_TOOL_STALL_TIMEOUT_MS";
 
 fn timeout_from_environment(name: &str, default_ms: u64) -> Option<Duration> {
     let millis = match std::env::var(name) {
@@ -950,7 +959,7 @@ pub(super) fn turn_stall_policy() -> mj_core::activity::StallPolicy {
     mj_core::activity::StallPolicy {
         silence: turn_stall_timeout(),
         tool_call: timeout_from_environment(
-            "MJ_TURN_TOOL_CALL_TIMEOUT_MS",
+            TOOL_CALL_STALL_TIMEOUT_VARIABLE,
             DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS,
         ),
     }
@@ -988,8 +997,16 @@ pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::Activity
 /// nothing has to learn this string to keep working.
 pub(super) const TURN_STALLED_STOP_REASON: &str = "harness_inactive";
 
-fn stall_minutes(millis: u64) -> u64 {
-    (millis / 60_000).max(1)
+/// How long something took, in the coarsest unit that still tells the truth.
+///
+/// A bound shortened for a test trips in seconds, and reporting that as "about
+/// 1 minute" makes the message read like a bug in itself.
+fn stall_duration(millis: u64) -> String {
+    let seconds = millis / 1_000;
+    if seconds < 90 {
+        return format!("{seconds} second(s)");
+    }
+    format!("about {} minute(s)", seconds / 60)
 }
 
 /// The transcript message shown when a turn is failed for going silent. It says
@@ -1004,21 +1021,21 @@ pub(super) fn turn_stall_message(
             "mj stopped waiting for the harness".to_owned()
         }
         mj_core::activity::StallVerdict::Silent { silent_ms } => format!(
-            "mj received no activity from the harness for about {} minute(s) while a turn was \
-             running and no tool call was open, so it failed the turn",
-            stall_minutes(*silent_ms),
+            "mj received no activity from the harness for {} while a turn was running and no \
+             tool call was open, so it failed the turn",
+            stall_duration(*silent_ms),
         ),
         mj_core::activity::StallVerdict::ToolCall {
             tool_call_id,
             running_ms,
             silent_ms,
         } => format!(
-            "the tool call {tool_call_id} ran for about {} minute(s), with no activity from the \
-             harness for about {} minute(s), which is past the limit on a single tool call, so mj \
-             failed the turn. Raise or remove that limit with MJ_TURN_TOOL_STALL_TIMEOUT_MS \
-             (milliseconds, 0 removes it)",
-            stall_minutes(*running_ms),
-            stall_minutes(*silent_ms),
+            "the tool call {tool_call_id} ran for {}, with no activity from the harness for {}, \
+             which is past the limit on a single tool call, so mj failed the turn. Raise or \
+             remove that limit with {TOOL_CALL_STALL_TIMEOUT_VARIABLE} (milliseconds, 0 removes \
+             it)",
+            stall_duration(*running_ms),
+            stall_duration(*silent_ms),
         ),
     };
     turn_stall_transcript_message(harness, &reason)

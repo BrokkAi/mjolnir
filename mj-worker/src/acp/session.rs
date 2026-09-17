@@ -633,7 +633,31 @@ pub(super) async fn serve_session(
                             loop {
                                 let facts = turn_stall_facts(spec);
                                 let now_ms = mj_core::clock::epoch_millis();
-                                match mj_core::activity::stall_verdict(&facts, stall_policy, now_ms) {
+                                let verdict = mj_core::activity::stall_verdict(&facts, stall_policy, now_ms);
+                                // At most one line a second, and the only
+                                // record of why a turn was or was not failed
+                                // for going quiet. A turn that is wrongly
+                                // failed is diagnosed from exactly these
+                                // facts (#1020).
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    tools_in_flight = ?facts
+                                        .tools_in_flight
+                                        .iter()
+                                        .map(|tool| (
+                                            tool.tool_call_id.as_str(),
+                                            tool.status,
+                                            now_ms.saturating_sub(tool.started_at_ms),
+                                        ))
+                                        .collect::<Vec<_>>(),
+                                    silent_ms = facts
+                                        .last_acp_activity_at_ms
+                                        .map(|last| now_ms.saturating_sub(last)),
+                                    ?verdict,
+                                    policy = ?stall_policy,
+                                    "turn stall check"
+                                );
+                                match verdict {
                                     mj_core::activity::StallVerdict::Live => {
                                         tokio::time::sleep(stall_policy.next_check(&facts, now_ms)).await;
                                     }

@@ -518,7 +518,15 @@ pub(super) fn worker_launch_config(
     // inheritance. Carry the two knobs explicitly when the daemon was started
     // with them, so shortening a timeout for a test works on every target and
     // not only on the container targets that can set it in configuration.
-    for name in ["MJ_TURN_STALL_TIMEOUT_MS", "MJ_TURN_TOOL_STALL_TIMEOUT_MS"] {
+    // `RUST_LOG` travels the same way and for the same reason: a worker that
+    // has gone quiet is diagnosed from its own log, and the log level cannot
+    // be raised after the fact on a worker that re-execs with a cleared
+    // environment.
+    for name in [
+        "MJ_TURN_STALL_TIMEOUT_MS",
+        "MJ_TURN_TOOL_STALL_TIMEOUT_MS",
+        "RUST_LOG",
+    ] {
         if let Ok(value) = std::env::var(name) {
             target_environment.insert(name.to_owned(), value);
         }
