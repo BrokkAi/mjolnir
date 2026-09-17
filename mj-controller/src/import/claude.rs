@@ -107,12 +107,18 @@ pub(super) fn locate_unlisted_claude_sessions(
             continue;
         }
         let summary = claude_native_summary(&path)?;
+        // A transcript that never records a cwd cannot be imported: the
+        // archive is collected relative to the directory the session ran in.
+        let Some(cwd) = summary.cwd else {
+            rejected.push(format!("Claude session {} has no cwd", path.display()));
+            continue;
+        };
         matches.push(LocatedClaudeSession {
             native_session_id: native_session_id.to_owned(),
             jsonl_path: path,
             modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             title: summary.title,
-            cwd: summary.cwd.unwrap_or_default(),
+            cwd,
             git_branch: summary.git_branch,
             size_bytes: metadata.len(),
         });

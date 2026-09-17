@@ -1780,6 +1780,28 @@ fn claude_lookup_by_id_reports_a_symlinked_transcript() {
 }
 
 #[test]
+fn claude_lookup_by_id_reports_a_transcript_without_a_cwd() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    // Filtered out of the listing, so the lookup takes the by-id path.
+    fs::write(
+        project.join("homeless.jsonl"),
+        r#"{"type":"user","entrypoint":"sdk","message":{"content":"no cwd anywhere"}}"#,
+    )
+    .unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("homeless".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("has no cwd"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
 fn claude_lookup_by_id_still_reports_a_missing_session_as_not_found() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir_all(directory.path().join("projects/work")).unwrap();
