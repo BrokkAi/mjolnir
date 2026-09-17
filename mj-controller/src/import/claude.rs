@@ -15,10 +15,17 @@ pub fn locate_claude_session(
                 .into_iter()
                 .filter(|candidate| candidate.native_session_id == *native_session_id)
                 .collect::<Vec<_>>();
+            let mut rejected = Vec::new();
             if matches.is_empty() {
-                matches = locate_unlisted_claude_sessions(home, native_session_id)?;
+                let unlisted = locate_unlisted_claude_sessions(home, native_session_id)?;
+                matches = unlisted.matches;
+                rejected = unlisted.rejected;
             }
             match matches.len() {
+                0 if !rejected.is_empty() => bail!(
+                    "Claude session {native_session_id:?} cannot be imported: {}",
+                    rejected.join("; ")
+                ),
                 0 => bail!(
                     "Claude session {native_session_id:?} was not found under {}",
                     projects.display()
@@ -36,40 +43,81 @@ pub fn locate_claude_session(
     }
 }
 
+/// What looking a named Claude session up by path found: the transcripts that
+/// can be imported, and why any file that sits at the named path cannot be.
+pub(super) struct UnlistedClaudeSessions {
+    pub matches: Vec<LocatedClaudeSession>,
+    pub rejected: Vec<String>,
+}
+
+/// Find the transcript a named session id points at, for the ids the listing
+/// does not show. The listing is a resume picker: it stops at Claude's own
+/// display limit and hides sidechains, team sessions, daemon workers and
+/// non-interactive entrypoints. None of that applies once the user names a
+/// session, so this lookup reads `projects/<project>/<id>.jsonl` whatever the
+/// picker would have made of it.
+///
+/// A transcript reached through a symlink is still refused, because the
+/// archive step only stores regular files inside the harness home and would
+/// otherwise copy content from outside it. That refusal is reported, so the
+/// caller can say why the named path was rejected instead of "not found".
 pub(super) fn locate_unlisted_claude_sessions(
     home: &Path,
     native_session_id: &str,
-) -> Result<Vec<LocatedClaudeSession>> {
+) -> Result<UnlistedClaudeSessions> {
     let projects = home.join("projects");
     let mut matches = Vec::new();
+    let mut rejected = Vec::new();
     for project in fs::read_dir(&projects)? {
         let project = project?;
         let project_path = project.path();
         let project_metadata = fs::symlink_metadata(&project_path)?;
-        if project_metadata.file_type().is_symlink() || !project_metadata.is_dir() {
-            continue;
-        }
         let path = project_path.join(format!("{native_session_id}.jsonl"));
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if project_metadata.file_type().is_symlink() {
+            if path.exists() {
+                rejected.push(format!(
+                    "{} is a symlinked project directory; Mjolnir imports only \
+                     transcripts stored directly in the Claude home",
+                    project_path.display()
+                ));
+            }
             continue;
         }
-        let Some((title, cwd, git_branch)) = claude_native_metadata(&path)? else {
+        if !project_metadata.is_dir() {
             continue;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                rejected.push(format!("{} cannot be read: {error}", path.display()));
+                continue;
+            }
         };
+        if metadata.file_type().is_symlink() {
+            rejected.push(format!(
+                "{} is a symlink; Mjolnir imports only transcripts stored \
+                 directly in the Claude home",
+                path.display()
+            ));
+            continue;
+        }
+        if !metadata.is_file() {
+            rejected.push(format!("{} is not a regular file", path.display()));
+            continue;
+        }
+        let summary = claude_native_summary(&path)?;
         matches.push(LocatedClaudeSession {
             native_session_id: native_session_id.to_owned(),
             jsonl_path: path,
             modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            title,
-            cwd,
-            git_branch,
+            title: summary.title,
+            cwd: summary.cwd.unwrap_or_default(),
+            git_branch: summary.git_branch,
             size_bytes: metadata.len(),
         });
     }
-    Ok(matches)
+    Ok(UnlistedClaudeSessions { matches, rejected })
 }
 
 /// List native Claude sessions newest first.
@@ -235,7 +283,32 @@ fn json_field_is_true(line: &str, field: &str) -> bool {
     }
 }
 
+/// What one Claude transcript's own records say about it.
+pub(super) struct ClaudeNativeSummary {
+    /// The resume picker's verdict: a sidechain, a team session, a daemon
+    /// worker, a `/loop` record, or a non-interactive entrypoint. Importing a
+    /// session the user named by id ignores this.
+    pub filtered: bool,
+    pub title: String,
+    /// Absent when no record in the file carries a `cwd`.
+    pub cwd: Option<PathBuf>,
+    pub git_branch: String,
+}
+
+/// The picker's view of one transcript: `None` when the file is filtered out
+/// of the resume list, and an error when it has no `cwd` to import from.
 pub(super) fn claude_native_metadata(path: &Path) -> Result<Option<(String, PathBuf, String)>> {
+    let summary = claude_native_summary(path)?;
+    if summary.filtered {
+        return Ok(None);
+    }
+    let cwd = summary
+        .cwd
+        .with_context(|| format!("Claude session {} has no cwd", path.display()))?;
+    Ok(Some((summary.title, cwd, summary.git_branch)))
+}
+
+pub(super) fn claude_native_summary(path: &Path) -> Result<ClaudeNativeSummary> {
     let mut custom_title = None;
     let mut agent_name = None;
     let mut ai_title = None;
@@ -332,19 +405,16 @@ pub(super) fn claude_native_metadata(path: &Path) -> Result<Option<(String, Path
     }
     // Claude's native resume picker is for interactive CLI conversations. In
     // particular, its print/SDK entrypoints include the tiny rollouts created
-    // by `claude -p /usage`, which must not displace real sessions here.
-    if filtered || entrypoint.as_deref().is_some_and(|value| value != "cli") {
-        return Ok(None);
-    }
-    let cwd = cwd.with_context(|| format!("Claude session {} has no cwd", path.display()))?;
-    Ok(Some((
-        custom_title
+    // by `claude -p /usage`, which must not displace real sessions there.
+    Ok(ClaudeNativeSummary {
+        filtered: filtered || entrypoint.as_deref().is_some_and(|value| value != "cli"),
+        title: custom_title
             .or(agent_name)
             .or(ai_title)
             .unwrap_or_else(|| "Untitled session".into()),
         cwd,
-        git_branch.unwrap_or_else(|| "HEAD".into()),
-    )))
+        git_branch: git_branch.unwrap_or_else(|| "HEAD".into()),
+    })
 }
 
 pub(super) fn git_branch_or_head(cwd: &Path) -> String {

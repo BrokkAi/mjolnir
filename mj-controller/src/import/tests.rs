@@ -1735,6 +1735,65 @@ fn claude_first_user_message_is_not_used_as_a_session_name_fallback() {
 }
 
 #[test]
+fn claude_lookup_by_id_finds_a_session_the_picker_hides() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    let rollout = project.join("printed.jsonl");
+    fs::write(
+        &rollout,
+        r#"{"type":"user","entrypoint":"sdk","cwd":"/work/app","message":{"content":"printed run"}}"#,
+    )
+    .unwrap();
+
+    assert!(list_claude_sessions(directory.path()).unwrap().is_empty());
+    let located = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("printed".into()),
+    )
+    .unwrap();
+    assert_eq!(located.native_session_id, "printed");
+    assert_eq!(located.jsonl_path, rollout);
+}
+
+#[test]
+fn claude_lookup_by_id_reports_a_symlinked_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    let stored = directory.path().join("stored.jsonl");
+    fs::write(
+        &stored,
+        r#"{"type":"user","entrypoint":"cli","cwd":"/work/app","message":{"content":"stored"}}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&stored, project.join("linked.jsonl")).unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("linked".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn claude_lookup_by_id_still_reports_a_missing_session_as_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("projects/work")).unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("absent".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
+}
+
+#[test]
 fn claude_listing_uses_native_all_projects_limit() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("projects/work");
