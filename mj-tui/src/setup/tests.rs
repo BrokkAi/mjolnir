@@ -1133,7 +1133,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
     let resolving = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(resolving.contains("Automatic (resolving…)"), "{resolving}");
+    assert!(resolving.contains("Resolving…"), "{resolving}");
 
     dashboard.build_cache_previewed(
         generation,
@@ -1152,9 +1152,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
-        "Automatic (off)",
-        "Automatic (/mnt/fast/mbx-cache)",
-        "Automatic (500GiB, host mbx config)",
+        "Enabled                           Off",
+        "/mnt/fast/mbx-cache",
+        "500GiB, host mbx config",
         "run without the build cache: the filesystem under",
     ] {
         assert!(

@@ -187,15 +187,16 @@ fn inspect_host(
     executor: &impl CommandExecutor,
 ) -> Result<Inspection> {
     let native = native_version(host, executor);
+    let native_version = native.as_ref().map(|native| native.version.clone());
     let off = |preview: BuildCachePreview| Inspection {
         preview,
         cache: None,
     };
-    if let Some(version) = &native
+    if let Some(version) = &native_version
         && !version_at_least(version, MBX_VERSION)
     {
         return Ok(off(BuildCachePreview {
-            native_mbx: native.clone(),
+            native_mbx: native_version.clone(),
             directory: None,
             max_size: None,
             off_reason: Some(format!(
@@ -206,8 +207,10 @@ fn inspect_host(
     }
     let directory = match &settings.directory {
         Some(directory) => directory.clone(),
-        None if native.is_some() => native_cache_directory(host, executor)?,
-        None => home(host, executor)?.join(DEFAULT_CACHE_RELATIVE),
+        None => match &native {
+            Some(native) => native_cache_directory(host, native, executor)?,
+            None => home(host, executor)?.join(DEFAULT_CACHE_RELATIVE),
+        },
     };
     ensure!(
         directory.is_absolute(),
@@ -232,7 +235,7 @@ fn inspect_host(
         (None, None) => unreachable!("a missing budget is derived above"),
     };
     let preview = |off_reason: Option<String>| BuildCachePreview {
-        native_mbx: native.clone(),
+        native_mbx: native_version.clone(),
         directory: Some(directory.clone()),
         max_size: Some(limit.clone()),
         off_reason,
@@ -295,26 +298,55 @@ fn version_at_least(found: &str, required: &str) -> bool {
     }
 }
 
-/// The host's own mbx version, or `None` when it has no mbx on `PATH`.
-fn native_version(host: &CacheHost, executor: &impl CommandExecutor) -> Option<String> {
-    let command = host.command(
-        vec!["mbx".to_owned(), "--version".to_owned()],
+/// The host's own mbx: the program that runs it and its version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeMbx {
+    program: String,
+    version: String,
+}
+
+/// An SSH command runs in a non-login shell whose `PATH` lacks the user's
+/// Cargo bin directory, so a `cargo install`ed mbx is looked up there too.
+const NATIVE_VERSION_SCRIPT: &str = r#"for m in mbx "$HOME/.cargo/bin/mbx"; do
+    if v=$("$m" --version 2>/dev/null); then
+        printf '%s
+%s' "$m" "$v"
+        exit 0
+    fi
+done
+exit 1"#;
+
+/// The host's own mbx, or `None` when neither `PATH` nor `~/.cargo/bin`
+/// has one.
+fn native_version(host: &CacheHost, executor: &impl CommandExecutor) -> Option<NativeMbx> {
+    let command = host.shell_command(
+        NATIVE_VERSION_SCRIPT,
+        LABEL,
+        [],
         "read the container host mbx version",
     );
     let output = executor.execute(&command).ok()?;
     if output.status != 0 {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    text.split_whitespace().next_back().map(str::to_owned)
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (program, version) = text.trim().split_once('\n')?;
+    Some(NativeMbx {
+        program: program.to_owned(),
+        version: version.split_whitespace().next_back()?.to_owned(),
+    })
 }
 
 /// The host's own cache directory. `mbx cache dir` prints the store, which is
 /// the `actions` directory inside the cache directory.
-fn native_cache_directory(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
+fn native_cache_directory(
+    host: &CacheHost,
+    native: &NativeMbx,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
     let command = host.command(
         vec![
-            "mbx".to_owned(),
+            native.program.clone(),
             "cache".to_owned(),
             "dir".to_owned(),
             "--json".to_owned(),
@@ -852,7 +884,7 @@ mod tests {
     /// home directory gives.
     fn plain_host() -> Vec<(&'static str, i32, &'static str)> {
         vec![
-            ("mbx --version", 127, ""),
+            ("$m\" --version", 1, ""),
             (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
             ("[ -f \"$1\" ]", 3, ""),
             ("while [ ! -d", 0, "/home/dev"),
@@ -871,7 +903,7 @@ mod tests {
     fn a_native_mbx_supplies_the_cache_directory_and_its_own_limits() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("mbx --version", 0, "mbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -904,7 +936,7 @@ mod tests {
     fn a_relocated_target_root_is_reported_for_its_own_mount() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("mbx --version", 0, "mbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -941,9 +973,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cargo_installed_mbx_off_the_path_is_queried_where_it_was_found() {
+        let _isolated = isolated();
+        let mut answers = plain_host();
+        answers.retain(|(needle, _, _)| *needle != "$m\" --version");
+        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.12.0"));
+        answers.push((
+            "/home/dev/.cargo/bin/mbx cache dir --json",
+            0,
+            r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
+        ));
+        let executor = ProbeExecutor::new(&answers);
+        let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor).unwrap();
+        assert_eq!(resolved.directory, PathBuf::from("/mnt/fast/mbx-cache"));
+    }
+
+    #[test]
     fn an_older_native_mbx_must_not_share_the_store() {
         let _isolated = isolated();
-        let executor = ProbeExecutor::new(&[("mbx --version", 0, "mbx 1.11.9")]);
+        let executor = ProbeExecutor::new(&[("$m\" --version", 0, "mbx\nmbx 1.11.9")]);
         assert_eq!(
             resolve(&podman(None), &BuildCacheConfig::default(), &executor),
             None
@@ -1050,7 +1098,7 @@ mod tests {
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
 
         let executor = ProbeExecutor::new(&[
-            ("mbx --version", 0, "mbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
             (
                 "mbx cache dir --json",
                 0,

@@ -251,7 +251,7 @@ everywhere. Each container target can override three values:
 
 Opening a target's build cache page asks its host for these values, so each
 blank field shows what a session there would actually use, such as
-`Automatic (/mnt/fast/mbx-cache)`. When sessions on that host run without
+`/mnt/fast/mbx-cache`. When sessions on that host run without
 the cache, the page says why, for example because the host has no
 reflink-capable filesystem or its own mbx is too old.
 

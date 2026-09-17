@@ -707,8 +707,8 @@ impl SetupDialog {
         }
     }
 
-    /// What the build cache page shows for a blank field, once its host has
-    /// answered.
+    /// What the build cache page shows for a blank field: the value its host
+    /// resolves, shown bare in place of the "automatic" placeholder.
     fn build_cache_automatic_label(&self, field: &str) -> Option<String> {
         use mj_core::state::BuildCacheLimit;
         let (_, key) = self.build_cache_page()?;
@@ -716,18 +716,18 @@ impl SetupDialog {
         if preview.key != key {
             return None;
         }
-        let detail = match &preview.result {
-            BuildCachePreviewResult::Resolving => "resolving…".to_owned(),
-            BuildCachePreviewResult::Failed(_) => "unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "not available for this target kind".to_owned(),
+        let label = match &preview.result {
+            BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
+            BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this target kind".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
-                "enabled" if preview.off_reason.is_some() => "off".to_owned(),
-                "enabled" => "on".to_owned(),
+                "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
+                "enabled" => "On".to_owned(),
                 "directory" => preview
                     .directory
                     .as_ref()
                     .map(|directory| directory.display().to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                    .unwrap_or_else(|| "Unknown".to_owned()),
                 "max_size" => match &preview.max_size {
                     Some(BuildCacheLimit::Size(size)) => size.clone(),
                     // The value column is narrow, so these stay short.
@@ -735,12 +735,12 @@ impl SetupDialog {
                         format!("{size}, host mbx config")
                     }
                     Some(BuildCacheLimit::HostConfiguration(None)) => "host mbx config".to_owned(),
-                    None => "unknown".to_owned(),
+                    None => "Unknown".to_owned(),
                 },
                 _ => return None,
             },
         };
-        Some(format!("Automatic ({detail})"))
+        Some(label)
     }
 
     fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
