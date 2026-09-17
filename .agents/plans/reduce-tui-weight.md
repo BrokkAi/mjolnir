@@ -31,7 +31,11 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   - [x] Step 5: `handle_wizard_shortcut`.
   - [x] Step 11: `declare_wizard_controls`; `can_advance_target` replaced by `target_advance_enabled`.
   - [x] Step 10: `handle_wizard_event`; `component_events.rs` calls it for both modes.
-- [ ] Milestone 6: small single-purpose cleanups (ActiveChat `Deref`, one truncation helper, one text-prompt dialog, one row viewport type).
+- [x] (2026-09-17 01:30Z) Milestone 6: small single-purpose cleanups, in four commits.
+  - [x] `ActiveChat` reaches `ChatState` through `Deref`; nineteen wrappers deleted.
+  - [x] `truncate_to_cells` replaces four truncation functions; one punctuation set.
+  - [x] `render_text_prompt` and `handle_text_prompt_event` behind the two rename editors.
+  - [x] `RowViewport` behind the reviewer pane, the verdict panel, and the overview panel.
 
 ## Surprises & Discoveries
 
@@ -169,6 +173,53 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   `dashboard.rs` rather than disappearing. This is the fourth milestone in a row where the
   estimate counted the deleted copy and not its replacement. The benefit is the one the plan
   always named: a change to the wizards' shared behaviour is now written once.
+
+- Observation: `ActiveChat::draft` needed no rename at all. The milestone lists it as a
+  wrapper that renames `ChatState::encoded_draft`, but `ChatState` already has a `pub fn
+  draft` whose body is exactly `self.encoded_draft()`, so the `ActiveChat` copy is a plain
+  duplicate and auto-deref resolves every caller. The other two renames stay as wrappers
+  because the methods they call have other callers under their own names: `latest_seq` is
+  read three times inside `mj-chat` and `second_opinion_active` eleven times.
+  Evidence: `mj-chat/src/chat.rs:844-847`; `grep -rn "\.latest_seq()\|\.second_opinion_active()" mj-chat/src`.
+- Observation: auto-deref does not cover a method used as a function path. The one caller
+  that failed to compile after the wrappers were deleted is
+  `mj-cli/src/dashboard.rs:1441`, `.is_some_and(mj_chat::chat::ActiveChat::transcript_selection_invalidated)`,
+  because a path names an inherent method on that exact type and never a `Deref` target's.
+  It is a closure now. Every ordinary `chat.method()` call compiled unchanged, as the
+  milestone predicted.
+  Evidence: `error[E0599]: no associated function or constant named
+  \`transcript_selection_invalidated\` found for struct \`ActiveChat\`` … `help: the function
+  \`transcript_selection_invalidated\` is implemented on \`ChatState\``.
+- Observation: the four truncation functions did not disagree, so nothing had to be
+  adjudicated. `truncate_text` and `clip` counted characters while `truncate_display_text`
+  and the `workspace_label` copy counted cells, but the two cell-counting ones use exactly
+  the arithmetic the unified helper does (keep the longest prefix whose width plus one
+  fits), and for the ASCII these sites carry characters and cells agree. The one genuine
+  difference is the degenerate `width == 0` case, where `clip` returned a lone `…` that did
+  not fit the space it was given; the helper returns an empty string like the other three.
+  Evidence: `mj-tui/src/palette.rs` `clip` chained `['…']` after `take(0)`.
+- Observation: Milestone 6 costs about 20 lines rather than saving any. The four commits are
+  -83, +53, +27 and +23 lines. Only the `Deref` one subtracts, because it deletes code and
+  adds a ten-line impl. The other three each replace two or four short copies with one
+  documented helper plus a named result type: `Truncate` with its two configurations is
+  35 lines and its tests another 30; `TextPromptOutcome` with a doc comment per variant is
+  16 lines and the two renderers keep a wrapper each; `RowViewport` is a 42-line file
+  against about 35 lines of deleted arithmetic. This is the fifth milestone in a row where
+  the estimate counted the deleted copies and not the named, documented thing that replaces
+  them. The estimates in this plan should be read as a count of duplicated code, not as a
+  prediction of the diff.
+  Evidence: `git show --shortstat` for each of the four commits.
+- Observation: the two text-prompt handlers had drifted on one side effect, not the two the
+  milestone counted. On an empty value, the session rename editor moves focus back to the
+  field and the configuration ID editor does not. The difference is preserved rather than
+  aligned, because unlike Milestone 5's four invisible ones this one is visible: it decides
+  where the caret sits after a refused save.
+  Evidence: `mj-tui/src/dialogs.rs`, the `Rejected` arms of `handle_rename_event` and
+  `handle_config_id_event`.
+- Observation: `render_rename_editor` carried a doc comment describing "editable
+  per-session container provisioning inputs: the size overrides and the attached host
+  directories", which belongs to a different dialog entirely. It is dropped rather than
+  moved onto the shared renderer.
 
 ## Decision Log
 
@@ -344,6 +395,50 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   different files for no gain.
   Date/Author: 2026-09-17 / Claude Opus 5.
 
+- Decision: `Truncate` carries two named configurations, `Truncate::PLAIN` and
+  `Truncate::SUMMARY`, and does not derive `Default`.
+  Rationale: only two configurations are used, `PLAIN` at nine call sites and `SUMMARY` at
+  thirteen, and writing the two-field literal at each of them would have been noise.
+  `Default` was dropped once the constants existed so that one configuration has one
+  spelling, which is the point of the milestone.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `trim_before_ellipsis` moves from `mj-chat/src/chat/rendering.rs` into
+  `mj-chat/src/components/text_layout.rs` beside `truncate_to_cells`, rather than staying in
+  `rendering.rs` as a `pub(crate)` item the way the milestone offered.
+  Rationale: `text_layout.rs` is where text measurement and wrapping already live, and the
+  repository guidelines ask for shared interpretation of a data shape to sit in one place.
+  `rendering.rs` imports it for its span-aware truncation; the definition is not duplicated
+  either way, but this direction keeps the lower-level module free of an upward dependency.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `handle_text_prompt_event` is a method on `DashboardState` taking `&self`, not
+  the free function the milestone sketched.
+  Rationale: it has to record `last_event_consumed` and set the empty-value notice, which
+  are both `DashboardState`'s. Both use interior mutability, so `&self` is enough and the
+  caller keeps its own `&mut self` for the mode change. A free function would have needed
+  the `Cell` and the `Notices` passed in, which is the same coupling spelled longer.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `TextPromptOutcome::Edited` also covers "the event did nothing", so the two
+  handlers have four arms rather than five.
+  Rationale: both call sites treat an edit and an unhandled event identically, by putting
+  the dialog back. A fifth variant would have been matched to the same arm at every call
+  site that exists.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `RowViewport::clamp` re-derives `follow` as well as clamping `top_row`, and the
+  turn review's two `set_*_viewport` methods call it.
+  Rationale: the shared `scroll_by` reports movement as `(top_row, follow) != before`, which
+  is what the second-opinion pane has always done. Without a `follow` that is already
+  correct, the turn review's first scroll on content that fits its pane would have reported
+  movement where the old code reported none. Clamping is called from the render pass before
+  any scroll reaches it, so `follow` is accurate whenever `scroll_by` runs and the reported
+  value is unchanged. `follow` is otherwise unread by the turn review, which keeps its own
+  total and height fields.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the session rename editor keeps moving focus to its field after an empty save
+  and the configuration ID editor keeps not moving it.
+  Rationale: see Surprises & Discoveries. The difference is visible, and this milestone is
+  not the place to change where a caret lands.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+
 ## Outcomes & Retrospective
 
 Milestone 1 (2026-09-16). The dashboard now draws once per event-loop wakeup.
@@ -481,6 +576,85 @@ that commit's message and in Surprises & Discoveries.
 Like the three milestones before it, it saves less than predicted: about 155
 lines against 300 to 330. Two hand-written accessor blocks and the New-only
 bodies that moved rather than vanished account for most of the difference.
+
+Milestone 6 (2026-09-17). Four unrelated duplications are gone. `ActiveChat`
+implements `Deref` and `DerefMut` to `ChatState`, and the nineteen methods whose
+whole body was one call to the same-named `ChatState` method went with it; five
+`ChatState` methods widened from `pub(super)` to `pub` and took the wrappers'
+doc comments. `mj-chat/src/components/text_layout.rs` gained
+`truncate_to_cells(text, width, Truncate)`, which replaced `truncate_text`,
+`truncate_display_text`, `clip` and the copy inlined in `workspace_label`, and
+now holds the one definition of the punctuation a cut swallows.
+`mj-tui/src/dialogs.rs` gained `render_text_prompt` and
+`handle_text_prompt_event`, which the session rename editor and the
+configuration ID rename editor share. `mj-chat/src/chat/viewport.rs` holds
+`RowViewport`, used by the reviewer pane, the verdict panel and the overview
+panel; the primary transcript's `TranscriptViewport` is untouched.
+
+One behaviour changed on purpose, as the milestone said it would: the command
+palette measured its columns in characters and now measures them in display
+cells, so a row of double-width glyphs no longer overruns its column.
+
+## Outcomes for the whole plan
+
+The plan set out to replace six duplications with one implementation each, and
+it did. What a contributor writes once now, having had to write it several times
+before: a repaint (there is no repaint protocol left, only an unconditional draw
+per wakeup), the answer to a question about whichever modal is open, a
+background job's failure path, each readline boundary algorithm, each behaviour
+of the two session wizards, a truncation, a one-field dialog, and a scroll
+position. The user sees the same TUI, with one visible change from Milestone 3
+(a rename whose daemon goes quiet now reports an unconfirmed save instead of
+holding quit open) and one from Milestone 6 (the palette's columns measure
+cells).
+
+The line count did not follow. The six milestones, measured over `mj-tui`,
+`mj-chat`, `mj-cli` and `mj-controller`:
+
+    Milestone 1   491 inserted, 2074 deleted    -1583
+    Milestone 2   520 inserted,  431 deleted      +89
+    Milestone 3   265 inserted,  173 deleted      +92
+    Milestone 4   348 inserted,  215 deleted     +133
+    Milestone 5  1078 inserted, 1233 deleted     -155
+    Milestone 6   420 inserted,  400 deleted      +20
+    Total                                       -1404
+
+against a prediction of 1,800 to 2,300 non-test lines removed plus a comparable
+amount of test scaffolding. Milestone 1 delivered most of the reduction and more
+than its own share of it. Every other milestone cost lines or saved a fraction
+of its estimate.
+
+The reason is the same in all five cases, and it is the lesson worth carrying:
+deleting duplicated code and calling one function instead does not shorten a
+file unless the duplication is large and its replacement is anonymous. What
+replaces a duplication is a named, documented thing -- a trait with accessors
+for every field the two sides disagree about, an options struct with its
+configurations, a result enum with a doc comment per variant, a module with a
+header. Milestone 1 shrank the code because its target was not a duplication at
+all: 400-odd calls to `mark_render_changed` were deleted and nothing replaced
+them. The other five replaced N copies of a body with one body plus an
+interface, and the interface is not free. A future plan of this kind should
+estimate the interface as well as the copies, and should justify itself on the
+bug classes it closes rather than on a line count. Each of them does close one:
+a missed repaint mark, a modal that answers one of seven questions wrongly, a
+background job that panics into silence, word motion fixed in one editor and
+not the other, a wizard behaviour changed for New and forgotten for Move, a
+truncation that counts characters where its neighbour counts cells.
+
+Note that `git diff --shortstat 513cd5e4 HEAD -- mj-tui mj-chat mj-cli
+mj-controller` reports 6,880 insertions against 4,902 deletions, a gain of 1,978
+lines. That range starts at this plan's own commit and includes unrelated
+feature work that landed before Milestone 1 began (container build cache,
+per-session workspace paths, attached-directory access modes), which added 3,382
+lines to those crates by itself. Subtracting it gives the -1,404 in the table
+above, which is the plan's own effect.
+
+What was not attempted, and why, is recorded in the milestones: `rat-focus`
+stays (one file, no saving), the generic `TextInput<B: EditBuffer>` that would
+let the composer be a `TextInput` stays deferred (its sketch is in Artifacts and
+Notes), the two wizards' submit actions and step machines stay unmerged because
+they share no logic, and `TranscriptViewport` stays its own type because
+freezing row estimates during a drag is not what the other three panes do.
 
 ## Context and Orientation
 
@@ -803,3 +977,20 @@ AWS-options accessor, two hook return types, the reading of the two attachment
 out-parameter, and the `pub(super)` widenings the sibling-module trait impls
 need), the two milestone-named tests that no longer exist under those names,
 the four rather than two side effects step 8 aligned, and the honest line count.
+
+2026-09-17, after implementing Milestone 6 and completing the plan. Recorded the
+six decisions that departed from the written milestone (two named `Truncate`
+configurations instead of a struct literal per call site, moving
+`trim_before_ellipsis` into `text_layout.rs` rather than exporting it from
+`rendering.rs`, `handle_text_prompt_event` as a `&self` method on
+`DashboardState` because it owns the consumed flag and the notices,
+`TextPromptOutcome::Edited` covering an unhandled event as well, `RowViewport::clamp`
+re-deriving `follow` so the turn review's movement reports do not change, and
+keeping the two rename editors' different focus behaviour after a refused save),
+the fact that `ActiveChat::draft` needed no rename because `ChatState::draft`
+already existed, the one caller auto-deref could not cover, and the honest line
+count for the milestone and for the whole plan. Added the `Outcomes for the
+whole plan` section with the per-milestone diff table and the lesson about the
+estimates: an interface that replaces a duplication is not free, and five of the
+six milestones cost lines because the estimates counted only the copies they
+deleted.

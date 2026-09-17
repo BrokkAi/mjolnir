@@ -33,6 +33,7 @@ use mj_client::review::{RuntimeReviewView, VerdictKind};
 use mj_core::review::driver::{Resolution, RoleState, TurnReviewPhase};
 
 use super::second_opinion::ReviewerPane;
+use super::viewport::RowViewport;
 
 /// Which of the review's actions the keyboard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +113,12 @@ pub(super) struct TurnReview {
     /// The verdict's wrapped rows currently above the viewport. Verdicts are
     /// rendered separately from a reviewer's journal because the daemon can
     /// publish one before that journal has produced a readable event.
-    verdict_top_row: usize,
+    verdict_viewport: RowViewport,
     verdict_total_rows: usize,
     verdict_viewport_height: usize,
     /// The progress tab is short in a normal pane but remains scrollable when
     /// a split is only a few rows high.
-    overview_top_row: usize,
+    overview_viewport: RowViewport,
     overview_total_rows: usize,
     overview_viewport_height: usize,
     /// A refusal from the daemon, shown in place rather than in a dialog that
@@ -181,10 +182,10 @@ impl TurnReview {
             action: Self::preferred_action(&view),
             view,
             panes: BTreeMap::new(),
-            verdict_top_row: 0,
+            verdict_viewport: RowViewport::default(),
             verdict_total_rows: 0,
             verdict_viewport_height: 0,
-            overview_top_row: 0,
+            overview_viewport: RowViewport::default(),
             overview_total_rows: 0,
             overview_viewport_height: 0,
             failure: None,
@@ -386,43 +387,29 @@ impl TurnReview {
     fn set_verdict_viewport(&mut self, total_rows: usize, height: usize) {
         self.verdict_total_rows = total_rows;
         self.verdict_viewport_height = height;
-        let maximum = total_rows.saturating_sub(height);
-        self.verdict_top_row = self.verdict_top_row.min(maximum);
+        self.verdict_viewport.clamp(total_rows, height);
     }
 
     fn scroll_verdict(&mut self, delta: isize) -> bool {
-        let before = self.verdict_top_row;
-        let maximum = self
-            .verdict_total_rows
-            .saturating_sub(self.verdict_viewport_height);
-        self.verdict_top_row = if delta.is_negative() {
-            self.verdict_top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.verdict_top_row.saturating_add(delta as usize)
-        }
-        .min(maximum);
-        self.verdict_top_row != before
+        self.verdict_viewport.scroll_by(
+            delta,
+            self.verdict_total_rows,
+            self.verdict_viewport_height,
+        )
     }
 
     fn set_overview_viewport(&mut self, total_rows: usize, height: usize) {
         self.overview_total_rows = total_rows;
         self.overview_viewport_height = height;
-        let maximum = total_rows.saturating_sub(height);
-        self.overview_top_row = self.overview_top_row.min(maximum);
+        self.overview_viewport.clamp(total_rows, height);
     }
 
     fn scroll_overview(&mut self, delta: isize) -> bool {
-        let before = self.overview_top_row;
-        let maximum = self
-            .overview_total_rows
-            .saturating_sub(self.overview_viewport_height);
-        self.overview_top_row = if delta.is_negative() {
-            self.overview_top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.overview_top_row.saturating_add(delta as usize)
-        }
-        .min(maximum);
-        self.overview_top_row != before
+        self.overview_viewport.scroll_by(
+            delta,
+            self.overview_total_rows,
+            self.overview_viewport_height,
+        )
     }
 
     fn scroll_pane(&mut self, delta: isize, height: usize) -> bool {
@@ -910,10 +897,10 @@ fn render_review_overview(
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner.width);
     review.set_overview_viewport(total, usize::from(inner.height));
-    let top = u16::try_from(review.overview_top_row).unwrap_or(u16::MAX);
+    let top = u16::try_from(review.overview_viewport.top_row).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((top, 0)), inner);
     // Expose the measured viewport for mouse scrolling in short panes.
-    (inner, review.overview_top_row, total)
+    (inner, review.overview_viewport.top_row, total)
 }
 
 fn role_state_color(state: RoleState) -> Color {
@@ -953,9 +940,9 @@ fn render_verdict_panel(
     let paragraph = Paragraph::new(text.to_owned()).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner.width);
     review.set_verdict_viewport(total, usize::from(inner.height));
-    let top = u16::try_from(review.verdict_top_row).unwrap_or(u16::MAX);
+    let top = u16::try_from(review.verdict_viewport.top_row).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((top, 0)), inner);
-    (inner, review.verdict_top_row, total)
+    (inner, review.verdict_viewport.top_row, total)
 }
 
 /// Draws the review's action bar and reports where each button landed, so a

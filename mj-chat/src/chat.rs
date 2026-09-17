@@ -19,6 +19,7 @@ mod rendering;
 mod second_opinion;
 mod transcript;
 mod turn_review;
+mod viewport;
 
 #[cfg(test)]
 mod test_support;

@@ -32,6 +32,7 @@ use mj_transcript::projection::{apply_committed_projection_event, project_relay_
 
 use super::rendering::TranscriptRenderMode;
 use super::transcript::{materialized_chat_entries_reusing, render_entry_rows};
+use super::viewport::RowViewport;
 
 /// The plan a review is about, captured when the user asked for one.
 ///
@@ -272,10 +273,8 @@ pub(super) struct ReviewerPane {
     rows: Vec<Line<'static>>,
     theme: theme::UiTheme,
     width: u16,
-    /// First content row drawn.
-    top_row: usize,
-    /// Whether new rows keep the pane pinned to the end.
-    follow: bool,
+    /// Where this pane is scrolled to.
+    viewport: RowViewport,
     /// Frontier this pane has folded, so a replay resumes from it.
     pub(super) cursor_ordinal: u64,
     pub(super) cursor_digest: String,
@@ -316,7 +315,7 @@ impl ReviewerPane {
         self.entries = materialized_chat_entries_reusing(session, 0, Vec::new());
         // Rows are rebuilt on the next draw, at whatever width that draw has.
         self.width = 0;
-        self.follow = true;
+        self.viewport.follow = true;
         true
     }
 
@@ -367,7 +366,7 @@ impl ReviewerPane {
         self.entries = materialized_chat_entries_reusing(&session, 0, Vec::new());
         self.session = Some(session);
         self.width = 0;
-        self.follow = true;
+        self.viewport.follow = true;
     }
 
     /// Forms the reviewer's harness is waiting on.
@@ -399,16 +398,7 @@ impl ReviewerPane {
 
     /// Scrolls by `delta` rows, leaving follow mode on only at the end.
     pub(super) fn scroll_by(&mut self, delta: isize, height: usize) -> bool {
-        let before = (self.top_row, self.follow);
-        let maximum = self.rows.len().saturating_sub(height);
-        let top = if delta.is_negative() {
-            self.top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.top_row.saturating_add(delta as usize)
-        };
-        self.top_row = top.min(maximum);
-        self.follow = self.top_row >= maximum;
-        (self.top_row, self.follow) != before
+        self.viewport.scroll_by(delta, self.rows.len(), height)
     }
 
     /// The text a selection in this pane covers, resolved against this pane's
@@ -1137,10 +1127,10 @@ pub(super) fn render_reviewer_titled(
     }
     reviewer.ensure_rows(inner.width);
     let height = usize::from(inner.height);
-    if reviewer.follow {
-        reviewer.top_row = reviewer.rows.len().saturating_sub(height);
+    if reviewer.viewport.follow {
+        reviewer.viewport.top_row = reviewer.rows.len().saturating_sub(height);
     }
-    let top = reviewer.top_row;
+    let top = reviewer.viewport.top_row;
     let visible = reviewer
         .rows
         .iter()
@@ -1256,7 +1246,10 @@ pub(super) fn review_role_session_id(primary_session_id: &str, role: &str) -> St
 pub(super) fn pane_from_entries(entries: Vec<ChatEntry>) -> ReviewerPane {
     ReviewerPane {
         entries,
-        follow: true,
+        viewport: RowViewport {
+            top_row: 0,
+            follow: true,
+        },
         ..ReviewerPane::default()
     }
 }
@@ -1684,9 +1677,9 @@ mod tests {
 
         // Scrolling stops at the last full screen rather than running past it.
         pane.scroll_by(1_000, 10);
-        assert_eq!(pane.top_row, total - 10);
+        assert_eq!(pane.viewport.top_row, total - 10);
         pane.scroll_by(-1_000, 10);
-        assert_eq!(pane.top_row, 0);
+        assert_eq!(pane.viewport.top_row, 0);
 
         let text = pane
             .selection_text(&SelectionRange {
