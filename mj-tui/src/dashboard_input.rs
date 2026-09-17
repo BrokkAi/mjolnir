@@ -113,12 +113,16 @@ impl DashboardState {
             self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
             return;
         }
-        if self.focus == Focus::Prompt
-            && let Some(session_id) = self.standby_prompt_session()
-        {
+        if self.focus != Focus::Prompt {
+            return;
+        }
+        let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+        if let Some(session_id) = self.standby_prompt_session() {
             let session_id = session_id.to_owned();
-            let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
-            let standby = self.standby_prompt_mut(&session_id);
+            self.standby_prompt_mut(&session_id).paste(&normalized);
+        } else if self.launch_standby_capturing()
+            && let Some(standby) = self.launch_standby.as_mut()
+        {
             standby.paste(&normalized);
         }
     }

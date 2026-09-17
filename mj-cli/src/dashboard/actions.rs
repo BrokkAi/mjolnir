@@ -1306,6 +1306,41 @@ pub(crate) fn start_preflighted_session_launch(
     start_session_launch_with_repository_preflight(context, action, Some(repository_preflight));
 }
 
+/// Opens the composer that catches typing while a creation runs. Registration
+/// is several seconds of work away — loading the controller, probing Git
+/// remotes, registering with the daemon — and until it lands there is no
+/// session id to key a standby composer by, so the launch standby holds the
+/// text and the new session's standby adopts it.
+fn begin_launch_standby(context: &mut DashboardContext, action: &DashboardAction) {
+    let DashboardAction::CreateSession {
+        profile_id,
+        bundle_id,
+        project_directory,
+        ..
+    } = action
+    else {
+        return;
+    };
+    let target = project_directory
+        .as_ref()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|| bundle_id.clone());
+    context
+        .dashboard
+        .begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+            target,
+            profile: profile_id.clone(),
+            title: String::new(),
+            harness_kind: context
+                .controller
+                .config
+                .profiles
+                .get(profile_id)
+                .map(|profile| profile.kind),
+            subagent_count: 0,
+        });
+}
+
 fn start_session_launch_with_repository_preflight(
     context: &mut DashboardContext,
     action: DashboardAction,
@@ -1326,6 +1361,7 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
+            begin_launch_standby(context, &action);
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,

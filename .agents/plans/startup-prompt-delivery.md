@@ -42,10 +42,12 @@ Enter still delivers the prompt.
 - [x] (2026-09-17) Milestone 2: standby composer Enter queues and previews;
       dashboard action and io update; failure restores the draft; tests
       updated.
-- [ ] Milestone 3: launch standby that captures typing before the session is
-      registered and adopts into the session's standby on registration.
-- [ ] Workspace `cargo clippy --all-targets -- -D warnings` and `cargo test`
-      (outside the sandbox) pass; manual scenario checked.
+- [x] (2026-09-17) Milestone 3: launch standby that captures typing before the
+      session is registered and adopts into the session's standby on
+      registration.
+- [x] (2026-09-17) Workspace `cargo clippy --all-targets -- -D warnings` and
+      `cargo test` (outside the sandbox) pass: 3583 tests passed, 0 failed,
+      24 ignored; clippy clean.
 
 ## Surprises & Discoveries
 
@@ -74,6 +76,27 @@ Enter still delivers the prompt.
 - Milestone 2: the standby branch also refuses an empty prompt with the
   command notice. Images cannot reach a standby composer, but that guard keeps
   an image-only submit from queueing empty text.
+- Milestone 3: `set_current_session(None)` does not stop the previously
+  selected session's chat from taking keys. `visible_chat`
+  (`mj-cli/src/dashboard/session_state.rs`) filters on `selected_session_id`,
+  not on the current session, and the selection does not move until the launch
+  registers. The chat is now also hidden while the launch standby is
+  capturing.
+- Milestone 3, decision: the launch standby captures keys, paste and the
+  prompt band only while the Sessions selection is still the one it began
+  with (`launch_standby_capturing`). Selecting another session hands that
+  session its conversation back while the launch standby keeps its text for
+  the session still on its way. Reselecting the original session resumes
+  capture; this is a small oddity of comparing against a fixed anchor, and
+  latching it off would need a hook in every one of the eight places that
+  assign `selected_session_id`.
+- Milestone 3: the launch standby is built before a session id exists, so it
+  carries the placeholder id `"launching"`. `ChatState::adopt_session_id`
+  (new, in `mj-chat/src/chat/status.rs`) corrects it on adoption, and the
+  header columns are refreshed from the registered record at the same time.
+- Milestone 3: `render_transition_surface` needs a session record, which a
+  launch being prepared does not have yet. The launch surface is its own small
+  renderer sharing only the composer drawing (`draw_standby_band`).
 - Observation: the SessionWiki restore hand-off (`restore_wiki_session` in
   `mj-controller/src/daemon/state.rs`) spawns an unsupervised task that waits
   for the same readiness condition a first prompt would wait for, then builds
@@ -110,7 +133,38 @@ Enter still delivers the prompt.
 
 ## Outcomes & Retrospective
 
-To be written at completion.
+The feature works end to end. A prompt typed while a session starts is now
+owned by the daemon, not by whichever composer happened to be on screen:
+
+- The daemon holds a per-session startup queue, waits for the harness to be
+  ready, submits the prompt, records it in history, and on failure puts the
+  text back in the session's saved draft with a notice (Milestone 1).
+- Enter in the standby composer hands the text to that queue and leaves it on
+  screen as a queued preview, so moving to another session no longer strands
+  it (Milestone 2).
+- Typing that begins the instant the wizard closes lands in a launch standby
+  and is adopted by the new session's standby when the daemon registers it,
+  so the seconds before registration are no longer a hole where keystrokes
+  reach the previously selected session (Milestone 3).
+
+What went differently from the plan:
+
+- The launch standby needed a capture rule the plan left open. The anchor
+  comparison described under Surprises is the simple version; it is the only
+  behaviour in this change that is a judgement call rather than a
+  requirement.
+- Hiding the old chat needed an explicit gate in `visible_chat`;
+  `set_current_session(None)` alone was not enough, contrary to the plan's
+  guess.
+- One small mj-chat addition was required that the plan did not list:
+  `ChatState::adopt_session_id`, because a composer created before its
+  session exists has to be re-pointed.
+
+What to watch: the launch standby is not persisted, so quitting the dashboard
+between the wizard closing and registration still loses that text. Once the
+session is registered, Milestone 1's queue makes delivery independent of the
+dashboard. Closing that last gap would mean persisting the pre-registration
+draft, which needs a client-owned store and was out of scope here.
 
 ## Context and Orientation
 
@@ -437,7 +491,25 @@ and the daemon log has a warning with the session id.
 
 ## Artifacts and Notes
 
-To be filled in with test transcripts as milestones complete.
+Milestone 3, new tests in `mj-tui`:
+
+    test tests::typing_before_a_launch_registers_edits_the_launch_standby ... ok
+    test tests::adopting_the_launch_standby_moves_its_draft_and_prompts ... ok
+    test tests::selecting_a_session_stops_the_launch_standby_from_capturing ... ok
+    test combined::tests::a_launch_being_prepared_draws_the_launch_standby ... ok
+
+Package runs after Milestone 3:
+
+    cargo test -p brokk-mj-tui     -> 493 passed; 0 failed; 2 ignored
+    cargo test -p brokk-mjolnir    -> 115 + 1 + 1 + 3 + 2 + 4 + 8 passed; 0 failed
+
+Final validation (outside the sandbox):
+
+    cargo clippy --all-targets -- -D warnings  -> clean
+    cargo test                                 -> 3583 passed; 0 failed; 24 ignored
+
+`cargo test -p brokk-mj-tui generate_documentation_screenshots -- --ignored`
+rewrote no SVG: nothing in a captured screen changed.
 
 ## Interfaces and Dependencies
 

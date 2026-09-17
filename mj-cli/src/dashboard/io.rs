@@ -1263,6 +1263,19 @@ impl DashboardContext {
                     SessionOperationKind::Launching,
                     None,
                 );
+                // Anything typed while the launch was being prepared belongs to
+                // this session now: its composer becomes the session's standby,
+                // and each prompt already entered there goes to the daemon to
+                // be delivered when the harness is ready.
+                for text in self.dashboard.adopt_launch_standby(&session_id) {
+                    spawn_startup_prompt(
+                        session_id.clone(),
+                        text,
+                        None,
+                        self.dashboard_io_tx.clone(),
+                        self.critical_operations.clone(),
+                    );
+                }
                 // The next thing the person does with a launching session is
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.

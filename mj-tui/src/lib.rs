@@ -604,6 +604,16 @@ pub struct DashboardState {
     /// session so each draft stays with its row; the controller hands the
     /// draft to the real composer when the chat opens.
     pub(crate) standby_prompts: BTreeMap<String, ChatState>,
+    /// The composer that catches typing between the new-session wizard
+    /// closing and the daemon registering the session, when there is no
+    /// session id to key a standby by yet. It is adopted by the new session's
+    /// standby as soon as the launch registers.
+    pub(crate) launch_standby: Option<ChatState>,
+    /// The session the Sessions pane had selected when the launch standby
+    /// began. Keys go to the launch standby only while the selection is still
+    /// that one, so moving to another session hands its conversation the
+    /// keyboard back without losing the typed text.
+    pub(crate) launch_standby_anchor: Option<String>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
@@ -790,6 +800,8 @@ impl DashboardState {
             go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
+            launch_standby: None,
+            launch_standby_anchor: None,
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
             target_readiness: BTreeMap::new(),

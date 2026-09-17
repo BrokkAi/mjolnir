@@ -132,6 +132,14 @@ impl ChatState {
         })
     }
 
+    /// Re-points a standby composer at the session that adopted it. The
+    /// launch standby is built before the daemon has registered a session, so
+    /// it starts with a placeholder id that has to be corrected once the real
+    /// id arrives.
+    pub fn adopt_session_id(&mut self, session_id: &str) {
+        self.session_id = session_id.to_owned();
+    }
+
     /// Installs the stable session-list columns used by the conversation title.
     pub fn set_header_summary(
         &mut self,
