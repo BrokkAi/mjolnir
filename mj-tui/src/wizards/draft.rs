@@ -112,6 +112,8 @@ pub(crate) trait WizardDraft: Sized {
         dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     );
+    /// Handles a bare key that only one wizard answers.
+    fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent);
 }
 
 impl WizardDraft for NewWizard {
@@ -350,6 +352,9 @@ impl WizardDraft for NewWizard {
             _ => {}
         }
     }
+
+    /// Creation has no key of its own outside the form.
+    fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
 }
 
 impl WizardDraft for ResumeWizard {
@@ -499,6 +504,17 @@ impl WizardDraft for ResumeWizard {
             interaction,
             Interaction::Toggle(WizardControl::DiscardQueue)
         ) {
+            self.discard_queue = !self.discard_queue;
+        }
+    }
+
+    /// `q` on the review toggles whether queued work is discarded, but only
+    /// when there is queued work to decide about.
+    fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent) {
+        if key.code == KeyCode::Char('q')
+            && self.step == WizardStep::Review
+            && self.has_queued_work(dashboard)
+        {
             self.discard_queue = !self.discard_queue;
         }
     }

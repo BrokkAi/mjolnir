@@ -377,7 +377,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         match event {
-            Event::Key(key) => self.handle_new_shortcut(key, wizard),
+            Event::Key(key) => self.handle_wizard_shortcut(key, wizard),
             _ => {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
@@ -432,7 +432,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         match event {
-            Event::Key(key) => self.handle_resume_shortcut(key, wizard),
+            Event::Key(key) => self.handle_wizard_shortcut(key, wizard),
             _ => {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
@@ -694,74 +694,65 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    fn handle_new_shortcut(&mut self, key: KeyEvent, mut wizard: NewWizard) -> DashboardAction {
-        let focused = wizard.form.borrow().focused();
+    fn handle_wizard_shortcut<W: WizardDraft>(
+        &mut self,
+        key: KeyEvent,
+        mut wizard: W,
+    ) -> DashboardAction {
+        let focused = wizard.form().borrow().focused();
         if !key.modifiers.is_empty() {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
-        if key.code == KeyCode::Backspace
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
+        let picker_focused = matches!(
+            focused,
+            Some(
+                WizardControl::ProfileList | WizardControl::TargetList | WizardControl::BundleList
             )
-        {
+        );
+        if key.code == KeyCode::Backspace && picker_focused {
             return self.activate_wizard_control(wizard, WizardControl::Back);
         }
-        if matches!(key.code, KeyCode::Char('j' | 'k'))
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
-            )
-        {
+        if matches!(key.code, KeyCode::Char('j' | 'k')) && picker_focused {
             let code = if key.code == KeyCode::Char('j') {
                 KeyCode::Down
             } else {
                 KeyCode::Up
             };
             let result = wizard
-                .form
-                .get_mut()
+                .form_mut()
                 .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             if let Some(interaction) = result.action {
                 return self.apply_wizard_interaction(wizard, interaction);
             }
         }
         if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
-            remove_selected_mount(&mut wizard.mounts);
-            if wizard.mounts.mounts.is_empty() {
-                wizard.form.get_mut().focus(WizardControl::Submit);
+            wizard.note_draft_change(self, DraftChange::AttachmentRemoved);
+            remove_selected_mount(wizard.mounts_mut());
+            if wizard.mounts().mounts.is_empty() {
+                wizard.form_mut().focus(WizardControl::Submit);
             }
+            // Delete only reaches this control on the review step, so no later
+            // arm of this function can apply to it.
+            return wizard.reenter_review(self);
         }
-        if wizard.step == WizardStep::Target && key.code == KeyCode::F(5) {
+        if wizard.step() == WizardStep::Target && key.code == KeyCode::F(5) {
             self.target_readiness.clear();
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
-        if wizard.step == WizardStep::Target
+        if wizard.step() == WizardStep::Target
             && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
         {
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
+            wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
+            let before = format!("{:?}", wizard.resource_allocation());
+            wizard
+                .form_mut()
+                .track_draft_part("resources", vec![before]);
             self.adjust_wizard_resources(&mut wizard, key.code);
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
+            let after = format!("{:?}", wizard.resource_allocation());
+            wizard.form_mut().track_draft_part("resources", vec![after]);
         }
-
-        self.mode = Mode::New(wizard);
-        DashboardAction::None
+        wizard.handle_extra_shortcut(self, key);
+        self.keep(wizard)
     }
 
     pub(super) fn advance_new_wizard(&mut self, mut wizard: NewWizard) -> DashboardAction {
@@ -1616,93 +1607,6 @@ impl DashboardState {
                 }
             }
         }
-    }
-
-    fn handle_resume_shortcut(
-        &mut self,
-        key: KeyEvent,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        let focused = wizard.form.borrow().focused();
-        if !key.modifiers.is_empty() {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if key.code == KeyCode::Backspace
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
-            )
-        {
-            return self.activate_wizard_control(wizard, WizardControl::Back);
-        }
-        if matches!(key.code, KeyCode::Char('j' | 'k'))
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
-            )
-        {
-            let code = if key.code == KeyCode::Char('j') {
-                KeyCode::Down
-            } else {
-                KeyCode::Up
-            };
-            let result = wizard
-                .form
-                .get_mut()
-                .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-            if let Some(interaction) = result.action {
-                return self.apply_wizard_interaction(wizard, interaction);
-            }
-        }
-        if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
-            invalidate_move_preparation(&mut wizard);
-            remove_selected_mount(&mut wizard.mounts);
-            if wizard.mounts.mounts.is_empty() {
-                wizard.form.get_mut().focus(WizardControl::Submit);
-            }
-            if wizard.moving {
-                let profile_id = self.compatible_profiles(&wizard.session_id)[wizard.profile]
-                    .0
-                    .clone();
-                return self.request_move_preparation_for_review(wizard, profile_id);
-            }
-        }
-        if wizard.step == WizardStep::Target && key.code == KeyCode::F(5) {
-            self.target_readiness.clear();
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if wizard.step == WizardStep::Target
-            && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
-        {
-            invalidate_move_preparation(&mut wizard);
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
-            self.adjust_wizard_resources(&mut wizard, key.code);
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
-        }
-        if key.code == KeyCode::Char('q')
-            && wizard.step == WizardStep::Review
-            && wizard.has_queued_work(self)
-        {
-            wizard.discard_queue = !wizard.discard_queue;
-        }
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::None
     }
 
     pub(super) fn advance_resume_wizard(&mut self, mut wizard: ResumeWizard) -> DashboardAction {
