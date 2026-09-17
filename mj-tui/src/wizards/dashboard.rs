@@ -1868,11 +1868,6 @@ impl DashboardState {
         wiki_id: String,
         title: String,
     ) -> DashboardAction {
-        if !self.config.sessionwiki.enabled {
-            self.notices
-                .set("Enable SessionWiki in Setup to restore archived sessions.");
-            return DashboardAction::None;
-        }
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.notices
                 .set("Restoring needs a profile and a target template.");

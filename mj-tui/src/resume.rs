@@ -201,9 +201,6 @@ pub(crate) struct ResumeDialog {
     pub(crate) search: TextInput,
     pub(crate) form: RefCell<Dialog<ResumeFocus>>,
     pub(crate) opened_at: Instant,
-    /// Whether SessionWiki is switched on. With it off the Archived tab shows
-    /// one line saying so and no search runs.
-    pub(crate) wiki_enabled: bool,
     /// The newest search results, or the most recent sessions before anything
     /// has been typed. Shared rather than copied: a confirmation clones the
     /// whole dialog.
@@ -298,9 +295,6 @@ impl ResumeDialog {
     /// text, or a line saying it is on its way. `None` when the row has no
     /// SessionWiki session behind it, and the pane is then not drawn at all.
     pub(crate) fn preview_text(&self, rows: &[ResumeRow]) -> Option<String> {
-        if !self.wiki_enabled {
-            return None;
-        }
         let index = selected_index(self, rows.len())?;
         let wiki_id = rows.get(index)?.wiki_id()?;
         Some(
@@ -707,7 +701,6 @@ impl DashboardState {
             search: TextInput::new(),
             form: RefCell::new(Dialog::default()),
             opened_at: Instant::now(),
-            wiki_enabled: self.config.sessionwiki.enabled,
             wiki: Arc::new(Vec::new()),
             wiki_request_id: 0,
             previews: Arc::new(BTreeMap::new()),
@@ -784,7 +777,7 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let Some(wiki_id) = wiki_id.filter(|_| dialog.wiki_enabled) else {
+        let Some(wiki_id) = wiki_id else {
             return DashboardAction::None;
         };
         if dialog.previews.contains_key(&wiki_id)
@@ -809,14 +802,11 @@ impl DashboardState {
     }
 
     /// Claim the next search request id for the open dialog, with the query it
-    /// should run. `None` when no dialog is open or SessionWiki is off.
+    /// should run. `None` when no dialog is open.
     pub fn next_wiki_search(&mut self) -> Option<(u64, String)> {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return None;
         };
-        if !dialog.wiki_enabled {
-            return None;
-        }
         dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
         Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
@@ -1167,9 +1157,6 @@ pub(crate) fn render_resume_dialog(
     let now = chrono::Local::now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
-            (ResumeTab::Archive, ..) if !dialog.wiki_enabled => {
-                "Enable SessionWiki in Setup to search and archive sessions"
-            }
             (ResumeTab::Import, true, _) => "Scanning native sessions…",
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
             (ResumeTab::Import, _, true) => "No importable sessions",
@@ -2101,10 +2088,11 @@ mod tests {
     /// wizard that restores it rather than resuming a record.
     #[test]
     fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
-        let mut config = config();
-        config.sessionwiki.enabled = true;
-        let mut dashboard =
-            DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
         dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
         // The dialog asks for the recent list as it opens, the way the
         // dashboard does, and the answer names that request.
@@ -2142,10 +2130,11 @@ mod tests {
     /// request is ignored because the person has typed since.
     #[test]
     fn typing_asks_for_a_search_and_stale_answers_are_dropped() {
-        let mut config = config();
-        config.sessionwiki.enabled = true;
-        let mut dashboard =
-            DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
         dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
         focus_resume_control(&mut dashboard, ResumeFocus::Search);
 
@@ -2168,20 +2157,6 @@ mod tests {
         };
         assert_eq!(dialog.wiki.len(), 1);
         assert_eq!(dialog.wiki[0].id, "fresh");
-    }
-
-    /// With SessionWiki off the tab says so and nothing is searched.
-    #[test]
-    fn the_archived_tab_says_when_sessionwiki_is_off() {
-        let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
-        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
-        assert_eq!(dashboard.next_wiki_search(), None);
-        focus_resume_control(&mut dashboard, ResumeFocus::Search);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('g'))),
-            DashboardAction::None,
-            "no search is asked for while SessionWiki is off"
-        );
     }
 
     #[test]

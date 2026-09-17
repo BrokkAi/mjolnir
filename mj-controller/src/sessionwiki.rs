@@ -18,7 +18,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use mj_client::daemon::WikiRow;
+use mj_client::daemon::{WikiIndexState, WikiRow, WikiStatus};
 use mj_core::state::{SessionRecord, State};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::{Message, Role, Session};
@@ -39,12 +39,15 @@ struct ArchiveFile {
     token: i64,
 }
 
-/// What indexing needs from controller state: which sessions exist, and which
-/// of them are sub-agent children.
+/// What indexing needs from controller state: which sessions exist, which of
+/// them are sub-agent children, and which are still running with their
+/// conversation in the daemon's own database rather than in a checkpoint.
 #[derive(Default)]
 struct Sessions {
     records: BTreeMap<String, SessionRecord>,
     subagent_ids: BTreeSet<String>,
+    /// Session id to change token, for sessions indexed from the projection.
+    live: BTreeMap<String, i64>,
 }
 
 impl Sessions {
@@ -52,8 +55,41 @@ impl Sessions {
         Self {
             records: state.sessions.clone(),
             subagent_ids: state.subagents.keys().cloned().collect(),
+            live: live_tokens(state),
         }
     }
+}
+
+/// The change token of every session whose transcript is still only in the
+/// daemon's database: its activity watermark in whole seconds.
+///
+/// A stopped session keeps being indexed from its checkpoint, which never
+/// changes again. Everything else is indexed from the projection, so a running
+/// session is findable before it has ever been closed.
+fn live_tokens(state: &State) -> BTreeMap<String, i64> {
+    let activity = match crate::database::load_transcribed_session_activity() {
+        Ok(activity) => activity,
+        Err(error) => {
+            tracing::warn!(%error, "could not read session activity for SessionWiki");
+            return BTreeMap::new();
+        }
+    };
+    state
+        .sessions
+        .iter()
+        .filter(|(_, record)| record.state != mj_core::state::SessionState::Stopped)
+        .filter_map(|(session_id, record)| {
+            let watermark = activity.get(session_id)?;
+            let token = watermark.map(|ms| ms / 1000).unwrap_or_else(|| {
+                // No relay watermark yet: the record's own last update is the
+                // next best thing, and it moves as the session does.
+                parse_time(&record.updated_at)
+                    .map(|updated| updated.timestamp())
+                    .unwrap_or_default()
+            });
+            Some((session_id.clone(), token))
+        })
+        .collect()
 }
 
 /// Mjolnir's sessions, as SessionWiki sees them.
@@ -106,6 +142,54 @@ impl MjolnirAdapter {
                 tracing::warn!(%error, "could not refresh session records for SessionWiki")
             }
         }
+    }
+
+    /// The conversation of a stopped session, read from its newest checkpoint,
+    /// with the title the checkpoint recorded.
+    fn checkpointed_transcript(&self, session_id: &str) -> Result<(Vec<Message>, Option<String>)> {
+        let (newest, _) = self.newest_archives();
+        let archive = newest
+            .get(session_id)
+            .with_context(|| format!("no checkpoint archive for session {session_id}"))?;
+        let snapshot = mj_checkpoint::archive::read_archive_verified(&archive.path)
+            .with_context(|| format!("read checkpoint {}", archive.path.display()))?
+            .canonical_session()
+            .with_context(|| format!("read the transcript of session {session_id}"))?;
+        let messages = snapshot
+            .transcript
+            .iter()
+            .filter_map(|item| {
+                let (role, text) = match &item.body {
+                    mj_core::archive::CanonicalTranscriptBody::User { content } => (
+                        Role::User,
+                        mj_core::transcript::materialized_content_text(content),
+                    ),
+                    mj_core::archive::CanonicalTranscriptBody::Agent { chunks, .. } => (
+                        Role::Assistant,
+                        mj_core::transcript::materialized_chunks_text(chunks),
+                    ),
+                    mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => {
+                        (Role::Tool, tool_call_title(call))
+                    }
+                    _ => return None,
+                };
+                message(role, text, item.created_at_ms)
+            })
+            .collect();
+        Ok((messages, snapshot.session.session_title.clone()))
+    }
+
+    /// The conversation of a session that has not stopped, read from the
+    /// daemon's own projection. It is the same conversation the checkpoint
+    /// would hold, minus whatever has not happened yet.
+    fn projected_transcript(&self, session_id: &str) -> Result<(Vec<Message>, Option<String>)> {
+        let projection = crate::database::load_materialized_session(session_id)
+            .with_context(|| format!("read the stored transcript of session {session_id}"))?
+            .with_context(|| format!("no stored transcript for session {session_id}"))?;
+        Ok((
+            projected_messages(&projection),
+            projection.session_title.clone(),
+        ))
     }
 
     /// The stable key for one session: its checkpoint directory and id. The
@@ -184,6 +268,50 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
         .then(|| (stem.to_owned(), 0))
 }
 
+/// A running session's conversation, as SessionWiki stores it.
+fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<Message> {
+    projection
+        .transcript
+        .iter()
+        .filter_map(|item| {
+            let (role, text) = match &item.body {
+                mj_core::state::TranscriptBody::User { content } => (
+                    Role::User,
+                    mj_core::transcript::materialized_content_text(content),
+                ),
+                mj_core::state::TranscriptBody::Agent { chunks, .. } => (
+                    Role::Assistant,
+                    mj_core::transcript::materialized_chunks_text(chunks),
+                ),
+                mj_core::state::TranscriptBody::Tool { call, .. } => {
+                    (Role::Tool, tool_call_title(call))
+                }
+                _ => return None,
+            };
+            message(role, text, item.created_at_ms)
+        })
+        .collect()
+}
+
+/// The tool's own title, which is what the transcript showed the user.
+/// Arguments and output are not worth indexing.
+fn tool_call_title(call: &serde_json::Value) -> String {
+    call.get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// One indexed message, or nothing when the item carried no text.
+fn message(role: Role, text: String, created_at_ms: i64) -> Option<Message> {
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then(|| Message {
+        role,
+        text,
+        ts: DateTime::from_timestamp_millis(created_at_ms),
+    })
+}
+
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -215,12 +343,27 @@ impl Adapter for MjolnirAdapter {
     fn store(&self) -> Option<Store> {
         self.reload();
         let (newest, had_error) = self.newest_archives();
-        let mut keys = Vec::with_capacity(newest.len());
         let mut files = Vec::with_capacity(newest.len());
+        let mut tokens: BTreeMap<String, i64> = BTreeMap::new();
         for (session_id, archive) in newest {
-            keys.push((self.key_for(&session_id), archive.token));
+            tokens.insert(session_id, archive.token);
             files.push(archive.path);
         }
+        // A session that is still running is indexed from the projection, and
+        // its own token replaces any checkpoint token it has: the conversation
+        // has moved on since that checkpoint was written. Listing it also
+        // keeps reconciliation from archiving a running session.
+        let live = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live
+            .clone();
+        tokens.extend(live);
+        let keys = tokens
+            .into_iter()
+            .map(|(session_id, token)| (self.key_for(&session_id), token))
+            .collect();
         Some(Store {
             keys,
             files,
@@ -238,54 +381,21 @@ impl Adapter for MjolnirAdapter {
     fn parse_key(&self, key: &str) -> Result<Session> {
         let session_id = key.rsplit('/').next().unwrap_or_default();
         anyhow::ensure!(!session_id.is_empty(), "no session id in key {key:?}");
-        let (newest, _) = self.newest_archives();
-        let archive = newest
-            .get(session_id)
-            .with_context(|| format!("no checkpoint archive for session {session_id}"))?;
-        let snapshot = mj_checkpoint::archive::read_archive_verified(&archive.path)
-            .with_context(|| format!("read checkpoint {}", archive.path.display()))?
-            .canonical_session()
-            .with_context(|| format!("read the transcript of session {session_id}"))?;
-
         let sessions = self
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (messages, snapshot_title) = if sessions.live.contains_key(session_id) {
+            self.projected_transcript(session_id)?
+        } else {
+            self.checkpointed_transcript(session_id)?
+        };
         let record = sessions.records.get(session_id);
-        let mut messages = Vec::new();
-        for item in &snapshot.transcript {
-            let ts = DateTime::from_timestamp_millis(item.created_at_ms);
-            let (role, text) = match &item.body {
-                mj_core::archive::CanonicalTranscriptBody::User { content } => (
-                    Role::User,
-                    mj_core::transcript::materialized_content_text(content),
-                ),
-                mj_core::archive::CanonicalTranscriptBody::Agent { chunks, .. } => (
-                    Role::Assistant,
-                    mj_core::transcript::materialized_chunks_text(chunks),
-                ),
-                // The tool's own title, which is what the transcript shows the
-                // user. Arguments and output are not worth indexing.
-                mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => (
-                    Role::Tool,
-                    call.get("title")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                ),
-                _ => continue,
-            };
-            let text = text.trim().to_owned();
-            if text.is_empty() {
-                continue;
-            }
-            messages.push(Message { role, text, ts });
-        }
 
         let title = record
             .and_then(|record| record.session_title_override.clone())
             .or_else(|| record.and_then(|record| record.acp_session_title.clone()))
-            .or_else(|| snapshot.session.session_title.clone())
+            .or_else(|| snapshot_title.clone())
             .unwrap_or_else(|| {
                 messages
                     .iter()
@@ -332,6 +442,9 @@ struct Indexer {
     requested: AtomicBool,
     /// At least one waiting trigger asked for a full sync.
     full_requested: AtomicBool,
+    /// A sync pass is running now. A surface shows this as "topping up", so a
+    /// user knows more results may arrive.
+    in_flight: AtomicBool,
     last_success: std::sync::Mutex<Option<Success>>,
 }
 
@@ -365,6 +478,16 @@ impl WikiIndexer {
     /// Run a sync and wait for it, joining a sync already in flight.
     pub async fn sync_now(&self, full: bool) -> Result<()> {
         self.inner.sync(full).await
+    }
+
+    /// The state of the index and whether a sync is running, for the surfaces
+    /// that say so while the first build is under way.
+    pub fn status(&self) -> WikiStatus {
+        WikiStatus {
+            state: index_state(),
+            topping_up: self.inner.in_flight.load(Ordering::Acquire)
+                || self.inner.requested.load(Ordering::Acquire),
+        }
     }
 
     /// When the last sync succeeded, for callers that trigger on staleness.
@@ -420,9 +543,10 @@ impl Indexer {
                 .map(|success| success.epoch_seconds - 60)
         };
         let started = Instant::now();
-        let ran = tokio::task::spawn_blocking(move || sync_blocking(since))
-            .await
-            .context("run the SessionWiki sync")??;
+        self.in_flight.store(true, Ordering::Release);
+        let ran = tokio::task::spawn_blocking(move || sync_blocking(since)).await;
+        self.in_flight.store(false, Ordering::Release);
+        let ran = ran.context("run the SessionWiki sync")??;
         if ran {
             *self
                 .last_success
@@ -436,14 +560,14 @@ impl Indexer {
     }
 }
 
-/// One synchronous sync pass. Returns false when SessionWiki is switched off,
-/// so a disabled daemon never records a success it did not have.
+/// One synchronous sync pass. Returns false when this process must not touch
+/// the index, so a refused run never records a success it did not have.
 fn sync_blocking(since: Option<i64>) -> Result<bool> {
-    let controller =
-        Controller::load().context("load controller state for the SessionWiki sync")?;
-    if !controller.config.sessionwiki.enabled {
+    if !index_is_writable() {
         return Ok(false);
     }
+    let controller =
+        Controller::load().context("load controller state for the SessionWiki sync")?;
     // Mjolnir's own sessions go first: a cold index walks every other tool's
     // store for many minutes, and a just-closed session should not wait on it.
     let mut adapters: Vec<Box<dyn sessionwiki::adapters::Adapter>> =
@@ -452,7 +576,125 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
     sessionwiki::index::sync_with(&mut connection, &adapters, since)
         .context("sync the SessionWiki index")?;
+    if since.is_none() {
+        // A full pass has walked every store, so the index is complete enough
+        // for a search to be trusted. The marker is what a later daemon reads
+        // instead of walking the corpus again to find out.
+        record_first_build();
+    }
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Which index, and whether it may be touched
+// ---------------------------------------------------------------------------
+
+/// Whether this process may open the index at all.
+///
+/// Indexing is always on, so a process that never resolved where its index
+/// belongs must not reach for one: it would walk the user's real session
+/// stores and write the user's real index. Only Mjolnir's own startup resolves
+/// it (see `mj_core::config::apply_instance_flag`), so this refuses every unit
+/// test that builds a daemon runtime directly and every other embedder, unless
+/// it names an index of its own with `SESSIONWIKI_DATA`.
+fn index_is_isolated() -> bool {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if mj_core::config::session_index_is_resolved()
+        || std::env::var_os(mj_core::config::SESSION_INDEX_ENV).is_some()
+    {
+        return true;
+    }
+    if !SAID.swap(true, Ordering::AcqRel) {
+        tracing::debug!(
+            "this process did not resolve a session index location; SessionWiki is not used"
+        );
+    }
+    false
+}
+
+/// Whether the index on disk was written by a SessionWiki at another schema
+/// version.
+///
+/// SessionWiki's own `open` drops and rebuilds its whole cache when the file's
+/// `user_version` differs from the version it was built with, which on a large
+/// corpus costs tens of minutes. Mjolnir will not do that to a user who also
+/// runs the `sessionwiki` command: it reads the version without SessionWiki and
+/// stands aside.
+fn index_version_mismatch() -> bool {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    let Ok(path) = sessionwiki::index::db_path() else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    let version = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .and_then(|connection| connection.pragma_query_value(None, "user_version", |row| row.get(0)));
+    let version: i64 = match version {
+        Ok(version) => version,
+        Err(error) => {
+            tracing::debug!(%error, "could not read the SessionWiki index schema version");
+            return false;
+        }
+    };
+    // Zero is an index SessionWiki has not finished creating; it is not a
+    // different version.
+    let mismatch = version != 0 && version != sessionwiki::index::SCHEMA_VERSION;
+    if mismatch && !SAID.swap(true, Ordering::AcqRel) {
+        tracing::warn!(
+            found = version,
+            expected = sessionwiki::index::SCHEMA_VERSION,
+            path = %path.display(),
+            "the SessionWiki index was written by another version;              Mjolnir will not open it, because opening it would rebuild it.              Install the matching sessionwiki command"
+        );
+    }
+    mismatch
+}
+
+fn index_is_writable() -> bool {
+    index_is_isolated() && !index_version_mismatch()
+}
+
+/// The file recording that one full sync has completed, holding the schema
+/// version it completed at.
+fn first_build_marker() -> PathBuf {
+    mj_core::config::data_dir().join("sessionwiki-built")
+}
+
+fn record_first_build() {
+    let path = first_build_marker();
+    let version = sessionwiki::index::SCHEMA_VERSION.to_string();
+    if std::fs::read_to_string(&path).is_ok_and(|held| held.trim() == version) {
+        return;
+    }
+    if let Err(error) = std::fs::write(&path, &version) {
+        tracing::warn!(%error, path = %path.display(), "could not record the first SessionWiki build");
+    }
+}
+
+/// Whether this index has completed a full build at this schema version.
+fn first_build_is_done() -> bool {
+    std::fs::read_to_string(first_build_marker())
+        .is_ok_and(|held| held.trim() == sessionwiki::index::SCHEMA_VERSION.to_string())
+        && sessionwiki::index::db_path().is_ok_and(|path| path.exists())
+}
+
+/// What a surface should say about this index right now.
+pub fn index_state() -> WikiIndexState {
+    if !index_is_isolated() {
+        return WikiIndexState::Indexing;
+    }
+    if index_version_mismatch() {
+        return WikiIndexState::VersionMismatch;
+    }
+    if first_build_is_done() {
+        WikiIndexState::Ready
+    } else {
+        WikiIndexState::Indexing
+    }
 }
 
 /// Whether a failure is SQLite reporting another writer, which a later trigger
@@ -497,6 +739,12 @@ pub fn sync_is_stale(last_success: Option<Instant>) -> bool {
 /// `spawn_blocking`.
 pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<Vec<WikiRow>> {
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
+    if !index_is_writable() {
+        // Nothing to answer from: either this process has no index of its own
+        // or the one on disk is at another version. The status beside the rows
+        // says which.
+        return Ok(Vec::new());
+    }
     let connection = open_readonly()?;
     let query = query.trim();
     if query.is_empty() {
@@ -513,14 +761,53 @@ pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<
         sessionwiki::index::search(&connection, query, limit, None, None)
     }
     .context("search the SessionWiki index")?;
-    Ok(hits
+    let mut rows: Vec<WikiRow> = hits
         .into_iter()
         .map(|hit| wiki_row(hit.row, Some(hit.snippet), live))
+        .collect();
+    // SessionWiki searches message text alone, so a session known by a title
+    // or a project that is never said out loud would be unfindable. Those
+    // matches follow the full-text ones rather than displacing them.
+    let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    for row in named_like(&connection, query)? {
+        if rows.len() >= limit {
+            break;
+        }
+        if found.contains(&row.session_id) {
+            continue;
+        }
+        rows.push(wiki_row(row, None, live));
+    }
+    Ok(rows)
+}
+
+/// How far back a title or project match looks. Those columns have no index of
+/// their own, so this is a scan of the most recent sessions rather than of the
+/// whole corpus.
+const NAME_SCAN_LIMIT: usize = 2_000;
+
+/// Indexed sessions whose title or project contains the query, ignoring case.
+fn named_like(
+    connection: &rusqlite::Connection,
+    query: &str,
+) -> Result<Vec<sessionwiki::index::SessionRow>> {
+    let needle = query.to_lowercase();
+    let rows = sessionwiki::index::recent(connection, NAME_SCAN_LIMIT, None, None, None, false)
+        .context("list recent SessionWiki sessions")?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            row.title.to_lowercase().contains(&needle)
+                || row.project.to_lowercase().contains(&needle)
+        })
         .collect())
 }
 
 /// The briefing for one indexed session, or `None` when the id names none.
 pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>> {
+    if !index_is_writable() {
+        return Ok(None);
+    }
     let connection = open_readonly()?;
     let Some(row) = row_by_id(&connection, id)? else {
         return Ok(None);
@@ -545,6 +832,9 @@ pub struct ArchivedSession {
 
 /// Load one indexed session for restore, or `None` when the id names none.
 pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
+    if !index_is_writable() {
+        return Ok(None);
+    }
     let connection = open_readonly()?;
     let Some(row) = row_by_id(&connection, id)? else {
         return Ok(None);
@@ -635,6 +925,11 @@ fn ancestor_depth(
 /// own copy of a conversation SessionWiki has actually stored. Runs SQLite
 /// work, so callers on the async runtime wrap it in `spawn_blocking`.
 pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>> {
+    if !index_is_writable() {
+        // An index this daemon will not open holds nothing it may act on, and
+        // the archive job deletes data, so it must find nothing here.
+        return Ok(BTreeSet::new());
+    }
     let connection = open_readonly()?;
     let sessions_dir = mj_core::config::sessions_dir();
     let mut indexed = BTreeSet::new();
@@ -933,6 +1228,14 @@ mod tests {
     }
 
     fn adapter(directory: &Path, session_id: &str) -> MjolnirAdapter {
+        adapter_with_live(directory, session_id, BTreeMap::new())
+    }
+
+    fn adapter_with_live(
+        directory: &Path,
+        session_id: &str,
+        live: BTreeMap<String, i64>,
+    ) -> MjolnirAdapter {
         let record = SessionRecord {
             id: session_id.into(),
             ..record_template()
@@ -942,6 +1245,7 @@ mod tests {
             sessions: std::sync::Mutex::new(Sessions {
                 records: BTreeMap::from([(session_id.to_owned(), record)]),
                 subagent_ids: BTreeSet::new(),
+                live,
             }),
             reload: false,
         }
@@ -1035,6 +1339,118 @@ mod tests {
                 (Role::Tool, "Read config.toml"),
                 (Role::Assistant, "done"),
             ]
+        );
+    }
+
+    fn projection(session_id: &str) -> mj_core::state::MaterializedSession {
+        use mj_core::transcript::{TranscriptBody, TranscriptItem};
+        let mut projected = mj_core::state::MaterializedSession::empty(session_id);
+        let mut push = |position: u64, body: TranscriptBody| {
+            let streamed = matches!(body, TranscriptBody::Agent { .. });
+            projected
+                .transcript
+                .push(std::sync::Arc::new(TranscriptItem {
+                    stable_id: format!("item-{position}"),
+                    position,
+                    latest_content_event_ordinal: streamed.then_some(position),
+                    created_at_ms: 1_700_000_000_000 + i64::try_from(position).unwrap(),
+                    last_changed_at_ms: 1_700_000_000_000 + i64::try_from(position).unwrap(),
+                    body,
+                }));
+        };
+        push(
+            1,
+            TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "still talking"})],
+            },
+        );
+        push(
+            2,
+            TranscriptBody::Thought {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "hmm"}})],
+                streaming: false,
+            },
+        );
+        push(
+            3,
+            TranscriptBody::Tool {
+                call: serde_json::json!({"toolCallId": "c1", "title": "Read README.md"}),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        );
+        push(
+            4,
+            TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "reading"}})],
+                streaming: false,
+            },
+        );
+        projected.session_title = Some("the live title".into());
+        projected
+    }
+
+    /// A session that has never been checkpointed is indexed from the
+    /// daemon's own projection, with the same roles a checkpoint would give.
+    #[test]
+    fn a_running_session_is_indexed_from_its_stored_transcript() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            projected_messages(&projection(session_id))
+                .iter()
+                .map(|message| (message.role, message.text.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Role::User, "still talking".to_owned()),
+                (Role::Tool, "Read README.md".to_owned()),
+                (Role::Assistant, "reading".to_owned()),
+            ],
+            "a thought is skipped and every other item keeps its role"
+        );
+    }
+
+    /// A running session is listed under the same key as a stopped one, with
+    /// its own change token, so it is searchable before it is ever closed and
+    /// reconciliation never archives it. When it stops, the key stays and the
+    /// checkpoint becomes its source.
+    #[test]
+    fn a_running_session_is_listed_with_its_own_change_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let running = "0123456789abcdef0123456789abcdef";
+        let never_checkpointed = "fedcba9876543210fedcba9876543210";
+        write_archive(directory.path(), running, 3);
+        let live = adapter_with_live(
+            directory.path(),
+            running,
+            BTreeMap::from([
+                (running.to_owned(), 1_900_000_000),
+                (never_checkpointed.to_owned(), 1_900_000_001),
+            ]),
+        );
+
+        let store = live.store().expect("the adapter is a shared store");
+        let key_of = |session_id: &str| format!("{}/{session_id}", directory.path().display());
+        assert_eq!(
+            store.keys,
+            vec![
+                (key_of(running), 1_900_000_000),
+                (key_of(never_checkpointed), 1_900_000_001),
+            ],
+            "a live session's own token replaces the checkpoint's"
+        );
+
+        // Once it stops it leaves the live set, and the checkpoint's own
+        // modification time is the token again.
+        let stopped = adapter(directory.path(), running);
+        let keys = stopped.store().expect("a shared store").keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, key_of(running));
+        assert_ne!(keys[0].1, 1_900_000_000);
+        assert_eq!(
+            stopped.parse_key(&key_of(running)).unwrap().title,
+            "the harness title",
+            "a stopped session is parsed from its checkpoint"
         );
     }
 

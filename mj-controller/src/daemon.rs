@@ -427,21 +427,25 @@ impl RuntimeState {
 
     /// Search the user's SessionWiki index, with this daemon's own live
     /// sessions marked so a surface can resume them instead of restoring them.
-    pub async fn wiki_search(&self, query: String, limit: usize) -> Result<Vec<WikiRow>> {
-        self.require_wiki()?;
+    pub async fn wiki_search(&self, query: String, limit: usize) -> Result<WikiSearchPage> {
         if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
             // Fresh enough matters less than answering now: the sync runs in
             // the background and the next keystroke sees its result.
             self.wiki.request_sync(false);
         }
         let live = self.live_session_ids();
-        blocking(move || crate::sessionwiki::query_rows(&query, limit, &live)).await
+        let rows = blocking(move || crate::sessionwiki::query_rows(&query, limit, &live)).await?;
+        // The status is read after the rows, so a sync that finished while the
+        // query ran is reported as finished.
+        Ok(WikiSearchPage {
+            rows,
+            status: self.wiki.status(),
+        })
     }
 
     /// The markdown briefing for one indexed session, or `None` when the index
     /// holds no session with that id.
     pub async fn wiki_brief(&self, wiki_id: String, max_chars: usize) -> Result<Option<String>> {
-        self.require_wiki()?;
         blocking(move || crate::sessionwiki::brief(&wiki_id, max_chars)).await
     }
 
@@ -456,7 +460,6 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: WikiRestoreRequest,
     ) -> Result<Option<RegisteredSession>> {
-        self.require_wiki()?;
         let wiki_id = request.wiki_id.clone();
         let Some(archived) =
             blocking(move || crate::sessionwiki::archived_session(&wiki_id)).await?
@@ -520,29 +523,6 @@ impl RuntimeState {
             }
         });
         Ok(Some(registered))
-    }
-
-    /// Whether the user has switched SessionWiki on.
-    pub fn wiki_enabled(&self) -> bool {
-        self.controller
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .config
-            .sessionwiki
-            .enabled
-    }
-
-    fn require_wiki(&self) -> Result<()> {
-        ensure!(
-            self.controller
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .config
-                .sessionwiki
-                .enabled,
-            "SessionWiki is disabled; enable it in Setup to search and restore archived sessions"
-        );
-        Ok(())
     }
 
     fn live_session_ids(&self) -> BTreeSet<String> {

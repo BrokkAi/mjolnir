@@ -222,22 +222,25 @@ If imported Git roots are dirty, Mjolnir warns that it will archive their comple
 
 ## Search and restore archived sessions
 
-Mjolnir can write every checkpointed session into
+Mjolnir writes every session into
 [SessionWiki](https://github.com/jbellis/sessionwiki), a separate tool that
 keeps one full-text index of AI coding sessions across Claude Code, Codex, and
-other harnesses. Turn it on in `config.toml`:
+other harnesses. This is always on. The one setting is how long a stopped
+session is kept before Mjolnir's own copy is removed:
 
 ```toml
 [sessionwiki]
-enabled = true
 archive_after_days = 30
 ```
 
 ### What gets indexed, and when
 
-A session is indexed once it has a checkpoint. The daemon indexes a session when
-it reaches the stopped state, once an hour, and before a Resume search that has
-not synced in the last minute. What is stored is the conversation: the prompts,
+A running session is indexed from the transcript the daemon holds, and a stopped
+one from its checkpoint, so a session is searchable before it has ever been
+closed. The daemon indexes when it starts, when a session reaches the stopped
+state, once an hour, and before a Resume search that has not synced in the last
+minute. The first build walks every tool's store and can take many minutes on a
+large corpus; until it finishes, Resume says it is still indexing. What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
 project directory. Each Mjolnir instance indexes only its own sessions, and all
 of them share the tool name `mjolnir`, so one search covers every instance:

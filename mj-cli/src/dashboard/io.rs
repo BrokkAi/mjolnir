@@ -1636,6 +1636,9 @@ pub(crate) fn spawn_wiki_search(
                 .await
         }
         .await
+        // Milestone 10 shows the index's state; for now the rows are what the
+        // dialog uses.
+        .map(|page| page.rows)
         .map_err(|error| format!("{error:#}"));
         let _ = updates.send(DashboardIoUpdate::WikiRows { request_id, result });
     });

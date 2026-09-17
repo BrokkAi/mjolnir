@@ -175,25 +175,30 @@ profile list to compatible reviewer profiles.
 ## Session index `[sessionwiki]`
 
 [SessionWiki](https://github.com/jbellis/sessionwiki) is a separate tool that
-indexes AI coding sessions from many tools into one full-text SQLite index. When
-this section is enabled, the daemon writes every checkpointed Mjolnir session
-into that index under the tool name `mjolnir`, and Resume can search it.
+indexes AI coding sessions from many tools into one full-text SQLite index. The
+daemon always writes Mjolnir's sessions into that index under the tool name
+`mjolnir`, and Resume searches it. This section only chooses whether old
+sessions are archived, because archiving is the only part that deletes
+anything.
 
 ```toml
 [sessionwiki]
-enabled = true
-# archive_after_days = 30
+archive_after_days = 30
 ```
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `false` | Indexes closed sessions and turns on wiki search, the Archived tab, and restore. When it is `false` the daemon indexes nothing and the wiki routes answer `409`. |
 | `archive_after_days` | integer | no | unset (keep every session) | Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. `0` is rejected. |
+
+An `enabled` key written by an earlier build is still read and then ignored;
+indexing is no longer optional.
 
 The index is the user's own SessionWiki index, in SessionWiki's default
 location. There is no index path setting; set `SESSIONWIKI_DATA` if you move it.
-Each Mjolnir instance indexes only its own sessions, and every instance shares
-the one tool name, so a single search covers them all.
+A daemon running against an overridden `MJ_DATA_DIR` indexes into
+`$MJ_DATA_DIR/sessionwiki` instead, so a test or lab daemon never writes your
+own index. Each Mjolnir instance indexes only its own sessions, and every
+instance shares the one tool name, so a single search covers them all.
 
 See [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions)
 for what archiving deletes and keeps, and for the rule that the `sessionwiki`
