@@ -304,7 +304,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Your sessions are always indexed into SessionWiki so one search covers every coding tool. Archiving is what this section chooses."
         }
         "archive_after_days" => {
-            "Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. The session's branch in the repository is kept; the checkpoint and any image attachments are deleted. Leave empty to keep every session."
+            "Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. The checkpoint and any image attachments are deleted. The session's branch is deleted only if all its commits are already on another branch. Leave empty to keep every session."
         }
         "subagents" => {
             "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."

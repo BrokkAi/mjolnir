@@ -15,7 +15,7 @@ Success is visible from a terminal. For the branch: with `archive_after_days = 1
 
 ## Progress
 
-- [ ] Milestone 1: `BranchDisposition::DeleteIfMerged` and the merge check in `cleanup_managed_worktree`; archive job uses it; unit tests; docs and help text updated.
+- [x] (2026-09-17) Milestone 1: `BranchDisposition::DeleteIfMerged` and the merge check in `cleanup_managed_worktree`; archive job uses it; three real-git tests in `mj-controller/src/controller/worktree/tests.rs`; `docs/src/content/docs/sessions.md` and the `archive_after_days` help text updated. `cargo test` and `cargo clippy --all-targets -- -D warnings` pass. The daemon live check was skipped as too heavy for its value; the tests exercise the real git behaviour.
 - [ ] Milestone 2: `archive_space_preview` in `mj-controller`, the `PreviewArchiveSpace` dashboard action and `ArchiveSpacePreviewed` update, live rendering in the SessionWiki setup page; unit tests; docs and help text updated.
 - [ ] Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the dev profile; each milestone committed on the current branch.
 
@@ -40,6 +40,14 @@ Success is visible from a terminal. For the branch: with `archive_after_days = 1
 - Decision: The estimate replaces the row's value column, the way the build cache preview does, and the longer sentence goes in the dialog notice. The static help text is changed to promise the estimate.
   Rationale: The setup screen already has exactly this mechanism (`automatic` label passed to `value_summary`, `notice` for prose). Reusing it keeps one pattern for live text and needs no new layout.
   Date/Author: 2026-09-17, Fable.
+
+- Decision: Milestone 1's tests drive a real temporary git repository through `ProcessExecutor` (the pattern the neighbouring `cleanup_managed_worktree` test already uses) instead of a fake executor scripted to return `for-each-ref` output.
+  Rationale: The behaviour under test is what git reports about containment. A fake would only replay my own assumption about `for-each-ref --contains`, while the real repository proves the merged, unmerged, and only-a-sibling-session-branch cases end to end. No mocking framework is involved either way.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
+- Decision: Milestone 1 changes only the branch sentence in the `archive_after_days` help text; the sentence promising the space estimate is added in Milestone 2.
+  Rationale: Each milestone's help text should describe what the build actually does at that commit.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
 
 ## Outcomes & Retrospective
 
