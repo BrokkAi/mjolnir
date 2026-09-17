@@ -55,7 +55,7 @@ libc = "0.2"
 # Same spec as brokk-mj-core's, so the features unify and SQLite compiles once. The
 # store-divergence test migrates the daemon's store from outside the daemon,
 # which is exactly what the incident it reproduces did.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 tempfile = "3"
 # `start_paused` drives the force-destroy preemption timeout instantly.
 tokio = { version = "1", features = ["test-util"] }

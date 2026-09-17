@@ -847,6 +847,20 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Install background text the harness reads with the next real prompt.
+    /// It creates no transcript turn, so the user never sees it.
+    pub async fn install_prompt_context(&self, text: String) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::InstallPromptContext { text, reply })
+            .await
+            .context("session manager stopped")?;
+        result
+            .await
+            .context("session manager stopped")?
+            .map_err(anyhow::Error::msg)
+    }
+
     /// Drive the session's second-opinion reviewer.
     ///
     /// The reviewer shares this session's relay connection, so its actions
@@ -1137,6 +1151,12 @@ enum ActorCommand {
         background_task_id: String,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+    /// Background text only the target harness sees, prepended to the next
+    /// real prompt. A restored archive installs its hand-off this way.
+    InstallPromptContext {
+        text: String,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Reviewer {
         role: Option<String>,
         action: ReviewerAction,
@@ -1157,6 +1177,7 @@ impl ActorCommand {
             Self::Sync { .. } => "sync",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
+            Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::Reviewer { action, .. } => action.operation_name(),
             Self::Lease { .. } => "lease",
         }
@@ -1197,6 +1218,15 @@ impl ActorCommand {
                         %session_id,
                         operation = "stop_background_task",
                         "background task stop rejection receiver was already closed"
+                    );
+                }
+            }
+            Self::InstallPromptContext { reply, .. } => {
+                if reply.send(Err(message.to_owned())).is_err() {
+                    tracing::debug!(
+                        %session_id,
+                        operation = "install_prompt_context",
+                        "prompt context rejection receiver was already closed"
                     );
                 }
             }
@@ -1460,6 +1490,14 @@ async fn run_remote_session_actor(
                 action,
                 reply,
             },
+            ActorCommand::InstallPromptContext { reply, .. } => {
+                // Only the daemon that owns the relay can install context, and
+                // only a session it started is ever restored into.
+                let _ = reply.send(Err(
+                    "prompt context can be installed only inside the controller daemon".into(),
+                ));
+                continue;
+            }
             ActorCommand::Lease { reply } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "relay connection leases are available only inside the controller daemon"
@@ -2237,6 +2275,46 @@ async fn run_session_actor(
                                 session_id = %target.session_id,
                                 operation = "respond_elicitation",
                                 "elicitation result receiver was already closed"
+                            );
+                        }
+                    }
+                    ActorCommand::InstallPromptContext { text, reply } => {
+                        if lifecycle.is_leased() {
+                            let _ = reply.send(Err(
+                                "session is reserved for a lifecycle operation".into(),
+                            ));
+                            continue;
+                        }
+                        let result = async {
+                            sync_actor_connection(&target, &mut connection).await?;
+                            let connection = connection
+                                .as_mut()
+                                .context("relay is disconnected")?;
+                            connection.install_prompt_context(text).await
+                        }
+                        .await;
+                        // Installing context changes nothing the projection
+                        // shows, so there is no view to publish; a transport
+                        // failure still drops the connection for a reconnect.
+                        if let Err(ref error) = result {
+                            if !is_final_rejection(error) {
+                                connection = None;
+                            }
+                            tracing::warn!(
+                                session_id = %target.session_id,
+                                operation = "install_prompt_context",
+                                error = %error,
+                                "installing relay prompt context failed"
+                            );
+                        }
+                        if reply
+                            .send(result.map_err(|error| format!("{error:#}")))
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                session_id = %target.session_id,
+                                operation = "install_prompt_context",
+                                "prompt context result receiver was already closed"
                             );
                         }
                     }

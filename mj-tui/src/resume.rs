@@ -24,6 +24,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use mj_client::daemon::WikiRow;
 use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
 
@@ -55,6 +56,9 @@ pub(crate) enum ResumeFocus {
 pub(crate) enum ResumeTab {
     Hel,
     Import,
+    /// Sessions SessionWiki kept after the tool that ran them deleted its own
+    /// copy. They have no checkpoint; Enter restores one into a new session.
+    Archive,
 }
 
 impl ResumeTab {
@@ -62,13 +66,24 @@ impl ResumeTab {
         match self {
             Self::Hel => 0,
             Self::Import => 1,
+            Self::Archive => 2,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::Hel,
+            1 => Self::Import,
+            _ => Self::Archive,
         }
     }
 
     fn includes(self, row: &ResumeRow) -> bool {
         matches!(
             (self, &row.key),
-            (Self::Hel, ResumeRowKey::Hel(_)) | (Self::Import, ResumeRowKey::Native(..))
+            (Self::Hel, ResumeRowKey::Hel(_))
+                | (Self::Import, ResumeRowKey::Native(..))
+                | (Self::Archive, ResumeRowKey::Archive(_))
         )
     }
 }
@@ -81,6 +96,9 @@ pub(crate) enum ResumeRowKey {
     Hel(String),
     /// A native session with no Hel record, keyed by harness and native id.
     Native(HarnessKind, String),
+    /// An archived session that lives only in the SessionWiki index, keyed by
+    /// its SessionWiki id.
+    Archive(String),
 }
 
 /// What selecting the row does, and whether it may be selected at all.
@@ -90,6 +108,9 @@ pub(crate) enum ResumeRowStatus {
     Resumable,
     /// A native session Hel has never adopted: Enter imports it.
     Importable,
+    /// Only SessionWiki's copy is left: Enter restores it into a new session
+    /// carrying a summary of the old transcript.
+    Restorable,
     /// The target vanished without a verified checkpoint.
     Lost,
     /// Force-destroyed. There is nothing left to restore.
@@ -98,7 +119,7 @@ pub(crate) enum ResumeRowStatus {
 
 impl ResumeRowStatus {
     pub(crate) fn is_recoverable(self) -> bool {
-        matches!(self, Self::Resumable | Self::Importable)
+        matches!(self, Self::Resumable | Self::Importable | Self::Restorable)
     }
 
     /// Short marker shown in the origin column, sized to fit beside it.
@@ -106,7 +127,7 @@ impl ResumeRowStatus {
         match self {
             Self::Lost => Some("⚠ lost"),
             Self::DataLoss => Some("⚠ data lost"),
-            Self::Resumable | Self::Importable => None,
+            Self::Resumable | Self::Importable | Self::Restorable => None,
         }
     }
 
@@ -116,7 +137,7 @@ impl ResumeRowStatus {
         match self {
             Self::Lost => Some("lost without a verified checkpoint"),
             Self::DataLoss => Some("force-destroyed; nothing is left to restore"),
-            Self::Resumable | Self::Importable => None,
+            Self::Resumable | Self::Importable | Self::Restorable => None,
         }
     }
 }
@@ -141,13 +162,25 @@ pub(crate) struct ResumeRow {
     /// A retained failed/cancelled Move for this record, when recovery is
     /// possible. The dialog turns Enter into an explicit recovery choice.
     pub(crate) move_recovery: Option<MoveOperation>,
+    /// The SessionWiki session a search matched to this live row, so the
+    /// preview can show the same transcript the hit came from.
+    pub(crate) wiki_match: Option<String>,
 }
 
 impl ResumeRow {
     pub(crate) fn session_id(&self) -> Option<&str> {
         match &self.key {
             ResumeRowKey::Hel(session_id) => Some(session_id),
-            ResumeRowKey::Native(..) => None,
+            ResumeRowKey::Native(..) | ResumeRowKey::Archive(_) => None,
+        }
+    }
+
+    /// The SessionWiki session this row previews, which an archived row always
+    /// has and a live row has when a search matched it.
+    pub(crate) fn wiki_id(&self) -> Option<&str> {
+        match &self.key {
+            ResumeRowKey::Archive(wiki_id) => Some(wiki_id),
+            _ => self.wiki_match.as_deref(),
         }
     }
 }
@@ -168,6 +201,20 @@ pub(crate) struct ResumeDialog {
     pub(crate) search: TextInput,
     pub(crate) form: RefCell<Dialog<ResumeFocus>>,
     pub(crate) opened_at: Instant,
+    /// Whether SessionWiki is switched on. With it off the Archived tab shows
+    /// one line saying so and no search runs.
+    pub(crate) wiki_enabled: bool,
+    /// The newest search results, or the most recent sessions before anything
+    /// has been typed. Shared rather than copied: a confirmation clones the
+    /// whole dialog.
+    pub(crate) wiki: Arc<Vec<WikiRow>>,
+    /// The search this dialog last asked for. A result that names an older
+    /// request is stale and dropped.
+    pub(crate) wiki_request_id: u64,
+    /// Briefings already fetched, by SessionWiki id, for the dialog's life.
+    pub(crate) previews: Arc<BTreeMap<String, String>>,
+    /// The briefing being fetched now, so one selection asks only once.
+    pub(crate) preview_pending: Option<String>,
 }
 
 impl ResumeDialog {
@@ -185,7 +232,7 @@ impl ResumeDialog {
         form.declare_with_enabled(
             Tabs,
             ControlKind::Tabs {
-                len: 2,
+                len: 3,
                 selected: self.tab.index(),
             },
             true,
@@ -245,6 +292,23 @@ impl ResumeDialog {
                     (scanned + profile_scanned, total + profile_total)
                 },
             )
+    }
+
+    /// The briefing to show under the list for the selected row: the cached
+    /// text, or a line saying it is on its way. `None` when the row has no
+    /// SessionWiki session behind it, and the pane is then not drawn at all.
+    pub(crate) fn preview_text(&self, rows: &[ResumeRow]) -> Option<String> {
+        if !self.wiki_enabled {
+            return None;
+        }
+        let index = selected_index(self, rows.len())?;
+        let wiki_id = rows.get(index)?.wiki_id()?;
+        Some(
+            self.previews
+                .get(wiki_id)
+                .cloned()
+                .unwrap_or_else(|| "Loading the archived transcript…".to_owned()),
+        )
     }
 
     pub(crate) fn errors(&self) -> Vec<String> {
@@ -326,10 +390,22 @@ fn relative_time(value: i64, unit: &str) -> String {
 ///
 /// Dedupe rule: a Hel record whose `native_session_id` matches a scanned native
 /// session of the same harness replaces that native row entirely.
+/// The Mjolnir harness a SessionWiki tool name stands for, when one does.
+/// Tools Mjolnir cannot run have no harness and are never deduplicated against
+/// an import row.
+fn harness_of_tool(tool: &str) -> Option<HarnessKind> {
+    match tool {
+        "claude-code" => Some(HarnessKind::Claude),
+        "codex" => Some(HarnessKind::Codex),
+        _ => None,
+    }
+}
+
 pub(crate) fn merged_resume_rows(
     config: &Config,
     state: &State,
     profiles: &[ImportProfileOption],
+    wiki: &[WikiRow],
 ) -> Vec<ResumeRow> {
     let mut adopted = BTreeSet::new();
     let mut rows = Vec::new();
@@ -367,6 +443,7 @@ pub(crate) fn merged_resume_rows(
             natively_archived: false,
             unavailable_reason: None,
             move_recovery: None,
+            wiki_match: None,
         });
     }
     for profile in profiles {
@@ -386,8 +463,59 @@ pub(crate) fn merged_resume_rows(
                 natively_archived: native.natively_archived,
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
+                wiki_match: None,
             });
         }
+    }
+    // SessionWiki rows either annotate a row already here or become archived
+    // rows of their own. A row is archived only when nothing on this machine
+    // still holds the session: no Mjolnir record, and no native file an import
+    // could adopt.
+    for hit in wiki {
+        let native = hit
+            .native_id
+            .as_deref()
+            .zip(harness_of_tool(&hit.tool))
+            .map(|(native_id, harness)| ResumeRowKey::Native(harness, native_id.to_owned()));
+        let existing = hit
+            .hel_session_id
+            .as_deref()
+            .map(|session_id| ResumeRowKey::Hel(session_id.to_owned()))
+            .filter(|key| rows.iter().any(|row| &row.key == key))
+            .or_else(|| native.filter(|key| rows.iter().any(|row| &row.key == key)));
+        if let Some(key) = existing {
+            if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
+                row.wiki_match = Some(hit.id.clone());
+                if let Some(snippet) = snippet_text(hit) {
+                    row.details = format!("{} · {snippet}", row.details);
+                }
+            }
+            continue;
+        }
+        if !hit.archived {
+            continue;
+        }
+        rows.push(ResumeRow {
+            key: ResumeRowKey::Archive(hit.id.clone()),
+            profile_id: hit.tool.clone(),
+            title: if hit.title.trim().is_empty() {
+                hit.id.clone()
+            } else {
+                hit.title.clone()
+            },
+            origin: archive_origin(&hit.project),
+            details: archive_details(hit),
+            last_activity_ms: hit
+                .started
+                .as_deref()
+                .and_then(timestamp_ms)
+                .unwrap_or_default(),
+            status: ResumeRowStatus::Restorable,
+            natively_archived: false,
+            unavailable_reason: None,
+            move_recovery: None,
+            wiki_match: Some(hit.id.clone()),
+        });
     }
     // Newest first across the whole merged list; the key breaks ties so the
     // order is stable between incremental scan updates.
@@ -400,6 +528,41 @@ pub(crate) fn merged_resume_rows(
     rows
 }
 
+/// The matching text a search returned, on one line and without the markers
+/// SessionWiki wraps a hit in.
+fn snippet_text(hit: &WikiRow) -> Option<String> {
+    let snippet = hit.snippet.as_deref()?;
+    let text = snippet
+        .replace(['\n', '\r'], " ")
+        .replace(['\u{2}', '\u{3}'], "");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+/// Where an archived session ran, in the same shape the other tabs use.
+fn archive_origin(project: &str) -> String {
+    std::path::Path::new(project).file_name().map_or_else(
+        || LOCAL_ORIGIN.to_owned(),
+        |project| format!("{LOCAL_ORIGIN}/{}", project.to_string_lossy()),
+    )
+}
+
+fn archive_details(hit: &WikiRow) -> String {
+    let mut details = format!("archived · {} messages", hit.msgs);
+    if let Some(snippet) = snippet_text(hit) {
+        details.push_str(" · ");
+        details.push_str(&snippet);
+    } else if let Some(preview) = hit
+        .preview
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        details.push_str(" · ");
+        details.push_str(preview.trim());
+    }
+    details
+}
+
 /// The rows one dialog tab shows: the merged sources split by ownership, with
 /// checkpoint sizes appended and search applied.
 fn build_resume_rows(
@@ -410,7 +573,7 @@ fn build_resume_rows(
     now: &chrono::DateTime<chrono::Local>,
 ) -> Vec<ResumeRow> {
     let needle = dialog.search.to_lowercase();
-    merged_resume_rows(config, state, &dialog.profiles)
+    merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
         .into_iter()
         .filter(|row| dialog.tab.includes(row))
         .map(|mut row| {
@@ -428,6 +591,11 @@ fn build_resume_rows(
             row
         })
         .filter(|row| {
+            // An archived row is here because the index matched the query, so
+            // the local filter must not drop it for lacking the literal text.
+            if matches!(row.key, ResumeRowKey::Archive(_)) {
+                return true;
+            }
             let activity = format_last_active(now, row.last_activity_ms).to_lowercase();
             needle.is_empty()
                 || row.title.to_lowercase().contains(&needle)
@@ -539,6 +707,11 @@ impl DashboardState {
             search: TextInput::new(),
             form: RefCell::new(Dialog::default()),
             opened_at: Instant::now(),
+            wiki_enabled: self.config.sessionwiki.enabled,
+            wiki: Arc::new(Vec::new()),
+            wiki_request_id: 0,
+            previews: Arc::new(BTreeMap::new()),
+            preview_pending: None,
         });
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
@@ -575,6 +748,77 @@ impl DashboardState {
         }
         self.rebuild_resume_rows();
         self.resync_resume_selection();
+    }
+
+    /// Fold one SessionWiki search result into the open dialog. A result for
+    /// an older request is dropped: the person has typed since.
+    pub fn apply_wiki_search(&mut self, request_id: u64, rows: Vec<WikiRow>) {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return;
+        };
+        if dialog.wiki_request_id != request_id || *dialog.wiki == rows {
+            return;
+        }
+        dialog.wiki = Arc::new(rows);
+        self.rebuild_resume_rows();
+        self.resync_resume_selection();
+    }
+
+    /// Fold one fetched briefing into the open dialog's preview cache.
+    pub fn apply_wiki_brief(&mut self, wiki_id: String, markdown: String) {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return;
+        };
+        if dialog.preview_pending.as_deref() == Some(wiki_id.as_str()) {
+            dialog.preview_pending = None;
+        }
+        Arc::make_mut(&mut dialog.previews).insert(wiki_id, markdown);
+    }
+
+    /// Ask for the briefing of the selected row, unless it is cached or
+    /// already in flight.
+    fn wiki_preview_action(&mut self) -> DashboardAction {
+        let wiki_id = self
+            .selected_resume_row()
+            .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        let Some(wiki_id) = wiki_id.filter(|_| dialog.wiki_enabled) else {
+            return DashboardAction::None;
+        };
+        if dialog.previews.contains_key(&wiki_id)
+            || dialog.preview_pending.as_deref() == Some(wiki_id.as_str())
+        {
+            return DashboardAction::None;
+        }
+        dialog.preview_pending = Some(wiki_id.clone());
+        DashboardAction::LoadArchivedBrief { wiki_id }
+    }
+
+    /// Ask for a new search after the query changed. The debounce and the
+    /// dropping of stale answers live with the request id, not with a timer
+    /// here.
+    fn wiki_search_action(&mut self) -> DashboardAction {
+        match self.next_wiki_search() {
+            Some((request_id, query)) => {
+                DashboardAction::SearchArchivedSessions { request_id, query }
+            }
+            None => DashboardAction::None,
+        }
+    }
+
+    /// Claim the next search request id for the open dialog, with the query it
+    /// should run. `None` when no dialog is open or SessionWiki is off.
+    pub fn next_wiki_search(&mut self) -> Option<(u64, String)> {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return None;
+        };
+        if !dialog.wiki_enabled {
+            return None;
+        }
+        dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
@@ -657,12 +901,10 @@ impl DashboardState {
                     }
                     // Keep list navigation shortcuts; arrows in fields belong to editing.
                     KeyCode::Left | KeyCode::Right if focused == Sessions => {
-                        self.switch_resume_tab(if key.code == KeyCode::Left {
-                            ResumeTab::Hel
-                        } else {
-                            ResumeTab::Import
-                        });
-                        return DashboardAction::None;
+                        let step = if key.code == KeyCode::Left { 2 } else { 1 };
+                        let next = ResumeTab::from_index((dialog.tab.index() + step) % 3);
+                        self.switch_resume_tab(next);
+                        return self.wiki_preview_action();
                     }
                     _ => {}
                 }
@@ -688,15 +930,16 @@ impl DashboardState {
                 TextField::apply(&mut dialog.search, edit);
                 self.rebuild_resume_rows();
                 self.select_resume_row(0);
+                return self.wiki_search_action();
             }
             Some(Interaction::Select(Tabs, index)) => {
-                self.switch_resume_tab(if index == 0 {
-                    ResumeTab::Hel
-                } else {
-                    ResumeTab::Import
-                });
+                self.switch_resume_tab(ResumeTab::from_index(index));
+                return self.wiki_preview_action();
             }
-            Some(Interaction::Select(Sessions, index)) => self.select_resume_row(index),
+            Some(Interaction::Select(Sessions, index)) => {
+                self.select_resume_row(index);
+                return self.wiki_preview_action();
+            }
             Some(Interaction::Activate(Search | Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
             }
@@ -757,6 +1000,10 @@ impl DashboardState {
                 self.cancel_modal();
                 self.begin_resume_for(&session_id)
             }
+            ResumeRowKey::Archive(wiki_id) => {
+                self.cancel_modal();
+                self.begin_archive_restore(wiki_id, row.title)
+            }
             ResumeRowKey::Native(_, native_session_id) => {
                 let profile_id = row.profile_id;
                 let display_title = row.title;
@@ -803,21 +1050,35 @@ fn native_project_target(project_directory: &str) -> String {
         )
 }
 
-pub(crate) fn resume_sessions_pane(area: Rect) -> Rect {
+/// How tall the preview pane under the list is when the dialog shows one.
+const PREVIEW_HEIGHT: u16 = 6;
+
+/// The dialog body split into its bands: tabs, search, list, preview, footer.
+/// The preview band is present only when the dialog has something to show in
+/// it, so the list keeps the whole height when it does not.
+fn resume_bands(inner: Rect, preview: bool) -> std::rc::Rc<[Rect]> {
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(5),
+    ];
+    if preview {
+        constraints.push(Constraint::Length(PREVIEW_HEIGHT));
+    }
+    constraints.push(Constraint::Length(4));
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner)
+}
+
+pub(crate) fn resume_sessions_pane(area: Rect, preview: bool) -> Rect {
     let popup = centered_rect(84, 24, area);
     let inner = popup.inner(Margin {
         vertical: 1,
         horizontal: 1,
     });
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(4),
-        ])
-        .split(inner)[2]
+    resume_bands(inner, preview)[2]
 }
 
 pub(crate) fn render_resume_dialog(
@@ -835,15 +1096,11 @@ pub(crate) fn render_resume_dialog(
         " Resume a session ".to_owned()
     };
     let inner = theme::modal().inner(popup);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Min(5),
-            Constraint::Length(4),
-        ])
-        .split(inner);
+    let preview = dialog.preview_text(dashboard.resume_rows());
+    let bands = resume_bands(inner, preview.is_some());
+    let rows = bands.as_ref();
+    // The footer is the last band whether or not a preview sits above it.
+    let footer_band = rows[rows.len() - 1];
 
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
@@ -853,7 +1110,7 @@ pub(crate) fn render_resume_dialog(
     TabStrip::render(
         frame,
         rows[0],
-        &[" Mjolnir ", " Import "],
+        &[" Mjolnir ", " Import ", " Archived "],
         dialog.tab.index(),
         &mut form,
         ResumeFocus::Tabs,
@@ -887,6 +1144,7 @@ pub(crate) fn render_resume_dialog(
     let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
         ResumeTab::Hel => " Mjolnir sessions · newest first ",
         ResumeTab::Import => " Importable sessions · newest first ",
+        ResumeTab::Archive => " Archived sessions · newest first ",
     });
     let list_area = block.inner(rows[2]);
     // Registered after the dialog body so a drag over the rows selects the
@@ -909,9 +1167,13 @@ pub(crate) fn render_resume_dialog(
     let now = chrono::Local::now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
+            (ResumeTab::Archive, ..) if !dialog.wiki_enabled => {
+                "Enable SessionWiki in Setup to search and archive sessions"
+            }
             (ResumeTab::Import, true, _) => "Scanning native sessions…",
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
             (ResumeTab::Import, _, true) => "No importable sessions",
+            (ResumeTab::Archive, _, true) => "No archived sessions",
             _ => "No matching sessions",
         };
         frame.render_widget(Line::raw(message), list_area);
@@ -946,13 +1208,29 @@ pub(crate) fn render_resume_dialog(
         usize::from(list_area.height).max(1),
     );
 
+    if let Some(preview) = preview {
+        let preview_band = rows[3];
+        let block = theme::panel(false).title(" Archived transcript ");
+        let body = block.inner(preview_band);
+        frame.render_widget(block, preview_band);
+        frame.render_widget(
+            Paragraph::new(
+                preview
+                    .lines()
+                    .map(|line| Line::raw(line.to_owned()))
+                    .collect::<Vec<_>>(),
+            )
+            .wrap(Wrap { trim: false }),
+            body,
+        );
+    }
     let selected = selected_index(dialog, list_rows.len()).and_then(|index| list_rows.get(index));
     let mut footer = Vec::new();
     if let Some(detail) = selected {
         footer.push(Line::styled(
             truncate_to_cells(
                 &detail.details,
-                usize::from(rows[3].width),
+                usize::from(footer_band.width),
                 Truncate::SUMMARY,
             ),
             Style::default().fg(theme::palette().muted),
@@ -965,7 +1243,7 @@ pub(crate) fn render_resume_dialog(
         footer.push(Line::styled(
             truncate_to_cells(
                 &format!("Scan failed for {error}"),
-                usize::from(rows[3].width),
+                usize::from(footer_band.width),
                 Truncate::SUMMARY,
             ),
             Style::default().fg(theme::palette().warning),
@@ -975,14 +1253,15 @@ pub(crate) fn render_resume_dialog(
         match dialog.tab {
             ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
+            ResumeTab::Archive => "Enter restores · ←/→ tabs · / searches · Tab moves",
         },
         Style::default().fg(theme::palette().muted),
     ));
     let note_area = Rect::new(
-        rows[3].x,
-        rows[3].y,
-        rows[3].width,
-        rows[3].height.saturating_sub(1),
+        footer_band.x,
+        footer_band.y,
+        footer_band.width,
+        footer_band.height.saturating_sub(1),
     );
     frame.render_widget(
         Paragraph::new(footer)
@@ -991,10 +1270,10 @@ pub(crate) fn render_resume_dialog(
         note_area,
     );
     let button_area = Rect::new(
-        rows[3].x,
-        rows[3].bottom().saturating_sub(1),
-        rows[3].width,
-        u16::from(rows[3].height > 0),
+        footer_band.x,
+        footer_band.bottom().saturating_sub(1),
+        footer_band.width,
+        u16::from(footer_band.height > 0),
     );
     let mut buttons = vec![(ResumeFocus::Cancel, "Cancel", true)];
     if dialog.tab == ResumeTab::Hel {
@@ -1006,10 +1285,10 @@ pub(crate) fn render_resume_dialog(
     }
     buttons.push((
         ResumeFocus::Open,
-        if dialog.tab == ResumeTab::Hel {
-            "Resume"
-        } else {
-            "Import"
+        match dialog.tab {
+            ResumeTab::Hel => "Resume",
+            ResumeTab::Import => "Import",
+            ResumeTab::Archive => "Restore",
         },
         dialog.can_open(list_rows),
     ));
@@ -1367,6 +1646,7 @@ mod tests {
                 native("native-1", "Same conversation", 10),
                 native("native-2", "A different conversation", 5),
             ])],
+            &[],
         );
 
         assert_eq!(merged.len(), 2, "{:?}", titles(&merged));
@@ -1471,6 +1751,7 @@ mod tests {
                 native("native-1", "Running under Hel right now", 10),
                 native("native-2", "Idle native session", 5),
             ])],
+            &[],
         );
         assert_eq!(titles(&merged), ["Idle native session"]);
     }
@@ -1483,7 +1764,7 @@ mod tests {
         session.target_template_id = "retired-target".into();
         let mut config = config();
         config.targets.clear();
-        let merged = merged_resume_rows(&config, &state_with(vec![session]), &[]);
+        let merged = merged_resume_rows(&config, &state_with(vec![session]), &[], &[]);
         assert_eq!(merged[0].origin, "retired-target");
     }
 
@@ -1512,6 +1793,7 @@ mod tests {
                 native("native-mid", "Native March", march),
                 native("native-new", "Native July", july),
             ])],
+            &[],
         );
 
         assert_eq!(
@@ -1735,6 +2017,173 @@ mod tests {
 
     /// The default Hel tab and the Import tab each expose only the source they
     /// name, with a valid selection after every switch.
+    fn wiki_row(id: &str, archived: bool) -> WikiRow {
+        WikiRow {
+            id: id.into(),
+            tool: "mjolnir".into(),
+            project: "/home/dev/project".into(),
+            title: format!("archived {id}"),
+            started: Some("2026-09-01T00:00:00Z".into()),
+            msgs: 7,
+            preview: Some("the last thing it said".into()),
+            archived,
+            native_id: None,
+            snippet: None,
+            hel_session_id: None,
+        }
+    }
+
+    /// A row is archived only when nothing on this machine still holds the
+    /// session: no Mjolnir record and no native file an import could adopt.
+    #[test]
+    fn only_indexed_sessions_nothing_else_holds_become_archived_rows() {
+        let config = config();
+        let state = state_with(vec![stopped_session()]);
+        let profiles = [codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])];
+
+        let gone = wiki_row("gone", true);
+        let held = WikiRow {
+            hel_session_id: Some("session-1".into()),
+            snippet: Some("the phrase that matched".into()),
+            ..wiki_row("held", true)
+        };
+        let imported = WikiRow {
+            tool: "codex".into(),
+            native_id: Some("native-2".into()),
+            snippet: Some("a native hit".into()),
+            ..wiki_row("imported", true)
+        };
+        let live_elsewhere = wiki_row("still-there", false);
+
+        let merged = merged_resume_rows(
+            &config,
+            &state,
+            &profiles,
+            &[gone, held, imported, live_elsewhere],
+        );
+        let archived = merged
+            .iter()
+            .filter(|row| matches!(row.key, ResumeRowKey::Archive(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            archived
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>(),
+            vec![ResumeRowKey::Archive("gone".into())],
+            "only the session nothing else holds is archived"
+        );
+        assert_eq!(archived[0].status, ResumeRowStatus::Restorable);
+
+        let hel = merged
+            .iter()
+            .find(|row| row.key == ResumeRowKey::Hel("session-1".into()))
+            .expect("the Mjolnir record is still listed");
+        assert_eq!(hel.wiki_id(), Some("held"));
+        assert!(
+            hel.details.contains("the phrase that matched"),
+            "a hit on a live record shows its snippet: {}",
+            hel.details
+        );
+        let native_row = merged
+            .iter()
+            .find(|row| matches!(row.key, ResumeRowKey::Native(..)))
+            .expect("the importable session is still listed");
+        assert_eq!(native_row.wiki_id(), Some("imported"));
+        assert!(native_row.details.contains("a native hit"));
+    }
+
+    /// The Archived tab shows archived rows only, and Enter on one opens the
+    /// wizard that restores it rather than resuming a record.
+    #[test]
+    fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
+        let mut config = config();
+        config.sessionwiki.enabled = true;
+        let mut dashboard =
+            DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        // The dialog asks for the recent list as it opens, the way the
+        // dashboard does, and the answer names that request.
+        let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
+        assert_eq!(query, "");
+        dashboard.apply_wiki_search(request_id, vec![wiki_row("gone", true)]);
+
+        assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+        switch_to_import(&mut dashboard);
+        assert!(rows(&dashboard).is_empty());
+
+        if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+            dialog.form.get_mut().focus(ResumeFocus::Sessions);
+        }
+        assert!(matches!(
+            dashboard.handle_key(key(KeyCode::Right)),
+            DashboardAction::LoadArchivedBrief { .. } | DashboardAction::None
+        ));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.tab, ResumeTab::Archive);
+        assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+        assert_eq!(dialog.selected, Some(ResumeRowKey::Archive("gone".into())));
+
+        dashboard.handle_key(key(KeyCode::Enter));
+        let Mode::Resume(wizard) = &dashboard.mode else {
+            panic!("expected the resume wizard, got {:?}", dashboard.mode);
+        };
+        assert_eq!(wizard.source, crate::wizards::ResumeSource::Archive);
+        assert_eq!(wizard.session_id, "gone");
+    }
+
+    /// Typing asks the daemon for a new search, and an answer to an older
+    /// request is ignored because the person has typed since.
+    #[test]
+    fn typing_asks_for_a_search_and_stale_answers_are_dropped() {
+        let mut config = config();
+        config.sessionwiki.enabled = true;
+        let mut dashboard =
+            DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        focus_resume_control(&mut dashboard, ResumeFocus::Search);
+
+        let action = dashboard.handle_key(key(KeyCode::Char('g')));
+        let DashboardAction::SearchArchivedSessions { request_id, query } = action else {
+            panic!("typing must ask for a search, got {action:?}");
+        };
+        assert_eq!(query, "g");
+
+        dashboard.apply_wiki_search(request_id - 1, vec![wiki_row("stale", true)]);
+        assert!(
+            !rows(&dashboard)
+                .iter()
+                .any(|row| matches!(row.key, ResumeRowKey::Archive(_))),
+            "an answer to an older request is dropped"
+        );
+        dashboard.apply_wiki_search(request_id, vec![wiki_row("fresh", true)]);
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.wiki.len(), 1);
+        assert_eq!(dialog.wiki[0].id, "fresh");
+    }
+
+    /// With SessionWiki off the tab says so and nothing is searched.
+    #[test]
+    fn the_archived_tab_says_when_sessionwiki_is_off() {
+        let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        assert_eq!(dashboard.next_wiki_search(), None);
+        focus_resume_control(&mut dashboard, ResumeFocus::Search);
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('g'))),
+            DashboardAction::None,
+            "no search is asked for while SessionWiki is off"
+        );
+    }
+
     #[test]
     fn tabs_separate_hel_records_from_importable_native_sessions() {
         let mut dashboard = DashboardState::new(

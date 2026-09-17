@@ -57,14 +57,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 8
+version = 10
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `7`. |
+| `version` | integer | yes | none | Configuration schema version; use `10`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -72,6 +72,7 @@ The only accepted top-level keys are:
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
+| `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
@@ -80,7 +81,7 @@ The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
 **Interface**. This is only a presentation grouping; the fields remain at the
 top level in `config.toml`.
 
-A missing or empty file is treated as an empty version 8 configuration. Older
+A missing or empty file is treated as an empty version 10 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -170,6 +171,33 @@ In the terminal, these review fields are edited inside **Setup** so one Save or
 Cancel applies to the entire configuration draft. Setup can discover the
 selected review profile's supported model and effort choices and filters the
 profile list to compatible reviewer profiles.
+
+## Session index `[sessionwiki]`
+
+[SessionWiki](https://github.com/jbellis/sessionwiki) is a separate tool that
+indexes AI coding sessions from many tools into one full-text SQLite index. When
+this section is enabled, the daemon writes every checkpointed Mjolnir session
+into that index under the tool name `mjolnir`, and Resume can search it.
+
+```toml
+[sessionwiki]
+enabled = true
+# archive_after_days = 30
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `false` | Indexes closed sessions and turns on wiki search, the Archived tab, and restore. When it is `false` the daemon indexes nothing and the wiki routes answer `409`. |
+| `archive_after_days` | integer | no | unset (keep every session) | Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. `0` is rejected. |
+
+The index is the user's own SessionWiki index, in SessionWiki's default
+location. There is no index path setting; set `SESSIONWIKI_DATA` if you move it.
+Each Mjolnir instance indexes only its own sessions, and every instance shares
+the one tool name, so a single search covers them all.
+
+See [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions)
+for what archiving deletes and keeps, and for the rule that the `sessionwiki`
+command-line tool must match the version Mjolnir links.
 
 ## Profiles `[profiles.<id>]`
 
@@ -490,7 +518,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 8
+version = 10
 
 [phone]
 enabled = true

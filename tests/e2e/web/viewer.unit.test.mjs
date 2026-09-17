@@ -640,6 +640,125 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   assert.deepEqual(operations.map(operation => operation[0]), ['fetch', 'match']);
 });
 
+function wikiContext(overrides = {}) {
+  const timers = new Map();
+  let nextTimerId = 1;
+  const context = vm.createContext({
+    encodeURIComponent,
+    JSON,
+    route: { name: 'resume' },
+    renders: 0,
+    renderResumable() { context.renders += 1; },
+    setTimeout: (fn, ms) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout: id => timers.delete(id),
+    request: async () => ({ rows: [] }),
+    ...overrides,
+  });
+  vm.runInContext(
+    sourceBetween('const WIKI_SEARCH_DEBOUNCE_MS', '\nfunction wikiDraft('),
+    context,
+  );
+  return {
+    context,
+    timers,
+    fire() {
+      assert.equal(timers.size, 1, 'exactly one search was scheduled');
+      const [id, timer] = [...timers.entries()][0];
+      timers.delete(id);
+      return timer.fn();
+    },
+  };
+}
+
+test('wiki search waits out a burst of typing and drops an overtaken answer', async () => {
+  const pending = [];
+  const urls = [];
+  const { context, timers, fire } = wikiContext({
+    request: url => {
+      urls.push(url);
+      return new Promise(resolve => pending.push(resolve));
+    },
+  });
+
+  vm.runInContext("scheduleWikiSearch('a'); scheduleWikiSearch('ab'); scheduleWikiSearch('abc');", context);
+  assert.equal(timers.size, 1, 'each keystroke replaces the pending request');
+  assert.equal([...timers.values()][0].ms, 250);
+  assert.equal(urls.length, 0, 'nothing is requested while the typing continues');
+
+  const first = fire();
+  assert.deepEqual(urls, ['/api/v1/wiki/search?q=abc&limit=50']);
+
+  // A later keystroke starts a second request before the first has answered.
+  vm.runInContext("scheduleWikiSearch('zebra')", context);
+  const second = fire();
+  assert.equal(urls.length, 2);
+
+  pending[1]({ rows: [{ id: 'new' }] });
+  await second;
+  pending[0]({ rows: [{ id: 'stale' }] });
+  await first;
+  assert.deepEqual(
+    vm.runInContext('wikiState.rows.map(row => row.id)', context),
+    ['new'],
+    'the overtaken answer was dropped',
+  );
+  assert.equal(context.renders, 1, 'only the current request redraws the page');
+});
+
+test('a disabled SessionWiki stops asking and reports one line', async () => {
+  const { context, timers, fire } = wikiContext({
+    request: async () => {
+      const failure = new Error('SessionWiki is disabled');
+      failure.status = 409;
+      throw failure;
+    },
+  });
+  vm.runInContext("scheduleWikiSearch('anything')", context);
+  await fire();
+  assert.equal(vm.runInContext('wikiState.disabled', context), true);
+  assert.equal(vm.runInContext('wikiState.rows.length', context), 0);
+  assert.match(vm.runInContext('wikiState.notice', context), /SessionWiki is disabled/);
+  vm.runInContext("scheduleWikiSearch('more typing')", context);
+  assert.equal(timers.size, 0, 'a switched-off index is not asked again');
+});
+
+test('wiki rows split into archived rows and snippets for live sessions', () => {
+  const { context } = wikiContext();
+  context.rows = [
+    { id: 'gone', archived: true, hel_session_id: null, snippet: 'old work' },
+    { id: 'kept', archived: false, hel_session_id: 'live-1', snippet: 'a match here' },
+    { id: 'indexed-live', archived: true, hel_session_id: 'live-2', snippet: 'still here' },
+    { id: 'recent', archived: false, hel_session_id: null, snippet: null },
+  ];
+  vm.runInContext('wikiState.rows = rows', context);
+  assert.deepEqual(
+    vm.runInContext('wikiArchivedRows().map(row => row.id)', context),
+    ['gone'],
+    'only rows the tool has lost and this daemon cannot see are archived rows',
+  );
+  assert.equal(vm.runInContext("wikiSnippetFor('live-1')", context), 'a match here');
+  assert.equal(vm.runInContext("wikiSnippetFor('missing')", context), '');
+});
+
+test('a search snippet marks the matched words as elements, not markup', () => {
+  const built = [];
+  const { context } = wikiContext({
+    el: (name, className, textContent) => {
+      built.push([name, textContent]);
+      return { name, className, textContent };
+    },
+  });
+  const marked = `read README now`;
+  context.marked = marked;
+  vm.runInContext('wikiSnippetNodes(marked)', context);
+  assert.deepEqual(built, [['span', 'read '], ['mark', 'README'], ['span', ' now']]);
+});
+
 test('shipped viewer source comments use Mjolnir terminology', () => {
   for (const source of [
     serviceWorkerSource,

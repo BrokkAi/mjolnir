@@ -1034,6 +1034,25 @@ impl DashboardState {
     }
 
     /// Why this session cannot resume on `target_id`, or `None` when it can.
+    /// The profiles the resume wizard offers. A record's resume is limited to
+    /// the profiles compatible with it; an archived session has no record, so
+    /// every enabled profile can carry its summary.
+    pub(crate) fn resume_wizard_profiles(
+        &self,
+        wizard: &ResumeWizard,
+    ) -> Vec<(&String, HarnessKind)> {
+        match wizard.source {
+            ResumeSource::Session => self.compatible_profiles(&wizard.session_id),
+            ResumeSource::Archive => self
+                .config
+                .profiles
+                .iter()
+                .filter(|(_, profile)| profile.enabled)
+                .map(|(id, profile)| (id, profile.kind))
+                .collect(),
+        }
+    }
+
     pub(super) fn resume_target_rejection(
         &self,
         session_id: &str,
@@ -1378,7 +1397,7 @@ impl DashboardState {
     }
 
     pub(super) fn advance_resume_wizard(&mut self, mut wizard: ResumeWizard) -> DashboardAction {
-        let profiles = self.compatible_profiles(&wizard.session_id);
+        let profiles = self.resume_wizard_profiles(&wizard);
         match wizard.step {
             WizardStep::Profile => {
                 wizard.step = WizardStep::Target;
@@ -1518,6 +1537,18 @@ impl DashboardState {
                 } else {
                     ResumeQueueDisposition::Start
                 }),
+            };
+            self.mode = Mode::Resume(wizard);
+            return action;
+        }
+        if wizard.source == ResumeSource::Archive {
+            // A restored archive has no checkpoint and no repositories to
+            // preflight: it starts as a new session and the summary follows.
+            let action = DashboardAction::RestoreArchivedSession {
+                workspace_id: wizard.workspace_id.clone(),
+                wiki_id: wizard.session_id.clone(),
+                profile_id,
+                target_template_id,
             };
             self.mode = Mode::Resume(wizard);
             return action;
@@ -1806,6 +1837,8 @@ impl DashboardState {
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             session_id: session.id.clone(),
+            source: ResumeSource::Session,
+            title: session.display_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: false,
             preparation: None,
@@ -1817,6 +1850,49 @@ impl DashboardState {
             profile,
             target,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
+
+            resource_allocation: None,
+            aws_options: BTreeMap::new(),
+            sizing_error: None,
+            discard_queue: false,
+            form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
+        });
+        self.resolve_all_aws_resource_options_action()
+    }
+
+    /// Open the resume wizard for an archived SessionWiki session. There is no
+    /// record to read a profile or target from, so the wizard opens on the
+    /// first of each and the person chooses.
+    pub(crate) fn begin_archive_restore(
+        &mut self,
+        wiki_id: String,
+        title: String,
+    ) -> DashboardAction {
+        if !self.config.sessionwiki.enabled {
+            self.notices
+                .set("Enable SessionWiki in Setup to restore archived sessions.");
+            return DashboardAction::None;
+        }
+        if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
+            self.notices
+                .set("Restoring needs a profile and a target template.");
+            return DashboardAction::None;
+        }
+        self.mode = Mode::Resume(ResumeWizard {
+            session_id: wiki_id,
+            source: ResumeSource::Archive,
+            title,
+            workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
+            moving: false,
+            preparation: None,
+            preparing: false,
+            preparation_request_id: None,
+            preparation_error: None,
+            step: WizardStep::Profile,
+
+            profile: 0,
+            target: 0,
+            mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
             aws_options: BTreeMap::new(),
@@ -1861,7 +1937,9 @@ impl DashboardState {
             .position(|target_id| target_id == &session.target_template_id)
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
-            session_id: session.id,
+            session_id: session.id.clone(),
+            source: ResumeSource::Session,
+            title: session.display_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,
@@ -1927,7 +2005,9 @@ impl DashboardState {
             return;
         };
         self.mode = Mode::Resume(ResumeWizard {
-            session_id: session.id,
+            session_id: session.id.clone(),
+            source: ResumeSource::Session,
+            title: session.display_title().to_owned(),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             moving: true,
             preparation: None,

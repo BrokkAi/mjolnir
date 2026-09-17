@@ -663,7 +663,7 @@ impl WizardDraft for ResumeWizard {
     }
 
     fn profile_count(&self, dashboard: &DashboardState) -> usize {
-        dashboard.compatible_profiles(&self.session_id).len()
+        dashboard.resume_wizard_profiles(self).len()
     }
 
     fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
@@ -700,7 +700,7 @@ impl ResumeWizard {
     /// The profile this resume or move lands on.
     fn destination_profile(&self, dashboard: &DashboardState) -> String {
         dashboard
-            .compatible_profiles(&self.session_id)
+            .resume_wizard_profiles(self)
             .get(self.profile)
             .map(|(id, _)| (*id).clone())
             .expect("resume wizard is only opened with a compatible profile")

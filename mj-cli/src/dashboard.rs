@@ -341,6 +341,10 @@ pub(crate) struct DashboardContext {
     /// produced. Copy redraws first, so it never reads a stale frame.
     selection_text: Option<String>,
 
+    /// The newest archive search this dialog asked for. The debounced task
+    /// reads it when it wakes and gives up when a later keystroke has since
+    /// replaced it.
+    pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
     pub(crate) web_request_generation: u64,
@@ -1032,6 +1036,7 @@ impl DashboardContext {
             aws_resource_options_tx,
             aws_options: Feed::new(aws_resource_options_rx),
             resolving_aws_resource_options: BTreeSet::new(),
+            wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
             import_task_tx,
@@ -2574,6 +2579,16 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
+        // The Archived tab lists the most recent indexed sessions before
+        // anything is typed, so the first search runs as the dialog opens.
+        if let Some((request_id, query)) = self.dashboard.next_wiki_search() {
+            crate::dashboard::io::spawn_wiki_search(
+                request_id,
+                query,
+                self.wiki_search_request.clone(),
+                self.dashboard_io_tx.clone(),
+            );
+        }
         let discovery_id = self.import_discovery_id;
         for (profile_id, profile) in self
             .controller

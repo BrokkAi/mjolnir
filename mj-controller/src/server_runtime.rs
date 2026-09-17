@@ -590,6 +590,22 @@ fn request_controller_reload(
     }
 }
 
+/// How often the housekeeping tick runs: hourly, unless the test-only
+/// environment variable `MJ_PRUNE_TICK_SECONDS` names something shorter.
+///
+/// Test-only: it exists so a live check of the SessionWiki archive job does not
+/// have to wait an hour, and it is read once per daemon.
+fn prune_tick_interval() -> Duration {
+    static INTERVAL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var("MJ_PRUNE_TICK_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map_or(Duration::from_secs(60 * 60), Duration::from_secs)
+    })
+}
+
 fn request_daemon_controller_reload(daemon_runtime: Arc<RuntimeState>, reason: &'static str) {
     tokio::spawn(async move {
         if let Err(error) = daemon_runtime.reload_controller().await {
@@ -867,7 +883,7 @@ pub async fn run_server(
         // Stored viewer state expires with the authentication that created it.
         // The sweep is hourly rather than on every request, because it is
         // housekeeping and nothing waits for it.
-        let mut prune_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        let mut prune_tick = tokio::time::interval(prune_tick_interval());
         let client_state_retention = options_session_ttl;
         let (action_done_tx, mut action_done_rx) = tokio::sync::mpsc::unbounded_channel::<(
             u64,
@@ -885,6 +901,7 @@ pub async fn run_server(
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut dictation_jobs = tokio::task::JoinSet::new();
+        let mut archive_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
@@ -1337,6 +1354,34 @@ pub async fn run_server(
                     }
                 }
                 _ = prune_tick.tick() => {
+                    // The hourly full SessionWiki sync. Session closes drive
+                    // bounded syncs; this one also reconciles sessions deleted
+                    // outside the daemon and picks up any bounded run that
+                    // failed.
+                    //
+                    // With `archive_after_days` set, the same tick runs the
+                    // archive job instead, because that job starts with the
+                    // full sync itself. It runs as a background task, and only
+                    // when no earlier one is still running: a pass over a large
+                    // corpus can outlast the tick.
+                    let archive_after_days = controller
+                        .config
+                        .sessionwiki
+                        .enabled
+                        .then_some(controller.config.sessionwiki.archive_after_days)
+                        .flatten();
+                    match archive_after_days {
+                        Some(days) if archive_jobs.is_empty() => {
+                            let runtime = daemon_runtime.clone();
+                            archive_jobs.spawn(async move {
+                                runtime.archive_aged_sessions(days).await
+                            });
+                        }
+                        Some(_) => tracing::debug!(
+                            "the previous SessionWiki archive pass is still running; skipping this tick"
+                        ),
+                        None => daemon_runtime.wiki().request_sync(true),
+                    }
                     // Only rows whose client id names a phone are considered:
                     // a terminal client's place in a conversation is not the
                     // phone's to expire.
@@ -1386,6 +1431,21 @@ pub async fn run_server(
                 job = dictation_jobs.join_next(), if !dictation_jobs.is_empty() => {
                     if let Some(Err(error)) = job {
                         tracing::warn!(%error, "web dictation task failed");
+                    }
+                }
+                job = archive_jobs.join_next(), if !archive_jobs.is_empty() => {
+                    match job {
+                        Some(Ok(Ok(0))) | None => {}
+                        Some(Ok(Ok(archived))) => tracing::debug!(
+                            archived, "the SessionWiki archive pass finished"
+                        ),
+                        Some(Ok(Err(error))) => tracing::warn!(
+                            error = %format!("{error:#}"),
+                            "the SessionWiki archive pass failed"
+                        ),
+                        Some(Err(error)) => tracing::warn!(
+                            %error, "the SessionWiki archive task panicked"
+                        ),
                     }
                 }
                 stored = client_state_rx.recv() => {
@@ -4253,6 +4313,7 @@ mod tests {
                 theme: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
+                sessionwiki: Default::default(),
                 legacy_startup: (),
                 profiles: ids
                     .iter()

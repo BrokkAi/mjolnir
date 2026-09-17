@@ -33,6 +33,9 @@ const login = document.querySelector('#login'),
   resumeDetailView = document.querySelector('#resume-detail-view'),
   resumeDetail = document.querySelector('#resume-detail'),
   resumeSearch = document.querySelector('#resume-search'),
+  resumeWikiNote = document.querySelector('#resume-wiki-note'),
+  resumeArchived = document.querySelector('#resume-archived'),
+  resumeArchivedRows = document.querySelector('#resume-archived-rows'),
   resumeDetailBack = document.querySelector('#resume-detail-back'),
   targetsPanel = document.querySelector('#targets'),
   quotaPanel = document.querySelector('#quota'),
@@ -132,7 +135,11 @@ async function request(url, options = {}) {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || response.statusText);
+    const failure = new Error(body.error || response.statusText);
+    // Callers that treat one status specially, such as SessionWiki being
+    // switched off, need the code and not only the sentence.
+    failure.status = response.status;
+    throw failure;
   }
   if (response.status === 202 || response.status === 204) return null;
   return response.json();
@@ -185,6 +192,7 @@ const ROUTE_PATTERNS = [
   [new RegExp(`^#subagents/(${ID})/(${ID})$`), ([parentId, sessionId]) => ({ name: 'conversation', sessionId, subagentParentId: parentId })],
   [new RegExp(`^#subagents/(${ID})$`), ([parentId]) => ({ name: 'dashboard', subagentParentId: parentId })],
   [new RegExp(`^#workspace/(${ID})/new$`), ([id]) => ({ name: 'new', workspaceId: id })],
+  [new RegExp(`^#workspace/(${ID})/resume/archive/(${ID})$`), ([workspaceId, wikiId]) => ({ name: 'resume', workspaceId, wikiId })],
   [new RegExp(`^#workspace/(${ID})/resume/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'resume', workspaceId, sessionId })],
   [new RegExp(`^#workspace/(${ID})/resume$`), ([id]) => ({ name: 'resume', workspaceId: id })],
   [new RegExp(`^#workspace/(${ID})/move/(${ID})$`), ([workspaceId, sessionId]) => ({ name: 'move', workspaceId, sessionId })],
@@ -212,6 +220,7 @@ function routeHash(next) {
     case 'new':
       return `#workspace/${next.workspaceId}/new`;
     case 'resume':
+      if (next.wikiId) return `#workspace/${next.workspaceId}/resume/archive/${next.wikiId}`;
       return next.sessionId
         ? `#workspace/${next.workspaceId}/resume/${next.sessionId}`
         : `#workspace/${next.workspaceId}/resume`;
@@ -263,7 +272,7 @@ function applyRoute() {
   route = parseRoute(location.hash);
   if (routeHash(previousRoute) !== routeHash(route)) {
     resumeRouteVisit += 1;
-    if (previousRoute.name === 'resume' && !previousRoute.sessionId && snapshot) {
+    if (previousRoute.name === 'resume' && !previousRoute.sessionId && !previousRoute.wikiId && snapshot) {
       resumeListState(previousRoute.workspaceId).scrollTop = window.scrollY;
     }
   }
@@ -345,7 +354,7 @@ function applyRoute() {
     const visit = resumeRouteVisit;
     requestAnimationFrame(() => {
       if (route.name !== 'resume' || resumeRouteVisit !== visit) return;
-      if (route.sessionId) {
+      if (route.sessionId || route.wikiId) {
         window.scrollTo(0, 0);
       } else {
         const state = resumeListState(route.workspaceId);
@@ -1684,7 +1693,10 @@ function resumeSearchText(session) {
 }
 
 function resumeRecencyLabel(session) {
-  const millis = resumeActivityMs(session);
+  return recencyLabel(resumeActivityMs(session));
+}
+
+function recencyLabel(millis) {
   if (!millis) return 'Unknown';
   const age = Math.max(0, serverClockMs() - millis);
   if (age < 60_000) return 'Just now';
@@ -1708,6 +1720,7 @@ function resumeRow(session) {
       session.profile_id || '',
     ].filter(Boolean).join(' · ')),
     el('span', 'resume-session-recent', resumeRecencyLabel(session)),
+    el('span', 'resume-session-snippet hidden'),
   );
   row.setAttribute('aria-label', `Resume ${session.title || session.id}`);
   row.onclick = () => {
@@ -1721,16 +1734,23 @@ function resumeRow(session) {
 function renderResumable() {
   const workspaceId = route.workspaceId || selectedWorkspaceId();
   const state = resumeListState(workspaceId);
-  const listMode = !route.sessionId;
+  const listMode = !route.sessionId && !route.wikiId;
   resumeListView?.classList.toggle('hidden', !listMode);
   resumeDetailView?.classList.toggle('hidden', listMode);
   if (!listMode) {
     renderResumeDetail();
     return;
   }
+  // The index answers on its own schedule; the list is drawn from what it has
+  // already said and redrawn when a later answer arrives.
+  startWikiSearchIfIdle(state.query);
   if (resumeSearch && document.activeElement !== resumeSearch) resumeSearch.value = state.query;
   const query = state.query.trim().toLocaleLowerCase();
-  const list = resumeSessions(workspaceId).filter(session => !query || resumeSearchText(session).includes(query));
+  // A session the index matched stays in the list even when its own title and
+  // project do not carry the words: the match is inside the transcript, and
+  // dropping the row would hide the one hit the person was looking for.
+  const list = resumeSessions(workspaceId).filter(session =>
+    !query || resumeSearchText(session).includes(query) || Boolean(wikiSnippetFor(session.id)));
   for (const id of resumeRows.keys()) {
     if (!list.some(session => session.id === id)) resumeRows.delete(id);
   }
@@ -1750,11 +1770,17 @@ function renderResumable() {
         session.profile_id || '',
       ].filter(Boolean).join(' · ');
       row.querySelector('.resume-session-recent').textContent = resumeRecencyLabel(session);
+      // A wiki hit for a session Mjolnir still has belongs on that session's
+      // own row rather than in the archived list.
+      const snippet = row.querySelector('.resume-session-snippet');
+      const matched = wikiSnippetFor(session.id);
+      snippet.classList.toggle('hidden', !matched);
+      snippet.replaceChildren(...(matched ? wikiSnippetNodes(matched) : []));
       return row;
     });
     reconcileChildren(resumable, rows);
   }
-
+  renderWikiSections();
 }
 
 function resumeChoiceField(label, id, items, value, onChange) {
@@ -1785,6 +1811,302 @@ function resumeChoiceField(label, id, items, value, onChange) {
   select.onchange = () => onChange(select.value);
   field.append(select);
   return field;
+}
+
+// ---------------------------------------------------------------------------
+// Archived sessions, from the SessionWiki index
+// ---------------------------------------------------------------------------
+//
+// Mjolnir's own copy of an old session eventually goes away; SessionWiki keeps
+// the transcript. Those rows are searched over HTTP, never on the render path:
+// typing schedules a request, the answer updates state, and the state is drawn
+// the next time the page renders. A request whose answer arrives after a later
+// one started is dropped, so the list always shows the newest query's result.
+
+const WIKI_SEARCH_DEBOUNCE_MS = 250;
+const WIKI_SEARCH_LIMIT = 50;
+const WIKI_BRIEF_CHARS = 24000;
+
+const wikiState = {
+  /// The text the next scheduled request will carry.
+  query: '',
+  /// Incremented per request; only the current one may write `rows`.
+  requestId: 0,
+  timer: null,
+  started: false,
+  searching: false,
+  rows: [],
+  error: '',
+  /// True once the daemon has said the index is not there to ask: the feature
+  /// is switched off, or this daemon has no wiki routes at all. Asking again
+  /// in this page load would only repeat the same answer.
+  disabled: false,
+  /// The one line the page shows about that.
+  notice: '',
+  /// Briefings and restore choices, kept per archived session id.
+  briefs: new Map(),
+  drafts: new Map(),
+};
+
+const wikiRowNodes = new Map();
+
+/// Ask for the current query after the typing pause. Each keystroke replaces
+/// the pending timer, so one request follows a burst of typing.
+function scheduleWikiSearch(query) {
+  wikiState.query = query;
+  wikiState.started = true;
+  if (wikiState.disabled) return;
+  if (wikiState.timer !== null) clearTimeout(wikiState.timer);
+  wikiState.timer = setTimeout(() => {
+    wikiState.timer = null;
+    // The timer's return value is nothing to the browser; handing the request
+    // back is what lets a test wait for the round trip it started.
+    return runWikiSearch();
+  }, WIKI_SEARCH_DEBOUNCE_MS);
+}
+
+/// Schedule the first search of a visit. Rendering calls this; it only ever
+/// sets a timer, so no fetch happens while the page is being drawn.
+function startWikiSearchIfIdle(query) {
+  if (wikiState.started || wikiState.disabled) return;
+  scheduleWikiSearch(query || '');
+}
+
+async function runWikiSearch() {
+  if (wikiState.disabled) return;
+  wikiState.requestId += 1;
+  const requestId = wikiState.requestId;
+  const query = wikiState.query.trim();
+  wikiState.searching = true;
+  try {
+    const body = await request(
+      `/api/v1/wiki/search?q=${encodeURIComponent(query)}&limit=${WIKI_SEARCH_LIMIT}`);
+    if (requestId !== wikiState.requestId) return;
+    wikiState.rows = body?.rows || [];
+    wikiState.error = '';
+  } catch (err) {
+    if (requestId !== wikiState.requestId) return;
+    if (err.status === 409 || err.status === 404) {
+      // 409 is SessionWiki switched off and worth a line; 404 is a daemon
+      // without these routes, which is not this page's news to report.
+      wikiState.disabled = true;
+      wikiState.rows = [];
+      wikiState.error = '';
+      wikiState.notice = err.status === 409
+        ? 'SessionWiki is disabled; archived sessions are not listed.'
+        : '';
+    } else {
+      wikiState.error = err.message;
+    }
+  } finally {
+    if (requestId === wikiState.requestId) {
+      wikiState.searching = false;
+      if (route.name === 'resume') renderResumable();
+    }
+  }
+}
+
+/// The rows the Archived section lists: the tool's own copy is gone and this
+/// daemon has no live session for them.
+function wikiArchivedRows() {
+  return wikiState.rows.filter(row => row.archived === true && !row.hel_session_id);
+}
+
+/// The matching text for a session Mjolnir still holds, if the search found
+/// one. Those hits belong on the live row, not in the archived list.
+function wikiSnippetFor(sessionId) {
+  const hit = wikiState.rows.find(row => row.hel_session_id === sessionId && row.snippet);
+  return hit ? hit.snippet : '';
+}
+
+/// SessionWiki marks the matched words with U+0002 and U+0003.
+function wikiSnippetNodes(text) {
+  const nodes = [];
+  let rest = String(text);
+  while (rest.length) {
+    const open = rest.indexOf('');
+    if (open === -1) {
+      nodes.push(el('span', '', rest));
+      break;
+    }
+    if (open > 0) nodes.push(el('span', '', rest.slice(0, open)));
+    const close = rest.indexOf('', open + 1);
+    if (close === -1) {
+      nodes.push(el('mark', '', rest.slice(open + 1)));
+      break;
+    }
+    nodes.push(el('mark', '', rest.slice(open + 1, close)));
+    rest = rest.slice(close + 1);
+  }
+  return nodes;
+}
+
+function wikiRowNode(row) {
+  let node = wikiRowNodes.get(row.id);
+  if (!node) {
+    node = button('', 'resume-session-row session archived-session-row', { wikiId: row.id });
+    node.type = 'button';
+    node.append(
+      el('span', 'resume-session-title'),
+      el('span', 'resume-session-meta'),
+      el('span', 'resume-session-recent'),
+      el('span', 'resume-session-snippet hidden'),
+    );
+    node.onclick = () => navigate({
+      name: 'resume',
+      workspaceId: route.workspaceId || selectedWorkspaceId(),
+      wikiId: row.id,
+    });
+    wikiRowNodes.set(row.id, node);
+  }
+  const title = row.title || row.id;
+  node.querySelector('.resume-session-title').textContent = title;
+  node.setAttribute('aria-label', `Restore ${title}`);
+  node.querySelector('.resume-session-meta').textContent = [
+    row.tool,
+    row.project,
+    `${row.msgs} message${row.msgs === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' · ');
+  node.querySelector('.resume-session-recent').textContent = recencyLabel(epochMs(row.started));
+  const snippet = node.querySelector('.resume-session-snippet');
+  const text = row.snippet || row.preview || '';
+  snippet.classList.toggle('hidden', !text);
+  snippet.replaceChildren(...(text ? wikiSnippetNodes(text) : []));
+  return node;
+}
+
+function renderWikiSections() {
+  if (!resumeArchived || !resumeArchivedRows || !resumeWikiNote) return;
+  const note = wikiState.disabled ? wikiState.notice : wikiState.error;
+  resumeWikiNote.textContent = note;
+  resumeWikiNote.classList.toggle('hidden', !note);
+  const rows = wikiState.disabled ? [] : wikiArchivedRows();
+  resumeArchived.classList.toggle('hidden', rows.length === 0);
+  for (const id of [...wikiRowNodes.keys()]) {
+    if (!rows.some(row => row.id === id)) wikiRowNodes.delete(id);
+  }
+  reconcileChildren(resumeArchivedRows, rows.map(wikiRowNode));
+}
+
+function wikiDraft(wikiId) {
+  let draft = wikiState.drafts.get(wikiId);
+  if (!draft) {
+    draft = {
+      profileId: snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : '',
+      targetId: snapshot?.targets?.length === 1 ? snapshot.targets[0].id : '',
+      error: '',
+    };
+    wikiState.drafts.set(wikiId, draft);
+  }
+  return draft;
+}
+
+/// Fetch a briefing once per session id and redraw when it lands. Called from
+/// the render, but the request itself runs in the background.
+function ensureWikiBrief(wikiId) {
+  let brief = wikiState.briefs.get(wikiId);
+  if (brief) return brief;
+  brief = { status: 'loading', markdown: '', error: '' };
+  wikiState.briefs.set(wikiId, brief);
+  request(`/api/v1/wiki/sessions/${encodeURIComponent(wikiId)}/brief?max_chars=${WIKI_BRIEF_CHARS}`)
+    .then(body => {
+      brief.status = 'ready';
+      brief.markdown = body?.markdown || '';
+    })
+    .catch(err => {
+      if (err.status === 409) wikiState.disabled = true;
+      brief.status = 'error';
+      brief.error = err.message;
+    })
+    .finally(() => {
+      if (route.name === 'resume' && route.wikiId === wikiId) renderResumeDetail();
+    });
+  return brief;
+}
+
+function renderWikiDetail(wikiId) {
+  const row = wikiState.rows.find(item => item.id === wikiId);
+  const draft = wikiDraft(wikiId);
+  const brief = ensureWikiBrief(wikiId);
+  const focused = document.activeElement;
+  const previousFocus = resumeDetail?.contains(focused)
+    ? focused.closest?.('[data-role]')?.dataset?.role
+    : null;
+  const card = el('article', 'card resume-card wiki-card');
+  card.dataset.wikiId = wikiId;
+  card.append(el('h3', '', row?.title || wikiId));
+  card.append(el('p', 'dim', [
+    row?.tool,
+    row?.project,
+    row ? `${row.msgs} message${row.msgs === 1 ? '' : 's'}` : '',
+    row?.started ? recencyLabel(epochMs(row.started)) : '',
+  ].filter(Boolean).join(' · ')));
+  card.append(el('p', '', 'This session is archived. Restoring starts a new session that opens with a summary of the old one.'));
+  const briefBox = el('div', 'wiki-brief');
+  if (brief.status === 'loading') briefBox.append(el('p', 'dim', 'Loading the transcript…'));
+  else if (brief.status === 'error') briefBox.append(el('p', 'resume-status error', brief.error));
+  else briefBox.append(renderMarkdown(brief.markdown));
+  card.append(briefBox);
+  const profileItems = (snapshot?.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
+  const targetItems = (snapshot?.targets || []).map(target => ({
+    id: target.id,
+    label: target.label || target.name || target.id,
+  }));
+  if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
+  if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
+  const profileField = resumeChoiceField('Profile', `wiki-profile-${wikiId}`, profileItems, draft.profileId, value => {
+    draft.profileId = value;
+    renderResumeDetail();
+  });
+  profileField.dataset.role = 'wiki-profile';
+  const targetField = resumeChoiceField('Target', `wiki-target-${wikiId}`, targetItems, draft.targetId, value => {
+    draft.targetId = value;
+    renderResumeDetail();
+  });
+  targetField.dataset.role = 'wiki-target';
+  card.append(profileField, targetField);
+  const submit = action('Restore', '', { action: 'wiki-restore', id: wikiId });
+  submit.disabled = submit.disabled || !draft.profileId || !draft.targetId;
+  const row2 = el('div', 'row');
+  row2.append(submit);
+  card.append(row2);
+  const pending = el('p', 'dim', pendingActions.has(`wiki-restore:${wikiId}`) ? 'Restoring…' : '');
+  pending.setAttribute('role', 'status');
+  card.append(pending);
+  const errorNode = el('p', 'error', draft.error);
+  errorNode.setAttribute('role', 'alert');
+  card.append(errorNode);
+  resumeDetail?.replaceChildren(card);
+  if (previousFocus) resumeDetail?.querySelector(`[data-role="${previousFocus}"] select`)?.focus({ preventScroll: true });
+}
+
+/// Start a new session from an archived one and follow it into its
+/// conversation, the same way a resumed session is followed.
+async function restoreWikiSession(wikiId) {
+  const key = `wiki-restore:${wikiId}`;
+  if (pendingActions.has(key)) return;
+  const draft = wikiDraft(wikiId);
+  if (!draft.profileId || !draft.targetId) return;
+  draft.error = '';
+  pendingActions.add(key);
+  renderRoute();
+  try {
+    const body = await request(`/api/v1/wiki/sessions/${encodeURIComponent(wikiId)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({
+        workspace_id: route.workspaceId || selectedWorkspaceId(),
+        profile_id: draft.profileId,
+        target_id: draft.targetId,
+      }),
+    });
+    await refresh();
+    if (body?.session_id) navigate({ name: 'conversation', sessionId: body.session_id });
+  } catch (err) {
+    draft.error = err.message;
+  } finally {
+    pendingActions.delete(key);
+    renderRoute();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2068,6 +2390,10 @@ function updateResumeCard(card, session, rebuild = false) {
 }
 
 function renderResumeDetail() {
+  if (route.wikiId) {
+    renderWikiDetail(route.wikiId);
+    return;
+  }
   const session = snapshot.sessions.find(item =>
     item.id === route.sessionId && item.workspace_id === route.workspaceId);
   if (!session) {
@@ -4884,6 +5210,9 @@ resumeDetailBack.onclick = () => {
 resumeSearch.oninput = () => {
   const state = resumeListState(route.workspaceId || selectedWorkspaceId());
   state.query = resumeSearch.value;
+  // The live list filters as you type; the index is asked once the typing
+  // pauses, and answers it in the background.
+  scheduleWikiSearch(state.query);
   renderResumable();
 };
 
@@ -5073,6 +5402,10 @@ sessions.addEventListener('contextmenu', event => {
 resumeDetail.onclick = async e => {
   const target = e.target.closest('button[data-action]');
   if (!target) return;
+  if (target.dataset.action === 'wiki-restore') {
+    await restoreWikiSession(target.dataset.id);
+    return;
+  }
   const session = snapshot?.sessions.find(item =>
     item.id === target.dataset.id && item.workspace_id === route.workspaceId);
   if (!session) return;

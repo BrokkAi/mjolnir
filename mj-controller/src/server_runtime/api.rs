@@ -32,6 +32,7 @@ use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, ne
 use mj_core::relay::RelayCommand;
 
 use crate::daemon::RuntimeState;
+use mj_client::daemon::{WikiRestoreRequest, WikiRow};
 
 /// How the follow-up task learns whether a session is still on its way up.
 ///
@@ -73,6 +74,38 @@ pub trait ExportRuntime: Send + Sync {
     fn close_subagent(self: Arc<Self>, _session_id: String) -> BoxFuture<'static, Result<()>> {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
+
+    /// Whether the user has switched SessionWiki on. The wiki routes answer
+    /// 409 when it is off rather than searching an index nobody asked for.
+    fn wiki_enabled(&self) -> bool {
+        false
+    }
+
+    /// Whether the index is stale enough that a query should ask for a sync.
+    fn wiki_sync_is_stale(&self) -> bool {
+        false
+    }
+
+    fn wiki_request_sync(&self) {}
+
+    fn wiki_search(&self, _query: String, _limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
+    }
+
+    fn wiki_brief(
+        &self,
+        _wiki_id: String,
+        _max_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki briefings are unavailable") })
+    }
+
+    fn wiki_restore(
+        self: Arc<Self>,
+        _request: WikiRestoreRequest,
+    ) -> BoxFuture<'static, Result<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
+    }
 }
 
 impl ExportRuntime for RuntimeState {
@@ -103,6 +136,42 @@ impl ExportRuntime for RuntimeState {
 
     fn close_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move { self.close_session(session_id).await })
+    }
+
+    fn wiki_enabled(&self) -> bool {
+        RuntimeState::wiki_enabled(self)
+    }
+
+    fn wiki_sync_is_stale(&self) -> bool {
+        crate::sessionwiki::sync_is_stale(self.wiki().last_success())
+    }
+
+    fn wiki_request_sync(&self) {
+        self.wiki().request_sync(false);
+    }
+
+    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+        Box::pin(async move { RuntimeState::wiki_search(self, query, limit).await })
+    }
+
+    fn wiki_brief(
+        &self,
+        wiki_id: String,
+        max_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<String>>> {
+        Box::pin(async move { RuntimeState::wiki_brief(self, wiki_id, max_chars).await })
+    }
+
+    fn wiki_restore(
+        self: Arc<Self>,
+        request: WikiRestoreRequest,
+    ) -> BoxFuture<'static, Result<Option<String>>> {
+        Box::pin(async move {
+            Ok(self
+                .restore_wiki_session(request)
+                .await?
+                .map(|registered| registered.session.id))
+        })
     }
 }
 
@@ -980,6 +1049,37 @@ impl SubagentBackend for ApiBackend {
         profile: &str,
     ) -> Option<mj_core::worker_launch::ProfileConfig> {
         self.profile_catalog.published(profile)
+    }
+
+    fn wiki_enabled(&self) -> bool {
+        self.exports.wiki_enabled()
+    }
+
+    fn wiki_sync_is_stale(&self) -> bool {
+        self.exports.wiki_sync_is_stale()
+    }
+
+    fn wiki_request_sync(&self) {
+        self.exports.wiki_request_sync();
+    }
+
+    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move { runtime.wiki_search(query, limit).await })
+    }
+
+    fn wiki_brief(
+        &self,
+        wiki_id: String,
+        max_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<String>>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move { runtime.wiki_brief(wiki_id, max_chars).await })
+    }
+
+    fn wiki_restore(&self, request: WikiRestoreRequest) -> BoxFuture<'_, Result<Option<String>>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move { runtime.wiki_restore(request).await })
     }
 
     fn start_subagent(
