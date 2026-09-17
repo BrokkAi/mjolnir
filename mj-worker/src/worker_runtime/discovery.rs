@@ -61,6 +61,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         execution_policy: policy,
         acp_activity: Default::default(),
         step_clock: Default::default(),
+        tools_in_flight: Default::default(),
     };
     probe(launch, spec.model).await
 }
@@ -288,6 +289,7 @@ for line in sys.stdin:
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: Default::default(),
             step_clock: Default::default(),
+            tools_in_flight: Default::default(),
         };
         let defaults = probe(launch.clone(), None).await.unwrap();
         assert_eq!(defaults.model.as_deref(), Some("default"));

@@ -39,6 +39,10 @@ pub struct LaunchSpec {
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
     pub step_clock: StepClock,
+    /// The tool calls the agent has open, shared with the durable relay that
+    /// records them. The turn stall watchdog reads this: a turn blocked in a
+    /// long tool call is working, however silent the protocol is (#1020).
+    pub tools_in_flight: mj_core::activity::ToolsInFlight,
 }
 
 pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {

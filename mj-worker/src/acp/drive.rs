@@ -919,17 +919,45 @@ pub(super) fn salvage_tool_call_update(update: &serde_json::Value) -> Option<Ses
 /// it. `MJ_TURN_STALL_TIMEOUT_MS` overrides the default; `0` disables the
 /// watchdog. Ten minutes clears a slow first token (seen at ~6 minutes) while
 /// still catching an adapter that stops relaying a turn it has completed.
+///
+/// This bound applies only while nothing is in flight. A turn with a tool call
+/// open is bounded by [`DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS`] instead.
 pub(super) const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
 
-pub(super) fn turn_stall_timeout() -> Option<Duration> {
-    let millis = match std::env::var("MJ_TURN_STALL_TIMEOUT_MS") {
-        Ok(value) => value
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(DEFAULT_TURN_STALL_TIMEOUT_MS),
-        Err(_) => DEFAULT_TURN_STALL_TIMEOUT_MS,
+/// How long one tool call may run before the worker gives up on the turn.
+/// `MJ_TURN_TOOL_CALL_TIMEOUT_MS` overrides it; `0` removes the bound.
+///
+/// Four hours, because failing a healthy long tool call loses work silently:
+/// the run in issue #1020 was ninety-seven minutes in, and evaluation lanes
+/// routinely block on a single build or test suite for tens of minutes. A
+/// bound that is too long only delays a failure the user can already end with
+/// `mj cancel`. It exists at all because a bridge that dies with a tool card
+/// left open would otherwise hold the turn open forever; a bridge *process*
+/// that exits is detected separately and at once, by the `child.wait()` arm of
+/// the select in `mj-worker/src/acp.rs`, and does not wait for this.
+pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
+
+fn timeout_from_environment(name: &str, default_ms: u64) -> Option<Duration> {
+    let millis = match std::env::var(name) {
+        Ok(value) => value.trim().parse::<u64>().unwrap_or(default_ms),
+        Err(_) => default_ms,
     };
     (millis > 0).then(|| Duration::from_millis(millis))
+}
+
+/// The two bounds a running turn is held to.
+pub(super) fn turn_stall_policy() -> mj_core::activity::StallPolicy {
+    mj_core::activity::StallPolicy {
+        silence: turn_stall_timeout(),
+        tool_call: timeout_from_environment(
+            "MJ_TURN_TOOL_CALL_TIMEOUT_MS",
+            DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS,
+        ),
+    }
+}
+
+pub(super) fn turn_stall_timeout() -> Option<Duration> {
+    timeout_from_environment("MJ_TURN_STALL_TIMEOUT_MS", DEFAULT_TURN_STALL_TIMEOUT_MS)
 }
 
 /// Whether a harness's turn ends only when the `session/prompt` reply arrives.
@@ -940,21 +968,65 @@ pub(super) fn turn_ends_only_on_prompt_reply(harness: HarnessKind) -> bool {
     !harness.marks_own_turn_end()
 }
 
-/// Milliseconds since the last ACP activity, saturating at zero.
-pub(super) fn acp_idle_millis(activity: &mj_core::relay::AcpActivityClock) -> u64 {
-    let now = mj_core::clock::epoch_millis();
-    now.saturating_sub(activity.last_at_ms().unwrap_or(now))
-        .max(0) as u64
+/// What the watchdog knows about the running turn right now.
+///
+/// Only two facts bear on it, and both are shared handles the relay fills:
+/// when anything last arrived, and which tool calls are open.
+pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::ActivityFacts {
+    mj_core::activity::ActivityFacts {
+        last_acp_activity_at_ms: spec.acp_activity.last_at_ms(),
+        tools_in_flight: spec.tools_in_flight.snapshot(),
+        ..mj_core::activity::ActivityFacts::default()
+    }
+}
+
+/// The stop reason recorded for a turn the watchdog failed.
+///
+/// A reason of its own rather than the bare word "error", so `mj wait`, the
+/// session summary and the recorded events all name what happened. Any stop
+/// reason that is not a known completion already classifies as an error, so
+/// nothing has to learn this string to keep working.
+pub(super) const TURN_STALLED_STOP_REASON: &str = "harness_inactive";
+
+fn stall_minutes(millis: u64) -> u64 {
+    (millis / 60_000).max(1)
 }
 
 /// The transcript message shown when a turn is failed for going silent. It says
 /// what happened and what the user can do, because the work may already be
 /// finished in the container even though mj never received it.
-pub(super) fn turn_stall_message(harness: HarnessKind, idle_ms: u64) -> String {
-    let minutes = (idle_ms / 60_000).max(1);
+pub(super) fn turn_stall_message(
+    harness: HarnessKind,
+    verdict: &mj_core::activity::StallVerdict,
+) -> String {
+    let reason = match verdict {
+        mj_core::activity::StallVerdict::Live => {
+            "mj stopped waiting for the harness".to_owned()
+        }
+        mj_core::activity::StallVerdict::Silent { silent_ms } => format!(
+            "mj received no activity from the harness for about {} minute(s) while a turn was \
+             running and no tool call was open, so it failed the turn",
+            stall_minutes(*silent_ms),
+        ),
+        mj_core::activity::StallVerdict::ToolCall {
+            tool_call_id,
+            running_ms,
+            silent_ms,
+        } => format!(
+            "the tool call {tool_call_id} ran for about {} minute(s), with no activity from the \
+             harness for about {} minute(s), which is past the limit on a single tool call, so mj \
+             failed the turn. Raise or remove that limit with MJ_TURN_TOOL_STALL_TIMEOUT_MS \
+             (milliseconds, 0 removes it)",
+            stall_minutes(*running_ms),
+            stall_minutes(*silent_ms),
+        ),
+    };
+    turn_stall_transcript_message(harness, &reason)
+}
+
+fn turn_stall_transcript_message(harness: HarnessKind, reason: &str) -> String {
     format!(
-        "The {name} turn stopped responding: mj received no activity from the harness for about \
-         {minutes} minute(s) while a turn was running, so it failed the turn. The work may already \
+        "The {name} turn stopped responding: {reason}. The work may already \
          be finished inside the container even though mj did not receive it.\n\
          - Inspect the workspace before discarding it: check `git status` and `git log` for edits \
          or a commit the model made.\n\

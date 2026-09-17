@@ -197,7 +197,8 @@ fn every_way_of_being_busy_is_work_in_flight() {
 
     // Rows where the session is doing something: it holds work *and* its
     // state says so.
-    let doing: Vec<(&str, fn(&mut ActivityFacts))> = vec![
+    type MakeBusy = fn(&mut ActivityFacts);
+    let doing: Vec<(&str, MakeBusy)> = vec![
         ("a prompt is in flight", |facts| {
             facts.prompt_started_at_ms = Some(NOW)
         }),
@@ -223,7 +224,7 @@ fn every_way_of_being_busy_is_work_in_flight() {
     // Rows where the session holds work without doing anything right now. Its
     // state is idle and it is still not safe to kill the worker: these are
     // separate questions and this is where they legitimately differ.
-    let holding: Vec<(&str, fn(&mut ActivityFacts))> = vec![
+    let holding: Vec<(&str, MakeBusy)> = vec![
         ("a command is queued", |facts| facts.queued_commands = 1),
         ("an agent terminal is open", |facts| {
             facts.active_agent_terminals = 1

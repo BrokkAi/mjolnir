@@ -799,6 +799,7 @@ impl ReviewerRole {
             native_session_may_have_history,
             acp_activity,
             step_clock,
+            tools_in_flight,
             accepted_config,
         ) = {
             let relay = relay.lock().expect("reviewer relay lock poisoned");
@@ -808,6 +809,7 @@ impl ReviewerRole {
                 relay.native_session_may_have_history(),
                 relay.acp_activity_clock(),
                 relay.step_clock(),
+                relay.tools_in_flight(),
                 Arc::new(Mutex::new(accepted_config)),
             )
         };
@@ -837,6 +839,7 @@ impl ReviewerRole {
             execution_policy: config.execution_policy,
             acp_activity,
             step_clock,
+            tools_in_flight,
         };
 
         let (commands_tx, commands_rx) = mpsc::channel(32);

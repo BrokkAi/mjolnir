@@ -330,11 +330,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // keeps a harness from outliving the session it was reviewing for.
     // One acquisition: a guard taken inside the struct literal below would
     // live until the literal ends and deadlock the next one.
-    let (acp_activity, step_clock, accepted_config) = {
+    let (acp_activity, step_clock, tools_in_flight, accepted_config) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
             relay.step_clock(),
+            relay.tools_in_flight(),
             Arc::new(Mutex::new(accepted_config)),
         )
     };
@@ -382,6 +383,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             execution_policy: config.execution_policy,
             acp_activity,
             step_clock,
+            tools_in_flight,
         };
         let mut acp_task = tokio::spawn(acp::run(acp_spec, acp_commands_rx, acp_events_tx));
 

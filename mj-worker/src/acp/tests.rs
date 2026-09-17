@@ -27,6 +27,7 @@ fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
     assert_eq!(
@@ -112,6 +113,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
     };
 
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
@@ -174,6 +176,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let servers = project_memory_mcp(&spec);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
@@ -227,6 +230,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
     assert_eq!(
@@ -433,6 +437,7 @@ fn resumed_session_request_keeps_load_context() {
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let load = serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
         .expect("load request serializes");
@@ -588,6 +593,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
             bridge_spec_path: None,
+            tools_in_flight: Default::default(),
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
@@ -1125,6 +1131,7 @@ async fn answer_to_ext_request(
         execution_policy,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1285,6 +1292,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1681,6 +1689,7 @@ async fn config_change_request(
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1854,6 +1863,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1934,6 +1944,7 @@ async fn policy_is_enforced_before_session_is_reported(
         execution_policy,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2118,6 +2129,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2219,6 +2231,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2648,6 +2661,7 @@ async fn exercise_image_steering(with_images: bool) {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2781,6 +2795,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2910,6 +2925,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2992,6 +3008,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
+            tools_in_flight: Default::default(),
         }
     }
 
@@ -3317,6 +3334,7 @@ mod terminals {
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
+            tools_in_flight: Default::default(),
         };
         let driver = tokio::spawn(async move {
             drive(
@@ -3826,6 +3844,7 @@ for line in sys.stdin:
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
+            tools_in_flight: Default::default(),
         },
         request_rx,
         event_tx,
@@ -3984,6 +4003,7 @@ while True:
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -4113,6 +4133,7 @@ while True:
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -4214,6 +4235,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         execution_policy: ExecutionPolicy::Unconstrained,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     };
 
     let error = tokio::time::timeout(
@@ -4275,6 +4297,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             execution_policy: ExecutionPolicy::Unconstrained,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
+            tools_in_flight: Default::default(),
         };
 
         let error = run(spec, request_rx, event_tx).await.unwrap_err();
@@ -4369,18 +4392,50 @@ fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
 
 #[test]
 fn the_stall_message_says_what_happened_and_what_to_do() {
-    let message = turn_stall_message(HarnessKind::Muse, 630_000);
-    assert!(message.contains("stopped responding"));
+    let silent = turn_stall_message(
+        HarnessKind::Muse,
+        &mj_core::activity::StallVerdict::Silent {
+            silent_ms: 630_000,
+        },
+    );
+    assert!(silent.contains("stopped responding"));
     assert!(
-        message.contains("10 minute"),
-        "reports the silence in minutes: {message}"
+        silent.contains("10 minute"),
+        "reports the silence in minutes: {silent}"
     );
     assert!(
-        message.contains("git log"),
-        "points the user at the workspace"
+        silent.contains("no tool call was open"),
+        "says why the short bound applied: {silent}"
     );
-    assert!(message.contains("Resend"), "tells the user how to continue");
-    assert!(message.contains("#1007"), "names the known issue");
+    assert!(silent.contains("Resend"), "tells the user how to continue");
+    assert!(silent.contains("#1007"), "names the known issue");
+
+    // A turn ended for one long tool call must name the call, how long it
+    // ran, and the knob that raises or removes the limit.
+    let tool = turn_stall_message(
+        HarnessKind::Muse,
+        &mj_core::activity::StallVerdict::ToolCall {
+            tool_call_id: "job_output-7".into(),
+            running_ms: 14_460_000,
+            silent_ms: 14_400_000,
+        },
+    );
+    assert!(tool.contains("job_output-7"), "names the tool call: {tool}");
+    assert!(tool.contains("241 minute"), "how long it ran: {tool}");
+    assert!(
+        tool.contains("MJ_TURN_TOOL_STALL_TIMEOUT_MS"),
+        "names the knob: {tool}"
+    );
+}
+
+/// The default bounds: ten minutes of silence, four hours for one tool call.
+/// The tool-call bound is long on purpose — failing a healthy long build loses
+/// work silently, while a bound that is too long only delays a failure the
+/// user can already end with a cancel.
+#[test]
+fn the_tool_call_bound_is_much_longer_than_the_silence_bound() {
+    assert_eq!(DEFAULT_TURN_STALL_TIMEOUT_MS, 600_000);
+    assert_eq!(DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS, 14_400_000);
 }
 
 /// Fake bridge that rejects every attempt to reload a recorded session and
@@ -4468,6 +4523,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     }
 }
 
@@ -4540,6 +4596,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
+            tools_in_flight: Default::default(),
         }
     }
     // The message as codex-acp wraps it.
@@ -4667,6 +4724,7 @@ fn missing_native_session_spec(
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
     }
 }
 

@@ -592,6 +592,12 @@ impl DurableRelay {
         self.step_clock.clone()
     }
 
+    /// The tool calls the agent has open. Shared, not copied: the ACP driver's
+    /// stall watchdog reads exactly what this relay records.
+    pub fn tools_in_flight(&self) -> mj_core::activity::ToolsInFlight {
+        self.foreground_tools.clone()
+    }
+
     /// The directory holding this relay's durable state.
     pub fn root(&self) -> &Path {
         &self.root

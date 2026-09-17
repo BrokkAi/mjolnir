@@ -166,6 +166,7 @@ impl PlanProbe {
             execution_policy: policy,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
+            tools_in_flight: Default::default(),
         };
         let driver = tokio::spawn(async move {
             drive(

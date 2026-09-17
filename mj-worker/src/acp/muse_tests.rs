@@ -39,6 +39,7 @@ pub(crate) async fn native_muse_turn(
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
     };
     let (commands, receiver) = mpsc::channel(16);
     let (sender, mut events) = mpsc::channel(128);
@@ -165,6 +166,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
+            tools_in_flight: Default::default(),
         };
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut events) = mpsc::channel(128);
