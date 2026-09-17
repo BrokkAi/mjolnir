@@ -1634,6 +1634,12 @@ pub struct RecoveryCandidate {
     /// the ownership marker. `None` means an older build left no stamp.
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// State of the session this resource is labelled for, when the
+    /// controller still tracks that session. A leftover resource the session
+    /// record no longer names can only be destroyed, never adopted, because
+    /// the session id is already taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_session: Option<SessionState>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

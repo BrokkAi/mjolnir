@@ -39,10 +39,17 @@ impl Controller {
         for (target_id, template) in &self.config.targets {
             match scan_target_workers(target_id, template, executor) {
                 Ok(candidates) => {
-                    scan.candidates
-                        .extend(candidates.into_iter().filter(|candidate| {
-                            !self.state.sessions.contains_key(&candidate.session_id)
-                        }))
+                    for mut candidate in candidates {
+                        if self.state_represents(&candidate) {
+                            continue;
+                        }
+                        candidate.tracked_session = self
+                            .state
+                            .sessions
+                            .get(&candidate.session_id)
+                            .map(|record| record.state);
+                        scan.candidates.push(candidate);
+                    }
                 }
                 Err(error) => scan.warnings.push(format!("target {target_id}: {error:#}")),
             }
@@ -59,6 +66,36 @@ impl Controller {
             restrict_to_instance(&mut scan);
         }
         scan
+    }
+
+    /// Whether the controller's own state still stands for this resource, so
+    /// recovery must leave it alone.
+    ///
+    /// A session stands for a resource only while some session record holds
+    /// the locator that names it; every record is checked, because a sub-agent
+    /// child borrows its parent's container and keeps the owner alive. Sharing
+    /// the session id is not enough: a failed provision and a failed move both
+    /// clear the locator and leave the session in `error`, and such a record
+    /// has no way of its own to reach the resource it left running.
+    ///
+    /// While the controller is provisioning or tearing a session down it is
+    /// writing that locator, so a record in one of those states is taken as
+    /// representing its resource whatever the locator says at this instant.
+    fn state_represents(&self, candidate: &RecoveryCandidate) -> bool {
+        if self
+            .state
+            .sessions
+            .get(&candidate.session_id)
+            .is_some_and(|record| locator_in_flight(record.state))
+        {
+            return true;
+        }
+        self.state.sessions.values().any(|record| {
+            record
+                .target
+                .as_ref()
+                .is_some_and(|locator| same_resource(locator, &candidate.locator))
+        })
     }
 
     pub async fn adopt_orphan_worker(
@@ -89,7 +126,13 @@ impl Controller {
                 }
                 (existing, false)
             }
-            Some(_) => bail!("session {session_id} is already tracked"),
+            // A leftover resource whose session id is still taken cannot be
+            // adopted: the id would have to name two sessions. Destroying it
+            // is the whole of what recovery can offer for such a resource.
+            Some(existing) => bail!(
+                "session {session_id} is already tracked in state {}; use `recover destroy` to remove a resource it left behind",
+                existing.state.as_str()
+            ),
             None => {
                 let scan = self.scan_orphan_workers(executor, true);
                 let candidate = scan
@@ -261,6 +304,102 @@ impl Controller {
         targets::close_plan(&backend, session_id)?
             .execute(executor)
             .map(|_| ())
+    }
+}
+
+/// States in which the controller is itself writing the session's locator.
+/// The record cannot be read as settled evidence about its resource then.
+const fn locator_in_flight(state: SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Provisioning
+            | SessionState::Checkpointing
+            | SessionState::Closing
+            | SessionState::Destroying
+    )
+}
+
+/// Whether two locators name the same managed resource. Only the identity
+/// fields count: borrowing, workspace storage, and a discovered address say
+/// how a session reaches the resource, not which resource it is.
+fn same_resource(left: &TargetLocator, right: &TargetLocator) -> bool {
+    match (left, right) {
+        (
+            TargetLocator::LocalBare { worker_root: left },
+            TargetLocator::LocalBare { worker_root: right },
+        ) => left == right,
+        (
+            TargetLocator::LocalPodman {
+                container_id: left, ..
+            },
+            TargetLocator::LocalPodman {
+                container_id: right,
+                ..
+            },
+        )
+        | (
+            TargetLocator::LocalDocker {
+                container_id: left, ..
+            },
+            TargetLocator::LocalDocker {
+                container_id: right,
+                ..
+            },
+        )
+        | (
+            TargetLocator::AppleContainer {
+                container_id: left, ..
+            },
+            TargetLocator::AppleContainer {
+                container_id: right,
+                ..
+            },
+        ) => left == right,
+        (
+            TargetLocator::AwsEc2 {
+                instance_id: left, ..
+            },
+            TargetLocator::AwsEc2 {
+                instance_id: right, ..
+            },
+        ) => left == right,
+        (
+            TargetLocator::SshBare {
+                host: left_host,
+                workspace: left_workspace,
+                ..
+            },
+            TargetLocator::SshBare {
+                host: right_host,
+                workspace: right_workspace,
+                ..
+            },
+        ) => left_host == right_host && left_workspace == right_workspace,
+        (
+            TargetLocator::SshPodman {
+                host: left_host,
+                container_id: left_container,
+                ..
+            },
+            TargetLocator::SshPodman {
+                host: right_host,
+                container_id: right_container,
+                ..
+            },
+        )
+        | (
+            TargetLocator::SshDocker {
+                host: left_host,
+                container_id: left_container,
+                ..
+            },
+            TargetLocator::SshDocker {
+                host: right_host,
+                container_id: right_container,
+                ..
+            },
+        ) => left_host == right_host && left_container == right_container,
+        _ => false,
     }
 }
 
@@ -596,6 +735,7 @@ fn scan_target_workers(
                         },
                         ownership: None,
                         instance_id: None,
+                        tracked_session: None,
                     })
                 })
                 .collect()
@@ -712,6 +852,7 @@ fn candidates_from_container_json(
                 locator,
                 ownership: None,
                 instance_id,
+                tracked_session: None,
             })
         })
         .collect())
@@ -843,6 +984,7 @@ fn candidates_from_aws_json(
             },
             ownership: None,
             instance_id: created_by,
+            tracked_session: None,
         });
     }
     Ok(result)
@@ -1344,6 +1486,135 @@ mod tests {
         );
     }
 
+    /// Answers the container listing the scan runs and fails everything else,
+    /// which is what a container with no worker in it does to the ownership
+    /// probe.
+    struct ListingExecutor {
+        listing: String,
+    }
+
+    impl CommandExecutor for ListingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.program == "podman" && command.args.first().map(String::as_str) == Some("ps")
+            {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: self.listing.clone().into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn podman_scan_controller(record: SessionRecord) -> (Controller, ListingExecutor) {
+        let mut config = Config::default();
+        config.targets.insert(
+            "local".into(),
+            TargetTemplate::LocalPodman {
+                container: ConfigContainer {
+                    build_cache: None,
+                    image: "ignored".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: Default::default(),
+                },
+            },
+        );
+        let listing = serde_json::to_string(&serde_json::json!([
+            {"Labels": {"dev.mj.managed": "true", "dev.mj.session": record.id}}
+        ]))
+        .unwrap();
+        let mut state = State::default();
+        state.sessions.insert(record.id.clone(), record);
+        (Controller { config, state }, ListingExecutor { listing })
+    }
+
+    fn errored_podman_session(session_id: &str) -> SessionRecord {
+        let mut record = adopted_session_record(
+            session_id,
+            "local",
+            "codex".into(),
+            HarnessKind::Codex,
+            "project".into(),
+            mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+            TargetLocator::LocalPodman {
+                container_id: targets::resource_name(session_id).unwrap(),
+                workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+                borrowed_from: None,
+            },
+        );
+        // What a failed provision or a failed move writes: the session is
+        // remembered, the locator that could tear its container down is not.
+        record.state = SessionState::Error;
+        record.target = None;
+        record
+    }
+
+    #[test]
+    fn a_container_an_errored_session_no_longer_names_is_an_orphan() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let (controller, executor) = podman_scan_controller(errored_podman_session(session_id));
+
+        let scan = controller.scan_orphan_workers(&executor, true);
+
+        let [candidate] = scan.candidates.as_slice() else {
+            panic!("the errored session's container was not offered: {scan:?}");
+        };
+        assert_eq!(candidate.session_id, session_id);
+        assert_eq!(
+            candidate.tracked_session,
+            Some(SessionState::Error),
+            "recovery must say the session id is still taken, so only destroy applies"
+        );
+    }
+
+    #[test]
+    fn a_container_a_session_still_names_is_not_an_orphan() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut record = errored_podman_session(session_id);
+        // The same failure, except the record kept its locator: the session's
+        // own forced destroy still reaches the container, so recovery stays out.
+        record.target = Some(TargetLocator::LocalPodman {
+            container_id: targets::resource_name(session_id).unwrap(),
+            workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+            borrowed_from: None,
+        });
+        let (controller, executor) = podman_scan_controller(record);
+
+        let scan = controller.scan_orphan_workers(&executor, true);
+
+        assert!(
+            scan.candidates.is_empty(),
+            "a container the controller can still drive was offered for destruction: {scan:?}"
+        );
+    }
+
+    #[test]
+    fn a_container_being_provisioned_is_not_an_orphan() {
+        let session_id = "0123456789abcdef0123456789abcdef";
+        let mut record = errored_podman_session(session_id);
+        // Provisioning writes the locator as it runs, so a scan that catches
+        // the window between `podman run` and locator discovery must not
+        // mistake the new container for a leftover.
+        record.state = SessionState::Provisioning;
+        let (controller, executor) = podman_scan_controller(record);
+
+        let scan = controller.scan_orphan_workers(&executor, true);
+
+        assert!(
+            scan.candidates.is_empty(),
+            "a container still being provisioned was offered for destruction: {scan:?}"
+        );
+    }
+
     fn candidate(session_id: &str, instance_id: Option<&str>) -> RecoveryCandidate {
         RecoveryCandidate {
             session_id: session_id.to_owned(),
@@ -1354,6 +1625,7 @@ mod tests {
             },
             ownership: None,
             instance_id: instance_id.map(str::to_owned),
+            tracked_session: None,
         }
     }
 
