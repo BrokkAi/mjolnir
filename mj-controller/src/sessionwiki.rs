@@ -78,16 +78,9 @@ fn live_tokens(state: &State) -> BTreeMap<String, i64> {
         .sessions
         .iter()
         .filter(|(_, record)| record.state != mj_core::state::SessionState::Stopped)
-        .filter_map(|(session_id, record)| {
+        .filter_map(|(session_id, _)| {
             let watermark = activity.get(session_id)?;
-            let token = watermark.map(|ms| ms / 1000).unwrap_or_else(|| {
-                // No relay watermark yet: the record's own last update is the
-                // next best thing, and it moves as the session does.
-                parse_time(&record.updated_at)
-                    .map(|updated| updated.timestamp())
-                    .unwrap_or_default()
-            });
-            Some((session_id.clone(), token))
+            Some((session_id.clone(), watermark.unwrap_or_default() / 1000))
         })
         .collect()
 }
@@ -353,13 +346,26 @@ impl Adapter for MjolnirAdapter {
         // its own token replaces any checkpoint token it has: the conversation
         // has moved on since that checkpoint was written. Listing it also
         // keeps reconciliation from archiving a running session.
-        let live = self
+        let sessions = self
             .sessions
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .live
-            .clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let live = sessions.live.clone();
         tokens.extend(live);
+        // A rename changes the record and not the conversation, so the
+        // record's own last update is part of the change token. Without it a
+        // renamed session would keep its old title in the index for as long as
+        // its transcript stood still.
+        for (session_id, token) in tokens.iter_mut() {
+            let updated = sessions
+                .records
+                .get(session_id)
+                .and_then(|record| parse_time(&record.updated_at))
+                .map(|updated| updated.timestamp());
+            if let Some(updated) = updated {
+                *token = (*token).max(updated);
+            }
+        }
         let keys = tokens
             .into_iter()
             .map(|(session_id, token)| (self.key_for(&session_id), token))
@@ -1451,6 +1457,36 @@ mod tests {
             stopped.parse_key(&key_of(running)).unwrap().title,
             "the harness title",
             "a stopped session is parsed from its checkpoint"
+        );
+    }
+
+    /// Renaming a session leaves its conversation untouched, so only the
+    /// record's own last update can tell the index the title moved.
+    #[test]
+    fn a_rename_moves_a_session_change_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let adapter = adapter(directory.path(), session_id);
+        let before = adapter.store().expect("a shared store").keys[0].1;
+
+        {
+            let mut sessions = adapter.sessions.lock().unwrap();
+            let record = sessions.records.get_mut(session_id).unwrap();
+            record.session_title_override = Some("the new name".into());
+            record.updated_at = "2099-01-01T00:00:00Z".into();
+        }
+        let after = adapter.store().expect("a shared store").keys[0].1;
+        assert!(
+            after > before,
+            "a renamed session is re-indexed: {before} then {after}"
+        );
+        assert_eq!(
+            adapter
+                .parse_key(&format!("{}/{session_id}", directory.path().display()))
+                .unwrap()
+                .title,
+            "the new name"
         );
     }
 
