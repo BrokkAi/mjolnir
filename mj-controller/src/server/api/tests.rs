@@ -415,7 +415,7 @@ impl SubagentBackend for FakeBackend {
     fn turn_summary(
         &self,
         _session_id: String,
-        _turn_start_position: u64,
+        _turn: TurnSpan,
     ) -> BoxFuture<'_, AnyResult<TurnSummary>> {
         Box::pin(async {
             self.summary

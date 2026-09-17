@@ -25,7 +25,7 @@ use crate::quota::ProfileQuota;
 use crate::controller::{Controller, SessionExportLayout};
 use crate::server::api::{
     BundleExport, ExportError, PushedBranch, StartFollowup, StartStatus, SubagentBackend,
-    TranscriptPage, TurnState, TurnSummary,
+    TranscriptPage, TurnSpan, TurnState, TurnSummary,
 };
 use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandOutput};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, new_command_id};
@@ -452,12 +452,15 @@ impl ApiBackend {
                     .into_iter()
                     .map(|relation| {
                         let record = self.exports.session_record(&relation.child_session_id);
+                        // This listing reports state only; a child's report is
+                        // collected through wait.
                         let (state, _, _) = subagent_status(
                             record.as_ref(),
                             summaries
                                 .get(&relation.child_session_id)
                                 .and_then(Option::as_ref),
                             starts.get(&relation.child_session_id),
+                            None,
                         );
                         serde_json::json!({
                             "child_session_id":relation.child_session_id,
@@ -519,9 +522,21 @@ impl ApiBackend {
                     }
                     let complete = summaries.iter().all(|(id, summary)| {
                         let record = self.exports.session_record(id);
-                        subagent_status(record.as_ref(), summary.as_ref(), starts.get(id)).2
+                        subagent_status(record.as_ref(), summary.as_ref(), starts.get(id), None).2
                     });
                     if complete || tokio::time::Instant::now() >= deadline {
+                        // Only read now, and only here: this is the one answer
+                        // that has to be the child's own report.
+                        let ids: Vec<String> = summaries.iter().map(|(id, _)| id.clone()).collect();
+                        let reports = tokio::task::spawn_blocking(move || {
+                            ids.into_iter()
+                                .map(|id| {
+                                    crate::database::load_materialized_finished_turn_message(&id)
+                                        .map(|message| (id, message))
+                                })
+                                .collect::<Result<std::collections::BTreeMap<_, _>>>()
+                        })
+                        .await??;
                         let agents = summaries
                             .into_iter()
                             .map(|(id, summary)| {
@@ -530,6 +545,7 @@ impl ApiBackend {
                                     record.as_ref(),
                                     summary.as_ref(),
                                     starts.get(&id),
+                                    reports.get(&id).and_then(Option::as_deref),
                                 );
                                 serde_json::json!({"child_session_id":id,"state":state,"output":output})
                             })
@@ -697,10 +713,20 @@ fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
         .min()
 }
 
+/// Classify a child session and choose the output its parent reads.
+///
+/// `finished_turn_message` is what the child's last finished turn answered.
+/// A finished child reports that, not the newest agent message anywhere in its
+/// session: a harness records messages outside any turn — a resume notice, for
+/// one — and those would otherwise stand in for the child's report. It falls
+/// back to the session-wide message only for a child with no recorded turn
+/// span, which has no report of its own to lose. A running child keeps showing
+/// its newest message, which is the point of looking at a running child.
 fn subagent_status(
     record: Option<&mj_core::state::SessionRecord>,
     summary: Option<&mj_core::state::MaterializedSessionSummary>,
     start: Option<&StartStatus>,
+    finished_turn_message: Option<&str>,
 ) -> (String, Option<String>, bool) {
     if let Some(StartStatus::Failed { message }) = start {
         return ("error".into(), Some(message.clone()), true);
@@ -723,9 +749,13 @@ fn subagent_status(
         }
         _ if start_pending => ("running".into(), None, false),
         _ => match summary {
-            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => {
-                ("completed".into(), summary.last_agent_message.clone(), true)
-            }
+            Some(summary) if matches!(summary.execution, MaterializedExecutionState::Idle) => (
+                "completed".into(),
+                finished_turn_message
+                    .map(str::to_owned)
+                    .or_else(|| summary.last_agent_message.clone()),
+                true,
+            ),
             Some(summary) => ("running".into(), summary.last_agent_message.clone(), false),
             None => ("preparing".into(), None, false),
         },
@@ -1198,11 +1228,15 @@ impl SubagentBackend for ApiBackend {
     fn turn_summary(
         &self,
         session_id: String,
-        turn_start_position: u64,
+        turn: TurnSpan,
     ) -> BoxFuture<'_, Result<TurnSummary>> {
         Box::pin(async move {
             blocking("load turn summary", move || {
-                crate::database::load_materialized_turn_summary(&session_id, turn_start_position)
+                crate::database::load_materialized_turn_summary(
+                    &session_id,
+                    turn.start_position,
+                    turn.completed_position,
+                )
             })
             .await
         })

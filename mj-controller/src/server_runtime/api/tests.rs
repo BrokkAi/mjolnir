@@ -81,7 +81,7 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
         message: "model is unavailable".into(),
     };
     assert_eq!(
-        subagent_status(None, None, Some(&status)),
+        subagent_status(None, None, Some(&status), None),
         ("error".into(), Some("model is unavailable".into()), true)
     );
 }

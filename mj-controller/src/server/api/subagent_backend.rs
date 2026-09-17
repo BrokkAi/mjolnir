@@ -84,11 +84,11 @@ pub trait SubagentBackend: Send + Sync {
     /// Durable turn state for a session with no live actor.
     fn turn_state(&self, session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>>;
 
-    /// Summarize the turn that started at this transcript position.
+    /// Summarize the turn that covers these transcript positions.
     fn turn_summary(
         &self,
         session_id: String,
-        turn_start_position: u64,
+        turn: TurnSpan,
     ) -> BoxFuture<'_, AnyResult<TurnSummary>>;
 
     /// Apply model, effort, and the first prompt once a new session is ready.

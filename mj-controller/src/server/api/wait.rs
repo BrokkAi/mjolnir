@@ -196,12 +196,8 @@ pub(super) async fn finish_wait(
         .as_ref()
         .and_then(|turn| turn.diagnostic.clone());
     session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
-    let summary = match decision.turn_start_position {
-        Some(position) => Some(
-            backend
-                .turn_summary(session_id.to_owned(), position)
-                .await?,
-        ),
+    let summary = match decision.turn {
+        Some(turn) => Some(backend.turn_summary(session_id.to_owned(), turn).await?),
         None => None,
     };
     Ok(WaitResponse {
@@ -210,7 +206,7 @@ pub(super) async fn finish_wait(
             .as_ref()
             .filter(|turn| {
                 turn.turn_start_position.is_some()
-                    && turn.turn_start_position == decision.turn_start_position
+                    && turn.turn_start_position == decision.turn.map(|turn| turn.start_position)
             })
             .and_then(|turn| turn.diagnostic.clone()),
         pending_elicitations: if decision.outcome == WaitOutcome::InputRequired {
@@ -223,7 +219,7 @@ pub(super) async fn finish_wait(
             .as_ref()
             .filter(|turn| {
                 turn.turn_start_position.is_some()
-                    && turn.turn_start_position == decision.turn_start_position
+                    && turn.turn_start_position == decision.turn.map(|turn| turn.start_position)
             })
             .and_then(|turn| turn.usage.clone()),
         outcome: decision.outcome,

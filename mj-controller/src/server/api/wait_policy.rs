@@ -41,6 +41,17 @@ pub struct WaitObservation {
     pub start_status: Option<StartStatus>,
 }
 
+/// The transcript positions one finished turn covers.
+///
+/// A turn is a span, not a starting point. The session keeps recording after a
+/// turn ends — a harness resume notice arrives as an agent message of its own —
+/// and only what falls inside the span is that turn's work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnSpan {
+    pub start_position: u64,
+    pub completed_position: u64,
+}
+
 /// What one pass of the wait loop concluded, before the turn summary is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitDecision {
@@ -48,8 +59,9 @@ pub struct WaitDecision {
     pub stop_reason: Option<String>,
     pub message: Option<String>,
     pub turn_id: Option<u64>,
-    /// Where the finished turn began, so its summary can be read.
-    pub turn_start_position: Option<u64>,
+    /// Which transcript positions the finished turn covers, so its summary can
+    /// be read.
+    pub turn: Option<TurnSpan>,
 }
 
 impl WaitDecision {
@@ -59,7 +71,7 @@ impl WaitDecision {
             stop_reason: None,
             message,
             turn_id: None,
-            turn_start_position: None,
+            turn: None,
         }
     }
 
@@ -89,7 +101,10 @@ impl WaitDecision {
             stop_reason,
             message,
             turn_id: outcome.accepted_ordinal,
-            turn_start_position: outcome.turn_start_position,
+            turn: outcome.turn_start_position.map(|start_position| TurnSpan {
+                start_position,
+                completed_position: outcome.completed_ordinal,
+            }),
         }
     }
 }
@@ -203,7 +218,7 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
                 .active_turn
                 .as_ref()
                 .and_then(|turn| turn.accepted_ordinal),
-            turn_start_position: None,
+            turn: None,
         });
     }
     match target {
