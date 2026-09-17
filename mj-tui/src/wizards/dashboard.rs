@@ -1,50 +1,33 @@
 use super::*;
 
-fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
-    let mut form = wizard.form.borrow_mut();
+fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &W) {
+    let mut form = wizard.form().borrow_mut();
     form.begin_update();
     form.set_action_role(
         WizardControl::Cancel,
         mj_chat::components::ActionRole::Cancel,
     );
     form.set_action_role(WizardControl::Back, mj_chat::components::ActionRole::Back);
-    let initial = step_initial(wizard.step);
-    match wizard.step {
+    let initial = step_initial(wizard.step());
+    match wizard.step() {
         WizardStep::Profile => {
             form.declare_with_enabled(
                 WizardControl::ProfileList,
                 ControlKind::ChoiceList {
-                    len: dashboard.config.enabled_profiles().count(),
-                    selected: wizard.profile,
+                    len: wizard.profile_count(dashboard),
+                    selected: wizard.profile(),
                 },
                 true,
             );
             declare_wizard_buttons(&mut form, false, true);
         }
-        WizardStep::Bundle => {
-            form.declare_with_enabled(
-                WizardControl::BundleList,
-                ControlKind::ChoiceList {
-                    len: dashboard.config.bundles.len(),
-                    selected: wizard.bundle,
-                },
-                !dashboard.config.bundles.is_empty(),
-            );
-            form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
-            declare_wizard_buttons(&mut form, true, !dashboard.config.bundles.is_empty());
-        }
         WizardStep::Target => {
-            let target_id = nth_key(&dashboard.config.targets, wizard.target);
-            let enabled = dashboard.target_readiness_rejection(&target_id).is_none()
-                && (!matches!(
-                    dashboard.config.targets.get(&target_id),
-                    Some(TargetTemplate::AwsEc2 { .. })
-                ) || wizard.resource_allocation.is_some());
+            let enabled = target_advance_enabled(dashboard, wizard);
             form.declare_with_enabled(
                 WizardControl::TargetList,
                 ControlKind::ChoiceList {
                     len: dashboard.config.targets.len(),
-                    selected: wizard.target,
+                    selected: wizard.target(),
                 },
                 true,
             );
@@ -54,101 +37,32 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
                     .config
                     .targets
                     .keys()
-                    .map(|id| dashboard.target_readiness_rejection(id).is_none())
+                    .map(|id| wizard.target_rejection(dashboard, id).is_none())
                     .collect(),
             );
             declare_wizard_buttons(&mut form, true, enabled);
         }
-        WizardStep::ProjectDirectory => {
-            form.declare_with_enabled(
-                WizardControl::ProjectDirectory,
-                ControlKind::TextField,
-                true,
-            );
-            declare_wizard_buttons(&mut form, true, true);
-        }
-        WizardStep::NewBundle => {
-            form.declare_with_enabled(
-                WizardControl::NewBundleRepositories,
-                ControlKind::ChoiceList {
-                    len: wizard.new_bundle_repositories.len(),
-                    selected: wizard.new_bundle_selected,
-                },
-                !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
-            );
-            form.declare_with_enabled(WizardControl::NewBundleSource, ControlKind::TextField, true);
-            form.declare_with_enabled(
-                WizardControl::Add,
-                ControlKind::Button,
-                !wizard.bundle_creation_in_flight && !wizard.new_bundle_source.trim().is_empty(),
-            );
-            form.declare_with_enabled(
-                WizardControl::NewBundleRemove,
-                ControlKind::Button,
-                !wizard.bundle_creation_in_flight && !wizard.new_bundle_repositories.is_empty(),
-            );
-            form.declare_with_enabled(
-                WizardControl::Cancel,
-                ControlKind::Button,
-                !wizard.bundle_creation_in_flight,
-            );
-            form.declare_with_enabled(
-                WizardControl::Back,
-                ControlKind::Button,
-                !wizard.bundle_creation_in_flight,
-            );
-            form.declare_with_enabled(
-                WizardControl::Next,
-                ControlKind::Button,
-                !wizard.bundle_creation_in_flight
-                    && !wizard.new_bundle_sources_for_submit().is_empty(),
-            );
-        }
-        WizardStep::Mounts => declare_mount_controls(&mut form, &wizard.mounts),
+        WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
             let can_attach = mount_history_host(
-                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
+                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target())],
             )
             .is_some();
-            if !wizard.mounts.mounts.is_empty() {
+            if !wizard.mounts().mounts.is_empty() {
                 form.declare_with_enabled(
                     WizardControl::ReviewAttachments,
                     ControlKind::ChoiceList {
-                        len: wizard.mounts.mounts.len(),
-                        selected: wizard.mounts.history_index,
+                        len: wizard.mounts().mounts.len(),
+                        selected: wizard.mounts().history_index,
                     },
                     true,
                 );
             }
-            // Isolated targets have no worktree choice, so the control only
-            // exists for a bare project directory.
-            if is_bare_project_target(
-                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
-            ) {
-                form.declare_with_enabled(
-                    WizardControl::CreateManagedWorktree,
-                    ControlKind::Checkbox,
-                    wizard
-                        .selected_worktree_options(&dashboard.config)
-                        .is_some_and(|options| options.available),
-                );
-            }
-            form.declare_with_enabled(
-                WizardControl::MjolnirSubagents,
-                ControlKind::Checkbox,
-                wizard.subagent_choice_applies(&dashboard.config),
-            );
-            let ready = !is_bare_project_target(
-                &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target)],
-            ) || wizard
-                .selected_worktree_options(&dashboard.config)
-                .is_some()
-                || wizard.remote_preflight_error.is_some();
-            declare_review_controls(
-                &mut form,
-                can_attach,
-                ready && !wizard.remote_preflight_in_flight,
-            );
+            let submit_enabled = wizard.declare_review_extras(dashboard, &mut form);
+            declare_review_controls(&mut form, can_attach, submit_enabled);
+        }
+        WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
+            wizard.declare_extra_step(dashboard, &mut form)
         }
     }
     form.end_frame(initial);
@@ -163,83 +77,11 @@ pub(super) fn invalidate_move_preparation(wizard: &mut ResumeWizard) {
     }
 }
 
-fn declare_resume_controls(dashboard: &DashboardState, wizard: &ResumeWizard) {
-    let mut form = wizard.form.borrow_mut();
-    form.begin_update();
-    form.set_action_role(
-        WizardControl::Cancel,
-        mj_chat::components::ActionRole::Cancel,
-    );
-    form.set_action_role(WizardControl::Back, mj_chat::components::ActionRole::Back);
-    let initial = step_initial(wizard.step);
-    match wizard.step {
-        WizardStep::Profile => {
-            form.declare_with_enabled(
-                WizardControl::ProfileList,
-                ControlKind::ChoiceList {
-                    len: dashboard.compatible_profiles(&wizard.session_id).len(),
-                    selected: wizard.profile,
-                },
-                true,
-            );
-            declare_wizard_buttons(&mut form, false, true);
-        }
-        WizardStep::Target => {
-            let enabled = wizard.can_advance_target(dashboard);
-            form.declare_with_enabled(
-                WizardControl::TargetList,
-                ControlKind::ChoiceList {
-                    len: dashboard.config.targets.len(),
-                    selected: wizard.target,
-                },
-                true,
-            );
-            form.set_row_enabled(
-                WizardControl::TargetList,
-                dashboard
-                    .config
-                    .targets
-                    .keys()
-                    .map(|id| {
-                        dashboard
-                            .resume_target_rejection(&wizard.session_id, id)
-                            .is_none()
-                    })
-                    .collect(),
-            );
-            declare_wizard_buttons(&mut form, true, enabled);
-        }
-        WizardStep::Mounts => declare_mount_controls(&mut form, &wizard.mounts),
-        WizardStep::Review => {
-            let target_id = nth_key(&dashboard.config.targets, wizard.target);
-            let can_attach = mount_history_host(&dashboard.config.targets[&target_id]).is_some();
-            if !wizard.mounts.mounts.is_empty() {
-                form.declare_with_enabled(
-                    WizardControl::ReviewAttachments,
-                    ControlKind::ChoiceList {
-                        len: wizard.mounts.mounts.len(),
-                        selected: wizard.mounts.history_index,
-                    },
-                    true,
-                );
-            }
-            let has_queue = wizard.has_queued_work(dashboard);
-            if has_queue {
-                form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
-            }
-            let submit_enabled = !wizard.moving
-                || wizard.preparation.is_some()
-                || wizard.preparation_error.is_some();
-            declare_review_controls(&mut form, can_attach, submit_enabled);
-        }
-        WizardStep::Bundle | WizardStep::NewBundle | WizardStep::ProjectDirectory => {
-            unreachable!("invalid resume wizard step")
-        }
-    }
-    form.end_frame(initial);
-}
-
-fn declare_wizard_buttons(form: &mut Dialog<WizardControl>, has_back: bool, next_enabled: bool) {
+pub(super) fn declare_wizard_buttons(
+    form: &mut Dialog<WizardControl>,
+    has_back: bool,
+    next_enabled: bool,
+) {
     form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, true);
     if has_back {
         form.declare_with_enabled(WizardControl::Back, ControlKind::Button, true);
@@ -321,7 +163,7 @@ impl DashboardState {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
-        declare_new_controls(self, &wizard);
+        declare_wizard_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
         {
@@ -391,7 +233,7 @@ impl DashboardState {
         event: Event,
         mut wizard: ResumeWizard,
     ) -> DashboardAction {
-        declare_resume_controls(self, &wizard);
+        declare_wizard_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
         {

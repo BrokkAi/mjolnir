@@ -14,7 +14,7 @@
 // trait carries accessors whose first caller arrives in a later step.
 #![allow(dead_code)]
 
-use super::dashboard::invalidate_move_preparation;
+use super::dashboard::{declare_wizard_buttons, invalidate_move_preparation};
 use super::*;
 
 /// A draft edit that may invalidate an answer a background task already owes
@@ -114,6 +114,34 @@ pub(crate) trait WizardDraft: Sized {
     );
     /// Handles a bare key that only one wizard answers.
     fn handle_extra_shortcut(&mut self, dashboard: &DashboardState, key: KeyEvent);
+    /// How many rows the profile picker shows.
+    fn profile_count(&self, dashboard: &DashboardState) -> usize;
+    /// Why this draft cannot use `target_id`, or `None` when it can.
+    fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String>;
+    /// Declares the controls of a step only one wizard has.
+    fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>);
+    /// Declares the review controls only one wizard has and answers whether
+    /// its primary button is enabled.
+    fn declare_review_extras(
+        &self,
+        dashboard: &DashboardState,
+        form: &mut Dialog<WizardControl>,
+    ) -> bool;
+}
+
+/// Whether the target step's Next is enabled: the draft must be able to use
+/// the selected target, and an EC2 target must already have a size.
+pub(crate) fn target_advance_enabled<W: WizardDraft>(
+    dashboard: &DashboardState,
+    wizard: &W,
+) -> bool {
+    let target_id = nth_key(&dashboard.config.targets, wizard.target());
+    wizard.target_rejection(dashboard, &target_id).is_none()
+        && (wizard.resource_allocation().is_some()
+            || !matches!(
+                dashboard.config.targets.get(&target_id),
+                Some(TargetTemplate::AwsEc2 { .. })
+            ))
 }
 
 impl WizardDraft for NewWizard {
@@ -355,6 +383,108 @@ impl WizardDraft for NewWizard {
 
     /// Creation has no key of its own outside the form.
     fn handle_extra_shortcut(&mut self, _dashboard: &DashboardState, _key: KeyEvent) {}
+
+    fn profile_count(&self, dashboard: &DashboardState) -> usize {
+        dashboard.config.enabled_profiles().count()
+    }
+
+    fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
+        dashboard.target_readiness_rejection(target_id)
+    }
+
+    fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>) {
+        match self.step {
+            WizardStep::Bundle => {
+                form.declare_with_enabled(
+                    WizardControl::BundleList,
+                    ControlKind::ChoiceList {
+                        len: dashboard.config.bundles.len(),
+                        selected: self.bundle,
+                    },
+                    !dashboard.config.bundles.is_empty(),
+                );
+                form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
+                declare_wizard_buttons(form, true, !dashboard.config.bundles.is_empty());
+            }
+            WizardStep::ProjectDirectory => {
+                form.declare_with_enabled(
+                    WizardControl::ProjectDirectory,
+                    ControlKind::TextField,
+                    true,
+                );
+                declare_wizard_buttons(form, true, true);
+            }
+            WizardStep::NewBundle => {
+                form.declare_with_enabled(
+                    WizardControl::NewBundleRepositories,
+                    ControlKind::ChoiceList {
+                        len: self.new_bundle_repositories.len(),
+                        selected: self.new_bundle_selected,
+                    },
+                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
+                );
+                form.declare_with_enabled(
+                    WizardControl::NewBundleSource,
+                    ControlKind::TextField,
+                    true,
+                );
+                form.declare_with_enabled(
+                    WizardControl::Add,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight && !self.new_bundle_source.trim().is_empty(),
+                );
+                form.declare_with_enabled(
+                    WizardControl::NewBundleRemove,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight && !self.new_bundle_repositories.is_empty(),
+                );
+                form.declare_with_enabled(
+                    WizardControl::Cancel,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight,
+                );
+                form.declare_with_enabled(
+                    WizardControl::Back,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight,
+                );
+                form.declare_with_enabled(
+                    WizardControl::Next,
+                    ControlKind::Button,
+                    !self.bundle_creation_in_flight
+                        && !self.new_bundle_sources_for_submit().is_empty(),
+                );
+            }
+            step => unreachable!("{step:?} is declared by declare_wizard_controls"),
+        }
+    }
+
+    fn declare_review_extras(
+        &self,
+        dashboard: &DashboardState,
+        form: &mut Dialog<WizardControl>,
+    ) -> bool {
+        let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
+        // Isolated targets have no worktree choice, so the control only
+        // exists for a bare project directory.
+        if is_bare_project_target(target) {
+            form.declare_with_enabled(
+                WizardControl::CreateManagedWorktree,
+                ControlKind::Checkbox,
+                self.selected_worktree_options(&dashboard.config)
+                    .is_some_and(|options| options.available),
+            );
+        }
+        form.declare_with_enabled(
+            WizardControl::MjolnirSubagents,
+            ControlKind::Checkbox,
+            self.subagent_choice_applies(&dashboard.config),
+        );
+        let ready = !is_bare_project_target(target)
+            || self.selected_worktree_options(&dashboard.config).is_some()
+            || self.remote_preflight_error.is_some();
+        ready && !self.remote_preflight_in_flight
+    }
 }
 
 impl WizardDraft for ResumeWizard {
@@ -517,6 +647,29 @@ impl WizardDraft for ResumeWizard {
         {
             self.discard_queue = !self.discard_queue;
         }
+    }
+
+    fn profile_count(&self, dashboard: &DashboardState) -> usize {
+        dashboard.compatible_profiles(&self.session_id).len()
+    }
+
+    fn target_rejection(&self, dashboard: &DashboardState, target_id: &str) -> Option<String> {
+        dashboard.resume_target_rejection(&self.session_id, target_id)
+    }
+
+    fn declare_extra_step(&self, _dashboard: &DashboardState, _form: &mut Dialog<WizardControl>) {
+        unreachable!("invalid resume wizard step")
+    }
+
+    fn declare_review_extras(
+        &self,
+        dashboard: &DashboardState,
+        form: &mut Dialog<WizardControl>,
+    ) -> bool {
+        if self.has_queued_work(dashboard) {
+            form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
+        }
+        !self.moving || self.preparation.is_some() || self.preparation_error.is_some()
     }
 }
 
