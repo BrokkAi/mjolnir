@@ -23,6 +23,8 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-17 02:15Z) Milestone 6: web viewer parity, commit 77f7cc80.
 - [x] (2026-09-17 03:30Z) Milestone 7: documentation, commits `b345b976` (docs site) and `fd16c8d9` (`.agents/docs/sessionwiki-fork.md`); follow-up ticket https://github.com/BrokkAi/mjolnir/issues/1066. The docs build the Docs workflow runs passes, including its internal link check.
 - [x] (2026-09-17 04:30Z) Milestone 8: `brokk-sessionwiki` 0.28.0 published to crates.io from the fork's `publish` branch (commit 33f67f6, tag `brokk-v0.28.0`) at the user's request; Mjolnir's workspace dependency switched to the registry crate and re-locked; install command in `sessions.md` updated.
+- [ ] Milestone 9: SessionWiki always on. Daemon side: remove the `enabled` switch, isolate the index for overridden data directories, refuse an index at another schema version, explicit startup sync, persisted "first build done" marker, sync status in the search response, title and project matching, live sessions indexed from the stored transcript.
+- [ ] Milestone 10: one search path in both UIs. The search box is disabled and reads "Indexing…" until the first build completes; typing queries the index only; the local filter is removed; the archive-restore wizard shows the archived session's title; background results verified to redraw in a live terminal.
 
 ## Surprises & Discoveries
 
@@ -139,6 +141,15 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - Decision: The web restore sends `workspace_id`, `profile_id`, and `target_id` only; there is no project-directory control in the browser yet.
   Rationale: The viewer already has profile and target selectors, and the daemon defaults the project directory to the repository above the archived worktree. A directory picker is a larger piece of UI; it is recorded as an open item.
   Date/Author: 2026-09-17, Fable with Opus.
+- Decision: SessionWiki is always on. The `[sessionwiki] enabled` key is removed; `archive_after_days` stays opt-in because it deletes data.
+  Rationale: The user sees no reason to make indexing optional, and a review found no downside that a switch fixes better than a direct guard. The three hazards are each guarded directly (milestone 9): test daemons writing to the real index, an index at another schema version, and first-build cost.
+  Date/Author: 2026-09-17, Jonathan Ellis with Fable.
+- Decision: There is one search path. The Resume search box queries the index through the daemon and nothing else; the local row filter is removed. The box is disabled and reads "Indexing…" until this index has completed one full sync. Routine top-up syncs do not disable it.
+  Rationale: The user does not want two search paths to maintain. Disabling only for the first build avoids the box disabling itself on every open, since opening the dialog triggers a top-up when the last sync is over 60 seconds old.
+  Date/Author: 2026-09-17, Jonathan Ellis with Fable.
+- Decision: Live sessions are indexed from the daemon's stored transcript, not only checkpointed ones. The daemon's search also matches title and project, which SessionWiki's own search does not (it matches message text only, `src/index.rs` `search` and `search_like`).
+  Rationale: With the local filter gone, a running session that has never been checkpointed, or a session known by a title that never appears in its messages, would otherwise be unfindable.
+  Date/Author: 2026-09-17, Fable, accepted by Jonathan Ellis.
 
 ## Outcomes & Retrospective
 
@@ -327,6 +338,28 @@ The exact commands, for the user to run:
     cargo build
 
 Schema-version caveat, and the reason this is worth doing beyond the publishing rule: once the crate is on crates.io, a binary from `cargo install brokk-sessionwiki` is built from the same source as the library Mjolnir links, so it matches the index schema version by construction. The `cargo install --git ... --tag v0.28.0-mj.2` command in `docs/src/content/docs/sessions.md` should change to `cargo install brokk-sessionwiki` in the same change that moves the dependency, so the documented tool and the linked library cannot drift.
+
+### Milestone 9: always on, daemon side
+
+Config. Remove `enabled` from `SessionWikiConfig` as a setting. Version 10 configs containing `enabled` exist on master builds, and the struct uses `deny_unknown_fields`, so keep the key readable and ignored exactly the way `Config.show_stopped_sessions` is kept (`#[serde(default, skip_serializing)]`, documented as deprecated), and follow the existing version pattern if a bump is required. Remove it from the setup schema, labels, and help. Remove every `config.sessionwiki.enabled` check in `mj-controller` and `mj-tui`, the 409 responses, the "Enable SessionWiki in Setup" messages, and the tests that assert them.
+
+Index isolation. SessionWiki chooses its index directory from the `SESSIONWIKI_DATA` environment variable, else the platform data directory. With indexing always on, any daemon started with an overridden data directory (every test and e2e daemon) would otherwise walk the user's real stores and write the user's real index. Rule: at process start, where `apply_instance_flag` in `mj-core/src/config.rs` already records `MJ_INSTANCE` with `std::env::set_var`, if the `MJ_DATA_DIR` override is set and `SESSIONWIKI_DATA` is not, set `SESSIONWIKI_DATA` to `<MJ_DATA_DIR>/sessionwiki`. Named instances without a data-dir override keep sharing the real index. The daemon child process must inherit it. Audit every test and script that starts a daemon (`tests/e2e/`, `mj-cli/tests/`, `scripts/test-*.sh`, and unit tests that reach `sync_blocking` or `query_rows`) and prove none can reach the real index; a test that cannot be isolated this way must set `SESSIONWIKI_DATA` itself.
+
+Schema guard. Before `sessionwiki::index::open()` or `open_readonly()`, if the index file exists, open it read-only with `rusqlite` directly and read `PRAGMA user_version`. If it is non-zero and differs from `sessionwiki::index::SCHEMA_VERSION`, do not open it through SessionWiki at all (its `open` would drop the cache): skip syncs and answer searches with no rows and status `version_mismatch`. Log once at warn level.
+
+First-build marker. `<data_dir>/sessionwiki-built` holds the schema version and is written after the first successful full sync. The index counts as built when the marker's version matches and the index file exists. Status is `indexing` until then.
+
+Status. The search response becomes `{ rows, status }` with `status = { state: "ready" | "indexing" | "version_mismatch", topping_up: bool }`. `topping_up` is true while any sync is running. The daemon-protocol reply carries the same. Make the startup sync an explicit `request_sync(true)` when the runtime starts, with a comment, instead of relying on the interval's immediate first tick.
+
+Title and project matching. For a non-empty query, union the full-text hits with index rows whose title or project contains the query case-insensitively (from `recent` with a generous limit, or a direct read-only query over `files`), full-text hits first, de-duplicated by session id, capped at `limit`.
+
+Live sessions. `MjolnirAdapter::store()` also lists every record that is not `Stopped` and has a stored transcript, under the same key `<sessions_dir>/<id>`, with token = `last_activity_at_ms / 1000`. `parse_key` for such a session reads the materialized transcript from the daemon's database (the reader the reviewer uses for `MaterializedSession`; see `mj-controller/src/database.rs` and `seed_from_session` in `review_host.rs`) and maps it exactly as the checkpoint path does. A `Stopped` session keeps using its checkpoint. Because a live key is listed, reconciliation never archives a running session; destroying it removes the key and the row becomes archived at the next sync. Unit-test both sources and the transition.
+
+Acceptance, isolated environment: start a session, send a prompt, do not close it; `GET /wiki/search?q=<word from the reply>` returns it with `hel_session_id` set within one top-up. Rename a session to a title that appears nowhere in its messages and find it by that title. Start a daemon with a fresh `MJ_DATA_DIR` and no `SESSIONWIKI_DATA` and confirm the index is created under it and the real index's modification time does not change. Set `PRAGMA user_version = 7` on a copy of an index and confirm `version_mismatch` and that the file is not modified.
+
+### Milestone 10: one search path in both UIs
+
+Terminal (`mj-tui/src/resume.rs`, drivers in `mj-cli/src/dashboard.rs`) and web (`mj-controller/src/web/viewer.js`): remove the local text filter. With an empty query the tabs list what they list today. With a query, each tab shows only rows the index returned: the Mjolnir tab rows whose session id is a hit's `hel_session_id`, the Import tab rows whose harness and native id match a hit, the Archived tab the archived hits; each with its snippet. Opening the dialog issues the empty query, which also fetches `status`. While `status.state` is `indexing` the search box is disabled with the placeholder "Indexing…" and the client re-queries every five seconds until it is `ready`; tabs and row navigation keep working. `version_mismatch` disables the box with "SessionWiki index is at a different version". While `topping_up` is true the client re-issues the current query every two seconds, at most ten times, so results refresh when the top-up ends. The archive-restore wizard title reads " Restore · <step> " and shows the archived session's title. Verify in a live terminal against the isolated daemon that search and preview results arriving in the background redraw the dialog under master's redraw-once-per-wakeup model. Update the unit, node, and Playwright tests; remove tests of the local filter. Update `docs/src/content/docs/sessions.md`, `configuration.md`, and `web-viewer.md`, and add a release note line about the first index build on upgrade.
 
 ## Concrete Steps
 
@@ -709,3 +742,5 @@ Dependency: `sessionwiki` via git tag during development (milestone 2), via crat
 Revision note (2026-09-16): first version, written after a review of an earlier draft that found the crates.io publishing conflict, the cross-instance reconciliation flip-flop, and the schema-skew hazard. Those findings are recorded in Surprises & Discoveries and their resolutions in the Decision Log.
 
 Revision note (2026-09-17): milestone 8 completed. The first draft said the publish step needed credentials the automated work lacked; that was an unchecked assumption, and a crates.io credentials file was present. The user authorized the publish explicitly. The version number matches upstream's 0.28.0 deliberately: crate versions are scoped to the crate name, so there is no clash.
+
+Revision note (2026-09-17): added milestones 9 and 10 after the user decided SessionWiki should be always on with one search path. The three hazards of always-on and their direct guards, and the finding that SessionWiki's search does not match titles, are recorded in the Decision Log and in milestone 9.
