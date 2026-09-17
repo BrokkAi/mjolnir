@@ -435,7 +435,6 @@ pub(super) fn worker_launch_config(
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
-    environment.remove(mj_core::worker_launch::DISCOVER_LOGIN_PATH_ENV);
     let mut project_memory =
         project_memory_launch(session, bundle, &workspace, &target_profile_home)?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);

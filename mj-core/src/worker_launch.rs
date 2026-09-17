@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ExecutionPolicy, HarnessKind};
 
-pub const DISCOVER_LOGIN_PATH_ENV: &str = "MJ_DISCOVER_LOGIN_PATH";
 /// Directory inside the primary worker root that holds everything the reviewer owns.
 pub const REVIEWER_DIR: &str = "reviewer";
 /// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].

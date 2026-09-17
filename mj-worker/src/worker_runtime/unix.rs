@@ -21,7 +21,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
-use super::{AcpSupervisorSpec, CredentialEndpoint, DISCOVER_LOGIN_PATH_ENV, WorkerLaunchConfig};
+use super::{AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig};
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
@@ -99,7 +99,6 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     });
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create worker root {}", root.display()))?;
-    config.environment.remove(DISCOVER_LOGIN_PATH_ENV);
     let socket = root.join("control.sock");
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
@@ -510,7 +509,6 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
     let mut environment = config.target_environment.clone();
     environment.extend(config.environment);
     config.environment = environment;
-    config.environment.remove(DISCOVER_LOGIN_PATH_ENV);
     let prepared = super::harness::resolve(
         config.harness_runtime,
         config.harness,
