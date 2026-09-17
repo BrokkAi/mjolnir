@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -15,6 +15,9 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
+        }
+        "sessionwiki" => {
+            json!({"enabled":false,"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
             json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
@@ -111,6 +114,8 @@ pub(super) fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
+        "sessionwiki" => "SessionWiki",
+        "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
         "build_cache" => "Build cache (mbx)",
         "directory" => "Cache directory",
@@ -283,6 +288,12 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "review" => {
             "Choose an agent profile for reviews. Model and effort can use the profile defaults."
+        }
+        "sessionwiki" => {
+            "Index closed sessions into your SessionWiki index so one search covers every coding tool."
+        }
+        "archive_after_days" => {
+            "Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. The session's branch in the repository is kept; the checkpoint and any image attachments are deleted. Leave empty to keep every session."
         }
         "subagents" => {
             "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."

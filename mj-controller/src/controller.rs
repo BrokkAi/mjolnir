@@ -2,7 +2,7 @@
 
 mod backend;
 mod cache_host;
-mod checkpoint;
+pub(crate) mod checkpoint;
 mod git_cache;
 mod lifecycle;
 mod mbx;

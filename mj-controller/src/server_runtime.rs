@@ -1337,6 +1337,11 @@ pub async fn run_server(
                     }
                 }
                 _ = prune_tick.tick() => {
+                    // The hourly full SessionWiki sync. Session closes drive
+                    // bounded syncs; this one also reconciles sessions deleted
+                    // outside the daemon and picks up any bounded run that
+                    // failed.
+                    daemon_runtime.wiki().request_sync(true);
                     // Only rows whose client id names a phone are considered:
                     // a terminal client's place in a conversation is not the
                     // phone's to expire.
@@ -4253,6 +4258,7 @@ mod tests {
                 theme: Default::default(),
                 phone: Default::default(),
                 review: Default::default(),
+                sessionwiki: Default::default(),
                 legacy_startup: (),
                 profiles: ids
                     .iter()

@@ -126,6 +126,8 @@ pub struct RuntimeState {
     /// Turn review runs here, in the process that owns every session, so a
     /// review happens whether the terminal, the phone, or nobody is attached.
     review_host: TurnReviewHost,
+    /// Publishes checkpointed sessions into the user's SessionWiki index.
+    wiki: crate::sessionwiki::WikiIndexer,
 }
 
 /// One monotonic cursor shared by daemon snapshots and their wake-up feed.
@@ -406,12 +408,36 @@ impl RuntimeState {
             next_notice_id: AtomicU64::new(1),
             review_config,
             review_host,
+            wiki: crate::sessionwiki::WikiIndexer::spawn(),
         }
     }
 
     /// The review host, for the surfaces that project and resolve reviews.
     pub fn review_host(&self) -> &TurnReviewHost {
         &self.review_host
+    }
+
+    /// The SessionWiki indexer, for the surfaces and jobs that trigger a sync.
+    pub fn wiki(&self) -> &crate::sessionwiki::WikiIndexer {
+        &self.wiki
+    }
+
+    /// React to the durable outcome of one lifecycle operation.
+    ///
+    /// A session that has just reached `Stopped` is checkpointed and torn
+    /// down, so its transcript is complete and ready to index. This is the one
+    /// place the daemon sees every operation's reloaded durable state.
+    fn note_lifecycle_outcome(&self, session_id: &str) {
+        let stopped = {
+            let controller = self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            durable_session_state(&controller, session_id) == Some(SessionState::Stopped)
+        };
+        if stopped {
+            self.wiki.request_sync(false);
+        }
     }
 
     pub fn allocate_revision(&self) -> u64 {
@@ -955,6 +981,7 @@ impl RuntimeState {
                             );
                         }
                     }
+                    state.note_lifecycle_outcome(&operation_session_id);
                     if let Err(error) =
                         reach_test_hook("lifecycle_reservation_before_result_publication").await
                     {
