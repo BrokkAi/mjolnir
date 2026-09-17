@@ -488,7 +488,7 @@ impl DashboardState {
                         }
                         wizard.target = selected;
                         let action = if target_changed {
-                            self.prepare_new_target(&mut wizard)
+                            self.prepare_wizard_target(&mut wizard)
                         } else {
                             DashboardAction::None
                         };
@@ -594,7 +594,7 @@ impl DashboardState {
                                 .resume_target_rejection(&wizard.session_id, &target_id)
                                 .is_none()
                         {
-                            let action = self.prepare_resume_target(&mut wizard);
+                            let action = self.prepare_wizard_target(&mut wizard);
                             self.mode = Mode::Resume(wizard);
                             return action;
                         }
@@ -1115,7 +1115,7 @@ impl DashboardState {
                 let action = if wizard.resource_allocation.is_some() {
                     DashboardAction::None
                 } else {
-                    self.prepare_new_target(&mut wizard)
+                    self.prepare_wizard_target(&mut wizard)
                 };
                 self.mode = Mode::New(wizard);
                 action
@@ -1546,59 +1546,38 @@ impl DashboardState {
         result: std::result::Result<Vec<SessionResourceAllocation>, String>,
     ) {
         match self.mode.clone() {
-            Mode::New(mut wizard) => {
-                if nth_key(&self.config.targets, wizard.target) != target_id {
-                    if let Ok(options) = result {
-                        wizard.aws_options.insert(target_id.to_string(), options);
-                        self.mode = Mode::New(wizard);
-                    }
-                    return;
-                }
-                apply_aws_options(
-                    target_id,
-                    result,
-                    &mut wizard.aws_options,
-                    &mut wizard.resource_allocation,
-                    &mut wizard.sizing_error,
-                    None,
-                );
-                self.mode = Mode::New(wizard);
-            }
-            Mode::Resume(mut wizard) => {
-                if nth_key(&self.config.targets, wizard.target) != target_id {
-                    if let Ok(options) = result {
-                        wizard.aws_options.insert(target_id.to_string(), options);
-                        self.mode = Mode::Resume(wizard);
-                    }
-                    return;
-                }
-                let previous = self
-                    .state
-                    .sessions
-                    .get(&wizard.session_id)
-                    .and_then(|session| session.resource_allocation.as_ref());
-                apply_aws_options(
-                    target_id,
-                    result,
-                    &mut wizard.aws_options,
-                    &mut wizard.resource_allocation,
-                    &mut wizard.sizing_error,
-                    previous,
-                );
-                self.mode = Mode::Resume(wizard);
-            }
+            Mode::New(wizard) => self.apply_wizard_aws_options(wizard, target_id, result),
+            Mode::Resume(wizard) => self.apply_wizard_aws_options(wizard, target_id, result),
             _ => {}
         }
     }
 
-    fn prepare_new_target(&self, wizard: &mut NewWizard) -> DashboardAction {
-        self.prepare_target(
-            wizard.target,
-            &wizard.aws_options,
-            &mut wizard.resource_allocation,
-            &mut wizard.sizing_error,
-            None,
-        )
+    fn apply_wizard_aws_options<W: WizardDraft>(
+        &mut self,
+        mut wizard: W,
+        target_id: &str,
+        result: std::result::Result<Vec<SessionResourceAllocation>, String>,
+    ) {
+        if nth_key(&self.config.targets, wizard.target()) != target_id {
+            // Sizes for a target the draft is not on are cached and nothing
+            // else; a failure for such a target is not the draft's problem.
+            if let Ok(options) = result {
+                wizard.sizing_mut().0.insert(target_id.to_string(), options);
+                self.mode = wizard.into_mode();
+            }
+            return;
+        }
+        let previous = wizard.previous_allocation(self);
+        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
+        apply_aws_options(
+            target_id,
+            result,
+            aws_options,
+            allocation,
+            sizing_error,
+            previous,
+        );
+        self.mode = wizard.into_mode();
     }
 
     pub(super) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
@@ -1651,17 +1630,15 @@ impl DashboardState {
         mj_client::target::resume_compatibility(session, &self.config, target_id).err()
     }
 
-    fn prepare_resume_target(&self, wizard: &mut ResumeWizard) -> DashboardAction {
-        let previous = self
-            .state
-            .sessions
-            .get(&wizard.session_id)
-            .and_then(|session| session.resource_allocation.as_ref());
+    fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {
+        let previous = wizard.previous_allocation(self);
+        let target_index = wizard.target();
+        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
         self.prepare_target(
-            wizard.target,
-            &wizard.aws_options,
-            &mut wizard.resource_allocation,
-            &mut wizard.sizing_error,
+            target_index,
+            aws_options,
+            allocation,
+            sizing_error,
             previous,
         )
     }
@@ -2078,7 +2055,7 @@ impl DashboardState {
                 let action = if wizard.resource_allocation.is_some() {
                     DashboardAction::None
                 } else {
-                    self.prepare_resume_target(&mut wizard)
+                    self.prepare_wizard_target(&mut wizard)
                 };
                 self.mode = Mode::Resume(wizard);
                 action
