@@ -17,7 +17,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-16 18:00Z) Plan written and committed (milestone 0).
 - [x] (2026-09-16 20:05Z) Milestone 1: rusqlite 0.40 bump in mj-worker, mj-cli, mj-controller; full `cargo test`; commit `4994dc15`.
 - [x] (2026-09-16 20:40Z) Milestone 2: fork branch `mj-embed` commit 529b8fe, tag `v0.28.0-mj.1` pushed to `jbellis/sessionwiki`, upstream PR https://github.com/youdie006/sessionwiki/pull/26; Mjolnir git dependency added, `cargo build` and `cargo about generate` pass.
-- [ ] Milestone 3: `[sessionwiki]` config section, Mjolnir adapter, daemon indexer; `sessionwiki list --tool mjolnir` shows a closed session.
+- [x] (2026-09-17 00:50Z) Milestone 3: `[sessionwiki]` config section (CONFIG_VERSION 10), `MjolnirAdapter`, `WikiIndexer` with close and hourly triggers; commit `60ed7bed`. Live check: two closed sessions listed by `sessionwiki list --tool mjolnir` and shown by `sessionwiki brief <id> --tools`.
 - [ ] Milestone 4: HTTP API and client wrappers; terminal Resume dialog search, preview, Archived tab, restore.
 - [ ] Milestone 5: archive job driven by `archive_after_days`.
 - [ ] Milestone 6: web viewer parity.
@@ -38,6 +38,14 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: the workspace run took 207s for that suite against 86s for the crate alone.
 - Observation: The fork's `main` already carried upstream through 0.28.0 when milestone 2 started, so the tag was cut as `v0.28.0-mj.1` rather than the 0.26.0 name in the first draft. The tag was created once and never moved after Mjolnir referenced it.
   Evidence: `git log --oneline mj-embed` shows the 0.27.0 and 0.28.0 release merges below commit 529b8fe.
+- Observation: The adapter's view of controller state goes stale during a long sync, and nothing later corrects it. A sync pass walks every other tool's store before it reaches the Mjolnir adapter; on this machine the first pass took about twenty minutes (746 Claude Code and 1639 Codex sessions). Sessions closed during that walk were indexed with no record at all: empty project, no start or end time, and the title guessed from the first prompt. Because the checkpoint's modification time is the change token and the checkpoint never changes again, no later sync re-parses them.
+  Evidence: the first live check produced rows with `project = ''` and `started = NULL` while `mj.sqlite3` held the correct `project_directory` and `updated_at`. Resolved by `MjolnirAdapter::reloading`, which re-reads controller state in `store()`, the moment the indexer reaches this adapter. `from_state` is kept as the fixed-snapshot form the unit test uses. Re-verified after touching the archives to change their tokens: project, title, start, and end are all populated.
+- Observation: `sessionwiki brief` prints `Tool: unknown` for a Mjolnir session. `index::session_from_index` resolves the display tool through `adapters::by_name`, and the Mjolnir adapter is not in the standalone binary's registry.
+  Evidence: `src/index.rs` lines 1957-1959 in the fork. Harmless for `list --tool mjolnir` and for search, but milestone 4's preview would show it too. If that matters, a fourth fork change should pass the row's own tool string through.
+- Observation: SessionWiki's per-session progress output is very loud in the daemon log: one `[tool] indexing n/total` line per session, with no newline, for every tool on every full sync. The plan accepted stderr progress; in practice it fills `daemon.log` with a single multi-megabyte line.
+  Evidence: `$MJ_DATA_DIR/daemon.log` after one full sync of this machine's corpus. Worth a fork change that silences progress when the caller is not a terminal.
+- Observation: The `zcode` profile named in the acceptance steps does not exist in the current `config.toml`; it survives only in a backup written by an older build, whose `kind = "zcode"` is not a `HarnessKind` this build accepts.
+  Evidence: `~/.config/mjolnir/config.toml.bak-20260915T121000` line 52 against `HarnessKind` in `mj-core/src/config.rs`. The live check used `codex` and `deepseek` instead; `codex` was out of quota, so `deepseek` supplied the session with a tool call.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
   Evidence: `src/index.rs` lines 375-395. A `sessionwiki` binary at a different schema version than the library Mjolnir links would force a full re-index on every alternation. Documented in milestone 7.
 
@@ -215,6 +223,39 @@ Fork CLI for verification:
     SESSIONWIKI_DATA=$S/wiki ../sessionwiki/target/debug/sessionwiki list --tool mjolnir
     SESSIONWIKI_DATA=$S/wiki ../sessionwiki/target/debug/sessionwiki brief <id> --tools
 
+Milestone 3, run on 2026-09-17. The isolated environment, from the repository root:
+
+    S=/tmp/claude-1000/-home-jonathan-Projects-hel3/68c2d9bc-4218-4756-9eaa-7d0de76bb3b9/scratchpad
+    export MJ_CONFIG_DIR=$S/mj-config MJ_DATA_DIR=$S/mj-data SESSIONWIKI_DATA=$S/wiki
+    mkdir -p $MJ_CONFIG_DIR $MJ_DATA_DIR $SESSIONWIKI_DATA $S/project
+    cp ~/.config/mjolnir/config.toml $MJ_CONFIG_DIR/config.toml
+    # appended to that copy:
+    #   [phone]
+    #   enabled = true
+    #   bind = "127.0.0.1:37650"
+    #
+    #   [sessionwiki]
+    #   enabled = true
+    (cd $S/project && git init -q && echo hello > README.md && git add README.md &&
+     git -c user.email=a@b -c user.name=t commit -qm init)
+    ./target/debug/mj new --profile deepseek --target localhost \
+      --project-directory $S/project --workspace-id default \
+      "Read README.md and tell me the single word it contains."
+    ./target/debug/mj wait --session <id>
+    ./target/debug/mj close --session <id>
+
+The daemon starts by itself on the first client command. Two details the plan
+did not have: the copied config must bind the web viewer somewhere other than
+port 3765, or the isolated daemon collides with the real one and refuses every
+request; and `mj new` needs `--workspace-id default`, or the API answers 500
+with "create a workspace before starting a phone session" in the daemon log.
+
+Verification, after the sync had run:
+
+    (cd /home/jonathan/Projects/sessionwiki && cargo build)
+    SESSIONWIKI_DATA=$S/wiki /home/jonathan/Projects/sessionwiki/target/debug/sessionwiki list --tool mjolnir
+    SESSIONWIKI_DATA=$S/wiki /home/jonathan/Projects/sessionwiki/target/debug/sessionwiki brief 1e0d61a75458ca85a9f040878e6aee8e --tools
+
 Update this section with the exact commands and observed output as each milestone lands.
 
 ## Validation and Acceptance
@@ -228,6 +269,34 @@ Every step is additive and can be rerun. The rusqlite bump is a manifest edit pl
 ## Artifacts and Notes
 
 Add transcripts proving each acceptance here as milestones complete.
+
+Milestone 3, 2026-09-17. `sessionwiki list --tool mjolnir`:
+
+    ID            TOOL         WHEN        MSGS  PROJECT                  TITLE
+    1e0d61a75458… mjolnir      16m ago        3  …/1e0d61a75458ca85a9f04… project via deepseek
+    04852244ba07… mjolnir      17m ago        2  …/04852244ba07430fabca2… project via codex
+
+`sessionwiki brief 1e0d61a75458ca85a9f040878e6aee8e --tools`:
+
+    # Previous session: project via deepseek
+
+    - Tool: unknown | Project: /tmp/.../scratchpad/project/.mj/worktrees/1e0d61a75458ca85a9f040878e6aee8e/ | Date: 2026-09-17 00:23
+    - Source: /tmp/.../scratchpad/mj-data/sessions/1e0d61a75458ca85a9f040878e6aee8e
+
+    **User:**
+    Read README.md and tell me the single word it contains.
+
+    > [tool] Read file '/tmp/.../README.md'
+
+    **Assistant:**
+    The single word in README.md is: **hello**
+
+User, tool, and assistant lines are all present, which is what the milestone
+asked for. `Tool: unknown` is the standalone binary's registry lookup, not a
+defect in the stored row; see Surprises.
+
+Workspace validation for the commit: `cargo build`, `cargo test` (3485 passed,
+0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
 
 ## Interfaces and Dependencies
 
