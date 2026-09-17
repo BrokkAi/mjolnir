@@ -531,6 +531,16 @@ impl RelayOperationalState {
             // call a working session idle.
             tools_in_flight: if self.tools_in_flight.is_empty() {
                 self.foreground_tool_started_at_ms
+                    .or_else(|| {
+                        // A step in flight under a running turn is foreground
+                        // work even when the harness has named no tool call
+                        // for it. It has always counted as such; naming it
+                        // here keeps that in one place.
+                        (self.execution == RelayExecutionState::Running)
+                            .then_some(self.current_step_started_at_ms)
+                            .flatten()
+                            .filter(|started_at_ms| *started_at_ms >= 0)
+                    })
                     .map(|started_at_ms| crate::activity::InFlightToolCall {
                         tool_call_id: String::new(),
                         status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,

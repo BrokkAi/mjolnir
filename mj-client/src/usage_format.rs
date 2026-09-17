@@ -50,6 +50,12 @@ pub struct SessionActivity {
     /// Start of foreground tool work, or a current SDK step while execution
     /// is Running. This also covers harnesses without autonomous-turn markers.
     pub foreground_tool_started_at_ms: Option<i64>,
+    /// What the session is doing, as the worker itself reported it. This type
+    /// renders activity; it no longer decides it. When the answer did not come
+    /// with the snapshot — an older worker, or a row assembled by hand — the
+    /// same `mj_core::activity` classifier answers from the facts below, so
+    /// there is still only one decision in the system.
+    pub state: Option<mj_core::activity::ActivityState>,
     /// Commands the agent left running with nothing waiting on them.
     pub background_commands: Vec<mj_core::relay::BackgroundCommand>,
     /// User shells still owned by the relay. These are separate from agent
@@ -80,6 +86,7 @@ impl SessionActivity {
                         .filter(|timestamp| *timestamp >= 0)
                 },
             ),
+            state: Some(operational.activity_state()),
             background_commands: operational.background_commands.clone(),
             active_user_shells: operational.active_user_shells.clone(),
         }
@@ -256,36 +263,67 @@ impl SessionActivity {
         }
     }
 
+    /// What this session is doing: the worker's own answer when the snapshot
+    /// carried one, and otherwise the same classifier applied to the same
+    /// facts.
+    #[must_use]
+    pub fn state(&self) -> mj_core::activity::ActivityState {
+        self.state
+            .clone()
+            .unwrap_or_else(|| mj_core::activity::classify(&self.facts()))
+    }
+
+    /// The facts this row holds, in the shape the shared classifier decides
+    /// with.
+    fn facts(&self) -> mj_core::activity::ActivityFacts {
+        mj_core::activity::ActivityFacts {
+            execution: self
+                .execution
+                .unwrap_or(mj_core::relay::RelayExecutionState::Idle),
+            prompt_started_at_ms: self.prompt_in_flight.then_some(0),
+            harness_turn_started_at_ms: self.harness_turn_started_at_ms,
+            turn_started_at_ms: self.activity_turn_started_at_ms,
+            tools_in_flight: self
+                .foreground_tool_started_at_ms
+                .map(|started_at_ms| mj_core::activity::InFlightToolCall {
+                    tool_call_id: String::new(),
+                    status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                    started_at_ms,
+                })
+                .into_iter()
+                .collect(),
+            background_started_at_ms: self.background_since().and_then(|seconds| {
+                i64::try_from(seconds).ok().map(|seconds| seconds * 1_000)
+            }),
+            background_commands: self.background_commands.len(),
+            active_user_shells: self.active_user_shells.len(),
+            goal_active: self.pursuing_goal,
+            idle_since_ms: self.idle_since_ms,
+            ..mj_core::activity::ActivityFacts::default()
+        }
+    }
+
+    /// The rendering vocabulary for what the session is doing.
+    ///
+    /// A mapping of the shared activity state, not a second opinion about it.
+    /// The one fact added here is the caller's own turn start, which comes
+    /// from the materialized projection rather than from the relay: a turn
+    /// the durable record knows about is a turn whatever the live state says.
     fn kind(&self, current_turn_started_at: Option<u64>) -> SessionActivityKind {
-        match self.execution {
-            Some(mj_core::relay::RelayExecutionState::Closing) => {
-                return SessionActivityKind::Lifecycle;
+        use mj_core::activity::ActivityState;
+        match self.state().last_known() {
+            ActivityState::Closing | ActivityState::Closed => SessionActivityKind::Lifecycle,
+            _ if current_turn_started_at.is_some() => SessionActivityKind::Turn,
+            ActivityState::Turn { .. } => SessionActivityKind::Turn,
+            ActivityState::Tool { .. } => SessionActivityKind::Step,
+            ActivityState::Background { .. } => SessionActivityKind::Background,
+            ActivityState::Goal => SessionActivityKind::Goal,
+            ActivityState::Idle { .. } => SessionActivityKind::Idle,
+            // A state this build does not know is something happening, and
+            // "Turn" is the honest way to render an unnamed something.
+            ActivityState::Unknown { .. } | ActivityState::Unrecognized => {
+                SessionActivityKind::Turn
             }
-            Some(mj_core::relay::RelayExecutionState::Closed) => {
-                return SessionActivityKind::Lifecycle;
-            }
-            Some(
-                mj_core::relay::RelayExecutionState::Idle
-                | mj_core::relay::RelayExecutionState::Running,
-            )
-            | None => {}
-        }
-        if current_turn_started_at.is_some()
-            || self.harness_turn_started_at_ms.is_some()
-            || self.prompt_in_flight
-        {
-            return SessionActivityKind::Turn;
-        }
-        if self.foreground_tool_started_at_ms.is_some() {
-            return SessionActivityKind::Step;
-        }
-        if !self.background_commands.is_empty() || !self.active_user_shells.is_empty() {
-            return SessionActivityKind::Background;
-        }
-        if self.pursuing_goal {
-            SessionActivityKind::Goal
-        } else {
-            SessionActivityKind::Idle
         }
     }
 
@@ -507,6 +545,11 @@ mod tests {
         let relay =
             mj_worker::relay::DurableRelay::open(temp.path(), "step-session", "test").unwrap();
         let mut state = relay.operational_state();
+        // This test edits the snapshot's fields by hand, so the answer the
+        // worker published with it no longer describes them. Clear it and let
+        // the shared classifier read the edited facts, which is exactly what
+        // happens with a worker too old to publish an answer at all.
+        state.activity = None;
         state.execution = mj_core::relay::RelayExecutionState::Running;
         state.current_step_started_at_ms = Some(50_000);
         let activity = SessionActivity::of(&state);
@@ -550,6 +593,7 @@ mod tests {
             prompt_in_flight: false,
             idle_since_ms: None,
             harness_turn_started_at_ms: None,
+            state: None,
             foreground_tool_started_at_ms: None,
             background_commands: vec![mj_core::relay::BackgroundCommand {
                 id: "test-background".into(),

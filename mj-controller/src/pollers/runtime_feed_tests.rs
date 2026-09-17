@@ -90,6 +90,8 @@ fn operational(session_id: &str) -> RelayOperationalState {
         last_acp_activity_at_ms: None,
         current_step_started_at_ms: None,
         foreground_tool_started_at_ms: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
         harness_turn: None,
         last_harness_turn_started_ordinal: None,
         background_commands: Vec::new(),

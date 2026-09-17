@@ -245,20 +245,30 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
         .prompt_started_at_ms
         .or(facts.harness_turn_started_at_ms)
         .or(facts.turn_started_at_ms);
-    if facts.prompt_started_at_ms.is_some()
-        || facts.harness_turn_started_at_ms.is_some()
-        || facts.execution == RelayExecutionState::Running
-    {
+    // A bare `Running` flag is not on its own evidence of a turn: the durable
+    // projection can lag behind a turn that has already ended, and presenting
+    // a stale flag as live work is how a finished session came to look busy.
+    // Something live has to corroborate it — a prompt, a turn the harness
+    // opened, a step in flight, or a native goal actually running.
+    let running_is_corroborated = facts.execution == RelayExecutionState::Running
+        && (facts.current_step_started_at_ms.is_some() || facts.goal_running);
+    if facts.prompt_started_at_ms.is_some() || facts.harness_turn_started_at_ms.is_some() {
         return ActivityState::Turn {
             started_at_ms: turn_started_at_ms,
         };
     }
     // A harness that marks no turn of its own is visible only through the
-    // tool calls it has open, so those are a state in their own right.
+    // tool calls it has open, so those are a state in their own right, and a
+    // named tool is a better answer than an unnamed turn.
     if let Some(tool) = facts.tools_in_flight.first() {
         return ActivityState::Tool {
             tool_call_id: tool.tool_call_id.clone(),
             started_at_ms: tool.started_at_ms,
+        };
+    }
+    if running_is_corroborated {
+        return ActivityState::Turn {
+            started_at_ms: turn_started_at_ms,
         };
     }
     if facts.background_commands > 0 || facts.active_user_shells > 0 {
@@ -289,6 +299,10 @@ pub fn has_work_in_flight(facts: &ActivityFacts) -> bool {
         return false;
     }
     classify(facts).has_work_in_flight()
+        // The durable flag on its own is too weak to claim the agent is
+        // working, but far too strong to ignore when the question is whether
+        // killing the worker would destroy something.
+        || facts.execution != RelayExecutionState::Idle
         || facts.queued_commands > 0
         || facts.active_agent_terminals > 0
         || facts.goal_pending_resume
@@ -349,6 +363,26 @@ pub fn checkpoint_blocker(facts: &ActivityFacts, harness: HarnessKind) -> Option
         )
     } else {
         None
+    }
+}
+
+/// The four-valued phase to report for a session the daemon can see.
+///
+/// The execution flag is the phase, with one correction: a live turn the flag
+/// has not caught up with is still running. `ActivityState::chat_phase` is the
+/// same question for a session nobody can see, where there is no flag to read.
+#[must_use]
+pub fn chat_phase(facts: &ActivityFacts) -> RelayExecutionState {
+    match facts.execution {
+        RelayExecutionState::Closing | RelayExecutionState::Closed => facts.execution,
+        _ if matches!(
+            classify(facts),
+            ActivityState::Turn { .. } | ActivityState::Tool { .. }
+        ) =>
+        {
+            RelayExecutionState::Running
+        }
+        execution => execution,
     }
 }
 

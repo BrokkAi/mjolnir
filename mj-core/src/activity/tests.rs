@@ -205,9 +205,6 @@ fn every_way_of_being_busy_is_work_in_flight() {
         ("the harness started a turn", |facts| {
             facts.harness_turn_started_at_ms = Some(NOW)
         }),
-        ("the execution flag says running", |facts| {
-            facts.execution = RelayExecutionState::Running
-        }),
         ("a close is in progress", |facts| {
             facts.execution = RelayExecutionState::Closing
         }),
@@ -225,6 +222,12 @@ fn every_way_of_being_busy_is_work_in_flight() {
     // state is idle and it is still not safe to kill the worker: these are
     // separate questions and this is where they legitimately differ.
     let holding: Vec<(&str, MakeBusy)> = vec![
+        // A bare running flag is the projection lagging behind a turn that
+        // has ended. It is not enough to claim the agent is working, and far
+        // too much to ignore when deciding whether to kill the worker.
+        ("the execution flag says running", |facts| {
+            facts.execution = RelayExecutionState::Running
+        }),
         ("a command is queued", |facts| facts.queued_commands = 1),
         ("an agent terminal is open", |facts| {
             facts.active_agent_terminals = 1
@@ -271,6 +274,41 @@ fn every_way_of_being_busy_is_work_in_flight() {
     assert!(!has_work_in_flight(&latched));
 }
 
+/// A running flag needs something live to corroborate it, because the durable
+/// projection can lag behind a turn that has already ended. With corroboration
+/// the session is working; without it the flag alone proves nothing.
+#[test]
+fn a_running_flag_alone_is_not_a_running_turn() {
+    let flag_only = ActivityFacts {
+        execution: RelayExecutionState::Running,
+        ..ActivityFacts::default()
+    };
+    assert!(classify(&flag_only).is_idle());
+    assert!(has_work_in_flight(&flag_only), "but it is still not safe to kill");
+    // The phase a session reports keeps naming the flag, so nothing that read
+    // `chat_phase` before reads something weaker now.
+    assert_eq!(chat_phase(&flag_only), RelayExecutionState::Running);
+
+    for corroboration in [
+        |facts: &mut ActivityFacts| facts.current_step_started_at_ms = Some(NOW),
+        |facts: &mut ActivityFacts| facts.goal_running = true,
+        |facts: &mut ActivityFacts| facts.prompt_started_at_ms = Some(NOW),
+    ] {
+        let mut facts = flag_only.clone();
+        corroboration(&mut facts);
+        assert!(classify(&facts).is_working(), "{facts:?}");
+        assert_eq!(chat_phase(&facts), RelayExecutionState::Running);
+    }
+
+    // And a live turn the flag has not caught up with still reports running.
+    let lagging = ActivityFacts {
+        execution: RelayExecutionState::Idle,
+        harness_turn_started_at_ms: Some(NOW),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(chat_phase(&lagging), RelayExecutionState::Running);
+}
+
 #[test]
 fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
     let idle = ActivityFacts {
@@ -314,7 +352,7 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
     );
     assert_eq!(classify(&tool_only).chat_phase(), RelayExecutionState::Running);
 
-    // A turn outranks everything below it.
+    // A turn marker outranks everything below it.
     let turn = ActivityFacts {
         harness_turn_started_at_ms: Some(NOW),
         tools_in_flight: vec![tool("bash", NOW)],

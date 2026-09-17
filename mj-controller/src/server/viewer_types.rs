@@ -112,7 +112,6 @@ impl ViewerSnapshot {
                     )
                     .then(|| session.last_error.clone())
                     .flatten(),
-                    last_error: session.last_error.clone(),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -138,8 +137,11 @@ impl ViewerSnapshot {
                     activity: String::new(),
                     operation: None,
                     move_recovery: None,
+                    // Both are replaced for every session by the phone
+                    // projection, from the one shared activity state.
                     chat_phase: ViewerChatPhase::default(),
                     is_idle: false,
+                    activity_state: None,
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -277,11 +279,6 @@ pub struct ViewerSession {
     /// the reason instead of a bare "failed to launch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_error: Option<String>,
-    /// Why `has_error` is set, when the reason is not a launch failure. A
-    /// summary that says a session has an error and then carries no error
-    /// text leaves the reader nowhere to go, which is half of issue #1020.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,
@@ -360,6 +357,12 @@ pub struct ViewerSession {
     /// Missing operational state must not be presented as confirmed idle.
     #[serde(default)]
     pub is_idle: bool,
+    /// What this session is doing, in the shared vocabulary every part of
+    /// Mjolnir now uses. Richer than `chat_phase`, which has only four values
+    /// and must keep them: this can also say that the daemon cannot see the
+    /// worker and report what was last known about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_state: Option<mj_core::activity::ActivityState>,
     /// What this session is doing, in the words the dashboard row uses:
     /// `Turn 43m36s  Step 12s`, `BG 43m36s`, or `[idle]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]

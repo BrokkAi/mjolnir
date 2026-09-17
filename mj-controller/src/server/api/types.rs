@@ -34,11 +34,17 @@ pub struct ApiSession {
     pub lifecycle: ViewerLifecycleCategory,
     pub chat_phase: crate::server::ViewerChatPhase,
     pub is_idle: bool,
+    /// What this session is doing, in more detail than `chat_phase`'s four
+    /// values allow: in particular it can say that the daemon cannot see the
+    /// worker and report what it last knew, rather than claiming idleness it
+    /// cannot prove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_state: Option<mj_core::activity::ActivityState>,
     pub has_error: bool,
-    /// Why this session has an error: the launch failure for a session in the
-    /// error state, and otherwise whatever set `has_error`. A summary that
-    /// reports an error and carries no text to explain it leaves the reader
-    /// nowhere to go (#1020).
+    /// Why a launch failed, for a session in the error state. Absent
+    /// otherwise: raw runtime error text is deliberately not published for a
+    /// running session. Why a *turn* failed travels in `last_turn_diagnostic`,
+    /// which a single-session query fills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at: String,
@@ -71,8 +77,9 @@ impl From<&ViewerSession> for ApiSession {
             lifecycle: session.lifecycle,
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
+            activity_state: session.activity_state.clone(),
             has_error: session.has_error,
-            error: session.launch_error.clone().or_else(|| session.last_error.clone()),
+            error: session.launch_error.clone(),
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,

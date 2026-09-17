@@ -1905,6 +1905,7 @@ fn background_work_reaches_both_session_row_forms() {
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
+        state: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![mj_core::relay::BackgroundCommand {
             id: "test-background".into(),
