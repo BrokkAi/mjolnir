@@ -227,10 +227,7 @@ impl ViewerSnapshot {
 pub(super) fn project_key(identity: &str) -> String {
     use sha2::Digest as _;
     let digest = Sha256::digest(identity.as_bytes());
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    mj_core::hex::lower_hex(&digest[..8])
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

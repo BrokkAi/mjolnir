@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 pub(super) fn rewrite_kimi_workspace_registry(data: &[u8], target_cwd: &Path) -> Result<Vec<u8>> {
     let mut registry: Value =
@@ -232,6 +233,6 @@ pub(super) fn kimi_workspace_key(cwd: &Path) -> String {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("workspace");
-    let digest = format!("{:x}", Sha256::digest(cwd.to_string_lossy().as_bytes()));
+    let digest = lower_hex(Sha256::digest(cwd.to_string_lossy().as_bytes()));
     format!("wd_{basename}_{}", &digest[..12])
 }

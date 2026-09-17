@@ -29,18 +29,10 @@ pub fn load_or_create_api_token(path: &std::path::Path) -> AnyResult<String> {
     let mut bytes = [0_u8; API_TOKEN_BYTES];
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("generate Mjolnir API token: {error}"))?;
-    let token = hex_lower(&bytes);
+    let token = mj_core::hex::lower_hex(bytes);
     mj_core::config::atomic_write(path, token.as_bytes())
         .with_context(|| format!("persist Mjolnir API token {}", path.display()))?;
     Ok(token)
-}
-
-pub(super) fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut text, byte| {
-        let _ = write!(text, "{byte:02x}");
-        text
-    })
 }
 
 // ---------------------------------------------------------------------------

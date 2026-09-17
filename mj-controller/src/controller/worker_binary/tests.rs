@@ -1,6 +1,7 @@
 use super::launch::*;
 use super::*;
 use crate::controller::test_support::{IsolatedTest, test_name};
+use mj_core::hex::lower_hex;
 use mj_core::targets::ProcessExecutor;
 
 use anyhow::Result;
@@ -1018,7 +1019,7 @@ fn podman_install_fixture() -> PodmanInstallFixture {
     std::fs::write(&ownership, b"{}").unwrap();
     let profile_stage = root.path().join("profile");
     std::fs::create_dir_all(&profile_stage).unwrap();
-    let digest = format!("{:x}", Sha256::digest(b"worker-binary-bytes"));
+    let digest = lower_hex(Sha256::digest(b"worker-binary-bytes"));
     PodmanInstallFixture {
         _root: root,
         worker_binary,

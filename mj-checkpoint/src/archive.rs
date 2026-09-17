@@ -4,6 +4,7 @@
 //! time.  Harness adapters must use a versioned allowlist; recursively copying
 //! a profile home would risk archiving credentials and configuration.
 
+use mj_core::hex::lower_hex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -1247,7 +1248,7 @@ impl<R> DigestingReader<R> {
     }
 
     fn finish(self) -> (u64, String) {
-        (self.bytes_read, format!("{:x}", self.digest.finalize()))
+        (self.bytes_read, lower_hex(self.digest.finalize()))
     }
 }
 
@@ -1514,7 +1515,7 @@ fn normalized_mode(mode: u32) -> Result<u32> {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    lower_hex(Sha256::digest(bytes))
 }
 
 fn digest_reader(reader: &mut impl Read) -> Result<String> {
@@ -1527,7 +1528,7 @@ fn digest_reader(reader: &mut impl Read) -> Result<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(lower_hex(digest.finalize()))
 }
 
 #[cfg(unix)]

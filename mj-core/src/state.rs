@@ -1504,12 +1504,7 @@ pub fn new_session_id() -> Result<String> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random)
         .map_err(|error| anyhow::anyhow!("generate Mjolnir session id: {error}"))?;
-    let mut encoded = String::with_capacity(32);
-    for byte in random {
-        use std::fmt::Write as _;
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    Ok(encoded)
+    Ok(crate::hex::lower_hex(random))
 }
 
 /// Return the newest clean ACP session title from canonical worker events.

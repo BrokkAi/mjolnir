@@ -8,6 +8,7 @@
 //! installed — with no relay, async, or process dependencies, so every rule
 //! is testable in isolation.
 
+use crate::hex::lower_hex;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -68,7 +69,7 @@ impl SkillsArchive {
     /// SHA-256 over the canonical encoding. Collection sorts entries, so two
     /// homes holding the same tree fingerprint identically.
     pub fn fingerprint(&self) -> String {
-        format!("{:x}", Sha256::digest(self.encode()))
+        lower_hex(Sha256::digest(self.encode()))
     }
 
     pub fn encode(&self) -> Vec<u8> {

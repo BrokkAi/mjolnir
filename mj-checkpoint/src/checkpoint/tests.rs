@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine as _;
+use mj_core::hex::lower_hex;
 
 use std::io::{Read, Write};
 use std::process::Command;
@@ -1704,7 +1705,7 @@ fn copy_archive_with_canonical_session(
     }
 
     let canonical_body = serde_json::to_vec_pretty(canonical_session).unwrap();
-    let canonical_sha256 = format!("{:x}", Sha256::digest(&canonical_body));
+    let canonical_sha256 = lower_hex(Sha256::digest(&canonical_body));
     entries
         .iter_mut()
         .find(|(name, _, _)| name == "canonical/session.json")

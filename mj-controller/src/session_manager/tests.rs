@@ -1,5 +1,6 @@
 use super::*;
 use crate::controller::test_support::{IsolatedTest, test_name};
+use mj_core::hex::lower_hex;
 
 fn recovery_source_target() -> mj_core::state::TargetLocator {
     mj_core::state::TargetLocator::LocalBare {
@@ -524,7 +525,7 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
     let refreshed = directory.path().join("worker-refreshed");
     let restarted = directory.path().join("worker-restarted");
     std::fs::write(&source, b"current worker binary").unwrap();
-    let current_digest = format!("{:x}", sha2::Sha256::digest(b"current worker binary"));
+    let current_digest = lower_hex(sha2::Sha256::digest(b"current worker binary"));
     let recovery = |installed_digest: &str, require_refresh: bool| {
         let mut restart = if require_refresh {
             CommandSpec::new(

@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerBinaryAvailability {
@@ -282,7 +283,7 @@ pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> R
         .with_context(|| format!("flush pinned worker source {}", source.display()))?;
     std::fs::set_permissions(temporary.path(), metadata.permissions())
         .with_context(|| format!("preserve permissions for {}", source.display()))?;
-    let digest = format!("{:x}", digest.finalize());
+    let digest = lower_hex(digest.finalize());
     publish_cached_worker(temporary, cache_root, &digest)
 }
 

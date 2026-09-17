@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 pub(super) const CHECKPOINT_STAGE_MANIFEST: &str = "stage.json";
 
@@ -247,7 +248,7 @@ pub(super) fn write_staged_repositories(
 pub(super) fn native_source_fingerprint(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     fingerprint_tree(root, root, &mut digest)?;
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(lower_hex(digest.finalize()))
 }
 
 pub(super) fn fingerprint_tree(root: &Path, path: &Path, digest: &mut Sha256) -> Result<()> {

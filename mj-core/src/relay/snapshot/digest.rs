@@ -1,5 +1,6 @@
 //! The relay event digest chain and the validation that checks it.
 
+use crate::hex::lower_hex;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -51,7 +52,7 @@ fn digest_over(domain: &[u8], encoded: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(encoded);
-    format!("{:x}", hasher.finalize())
+    lower_hex(hasher.finalize())
 }
 
 /// Compute the domain-separated SHA-256 digest for a relay event, using the
