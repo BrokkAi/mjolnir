@@ -857,7 +857,7 @@ Proof: `~/.local/share/sessionwiki/index.db` does not exist. It did not exist
 before `cargo test`, and it did not exist after two full runs of the workspace
 suite and all four live checks.
 
-Workspace validation for these commits: `cargo build`, `cargo test` (3509
+Workspace validation for these commits: `cargo build`, `cargo test` (3508
 passed, 0 failed), `cargo clippy --all-targets -- -D warnings`,
 `cargo fmt --check`, and the viewer's 31 node unit tests in
 `tests/e2e/web/viewer.unit.test.mjs`.
