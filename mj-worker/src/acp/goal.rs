@@ -465,6 +465,7 @@ for line in sys.stdin:
                 ..Default::default()
             }));
             let spec = LaunchSpec {
+                bridge_spec_path: None,
                 subagent_mcp_socket: None,
                 goal_recovery: context.clone(),
                 command: "python3".into(),
@@ -626,6 +627,7 @@ for line in sys.stdin:
 "#).unwrap();
                 let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext::default()));
                 let spec = LaunchSpec {
+                    bridge_spec_path: None,
                     subagent_mcp_socket: None,
                     goal_recovery: context.clone(),
                     command: "python3".into(),

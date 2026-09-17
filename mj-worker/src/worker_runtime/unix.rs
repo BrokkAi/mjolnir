@@ -282,16 +282,14 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         session_environment.clone(),
         acp_events_tx.clone(),
     );
-    // The bridge environment has to be final before it is persisted, and
-    // Codex needs the model this session accepted before it opens the resumed
-    // thread. Read the accepted configuration once; the launch spec below and
-    // the ACP runtime share it.
+    // The bridge environment has to be final before it is persisted. The
+    // accepted selectors are not part of it: the ACP runtime re-pins them into
+    // this spec before every bridge start, including the first one.
     let accepted_config = {
         let relay = relay.lock().expect("relay lock poisoned");
         let state = relay.operational_state();
         acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
     };
-    super::pin_accepted_codex_model(config.harness, &mut config.environment, &accepted_config)?;
     let supervisor_path = root.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: config.bridge_command,
@@ -369,6 +367,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                 supervisor_path.to_string_lossy().into_owned(),
             ],
             environment: session_environment,
+            bridge_spec_path: Some(supervisor_path.clone()),
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),

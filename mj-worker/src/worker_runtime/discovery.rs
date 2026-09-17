@@ -47,6 +47,9 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
             supervisor.to_string_lossy().into_owned(),
         ],
         environment: session_environment,
+        // Discovery opens a throwaway session that never accepts a selector,
+        // so there is nothing to pin into its spec.
+        bridge_spec_path: None,
         cwd: spec.cwd,
         additional_directories: vec![],
         project_memory: None,
@@ -268,6 +271,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
 "#).unwrap();
         let launch = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "python3".into(),

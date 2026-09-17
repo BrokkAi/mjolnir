@@ -149,6 +149,7 @@ impl PlanProbe {
         let (commands, mut requests) = mpsc::channel(16);
         let (event_tx, events) = mpsc::channel(128);
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "plan-probe".into(),

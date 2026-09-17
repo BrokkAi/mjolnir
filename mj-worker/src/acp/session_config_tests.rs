@@ -147,6 +147,7 @@ for line in sys.stdin:
 
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
@@ -845,4 +846,111 @@ async fn claude_startup_errors_are_not_reported_as_model_replacement() {
             ));
         }
     }
+}
+
+/// Codex reads its model out of the bridge environment at startup, so the pin
+/// has to carry the value this session holds at *this* launch. A session that
+/// accepts its model after the worker started -- which every session created
+/// with an explicit model does -- resumed every later bridge on the profile
+/// default while the supervisor spec was written once and never updated.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_bridge_restart_starts_on_a_model_accepted_after_the_worker_did() {
+    use crate::worker_runtime::AcpSupervisorSpec;
+
+    let root = tempfile::tempdir().unwrap();
+    let spec_path = root.path().join("acp-supervisor.json");
+    let launches = root.path().join("launched-on.txt");
+    let script = root.path().join("codex_like.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, os, sys
+spec = json.load(open(sys.argv[1]))
+pinned = spec['environment'].get('CODEX_CONFIG')
+with open(sys.argv[2], 'a') as log:
+    log.write((json.loads(pinned)['model'] if pinned else 'unpinned') + '\n')
+model = 'default'
+def options():
+    return [{'id':'model','name':'Model','category':'model','type':'select',
+             'currentValue':model,
+             'options':[{'value':x,'name':x} for x in ['default','chosen']]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params = request.get('params', {})
+    if method == 'initialize': result = {'protocolVersion':1}
+    elif method in ('session/new','session/load'):
+        result = {'sessionId':'native','configOptions':options(),
+                  'modes':{'currentModeId':'agent',
+                           'availableModes':[{'id':'agent','name':'Agent'}]}}
+    elif method == 'session/set_config_option':
+        model = params['value']
+        result = {'configOptions':options()}
+    elif method == 'session/prompt':
+        if params['prompt'][0]['text'] == 'restart': os._exit(0)
+        result = {'stopReason':'end_turn'}
+    else: result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#,
+    )
+    .unwrap();
+    AcpSupervisorSpec {
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        environment: BTreeMap::new(),
+        cwd: root.path().to_owned(),
+        harness_lease: None,
+    }
+    .write_spec(&spec_path)
+    .unwrap();
+
+    let mut spec = launch(
+        root.path(),
+        script.clone(),
+        AcceptedSessionConfig::default(),
+    );
+    spec.harness = HarnessKind::Codex;
+    spec.bridge_spec_path = Some(spec_path.clone());
+    spec.args = vec![
+        script.to_string_lossy().into_owned(),
+        spec_path.to_string_lossy().into_owned(),
+        launches.to_string_lossy().into_owned(),
+    ];
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    commands
+        .send(CommandRequest::SetConfig {
+            request_id: "choose".into(),
+            key: "model".into(),
+            value: "chosen".into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::ConfigApplied { request_id, .. } if request_id == "choose" => break,
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+
+    prompt(&commands, "restart").await;
+    configured(&mut events).await;
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&launches).unwrap(),
+        "unpinned\nchosen\n",
+        "the replacement bridge must start on the accepted model"
+    );
 }

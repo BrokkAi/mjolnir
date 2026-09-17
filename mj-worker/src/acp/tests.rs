@@ -10,6 +10,7 @@ use agent_client_protocol::schema::v1::{
 #[test]
 fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "codex-acp".into(),
@@ -94,6 +95,7 @@ fn only_updates_for_tool_calls_created_on_the_live_connection_are_relayed() {
 #[test]
 fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
     let mut spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "/worker/mj".into(),
@@ -146,6 +148,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
 #[test]
 fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "/worker/hel".into(),
@@ -207,6 +210,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 #[test]
 fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies() {
     let mut spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
@@ -412,6 +416,7 @@ fn claude_async_task_stop_request_uses_the_air_wire_shape() {
 #[test]
 fn resumed_session_request_keeps_load_context() {
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
@@ -582,6 +587,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let step_clock = crate::acp::StepClock::default();
         let observed_step_clock = step_clock.clone();
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
@@ -1102,6 +1108,7 @@ async fn answer_to_ext_request(
     // Drain events so a full channel can never be mistaken for silence.
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -1261,6 +1268,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -1656,6 +1664,7 @@ async fn config_change_request(
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -1828,6 +1837,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -1907,6 +1917,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2090,6 +2101,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let (request_tx, mut request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2190,6 +2202,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2618,6 +2631,7 @@ async fn exercise_image_steering(with_images: bool) {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2750,6 +2764,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2878,6 +2893,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let (request_tx, mut request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -2959,6 +2975,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
         LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
@@ -3283,6 +3300,7 @@ mod terminals {
             }
         });
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
@@ -3791,6 +3809,7 @@ for line in sys.stdin:
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let runtime = tokio::spawn(run(
         LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "python3".into(),
@@ -3942,6 +3961,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
@@ -4076,6 +4096,7 @@ while True:
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
@@ -4173,6 +4194,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let (_request_tx, request_rx) = mpsc::channel(1);
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "sh".into(),
@@ -4236,6 +4258,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: bridge.clone(),
@@ -4428,6 +4451,7 @@ async fn session_reload_rejecting_bridge(
 
 fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
@@ -4499,6 +4523,7 @@ async fn codex_still_fails_when_the_recorded_session_cannot_be_reloaded() {
 fn resume_failures_report_a_missing_native_session_per_harness() {
     fn spec(harness: HarnessKind) -> LaunchSpec {
         LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "agent".into(),
@@ -4625,6 +4650,7 @@ fn missing_native_session_spec(
     native_session_may_have_history: bool,
 ) -> LaunchSpec {
     LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "python3".into(),

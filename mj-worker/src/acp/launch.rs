@@ -15,6 +15,12 @@ pub struct LaunchSpec {
     pub extra_mcp_servers: Vec<mj_core::worker_launch::ReviewMcpServer>,
     /// Private Mjolnir delegation socket for supported parent sessions.
     pub subagent_mcp_socket: Option<PathBuf>,
+    /// The supervisor spec the bridge command reads, when this launch has
+    /// one. It is rewritten from `accepted_config` before every bridge start,
+    /// so a harness that can only take a selector before it opens a session
+    /// gets the value this session accepted at *this* launch rather than the
+    /// one it held when the worker started.
+    pub bridge_spec_path: Option<PathBuf>,
     pub resume_session: Option<String>,
     /// Whether Mjolnir's durable state shows the native session named by
     /// `resume_session` may already hold conversation history. Codex writes a

@@ -22,6 +22,7 @@ pub(crate) async fn native_muse_turn(
     HarnessKind::Muse.configure_home_environment(home, &mut environment);
     let resuming = resume.is_some();
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: adapter.to_path_buf(),
@@ -147,6 +148,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             ("MJ_MUSE_TEST_SCENARIO".into(), scenario.into()),
         ]);
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: adapter.clone(),
