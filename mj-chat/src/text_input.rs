@@ -741,6 +741,17 @@ mod tests {
         input.handle_key(key(KeyCode::Right));
         input.handle_key(key(KeyCode::Delete));
         assert_eq!(input.value(), "one  two");
+
+        // Word edits step over a whole grapheme cluster, not a char.
+        let mut input = TextInput::from_value("one two 👩‍💻");
+        input.handle_key(key(KeyCode::Left));
+        assert_eq!(&input.value()[input.cursor()..], "👩‍💻");
+        input.handle_key(ctrl('w'));
+        assert_eq!(input.value(), "one 👩‍💻");
+        input.handle_key(ctrl('y'));
+        assert_eq!(input.value(), "one two 👩‍💻");
+        input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(&input.value()[input.cursor()..], "two 👩‍💻");
     }
 
     #[test]

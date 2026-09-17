@@ -43,6 +43,7 @@ use ratatui::text::Line;
 use crate::clipboard::{ClipboardContent, ClipboardImage};
 use crate::components::{ControlKind, Form, Interaction};
 use crate::selection::{FrameSurfaces, SelectionRange};
+use crate::text_input;
 pub use mj_core::acp::PlanControl;
 use mj_core::acp::SessionConfigChoice;
 use mj_core::acp::surface::{AcpSessionSurface, PlanControlError};
@@ -2744,7 +2745,7 @@ impl ChatState {
                     self.chain_kill = true;
                 }
                 KeyCode::Char('w') => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Char('c') => {
@@ -2776,11 +2777,11 @@ impl ChatState {
                 KeyCode::Left => self.move_word(-1),
                 KeyCode::Right => self.move_word(1),
                 KeyCode::Backspace => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Delete => {
-                    let end = self.next_word_end();
+                    let end = text_input::next_word_end(&self.input, self.input_cursor);
                     self.kill_range(self.input_cursor..end);
                 }
                 KeyCode::Home => {
@@ -2800,11 +2801,11 @@ impl ChatState {
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
                 KeyCode::Char('d') | KeyCode::Delete => {
-                    let end = self.next_word_end();
+                    let end = text_input::next_word_end(&self.input, self.input_cursor);
                     self.kill_range(self.input_cursor..end);
                 }
                 KeyCode::Backspace => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Enter => self.insert_character('\n'),

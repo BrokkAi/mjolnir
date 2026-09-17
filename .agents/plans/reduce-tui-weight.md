@@ -17,7 +17,7 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - [x] (2026-09-16 22:49Z) Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
 - [x] (2026-09-16 23:18Z) Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
 - [x] (2026-09-16 23:43Z) Milestone 3: background job helpers report panics and share one send path.
-- [ ] Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
+- [x] (2026-09-17 00:14Z) Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
 - [ ] Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in the staged order given below.
 - [ ] Milestone 6: small single-purpose cleanups (ActiveChat `Deref`, one truncation helper, one text-prompt dialog, one row viewport type).
 
@@ -70,6 +70,51 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   already had a closure parameter named `report`, so the new free function needed the
   call sites' parameter renamed to `to_update`. The public signatures are unchanged;
   every caller passes it positionally.
+- Observation: the composer's Ctrl-K chaining and `TextInput::kill(range, append)` already
+  produce the same kill buffer. The composer takes the old buffer aside, kills, then splices
+  the old text back in front; `TextInput::kill` appends the new text behind the old one.
+  Both give "earlier kill, then later kill" in Emacs order, so `kill_to_line_end(chained)`
+  in `TextInput` is one call to the existing `kill(range, chained)`.
+  Evidence: `mj-chat/src/chat/input.rs` `kill_to_line_end` versus `mj-chat/src/text_input.rs` `kill`;
+  `sequential_control_k_accumulates_one_yankable_block` passes unchanged against both.
+- Observation: for a single-line `TextInput` the new line motions and line kills are
+  *already* the old whole-value ones. `insert_filtered` drops every control character
+  unless the field is multiline, so a single-line value can never contain `\n`, which makes
+  `line_start` always zero and `line_end` always the value length. The `self.multiline`
+  gate in `handle_key` is therefore belt and braces rather than a behaviour fork; it is kept
+  because it states the intent and survives a future change to the filter.
+  Evidence: `mj-chat/src/text_input.rs` `insert_filtered`; the new test
+  `single_line_fields_keep_their_whole_value_motions`.
+- Observation: clippy's `wrong_self_convention` rejects `fn to_line_start(&mut self)`,
+  because a `to_*` method on a non-`Copy` type is expected to take `self` by reference
+  only. The three private key-routing helpers are named `handle_line_start`,
+  `handle_line_end` and `handle_vertical` instead, which also reads better beside
+  `handle_key`.
+  Evidence: `error: methods with the following characteristics: (\`to_*\` and \`self\` type is
+  not \`Copy\`) usually take \`self\` by reference` from `cargo clippy --all-targets`.
+- Observation: `mj-chat` holds no other user of the composer's grapheme helpers.
+  `previous_grapheme_boundary` was `pub(super)` but had no caller outside
+  `mj-chat/src/chat/input.rs`, so it and `next_grapheme_boundary` are deleted outright
+  rather than re-exported.
+  Evidence: `grep -rn "previous_grapheme_boundary" mj-chat/src mj-tui/src mj-cli/src`
+  reported only `chat/input.rs`.
+- Observation: Milestone 4 costs about 87 non-test lines rather than saving about 80.
+  `mj-chat/src/chat/input.rs` went from 328 non-test lines to 246 and
+  `mj-chat/src/text_input.rs` from 553 to 722. Only seven of the added lines are the
+  moved algorithms; the rest are the five new public `TextInput` methods, the five private
+  routing helpers in `handle_key`, and the doc comments the four now-public free functions
+  need. This is the third milestone in a row where the estimate assumed that replacing a
+  duplicated block with a call always shortens the file.
+  Evidence: `git diff --shortstat HEAD~2 HEAD -- mj-chat` reports 348 insertions and
+  215 deletions; the per-file non-test counts above.
+- Observation: two full-suite runs failed one test each in a crate this milestone does not
+  touch, and both passed on their own immediately afterwards:
+  `brokk-mj-core local_sockets::tests::a_short_path_binds_without_switching_directory`
+  (the run that produced it was sandboxed, which the repository guidelines say invalidates
+  socket tests) and `brokk-mj-worker acp::tests::bridge_exit_during_initialize_returns_an_actionable_error`
+  (its test binary took 198 seconds under full-suite load). Neither crate depends on
+  `mj-chat`. The accepted run is the elevated `cargo test --no-fail-fast` that reports every
+  target green.
 
 ## Decision Log
 
@@ -126,6 +171,36 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - Decision: `NewWizard::text_input_focused` and `ResumeWizard::text_input_focused` moved into their `DialogModal` impls rather than being delegated to.
   Rationale: a trait method and an inherent method with the same name on the same type resolve in favour of the inherent one, so delegation compiles and is correct, but deleting the inherent method later would turn it into silent infinite recursion. Their only caller was the `match` in `text_input_focused` that this milestone deletes. Milestone 5's note that the two methods stay unmerged still holds; they are just in `modal_surface.rs` now.
   Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `TextInput::move_to_line_start`, `move_to_line_end` and `move_vertical` return
+  `()` while `kill_to_line_start` and `kill_to_line_end` return `bool`, rather than all five
+  returning `()` as the Interfaces section wrote them.
+  Rationale: `handle_key` must still answer `EditOutcome::Changed` versus `Handled` for
+  Ctrl-U and Ctrl-K, and `EditOutcome::Changed` is not a repaint signal any more (Milestone 1
+  kept the enum because `handle_history_search_key` re-runs its search only on `Changed`).
+  A kill that removed nothing must not claim a change. The motions have nothing to report.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `handle_key` routes through three private helpers (`handle_line_start`,
+  `handle_line_end`, `handle_vertical`) and two more for the kills (`kill_line_backward`,
+  `kill_line_forward`) instead of adding a `if self.multiline` guard to each of the eight
+  key arms.
+  Rationale: Ctrl-A and Home want the same decision with a different `cross_boundary`, as do
+  Ctrl-E and End, and Ctrl-P/Up and Ctrl-N/Down; writing the guard inline would have repeated
+  it eight times inside a `match` that is already long.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the composer's word-motion methods `ChatState::previous_word_start` and
+  `next_word_end` are deleted rather than kept as one-line wrappers, and their five callers
+  in `mj-chat/src/chat.rs` call `text_input::previous_word_start(&self.input, self.input_cursor)`
+  directly.
+  Rationale: the acceptance criterion is that `chat/input.rs` defines no word, grapheme or
+  line boundary function. A wrapper would satisfy the letter and not the point, which is that
+  there is one name for each algorithm.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the milestone is two commits, `text_input.rs` first and `chat/input.rs` second,
+  and the three moved tests travel with the first commit.
+  Rationale: the first commit is purely additive to `TextInput` plus the test move, so it can
+  be read on its own; the second is purely subtractive from the composer. Moving the tests
+  in the first commit keeps the new `TextInput` behaviour covered from the moment it exists.
+  Date/Author: 2026-09-17 / Claude Opus 5.
 - Decision: Order the milestones 1, 2, 3, 4, 5, 6. Milestone 1 goes first because it deletes hundreds of `mark_render_changed` calls that Milestones 2 and 5 would otherwise have to carry through their rewrites. Milestone 3 is independent of everything and can be done at any time.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
 - Decision: `report` is generic over the message type (`fn report<T>(operation: &str,
@@ -232,6 +307,45 @@ answers. That is the milestone's one user-visible change.
 
 Three sends stay outside `report` because their send result is control flow, not
 a report; they are named in Surprises & Discoveries.
+
+Milestone 4 (2026-09-17). There is now one implementation of each readline
+boundary algorithm. `mj-chat/src/text_input.rs` exports `previous_word_start`,
+`next_word_end`, `line_start` and `line_end` as free functions over `(text,
+cursor)` beside the `previous_grapheme` and `next_grapheme` it already had, and
+`TextInput` gained `move_to_line_start`, `move_to_line_end`, `move_vertical`,
+`kill_to_line_start`, `kill_to_line_end` and the `preferred_column` that
+`move_vertical` aims for and every other cursor change clears. `handle_key`
+routes Ctrl-A, Ctrl-E, Home, End, Ctrl-U, Ctrl-K, Up and Down to them when the
+field is multiline, so any future multiline `TextField` gets composer-grade
+editing for free. No production code constructs `TextInput::multiline()` today;
+the only callers are three tests in `mj-chat/src/components/controls.rs`.
+
+`mj-chat/src/chat/input.rs` lost its copies of all seven algorithms and calls
+the shared ones. What stayed is exactly the part that is not shared: every
+composer edit still goes through `attachments::replace_range` and
+`attachments::snap_cursor`, so an `[image N]` marker is still inserted, moved
+over and deleted as one unit. The file is 150 lines shorter.
+
+Tests moved with the behaviour. The three readline tests that covered line
+motion and chained kills through `ChatState` now run against
+`TextInput::multiline()`, joined by two new ones for the preferred column and
+for the unchanged single-line routing; the duplicate
+`readline_word_edits_and_grapheme_cursor_are_atomic` is gone, its Alt-B
+assertion folded into `readline_edits_at_unicode_grapheme_boundaries`. One
+composer test remains for the part only the composer does:
+`control_k_and_control_y_round_trip_a_line_holding_an_image_marker`.
+
+Like Milestones 2 and 3, it does not shrink the code. `chat/input.rs` loses 82
+non-test lines and `text_input.rs` gains 169, a net cost of about 87 non-test
+lines against a predicted saving of about 80, plus 45 net test lines. The plan's
+estimate counted the seven deleted algorithms and not what replaces them: five
+new public methods on `TextInput`, five private routing helpers, and four free
+functions that now carry doc comments because they are public. Most of that
+addition is capability that did not exist before -- any multiline `TextField`
+now has line motion, vertical motion with a preferred column, and line kills --
+rather than relocated code. The milestone's benefit is the closed bug class,
+which is that word or line movement can no longer be fixed in one editor and
+missed in the other.
 
 ## Context and Orientation
 
@@ -532,3 +646,15 @@ test for the cancellable helper, and converting the one `let _ = …send(…)` i
 count. The reason for each is in the Decision Log; the pattern is the same as
 Milestone 2, where the written estimate also assumed that replacing a block with
 a call always shortens the file.
+
+2026-09-17, after implementing Milestone 4. Recorded the four decisions that
+departed from the written milestone (the kills return `bool` so Ctrl-U and
+Ctrl-K can still answer `EditOutcome::Changed`; five private routing helpers in
+`handle_key` rather than eight inline `multiline` guards; deleting the
+composer's word-motion methods outright and pointing their five callers in
+`chat.rs` at the free functions; and splitting the milestone into two commits
+with the test move in the first), the clippy rule that forced the helpers'
+names, and the two facts that made the port safe to do mechanically: the
+composer's chained Ctrl-K and `TextInput::kill(range, append)` already build the
+same kill buffer, and a single-line `TextInput` can never hold a newline, so the
+new line motions reduce to the old whole-value ones.
