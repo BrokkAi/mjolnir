@@ -220,6 +220,81 @@ Close the source harness before importing. If it changes the session during impo
 
 If imported Git roots are dirty, Mjolnir warns that it will archive their complete current state; edited non-Git or scratch directories are omitted. An interactive CLI or dashboard import can acknowledge those warnings. For non-interactive use, pass `--allow-dirty` and, when applicable, `--allow-omitted-non-git`. See the [CLI reference](/cli-reference/#import-a-native-session) for every flag.
 
+## Search and restore archived sessions
+
+Mjolnir can write every checkpointed session into
+[SessionWiki](https://github.com/jbellis/sessionwiki), a separate tool that
+keeps one full-text index of AI coding sessions across Claude Code, Codex, and
+other harnesses. Turn it on in `config.toml`:
+
+```toml
+[sessionwiki]
+enabled = true
+archive_after_days = 30
+```
+
+### What gets indexed, and when
+
+A session is indexed once it has a checkpoint. The daemon indexes a session when
+it reaches the stopped state, once an hour, and before a Resume search that has
+not synced in the last minute. What is stored is the conversation: the prompts,
+the agent's replies, the titles of the tool calls, the session title, and the
+project directory. Each Mjolnir instance indexes only its own sessions, and all
+of them share the tool name `mjolnir`, so one search covers every instance:
+
+```sh
+sessionwiki search "flaky migration test"
+sessionwiki list --tool mjolnir
+```
+
+### The Archived tab
+
+`Alt+S` opens Resume with a third tab, **Archived**, listing sessions whose live
+Mjolnir copy is gone but whose conversation SessionWiki still has. Typing in the
+search box searches the index as well as filtering the list, so a session you
+remember only by something said inside it is findable. The pane under the list
+previews the selected session's conversation. On the Mjolnir and Import tabs, a
+search hit attaches its matching text to the row it belongs to. The web viewer
+has the same Archived section, preview, and Restore button.
+
+### Restore
+
+Pressing Enter on an archived row, or **Restore** in the viewer, starts a new
+session and hands it a compacted summary of the old conversation as hidden
+first-prompt context — the same compaction Mjolnir uses when a session moves
+between harnesses. The new session keeps the archived session's title. It opens
+in the repository above the archived session's old managed worktree unless you
+name another project directory. This is a new session, not a revival: there is
+no checkpoint to restore, so the workspace starts fresh and only the
+conversation carries over. An archived session with no user prompt cannot be
+restored.
+
+### What archiving deletes and keeps
+
+With `archive_after_days = N`, the hourly job removes Mjolnir's own copy of a
+stopped session older than N days, but only after confirming SessionWiki holds
+its conversation. It deletes the session record, the checkpoint archive, and the
+session's image attachments. It keeps the `mj/<session id>` branch in the
+repository, so any work the session committed is still there. A session with a
+sub-agent child that is not ready to be archived waits for the next pass. Leave
+`archive_after_days` unset to keep every session forever.
+
+### Match the `sessionwiki` version
+
+Mjolnir links SessionWiki as a library and writes into your ordinary SessionWiki
+index. The `sessionwiki` command-line tool you install must be the same version.
+SessionWiki drops and rebuilds its whole index when the file's schema version
+differs from the one the program expects, so two programs at different versions
+re-index everything each time you alternate between them — on a large corpus
+that is tens of minutes per switch.
+
+This build links the fork tag `v0.28.0-mj.2` from
+`github.com/jbellis/sessionwiki`. Install the matching tool with:
+
+```sh
+cargo install --git https://github.com/jbellis/sessionwiki.git --tag v0.28.0-mj.2 sessionwiki
+```
+
 ## Recover an orphaned worker
 
 If the controller host crashes or its state is lost, a managed container or EC2 worker may still be alive without a matching session record. Scan for those resources:
