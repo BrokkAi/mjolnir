@@ -735,9 +735,33 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
     );
     assert!(!checkpoint_was_deferred(&interrupted), "{interrupted:#}");
 
+    // A foreground tool can outlive the execution flag: a restart or a stale
+    // projection can leave `execution` Idle while a tool is still running. The
+    // shared predicate still defers, so a routine copy never restarts the
+    // worker underneath the tool.
+    snapshot.operational.execution = RelayExecutionState::Idle;
+    snapshot.operational.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
+        tool_call_id: "bash-1".into(),
+        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+        started_at_ms: 1,
+    }];
+    let tool_deferred = checkpoint_barrier_wait_ended(
+        &snapshot,
+        "checkpoint-1",
+        BarrierBusyPolicy::DeferWhileRunning,
+        true,
+        false,
+    )
+    .expect("a live foreground tool ends the wait at once");
+    assert!(checkpoint_was_deferred(&tool_deferred), "{tool_deferred:#}");
+    assert!(
+        !checkpoint_barrier_needs_worker_restart(&tool_deferred),
+        "a live foreground tool must never restart the worker: {tool_deferred:#}"
+    );
+    snapshot.operational.tools_in_flight.clear();
+
     // An idle session that never admits the barrier is the real wedge,
     // whatever the policy.
-    snapshot.operational.execution = RelayExecutionState::Idle;
     let wedged = checkpoint_barrier_wait_ended(
         &snapshot,
         "checkpoint-1",

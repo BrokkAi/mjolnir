@@ -98,16 +98,23 @@ pub(super) async fn wait_for_checkpoint_barrier(
     let mut cancel_started_at: Option<Instant> = None;
     loop {
         let snapshot = relay.sync().await?;
-        if busy == BarrierBusyPolicy::DeferWhileRunning
-            && !snapshot.operational.safe_for_checkpoint(harness)
-        {
-            // The native task level can change after the controller's initial
-            // idle sync and before the queued BeginCheckpoint is processed.
-            // Defer from the barrier wait rather than allowing its timeout to
-            // classify the worker as wedged and restart it.
-            return Err(
-                CheckpointDeferred::background_snapshot(&snapshot.operational, harness).into(),
-            );
+        if busy == BarrierBusyPolicy::DeferWhileRunning {
+            if !snapshot.operational.safe_for_checkpoint(harness) {
+                // The native task level can change after the controller's
+                // initial idle sync and before the queued BeginCheckpoint is
+                // processed. Defer from the barrier wait rather than allowing
+                // its timeout to classify the worker as wedged and restart it.
+                return Err(
+                    CheckpointDeferred::background_snapshot(&snapshot.operational, harness).into(),
+                );
+            }
+            if snapshot.operational.has_work_in_flight() {
+                // A foreground tool, a turn the execution flag has not caught
+                // up with, or queued work can all appear after the initial
+                // sync. Defer rather than let the deadline restart the worker
+                // underneath it.
+                return Err(CheckpointDeferred::harness_busy().into());
+            }
         }
         if checkpoint_barrier_is_ready(&snapshot, command_id) {
             if let Some(started_at) = cancel_started_at {
@@ -190,7 +197,10 @@ pub(super) async fn wait_for_checkpoint_barrier(
 ///
 /// The deadline means "wedged": it restarts the worker only after a close has
 /// already requested cancellation and the turn still has not settled. A
-/// checkpoint that can try again later defers as soon as it sees work.
+/// checkpoint that can try again later defers as soon as it sees work. "Work"
+/// is the shared predicate, not the bare execution flag: a stale projection
+/// can report `Idle` while a harness turn or a foreground tool is still live,
+/// and treating that as wedged would restart the worker under it.
 pub(super) fn checkpoint_barrier_wait_ended(
     snapshot: &ManagedSessionSnapshot,
     command_id: &str,
@@ -201,14 +211,17 @@ pub(super) fn checkpoint_barrier_wait_ended(
     if snapshot.operational.execution == RelayExecutionState::Closed {
         return Some(CheckpointBarrierUnreachable::runtime_stopped().into());
     }
+    if busy == BarrierBusyPolicy::DeferWhileRunning {
+        if snapshot.operational.has_work_in_flight() {
+            return Some(CheckpointDeferred::harness_busy().into());
+        }
+        return out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into());
+    }
+    // Close already asked to interrupt the active turn, so only a turn that
+    // never settles after cancellation reaches the restart path.
     if snapshot.operational.execution == RelayExecutionState::Running {
-        return Some(match busy {
-            BarrierBusyPolicy::DeferWhileRunning => CheckpointDeferred::harness_busy().into(),
-            BarrierBusyPolicy::InterruptWhileRunning if out_of_time && cancel_submitted => {
-                CheckpointBarrierUnreachable::cancel_timed_out(command_id).into()
-            }
-            BarrierBusyPolicy::InterruptWhileRunning => return None,
-        });
+        return (out_of_time && cancel_submitted)
+            .then(|| CheckpointBarrierUnreachable::cancel_timed_out(command_id).into());
     }
     out_of_time.then(|| CheckpointBarrierUnreachable::not_admitted(command_id).into())
 }
