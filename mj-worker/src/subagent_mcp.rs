@@ -2,13 +2,15 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use mj_core::subagent::{
-    FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction, SubagentToolRequest,
+    DEFAULT_WAIT_SECONDS, FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction,
+    SubagentToolRequest,
 };
 
 /// Server instructions stating the spawn/wait contract: results reach the
@@ -23,6 +25,45 @@ fn pending_reply(request_id: &str) -> Value {
         "request_id":request_id,
         "accepted":true,
         "note":"Mjolnir has not answered this request yet; it stays queued. Repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated."
+    })
+}
+
+/// How long any action other than `wait` may take to be answered. The daemon
+/// must notice the queued request, run the action (a spawn may provision a
+/// child session) and complete it back to the worker.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Slack added to a `wait` call's own timeout so the daemon's bounded wait
+/// can finish and be relayed before the shim gives up.
+const WAIT_REPLY_GRACE: Duration = Duration::from_secs(60);
+
+/// How long the shim waits for the worker to answer `action`. A `wait` blocks
+/// for as long as the caller asked plus grace; everything else is bounded by
+/// [`REPLY_TIMEOUT`].
+fn reply_timeout(action: &SubagentToolAction) -> Duration {
+    match action {
+        SubagentToolAction::WaitAgents {
+            timeout_seconds, ..
+        } => {
+            Duration::from_secs(
+                timeout_seconds
+                    .unwrap_or(DEFAULT_WAIT_SECONDS)
+                    .clamp(1, MAX_WAIT_SECONDS),
+            ) + WAIT_REPLY_GRACE
+        }
+        _ => REPLY_TIMEOUT,
+    }
+}
+
+/// The tool error when the worker never answered within the budget. The
+/// request may still be queued, so the model is told how to collect it.
+fn unanswered_reply(request_id: &str, waited: Duration) -> Value {
+    json!({
+        "request_id": request_id,
+        "error": format!(
+            "Mjolnir did not answer this request within {} seconds. It may still be queued; repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated.",
+            waited.as_secs()
+        )
     })
 }
 
@@ -91,6 +132,16 @@ struct WaitArgs {
 }
 
 fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
+    call_with_budget(socket, params, reply_timeout)
+}
+
+/// Answer one tool call, waiting for the worker as long as `budget` allows
+/// for the call's action.
+fn call_with_budget(
+    socket: &Path,
+    params: Option<&Value>,
+    budget: impl Fn(&SubagentToolAction) -> Duration,
+) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let (action, supplied_key) = match params.name.as_str() {
         "list_profiles" => (SubagentToolAction::ListProfiles, None),
@@ -149,12 +200,15 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
         other => bail!("unknown sub-agent tool {other:?}"),
     };
     let request_id = supplied_key.unwrap_or(mj_core::state::new_session_id()?);
+    let timeout = budget(&action);
     let request = SubagentToolRequest {
         request_id: request_id.clone(),
         created_at_ms: mj_core::clock::epoch_millis(),
         action,
     };
-    let reply = send(socket, &request)?;
+    let Some(reply) = send(socket, &request, timeout)? else {
+        return Ok((unanswered_reply(&request_id, timeout), true));
+    };
     if let Some(result) = reply.get("result").filter(|value| !value.is_null()) {
         return Ok((
             result.clone(),
@@ -167,8 +221,9 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     Ok((pending_reply(&request_id), false))
 }
 
-fn send(socket: &Path, request: &SubagentToolRequest) -> Result<Value> {
-    crate::mcp_stdio::socket_request(socket, request, "sub-agent")
+/// `None` means the worker did not answer within `timeout`.
+fn send(socket: &Path, request: &SubagentToolRequest, timeout: Duration) -> Result<Option<Value>> {
+    crate::mcp_stdio::socket_request(socket, request, "sub-agent", timeout)
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -264,6 +319,73 @@ mod tests {
         assert!(
             !note.contains("arrive in"),
             "the note must not promise pushed results: {note}"
+        );
+    }
+
+    #[test]
+    fn wait_calls_get_their_own_timeout_plus_grace() {
+        let wait = |timeout_seconds| SubagentToolAction::WaitAgents {
+            child_session_ids: vec!["c1".into()],
+            timeout_seconds,
+        };
+        assert_eq!(
+            reply_timeout(&wait(Some(7))),
+            Duration::from_secs(7) + WAIT_REPLY_GRACE
+        );
+        assert_eq!(
+            reply_timeout(&wait(None)),
+            Duration::from_secs(DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
+        );
+        assert_eq!(
+            reply_timeout(&wait(Some(MAX_WAIT_SECONDS * 2))),
+            Duration::from_secs(MAX_WAIT_SECONDS) + WAIT_REPLY_GRACE
+        );
+        assert_eq!(
+            reply_timeout(&SubagentToolAction::ListAgents),
+            REPLY_TIMEOUT
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unanswered_call_becomes_a_tool_error_instead_of_hanging() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        // Fake worker: consume the request, then hold the connection open
+        // without ever answering.
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            let _ = reader.into_inner().read(&mut [0u8; 1]);
+        });
+
+        let started = std::time::Instant::now();
+        let (value, is_error) =
+            call_with_budget(&socket, Some(&json!({"name": "list_agents"})), |_| {
+                Duration::from_millis(200)
+            })
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "the call must give up at its budget, took {:?}",
+            started.elapsed()
+        );
+        assert!(is_error, "{value}");
+        assert!(
+            !value["request_id"].as_str().unwrap_or_default().is_empty(),
+            "{value}"
+        );
+        let error = value["error"].as_str().expect("error text");
+        assert!(
+            error.contains("did not answer") && error.contains("request_key"),
+            "{error}"
         );
     }
 

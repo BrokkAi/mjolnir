@@ -72,7 +72,6 @@ impl ChatState {
         };
         if autocomplete.selected != selected {
             autocomplete.selected = selected;
-            self.mark_visible_changed();
         }
     }
 
@@ -171,7 +170,6 @@ impl ChatState {
     fn set_autocomplete(&mut self, autocomplete: Option<Autocomplete>) {
         if self.autocomplete != autocomplete {
             self.autocomplete = autocomplete;
-            self.mark_visible_changed();
         }
     }
 
@@ -245,7 +243,6 @@ impl ChatState {
         }
         if self.command_choices != commands {
             self.command_choices = commands;
-            self.mark_visible_changed();
         }
         self.update_autocomplete();
     }
@@ -257,7 +254,6 @@ impl ChatState {
         if self.model_values != model_values || self.effort_values != effort_values {
             self.model_values = model_values;
             self.effort_values = effort_values;
-            self.mark_visible_changed();
         }
         self.rebuild_command_choices();
     }
@@ -289,7 +285,6 @@ impl ChatState {
             ChatRole::System,
             format!("Clipboard: Ctrl-V paste text/image (Ctrl-Alt-V if intercepted by your terminal) · Backspace/Delete remove image markers · Ctrl-Alt-R restore a failed submission (empty composer)\n\nAvailable commands:\n!<command> — run a Bash command in this session [mj]\n{commands}"),
         ));
-        self.mark_visible_changed();
     }
 }
 

@@ -642,12 +642,27 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     LocalDocker {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AppleContainer {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AwsEc2 {
         instance_id: String,
@@ -665,10 +680,20 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     SshDocker {
         host: String,
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
 }
 
@@ -816,8 +841,8 @@ impl TargetLocator {
                 }
             }
             Self::LocalPodman { container_id, .. }
-            | Self::LocalDocker { container_id }
-            | Self::AppleContainer { container_id }
+            | Self::LocalDocker { container_id, .. }
+            | Self::AppleContainer { container_id, .. }
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
                 if container_id.trim().is_empty() =>
@@ -1610,12 +1635,23 @@ pub struct RecoveryCandidate {
     pub target_template_id: String,
     pub locator: TargetLocator,
     pub ownership: Option<crate::worker_launch::WorkerOwnership>,
+    /// Instance that created the worker, from its label or tag, else from
+    /// the ownership marker. `None` means an older build left no stamp.
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryScan {
     pub candidates: Vec<RecoveryCandidate>,
     pub warnings: Vec<String>,
+    /// Identity of the instance that ran the scan.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Candidates left out because another or an unknown instance created
+    /// them and the scan was not widened to all instances.
+    #[serde(default)]
+    pub hidden_other_instances: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1780,6 +1816,7 @@ mod tests {
             }],
             state: SessionState::Running,
             target: Some(TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "afb67d".into(),
                 workspace_storage: Default::default(),
             }),

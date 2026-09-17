@@ -12,7 +12,7 @@ use ratatui::{
 
 use super::{
     ButtonColumn, ButtonRow, ColumnAlign, ColumnSplit, ControlKind, EventResult, Form, Interaction,
-    Outcome, RowAlign,
+    RowAlign,
 };
 use crate::{modal, selection::FrameSurfaces, theme};
 
@@ -286,7 +286,7 @@ impl<K: Copy + Eq> Dialog<K> {
                 .any(|(name, _, changed)| name == scope && *changed)
         });
         if !dirty {
-            return EventResult::unchanged(Some(action));
+            return EventResult::with_action(action);
         }
         self.form.cancel_pointer();
         self.pending_dismissal = Some(action);
@@ -294,10 +294,7 @@ impl<K: Copy + Eq> Dialog<K> {
         self.confirmation.declare(false, ControlKind::Button);
         self.confirmation.declare(true, ControlKind::Button);
         self.confirmation.end_frame(false);
-        EventResult {
-            outcome: Outcome::Changed,
-            action: None,
-        }
+        EventResult::handled()
     }
 
     pub fn handle(&mut self, event: &Event) -> EventResult<Interaction<K>> {
@@ -306,16 +303,19 @@ impl<K: Copy + Eq> Dialog<K> {
             return match result.action {
                 Some(Interaction::Activate(true)) => {
                     self.dirty = false;
-                    EventResult::changed(self.pending_dismissal.take())
+                    EventResult {
+                        consumed: true,
+                        action: self.pending_dismissal.take(),
+                    }
                 }
                 Some(Interaction::Cancel | Interaction::Activate(false)) => {
                     self.pending_dismissal = None;
-                    EventResult::changed(None)
+                    EventResult::handled()
                 }
-                _ => EventResult {
-                    outcome: result.outcome.max(Outcome::Unchanged),
-                    action: None,
-                },
+                // The confirmation owns every event while it is open, so an
+                // unrecognized one is consumed rather than reaching the form
+                // behind it.
+                _ => EventResult::handled(),
             };
         }
         if let Event::Mouse(mouse) = event
@@ -328,7 +328,7 @@ impl<K: Copy + Eq> Dialog<K> {
             )
         {
             self.form.cancel_pointer();
-            return EventResult::changed(Some(Interaction::Cancel));
+            return EventResult::with_action(Interaction::Cancel);
         }
         let mut result = self.form.handle(event);
         if matches!(result.action, Some(Interaction::Cancel))

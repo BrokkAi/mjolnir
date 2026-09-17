@@ -25,13 +25,15 @@ use mj_core::state::{
 
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    Checkbox, ChoiceList, ComboBox, ComboBoxState, ConsumedEvent, ControlKind, Dialog, FieldEdit,
-    Form, FormViewport, Interaction, Outcome, PopupSide,
+    Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, EditOutcome, FieldEdit,
+    Form, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination, path_completion};
 
-use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
+use crate::widgets::{
+    Truncate, centered_modal, dismissible_modal_title, format_resource_bytes, truncate_to_cells,
+};
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
@@ -327,26 +329,6 @@ impl NewWizard {
             );
         }
     }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return match self.step {
-                WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
-                WizardStep::NewBundle => {
-                    id == WizardControl::NewBundleSource && !self.bundle_creation_in_flight
-                }
-                WizardStep::Mounts => matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                ),
-                _ => false,
-            };
-        }
-        matches!(
-            self.step,
-            WizardStep::ProjectDirectory | WizardStep::NewBundle | WizardStep::Mounts
-        )
-    }
 }
 
 impl ResumeWizard {
@@ -382,29 +364,6 @@ impl ResumeWizard {
             },
             |preparation| !preparation.queued_commands.is_empty(),
         )
-    }
-
-    fn can_advance_target(&self, dashboard: &DashboardState) -> bool {
-        let target_id = nth_key(&dashboard.config.targets, self.target);
-        dashboard
-            .resume_target_rejection(&self.session_id, &target_id)
-            .is_none()
-            && (self.resource_allocation.is_some()
-                || !matches!(
-                    dashboard.config.targets.get(&target_id),
-                    Some(TargetTemplate::AwsEc2 { .. })
-                ))
-    }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return self.step == WizardStep::Mounts
-                && matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                );
-        }
-        self.step == WizardStep::Mounts
     }
 }
 
@@ -470,19 +429,22 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
         .min(mounts.mounts.len().saturating_sub(1));
 }
 
-fn prepare_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Empties the attachment editor for a new entry. The caller moves the
+/// wizard to [`WizardStep::Mounts`].
+fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
     mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
 }
 
-fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Loads the selected attachment into the editor. Answers false when there is
+/// nothing to edit, in which case the wizard must stay on its current step.
+fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     if mounts.mounts.is_empty() {
-        return;
+        return false;
     }
     let index = mounts.history_index;
     let mount = mounts.mounts[index].clone();
@@ -495,31 +457,26 @@ fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard
     mounts.error = None;
     mounts.editing_mount = Some(index);
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
+    true
 }
 
-fn begin_mount_editor(wizard: &mut NewWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn begin_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    prepare_mount_editor(wizard.mounts_mut());
+    wizard.set_step(WizardStep::Mounts);
+    open_mount_editor(wizard);
 }
 
-fn edit_selected_mount(wizard: &mut NewWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn edit_selected_mount<W: WizardDraft>(wizard: &mut W) {
+    if prepare_selected_mount_editor(wizard.mounts_mut()) {
+        wizard.set_step(WizardStep::Mounts);
+    }
+    open_mount_editor(wizard);
 }
 
-fn begin_resume_mount_editor(wizard: &mut ResumeWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
-}
-
-fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn open_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    let form = wizard.form_mut();
+    form.forget_draft_part("attachment editor");
+    form.focus(WizardControl::MountSource);
 }
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
@@ -1915,7 +1872,11 @@ fn render_review_wizard(
                 1 => " · 1 attachment".to_owned(),
                 count => format!(" · {count} attachments"),
             };
-            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            let text = truncate_to_cells(
+                &text,
+                inner.width.saturating_sub(4) as usize,
+                Truncate::SUMMARY,
+            );
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     format!("  {}. {text}{attachment_note}", index + 1),
@@ -1945,7 +1906,11 @@ fn render_review_wizard(
             } else {
                 format!("{kind}: {}", text.replace('\n', " "))
             };
-            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            let text = truncate_to_cells(
+                &text,
+                inner.width.saturating_sub(4) as usize,
+                Truncate::SUMMARY,
+            );
             let row = queued_entries.len().saturating_add(index);
             frame.render_widget(
                 Paragraph::new(Line::styled(
@@ -2543,7 +2508,8 @@ pub(crate) fn render_resume_wizard(
                 WizardStep::Target => WizardControl::TargetList,
                 _ => unreachable!("resume picker step has a list control"),
             },
-            next_enabled: wizard.step != WizardStep::Target || wizard.can_advance_target(dashboard),
+            next_enabled: wizard.step != WizardStep::Target
+                || target_advance_enabled(dashboard, wizard),
             pinned_action: None,
             empty_hint: None,
         },
@@ -2703,6 +2669,9 @@ fn apply_mount_completions(wizard: &mut MountWizard, prefix: &str, candidates: V
 }
 
 mod dashboard;
+mod draft;
+
+pub(crate) use draft::{DraftChange, WizardDraft, target_advance_enabled};
 
 #[cfg(test)]
 mod tests;

@@ -23,6 +23,10 @@ pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
 pub const MANAGED_TAG: &str = "dev.mj.managed";
+/// Which Mjolnir instance (named `--instance` or data-directory fingerprint)
+/// created a worker; see `config::instance_identity`.
+pub const INSTANCE_LABEL: &str = "dev.mj.instance";
+pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// The shared in-container workspace every container session used before
 /// per-session workspaces existed. New sessions record a path under it; see
 /// `container_workspace_root`.
@@ -979,6 +983,30 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 }
 
+/// A command supervised by [`BoundedProcessExecutor`] did not finish before
+/// its deadline. Callers downcast to this to tell a hung probe apart from a
+/// command that could not be started at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandTimedOut {
+    pub program: String,
+    pub purpose: String,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Display for CommandTimedOut {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "`{}` did not answer within {} seconds while trying to {}",
+            self.program,
+            self.timeout.as_secs(),
+            self.purpose
+        )
+    }
+}
+
+impl std::error::Error for CommandTimedOut {}
+
 /// Runs every command with its own deadline.
 ///
 /// [`CancellableProcessExecutor::with_timeout`] bounds a whole operation from a
@@ -1003,12 +1031,11 @@ impl CommandExecutor for BoundedProcessExecutor {
         let executor = CancellableProcessExecutor::with_timeout(self.timeout);
         executor.execute(command).map_err(|error| {
             if executor.is_cancelled() {
-                anyhow::anyhow!(
-                    "`{}` did not answer within {} seconds while trying to {}",
-                    command.program,
-                    self.timeout.as_secs(),
-                    command.purpose
-                )
+                anyhow::Error::new(CommandTimedOut {
+                    program: command.program.clone(),
+                    purpose: command.purpose.clone(),
+                    timeout: self.timeout,
+                })
             } else {
                 error
             }
@@ -1536,12 +1563,27 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     LocalDocker {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AppleContainer {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AwsEc2 {
         profile: String,
@@ -1562,10 +1604,20 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     SshDocker {
         ssh: SshTarget,
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
 }
 
@@ -1743,8 +1795,8 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
             CommandSpec::new(program, args)
         }
         TargetLocator::LocalPodman { container_id, .. }
-        | TargetLocator::LocalDocker { container_id }
-        | TargetLocator::AppleContainer { container_id } => container_exec(
+        | TargetLocator::LocalDocker { container_id, .. }
+        | TargetLocator::AppleContainer { container_id, .. } => container_exec(
             locator.container_engine().expect("local container"),
             container_id,
             args,
@@ -1755,7 +1807,9 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | TargetLocator::SshDocker { ssh, container_id } => {
+        | TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let mut remote = vec![
                 locator
                     .container_engine()

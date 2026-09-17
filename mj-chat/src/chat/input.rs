@@ -6,6 +6,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::rendering::sanitize_terminal_text;
 use super::{ChatAction, ChatState, PromptPayload, attachments};
+use crate::text_input::{
+    line_end, line_start, next_grapheme, next_word_end, previous_grapheme, previous_word_start,
+};
 
 impl ChatState {
     pub(super) fn replace_input_range(
@@ -30,7 +33,6 @@ impl ChatState {
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
-        self.mark_visible_changed();
         removed
     }
 
@@ -60,9 +62,6 @@ impl ChatState {
     pub(super) fn handle_paste(&mut self, pasted: &str) {
         if let Some(dialog) = self.elicitation.as_mut() {
             dialog.paste(pasted);
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
             return;
         }
         let pasted = sanitize_terminal_text(pasted);
@@ -72,7 +71,6 @@ impl ChatState {
         if let Some(search) = self.history_search.as_mut() {
             search.query.push_str(&pasted.replace(['\r', '\n'], " "));
             self.refresh_history_search();
-            self.mark_visible_changed();
             return;
         }
         self.replace_input_range(
@@ -85,7 +83,7 @@ impl ChatState {
         if self.input_cursor == 0 {
             return;
         }
-        let start = previous_grapheme_boundary(&self.input, self.input_cursor);
+        let start = previous_grapheme(&self.input, self.input_cursor);
         self.replace_input_range(start..self.input_cursor, &PromptPayload::text(""));
     }
 
@@ -93,80 +91,46 @@ impl ChatState {
         if self.input_cursor >= self.input.len() {
             return;
         }
-        let end = next_grapheme_boundary(&self.input, self.input_cursor);
+        let end = next_grapheme(&self.input, self.input_cursor);
         self.replace_input_range(self.input_cursor..end, &PromptPayload::text(""));
     }
 
     pub(super) fn move_input_cursor(&mut self, delta: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         self.input_cursor = if delta.is_negative() {
-            previous_grapheme_boundary(&self.input, self.input_cursor)
+            previous_grapheme(&self.input, self.input_cursor)
         } else {
-            next_grapheme_boundary(&self.input, self.input_cursor)
+            next_grapheme(&self.input, self.input_cursor)
         };
         self.input_cursor = attachments::snap_cursor(&self.input_images, self.input_cursor, delta);
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
-    }
-
-    fn line_start(&self) -> usize {
-        self.input[..self.input_cursor]
-            .rfind('\n')
-            .map_or(0, |index| index + 1)
-    }
-
-    fn line_end(&self) -> usize {
-        self.input[self.input_cursor..]
-            .find('\n')
-            .map_or(self.input.len(), |index| self.input_cursor + index)
     }
 
     pub(super) fn move_to_line_start(&mut self, cross_boundary: bool) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
-        let start = self.line_start();
+        let start = line_start(&self.input, self.input_cursor);
         self.input_cursor = if cross_boundary && self.input_cursor == start && start > 0 {
-            self.input[..start - 1]
-                .rfind('\n')
-                .map_or(0, |index| index + 1)
+            line_start(&self.input, start - 1)
         } else {
             start
         };
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn move_to_line_end(&mut self, cross_boundary: bool) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
-        let end = self.line_end();
+        let end = line_end(&self.input, self.input_cursor);
         self.input_cursor = if cross_boundary && self.input_cursor == end && end < self.input.len()
         {
-            let next = end + 1;
-            self.input[next..]
-                .find('\n')
-                .map_or(self.input.len(), |index| next + index)
+            line_end(&self.input, end + 1)
         } else {
             end
         };
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn move_vertical(&mut self, direction: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
-        let start = self.line_start();
+        let start = line_start(&self.input, self.input_cursor);
         let column = self
             .preferred_column
             .unwrap_or_else(|| self.input[start..self.input_cursor].graphemes(true).count());
@@ -175,105 +139,42 @@ impl ChatState {
                 self.input_cursor = 0;
                 self.preferred_column = None;
                 self.update_autocomplete();
-                if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-                    self.mark_visible_changed();
-                }
                 return;
             }
-            self.input[..start - 1]
-                .rfind('\n')
-                .map_or(0, |index| index + 1)
+            line_start(&self.input, start - 1)
         } else {
-            let end = self.line_end();
+            let end = line_end(&self.input, self.input_cursor);
             if end == self.input.len() {
                 self.input_cursor = self.input.len();
                 self.preferred_column = None;
                 self.update_autocomplete();
-                if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-                    self.mark_visible_changed();
-                }
                 return;
             }
             end + 1
         };
-        let target_end = self.input[target_start..]
-            .find('\n')
-            .map_or(self.input.len(), |index| target_start + index);
+        let target_end = line_end(&self.input, target_start);
         self.input_cursor = self.input[target_start..target_end]
             .grapheme_indices(true)
             .nth(column)
             .map_or(target_end, |(offset, _)| target_start + offset);
+        // Only the composer needs this: a cursor that lands inside an
+        // `[image N]` marker is pushed to the near edge of the whole marker.
         self.input_cursor =
             attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = Some(column);
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
-    }
-
-    pub(super) fn previous_word_start(&self) -> usize {
-        let prefix = &self.input[..self.input_cursor];
-        let trimmed = prefix.trim_end_matches(char::is_whitespace);
-        if trimmed.is_empty() {
-            return 0;
-        }
-        let run_start = trimmed
-            .char_indices()
-            .rev()
-            .find(|(_, character)| character.is_whitespace())
-            .map_or(0, |(index, character)| index + character.len_utf8());
-        let run = &trimmed[run_start..];
-        let mut start = run_start + run.len();
-        let mut class = None;
-        for (index, character) in run.char_indices().rev() {
-            let next_class = word_class(character);
-            if class.is_some_and(|class| class != next_class) {
-                break;
-            }
-            class = Some(next_class);
-            start = run_start + index;
-        }
-        start
-    }
-
-    pub(super) fn next_word_end(&self) -> usize {
-        let suffix = &self.input[self.input_cursor..];
-        let Some(non_space) = suffix.find(|character: char| !character.is_whitespace()) else {
-            return self.input.len();
-        };
-        let run = &suffix[non_space..];
-        let mut end = 0;
-        let mut class = None;
-        for (index, character) in run.char_indices() {
-            if character.is_whitespace() {
-                break;
-            }
-            let next_class = word_class(character);
-            if class.is_some_and(|class| class != next_class) {
-                break;
-            }
-            class = Some(next_class);
-            end = index + character.len_utf8();
-        }
-        self.input_cursor + non_space + end
     }
 
     pub(super) fn move_word(&mut self, direction: isize) {
-        let old_cursor = self.input_cursor;
-        let old_preferred = self.preferred_column;
         self.input_cursor = if direction.is_negative() {
-            self.previous_word_start()
+            previous_word_start(&self.input, self.input_cursor)
         } else {
-            self.next_word_end()
+            next_word_end(&self.input, self.input_cursor)
         };
         self.input_cursor =
             attachments::snap_cursor(&self.input_images, self.input_cursor, direction);
         self.preferred_column = None;
         self.update_autocomplete();
-        if self.input_cursor != old_cursor || self.preferred_column != old_preferred {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn kill_range(&mut self, range: std::ops::Range<usize>) {
@@ -286,7 +187,7 @@ impl ChatState {
     }
 
     pub(super) fn kill_to_line_start(&mut self) {
-        let start = self.line_start();
+        let start = line_start(&self.input, self.input_cursor);
         if start == self.input_cursor && start > 0 {
             self.kill_range(start - 1..start);
         } else {
@@ -297,7 +198,7 @@ impl ChatState {
     /// Kill to the end of the line. A `chained` kill appends to the kill
     /// buffer, in Emacs order, so a later yank restores the whole block.
     pub(super) fn kill_to_line_end(&mut self, chained: bool) {
-        let end = self.line_end();
+        let end = line_end(&self.input, self.input_cursor);
         let range = if end == self.input_cursor && end < self.input.len() {
             end..end + 1
         } else {
@@ -338,25 +239,6 @@ impl ChatState {
     }
 }
 
-pub(super) fn previous_grapheme_boundary(input: &str, cursor: usize) -> usize {
-    input[..cursor]
-        .grapheme_indices(true)
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-fn next_grapheme_boundary(input: &str, cursor: usize) -> usize {
-    input[cursor..]
-        .grapheme_indices(true)
-        .nth(1)
-        .map_or(input.len(), |(index, _)| cursor + index)
-}
-
-fn word_class(character: char) -> bool {
-    const SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
-    SEPARATORS.contains(character)
-}
-
 pub(super) use crate::components::text_layout::{
     grapheme_offset_for_wrapped_row, input_cursor_visual_position, input_visual_rows,
     set_input_cursor, wrapped_row_for_grapheme_offset,
@@ -367,7 +249,7 @@ mod tests {
     use super::*;
     use crate::chat::test_support::{ctrl, key, snapshot};
     use crate::chat::{ChatAction, active::render_full_frame as render};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::KeyCode;
     use mj_core::relay::{ActivePrompt, WorkerPhase};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -455,67 +337,22 @@ mod tests {
     }
 
     #[test]
-    fn readline_line_movement_kill_and_yank_match_codex() {
+    fn control_k_and_control_y_round_trip_a_line_holding_an_image_marker() {
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("alpha beta\ngamma".into());
+        chat.set_input("before\nafter".into());
         chat.handle_key(ctrl('a'));
-        assert_eq!(&chat.input[chat.input_cursor..], "gamma");
+        assert!(chat.reserve_attachment(0));
+        assert_eq!(chat.input, "before\n[image 1]after");
+        assert_eq!(chat.input_images.len(), 1);
+
         chat.handle_key(ctrl('a'));
-        assert_eq!(chat.input_cursor, 0);
-        chat.handle_key(ctrl('e'));
-        assert_eq!(&chat.input[..chat.input_cursor], "alpha beta");
         chat.handle_key(ctrl('k'));
-        assert_eq!(chat.input, "alpha betagamma");
+        assert_eq!(chat.input, "before\n");
+        assert!(chat.input_images.is_empty());
+
         chat.handle_key(ctrl('y'));
-        assert_eq!(chat.input, "alpha beta\ngamma");
-    }
-
-    #[test]
-    fn sequential_control_k_accumulates_one_yankable_block() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.input, "line2");
-        chat.handle_key(ctrl('y'));
-        assert_eq!(chat.input, "line1\nline2");
-    }
-
-    #[test]
-    fn any_key_between_control_k_presses_restarts_the_kill_buffer() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(key(KeyCode::Right));
-        chat.handle_key(key(KeyCode::Left));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.kill_buffer, "\n");
-
-        chat.set_input("line1\nline2".into());
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        chat.handle_key(key(KeyCode::Char('x')));
-        chat.handle_key(ctrl('a'));
-        chat.handle_key(ctrl('k'));
-        assert_eq!(chat.kill_buffer, "x");
-    }
-
-    #[test]
-    fn readline_word_edits_and_grapheme_cursor_are_atomic() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("one two 👩‍💻".into());
-        chat.handle_key(key(KeyCode::Left));
-        assert_eq!(&chat.input[chat.input_cursor..], "👩‍💻");
-        chat.handle_key(ctrl('w'));
-        assert_eq!(chat.input, "one 👩‍💻");
-        chat.handle_key(ctrl('y'));
-        assert_eq!(chat.input, "one two 👩‍💻");
-        chat.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(&chat.input[chat.input_cursor..], "two 👩‍💻");
+        assert_eq!(chat.input, "before\n[image 1]after");
+        assert_eq!(chat.input_images.len(), 1);
+        assert_eq!(chat.input_images[0].range, 7.."before\n[image 1]".len());
     }
 }

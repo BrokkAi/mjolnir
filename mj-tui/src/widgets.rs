@@ -5,39 +5,11 @@ use ratatui::widgets::Paragraph;
 
 // Modal geometry is shared with the chat view, so it lives in `mj-chat`. These
 // re-exports keep `crate::widgets` the single import site for dashboard code.
+pub(crate) use mj_chat::components::{Truncate, truncate_to_cells};
 pub(crate) use mj_chat::modal::{
     bordered_content, centered_modal, centered_modal_fixed, centered_rect, dismissible_modal_title,
     modal_area,
 };
-
-pub(crate) fn truncate_text(text: &str, width: usize) -> String {
-    let text = collapse_whitespace(text);
-    if text.chars().count() <= width {
-        return text;
-    }
-    if width <= 1 {
-        return "…".chars().take(width).collect();
-    }
-    let mut truncated = text.chars().take(width - 1).collect::<String>();
-    truncated.truncate(
-        truncated
-            .trim_end_matches(|character: char| {
-                character.is_whitespace()
-                    || character.is_ascii_punctuation()
-                    || matches!(
-                        character,
-                        '…' | '–' | '—' | '‘' | '’' | '“' | '”' | '•' | '·'
-                    )
-            })
-            .len(),
-    );
-    truncated.push('…');
-    truncated
-}
-
-fn collapse_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
 
 /// Popup height that keeps every wrapped line of `paragraph` visible, never
 /// shrinking below the dialog's nominal height.
@@ -70,17 +42,5 @@ pub(crate) fn format_resource_bytes(bytes: u64) -> String {
         format!("{:.1}G", bytes as f64 / GIB)
     } else {
         format!("{:.1}T", bytes as f64 / TIB)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncated_widget_text_removes_cutoff_whitespace_and_punctuation() {
-        assert_eq!(truncate_text("alpha, beta", 7), "alpha…");
-        assert_eq!(truncate_text("alpha - beta", 8), "alpha…");
-        assert_eq!(truncate_text("alpha beta", 20), "alpha beta");
     }
 }

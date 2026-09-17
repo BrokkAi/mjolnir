@@ -962,6 +962,9 @@ impl RuntimeState {
                     }
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
+                    if let Err(error) = &result {
+                        tracing::warn!(session_id = %operation_session_id, ?kind, %error, "lifecycle operation failed");
+                    }
                     result_tx.send_replace(Some(result));
                     // Completion must release transient mutation ownership even
                     // when every requesting client has disconnected. Durable
@@ -3424,9 +3427,11 @@ async fn handle_action(
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
         )),
-        DaemonAction::ScanRecovery => {
-            let scan =
-                blocking(|| Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor))).await?;
+        DaemonAction::ScanRecovery { all_instances } => {
+            let scan = blocking(move || {
+                Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))
+            })
+            .await?;
             Ok(DaemonReply::RecoveryScan(scan))
         }
         DaemonAction::AdoptRecovery {
@@ -3434,6 +3439,7 @@ async fn handle_action(
             target_id,
             profile,
             bundle,
+            all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
             let mut controller = blocking(Controller::load).await?;
@@ -3443,6 +3449,7 @@ async fn handle_action(
                     &target_id,
                     profile.as_deref(),
                     bundle.as_deref(),
+                    all_instances,
                     &ProcessExecutor,
                 )
                 .await?;
@@ -3453,6 +3460,7 @@ async fn handle_action(
             session_id,
             target_id,
             confirmation,
+            all_instances,
         } => {
             ensure_no_active_lifecycle(state)?;
             blocking(move || {
@@ -3460,6 +3468,7 @@ async fn handle_action(
                     &session_id,
                     &target_id,
                     &confirmation,
+                    all_instances,
                     &ProcessExecutor,
                 )
             })
@@ -3874,6 +3883,7 @@ mod tests {
     #[test]
     fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         let target = Some(mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         });
@@ -5673,6 +5683,7 @@ mod tests {
         let state = test_runtime_state();
         let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
         session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "a".repeat(64),
             workspace_storage: Default::default(),
         });

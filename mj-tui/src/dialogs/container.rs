@@ -6,7 +6,8 @@ use std::cell::{Cell, RefCell};
 use crate::widgets::dismissible_modal_title;
 use crossterm::event::{Event, KeyEventKind};
 use mj_chat::components::{
-    ChoiceList, ComboBoxState, ControlKind, Dialog, FormViewport, Interaction, Outcome, TextField,
+    ChoiceList, ComboBoxState, ControlKind, Dialog, EditOutcome, FormViewport, Interaction,
+    TextField,
 };
 use ratatui::layout::Margin;
 
@@ -553,7 +554,6 @@ impl DashboardState {
             }
             Err(error) => editor.error = Some(error),
         }
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_container_edit_event(
@@ -570,16 +570,10 @@ impl DashboardState {
             editor.remove_selected();
             editor.prepare();
             self.mode = Mode::EditContainer(editor);
-            crate::mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
             return DashboardAction::None;
         }
         let result = editor.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = editor.access_combo.route(result.action);
         let mut changed_structure = false;
         match interaction {
@@ -590,13 +584,9 @@ impl DashboardState {
             Some(Interaction::Edit(id, edit)) => {
                 if editor
                     .field_mut(id)
-                    .is_some_and(|field| TextField::apply(field, edit) == Outcome::Changed)
+                    .is_some_and(|field| TextField::apply(field, edit) == EditOutcome::Changed)
                 {
                     editor.error = None;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Select(Mounts, index)) => editor.mount_index = index,
@@ -633,13 +623,11 @@ impl DashboardState {
                         };
                         editor.error = Some("Resolving attached directory…".into());
                         self.mode = Mode::EditContainer(editor);
-                        self.mark_render_changed();
                         return action;
                     }
                     Err(error) => {
                         editor.error = Some(error.to_string());
                         self.mode = Mode::EditContainer(editor);
-                        self.mark_render_changed();
                         return DashboardAction::None;
                     }
                     Ok(false) => {}

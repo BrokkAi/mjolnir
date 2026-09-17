@@ -13,14 +13,13 @@ use std::sync::Arc;
 
 use crate::theme;
 use crossterm::event::{Event, KeyEvent, MouseEvent};
-use rat_event::ConsumedEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome};
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
 use crate::selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::relay::RelayEvent;
@@ -33,6 +32,7 @@ use mj_transcript::projection::{apply_committed_projection_event, project_relay_
 
 use super::rendering::TranscriptRenderMode;
 use super::transcript::{materialized_chat_entries_reusing, render_entry_rows};
+use super::viewport::RowViewport;
 
 /// The plan a review is about, captured when the user asked for one.
 ///
@@ -273,10 +273,8 @@ pub(super) struct ReviewerPane {
     rows: Vec<Line<'static>>,
     theme: theme::UiTheme,
     width: u16,
-    /// First content row drawn.
-    top_row: usize,
-    /// Whether new rows keep the pane pinned to the end.
-    follow: bool,
+    /// Where this pane is scrolled to.
+    viewport: RowViewport,
     /// Frontier this pane has folded, so a replay resumes from it.
     pub(super) cursor_ordinal: u64,
     pub(super) cursor_digest: String,
@@ -317,7 +315,7 @@ impl ReviewerPane {
         self.entries = materialized_chat_entries_reusing(session, 0, Vec::new());
         // Rows are rebuilt on the next draw, at whatever width that draw has.
         self.width = 0;
-        self.follow = true;
+        self.viewport.follow = true;
         true
     }
 
@@ -368,7 +366,7 @@ impl ReviewerPane {
         self.entries = materialized_chat_entries_reusing(&session, 0, Vec::new());
         self.session = Some(session);
         self.width = 0;
-        self.follow = true;
+        self.viewport.follow = true;
     }
 
     /// Forms the reviewer's harness is waiting on.
@@ -400,16 +398,7 @@ impl ReviewerPane {
 
     /// Scrolls by `delta` rows, leaving follow mode on only at the end.
     pub(super) fn scroll_by(&mut self, delta: isize, height: usize) -> bool {
-        let before = (self.top_row, self.follow);
-        let maximum = self.rows.len().saturating_sub(height);
-        let top = if delta.is_negative() {
-            self.top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.top_row.saturating_add(delta as usize)
-        };
-        self.top_row = top.min(maximum);
-        self.follow = self.top_row >= maximum;
-        (self.top_row, self.follow) != before
+        self.viewport.scroll_by(delta, self.rows.len(), height)
     }
 
     /// The text a selection in this pane covers, resolved against this pane's
@@ -544,7 +533,6 @@ impl super::ChatState {
             form: Box::new(setup_form(&setup)),
             setup: Box::new(setup),
         });
-        self.mark_visible_changed();
     }
 
     pub(super) fn second_opinion(&self) -> Option<&SecondOpinion> {
@@ -568,20 +556,10 @@ impl super::ChatState {
     }
 
     pub(super) fn cancel_second_opinion_pointer(&mut self) {
-        let mut captured = false;
         match self.second_opinion.as_mut() {
-            Some(SecondOpinion::Setup { form, .. }) => {
-                captured = form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Some(SecondOpinion::Review(review)) => {
-                captured = review.form.captures_pointer();
-                review.form.cancel_pointer();
-            }
+            Some(SecondOpinion::Setup { form, .. }) => form.cancel_pointer(),
+            Some(SecondOpinion::Review(review)) => review.form.cancel_pointer(),
             None => {}
-        }
-        if captured {
-            self.mark_visible_changed();
         }
     }
 
@@ -606,11 +584,7 @@ impl super::ChatState {
                 Some(SecondOpinion::Setup { form, .. }) => form.handle(&event),
                 _ => unreachable!(),
             };
-            let consumed = result.outcome.is_consumed();
-            let changed = result.outcome == Outcome::Changed;
-            if changed {
-                self.mark_visible_changed();
-            }
+            let consumed = result.consumed;
             if let Some(interaction) = result.action.map(SetupInteraction::from) {
                 return match interaction {
                     SetupInteraction::Select(selected) => {
@@ -638,11 +612,7 @@ impl super::ChatState {
                 Some(SecondOpinion::Review(review)) => review.form.handle(&event),
                 _ => unreachable!(),
             };
-            let consumed = result.outcome.is_consumed();
-            let changed = result.outcome == Outcome::Changed;
-            if changed {
-                self.mark_visible_changed();
-            }
+            let consumed = result.consumed;
             if let Some(SplitInteraction::Activate(control)) =
                 result.action.map(SplitInteraction::from)
             {
@@ -668,20 +638,13 @@ impl super::ChatState {
         if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut() {
             prepare_setup_form(setup, form);
         }
-        let (consumed, changed, interaction) = {
+        let (consumed, interaction) = {
             let Some(SecondOpinion::Setup { form, .. }) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = form.handle(&event);
-            (
-                result.outcome.is_consumed(),
-                result.outcome == Outcome::Changed,
-                result.action,
-            )
+            (result.consumed, result.action)
         };
-        if changed {
-            self.mark_visible_changed();
-        }
         let Some(interaction) = interaction else {
             return (consumed, super::ChatAction::None);
         };
@@ -721,21 +684,13 @@ impl super::ChatState {
         let event = Event::Key(KeyEvent::new_with_kind_and_state(
             code, modifiers, key.kind, key.state,
         ));
-        let (consumed, changed, interaction, focused) = {
+        let (consumed, interaction, focused) = {
             let Some(SecondOpinion::Review(review)) = self.second_opinion.as_mut() else {
                 return (false, super::ChatAction::None);
             };
             let result = review.form.handle(&event);
-            (
-                result.outcome.is_consumed(),
-                result.outcome == Outcome::Changed,
-                result.action,
-                review.form.focused(),
-            )
+            (result.consumed, result.action, review.form.focused())
         };
-        if changed {
-            self.mark_visible_changed();
-        }
         if let Some(action) = interaction {
             match action {
                 Interaction::Activate(SplitControl::Transfer) => {
@@ -817,26 +772,20 @@ impl super::ChatState {
             SecondOpinion::Review(review) => match code {
                 KeyCode::Tab | KeyCode::Right => {
                     review.action = review.action.next(1);
-                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::BackTab | KeyCode::Left => {
                     review.action = review.action.next(-1);
-                    self.mark_visible_changed();
                     super::ChatAction::None
                 }
                 KeyCode::PageUp => {
                     let page = self.last_viewport_height.max(1);
-                    if review.reviewer.scroll_by(-(page as isize), page) {
-                        self.mark_visible_changed();
-                    }
+                    review.reviewer.scroll_by(-(page as isize), page);
                     super::ChatAction::None
                 }
                 KeyCode::PageDown => {
                     let page = self.last_viewport_height.max(1);
-                    if review.reviewer.scroll_by(page as isize, page) {
-                        self.mark_visible_changed();
-                    }
+                    review.reviewer.scroll_by(page as isize, page);
                     super::ChatAction::None
                 }
                 KeyCode::Enter => self.activate_split_action(),
@@ -984,11 +933,7 @@ impl super::ChatState {
         else {
             return false;
         };
-        let changed = reviewer.scroll_by(rows, height);
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        reviewer.scroll_by(rows, height)
     }
 
     /// The text a reviewer-pane selection covers.
@@ -1182,10 +1127,10 @@ pub(super) fn render_reviewer_titled(
     }
     reviewer.ensure_rows(inner.width);
     let height = usize::from(inner.height);
-    if reviewer.follow {
-        reviewer.top_row = reviewer.rows.len().saturating_sub(height);
+    if reviewer.viewport.follow {
+        reviewer.viewport.top_row = reviewer.rows.len().saturating_sub(height);
     }
-    let top = reviewer.top_row;
+    let top = reviewer.viewport.top_row;
     let visible = reviewer
         .rows
         .iter()
@@ -1301,7 +1246,10 @@ pub(super) fn review_role_session_id(primary_session_id: &str, role: &str) -> St
 pub(super) fn pane_from_entries(entries: Vec<ChatEntry>) -> ReviewerPane {
     ReviewerPane {
         entries,
-        follow: true,
+        viewport: RowViewport {
+            top_row: 0,
+            follow: true,
+        },
         ..ReviewerPane::default()
     }
 }
@@ -1729,9 +1677,9 @@ mod tests {
 
         // Scrolling stops at the last full screen rather than running past it.
         pane.scroll_by(1_000, 10);
-        assert_eq!(pane.top_row, total - 10);
+        assert_eq!(pane.viewport.top_row, total - 10);
         pane.scroll_by(-1_000, 10);
-        assert_eq!(pane.top_row, 0);
+        assert_eq!(pane.viewport.top_row, 0);
 
         let text = pane
             .selection_text(&SelectionRange {

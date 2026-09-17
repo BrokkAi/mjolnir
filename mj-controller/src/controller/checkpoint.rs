@@ -2186,7 +2186,7 @@ pub(super) fn upload_checkpoint_spec(
             .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        targets::TargetLocator::LocalDocker { container_id } => execute_checked(
+        targets::TargetLocator::LocalDocker { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "docker",
@@ -2199,7 +2199,7 @@ pub(super) fn upload_checkpoint_spec(
             .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        targets::TargetLocator::AppleContainer { container_id } => execute_checked(
+        targets::TargetLocator::AppleContainer { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "container",
@@ -2222,7 +2222,9 @@ pub(super) fn upload_checkpoint_spec(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",
@@ -2493,6 +2495,7 @@ mod tests {
         let mut session = checkpoint_test_session(session_id);
         session.bundle_id = "app-bundle".into();
         session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "hel-session".into(),
             workspace_storage: Default::default(),
         });
@@ -2964,6 +2967,7 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         let locator = targets::TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: "hel-session-12345678".to_owned(),
         };
         upload_checkpoint_spec(
@@ -2991,6 +2995,7 @@ mod tests {
     #[test]
     fn checkpoint_export_streams_its_spec_instead_of_uploading_it() {
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
             workspace_storage: Default::default(),
         };
@@ -3022,6 +3027,7 @@ mod tests {
     #[test]
     fn a_failing_export_is_not_retried_as_an_old_worker() {
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
             workspace_storage: Default::default(),
         };
@@ -3052,6 +3058,7 @@ mod tests {
     #[test]
     fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
         let locator = targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
             workspace_storage: Default::default(),
         };

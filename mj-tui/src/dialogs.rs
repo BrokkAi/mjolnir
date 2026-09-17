@@ -1,9 +1,7 @@
 //! Modal dialogs: session import, confirmations, and the rename editor.
 
 mod container;
-#[cfg(test)]
-use container::ContainerEditFocus;
-pub(crate) use container::{ContainerEditor, render_container_editor};
+pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container_editor};
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -24,7 +22,7 @@ use mj_core::config::{HarnessKind, mount_history_host};
 use mj_core::state::{MoveOperation, MovePhase, ResumeQueueDisposition};
 
 use mj_chat::components::{
-    Button, Checkbox, ChoiceList, ControlKind, Dialog, Interaction, Outcome, TextField,
+    Button, Checkbox, ChoiceList, ControlKind, Dialog, EditOutcome, Interaction, TextField,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
@@ -34,8 +32,8 @@ use mj_core::targets::{
 };
 
 use crate::widgets::{
-    centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
-    truncate_text,
+    Truncate, centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area,
+    popup_height, truncate_to_cells,
 };
 use crate::wizards::{access_marker, render_access_combo};
 use crate::{
@@ -434,6 +432,21 @@ fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
     form.end_frame(DialogControl::TargetList);
 }
 
+/// What one event did to a text-prompt dialog: a modal holding a single text
+/// field with Cancel and Save.
+pub(crate) enum TextPromptOutcome {
+    /// Esc or Cancel. The dialog's owner decides where the cancel goes.
+    Cancel,
+    /// The dialog stays open, whether or not the event changed the value.
+    Edited,
+    /// Save was pressed on an empty value. The notice is already set; the
+    /// dialog stays open.
+    Rejected,
+    /// Save was pressed on a value the dialog can act on. The owner builds
+    /// its own action from it.
+    Submit,
+}
+
 fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     // Keep declarations available for keyboard input while the modal is
     // clipped, but discard hitboxes and any in-flight mouse gesture.
@@ -554,7 +567,7 @@ pub(crate) fn render_import_progress(
     let status = import_progress_status(progress);
     let paragraph = Paragraph::new(vec![
         Line::styled(
-            truncate_text(&progress.session_title, 60),
+            truncate_to_cells(&progress.session_title, 60, Truncate::SUMMARY),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -736,12 +749,16 @@ pub(crate) fn render_import_bundle_confirmation(
     form.end_frame(DialogControl::ImportContinue);
 }
 
-/// Editable per-session container provisioning inputs: the size overrides and
-/// the attached host directories. Nothing here is written to config.toml.
-pub(crate) fn render_rename_editor(
+/// Draws a one-field modal: a header line naming what is being renamed, the
+/// field itself, and a Cancel/Save footer. The rename editors are the two
+/// dialogs shaped this way.
+fn render_text_prompt(
     frame: &mut Frame,
     area: Rect,
-    editor: &RenameEditor,
+    form: &RefCell<Dialog<DialogControl>>,
+    value: &TextInput,
+    header: &str,
+    title: &str,
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
@@ -750,21 +767,20 @@ pub(crate) fn render_rename_editor(
         vertical: 1,
     });
     if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
+        clear_dialog_form_geometry(&mut form.borrow_mut());
         return;
     }
     frame.render_widget(
-        Paragraph::new(format!("Session: {}", editor.session_id)),
+        Paragraph::new(header),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
+    let mut form = form.borrow_mut();
     form.begin_frame();
-    let title =
-        dismissible_modal_title(&mut form, popup, "Rename session", theme::title(true), true);
+    let title = dismissible_modal_title(&mut form, popup, title, theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
+    TextField::render(frame, field, value, &mut form, DialogControl::Field);
     Dialog::render_actions(
         frame,
         footer,
@@ -777,52 +793,38 @@ pub(crate) fn render_rename_editor(
     form.end_frame(DialogControl::Field);
 }
 
+pub(crate) fn render_rename_editor(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &RenameEditor,
+    surfaces: &mut FrameSurfaces,
+) {
+    render_text_prompt(
+        frame,
+        area,
+        &editor.form,
+        &editor.title,
+        &format!("Session: {}", editor.session_id),
+        "Rename session",
+        surfaces,
+    );
+}
+
 pub(crate) fn render_config_id_editor(
     frame: &mut Frame,
     area: Rect,
     editor: &ConfigIdEditor,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 60, 8, area);
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Current {} ID: {}",
-            editor.kind.label(),
-            editor.old_id
-        )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
-    form.begin_frame();
-    let title = dismissible_modal_title(
-        &mut form,
-        popup,
-        format!("Rename {} ID", editor.kind.label()),
-        theme::title(true),
-        true,
-    );
-    frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
-    Dialog::render_actions(
+    render_text_prompt(
         frame,
-        footer,
-        &[
-            (DialogControl::Cancel, "Cancel", true),
-            (DialogControl::Save, "Save", true),
-        ],
-        &mut form,
+        area,
+        &editor.form,
+        &editor.value,
+        &format!("Current {} ID: {}", editor.kind.label(), editor.old_id),
+        &format!("Rename {} ID", editor.kind.label()),
+        surfaces,
     );
-    form.end_frame(DialogControl::Field);
 }
 
 pub(crate) fn render_target_actions(
@@ -1553,12 +1555,8 @@ impl DashboardState {
             return;
         };
         if matches!(access, WebViewerAccess::Starting) {
-            let changed = !current.loading;
             current.loading = true;
             current.reset_form();
-            if changed {
-                self.mark_render_changed();
-            }
             return;
         }
         let mut dialog = WebDialog::loading();
@@ -1593,33 +1591,13 @@ impl DashboardState {
             WebViewerAccess::Unavailable(message) => dialog.message = Some(message),
         }
         dialog.reset_form();
-        let changed = current.loading != dialog.loading
-            || current.viewer_url != dialog.viewer_url
-            || current.viewer_code != dialog.viewer_code
-            || current.fallback_reason != dialog.fallback_reason
-            || current.message != dialog.message
-            || current.qr != dialog.qr
-            || current.failed_address != dialog.failed_address
-            || current.port_conflict != dialog.port_conflict
-            || current.inspecting != dialog.inspecting
-            || current.listeners != dialog.listeners
-            || current.listener_index != dialog.listener_index
-            || current.inspection_message != dialog.inspection_message
-            || current.confirm_stop != dialog.confirm_stop;
         self.mode = Mode::Web(dialog);
-        if changed {
-            self.mark_render_changed();
-        }
     }
 
     pub fn apply_web_listeners(&mut self, result: Result<Vec<WebListenerProcess>, String>) {
         let Mode::Web(dialog) = &mut self.mode else {
             return;
         };
-        let old_inspecting = dialog.inspecting;
-        let old_listeners = dialog.listeners.clone();
-        let old_listener_index = dialog.listener_index;
-        let old_message = dialog.inspection_message.clone();
         dialog.inspecting = false;
         match result {
             Ok(processes) => {
@@ -1630,25 +1608,12 @@ impl DashboardState {
             Err(error) => dialog.inspection_message = Some(error),
         }
         dialog.reset_form();
-        if old_inspecting != dialog.inspecting
-            || old_listeners != dialog.listeners
-            || old_listener_index != dialog.listener_index
-            || old_message != dialog.inspection_message
-        {
-            self.mark_render_changed();
-        }
     }
 
     pub fn apply_web_error(&mut self, error: String) {
         let Mode::Web(dialog) = &mut self.mode else {
             return;
         };
-        let old = (
-            dialog.loading,
-            dialog.confirm_stop.clone(),
-            dialog.inspection_message.clone(),
-            dialog.message.clone(),
-        );
         dialog.loading = false;
         dialog.confirm_stop = None;
         dialog.inspection_message = Some(error.clone());
@@ -1656,15 +1621,6 @@ impl DashboardState {
             dialog.message = Some(error);
         }
         dialog.reset_form();
-        let new = (
-            dialog.loading,
-            dialog.confirm_stop.clone(),
-            dialog.inspection_message.clone(),
-            dialog.message.clone(),
-        );
-        if old != new {
-            self.mark_render_changed();
-        }
     }
 
     pub(crate) fn handle_web_event(
@@ -1673,12 +1629,7 @@ impl DashboardState {
         mut dialog: WebDialog,
     ) -> DashboardAction {
         let result = dialog.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         let mut action = DashboardAction::None;
         match interaction {
@@ -1761,7 +1712,6 @@ impl DashboardState {
                 DialogControl::Field,
             ),
         });
-        self.mark_render_changed();
     }
 
     pub(crate) fn begin_target_actions(&mut self) {
@@ -1784,7 +1734,6 @@ impl DashboardState {
             testing: None,
             result: None,
         });
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_target_actions_event(
@@ -1804,7 +1753,6 @@ impl DashboardState {
             dialog.result = Some(("Target test".into(), Err("cancelled".into())));
             sync_target_actions_form(&mut dialog);
             self.mode = Mode::TargetActions(dialog);
-            self.mark_render_changed();
             return DashboardAction::CancelTargetTest;
         }
         // Preserve the convenient Up/Down target selection from the old
@@ -1819,16 +1767,10 @@ impl DashboardState {
             let form = dialog.form.get_mut();
             if !form.is_focused(DialogControl::TargetList) {
                 form.focus(DialogControl::TargetList);
-                self.mark_render_changed();
             }
         }
         let result = dialog.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => {
@@ -1867,7 +1809,6 @@ impl DashboardState {
                                 DialogControl::Field,
                             ),
                         });
-                        self.mark_render_changed();
                         return DashboardAction::None;
                     }
                     DialogControl::TargetTest if dialog.testing.is_none() => {
@@ -1875,7 +1816,6 @@ impl DashboardState {
                         dialog.result = None;
                         sync_target_actions_form(&mut dialog);
                         self.mode = Mode::TargetActions(dialog);
-                        self.mark_render_changed();
                         return DashboardAction::TestTarget { target_id };
                     }
                     _ => {}
@@ -1887,64 +1827,76 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    /// Routes one event through a text-prompt dialog: the single text field,
+    /// Cancel, and Save with the empty-value check both dialogs make. The
+    /// caller keeps what only it knows: where a cancel goes and what a
+    /// submitted value means.
+    fn handle_text_prompt_event(
+        &self,
+        form: &mut Dialog<DialogControl>,
+        value: &mut TextInput,
+        event: &Event,
+        empty_message: &str,
+    ) -> TextPromptOutcome {
+        let result = form.handle(event);
+        self.last_event_consumed.set(result.consumed);
+        match result.action {
+            Some(Interaction::Cancel | Interaction::Activate(DialogControl::Cancel)) => {
+                TextPromptOutcome::Cancel
+            }
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(value, edit);
+                TextPromptOutcome::Edited
+            }
+            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
+                if value.trim().is_empty() {
+                    self.notices.set(empty_message);
+                    TextPromptOutcome::Rejected
+                } else {
+                    TextPromptOutcome::Submit
+                }
+            }
+            _ => TextPromptOutcome::Edited,
+        }
+    }
+
     pub(crate) fn handle_config_id_event(
         &mut self,
         event: Event,
         mut editor: ConfigIdEditor,
     ) -> DashboardAction {
-        let result = editor.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
+        let outcome = self.handle_text_prompt_event(
+            editor.form.get_mut(),
+            &mut editor.value,
+            &event,
+            "Configuration ID cannot be empty.",
         );
-        let interaction = result.action;
-        match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(DialogControl::Cancel)) => {
+        match outcome {
+            TextPromptOutcome::Cancel => {
+                // This editor can be reached from the target actions dialog,
+                // which expects to come back when the rename is abandoned.
                 if let Some(parent) = editor.return_to.take() {
                     self.mode = Mode::TargetActions(*parent);
-                    self.mark_render_changed();
                 } else {
                     self.cancel_modal();
                 }
             }
-            Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                if TextField::apply(&mut editor.value, edit) == Outcome::Changed {
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                }
+            TextPromptOutcome::Edited | TextPromptOutcome::Rejected => {
                 self.mode = Mode::ConfigId(editor);
             }
-            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
-                if editor.value.trim().is_empty() {
-                    self.notices.set("Configuration ID cannot be empty.");
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                    self.mode = Mode::ConfigId(editor);
-                } else {
-                    self.cancel_modal();
-                    match editor.kind {
-                        ConfigEntryKind::Profile => {
-                            return DashboardAction::RenameProfile {
-                                old_id: editor.old_id,
-                                new_id: editor.value.into_value(),
-                            };
-                        }
-                        ConfigEntryKind::Target => {
-                            return DashboardAction::RenameTarget {
-                                old_id: editor.old_id,
-                                new_id: editor.value.into_value(),
-                            };
-                        }
-                    }
-                }
+            TextPromptOutcome::Submit => {
+                self.cancel_modal();
+                return match editor.kind {
+                    ConfigEntryKind::Profile => DashboardAction::RenameProfile {
+                        old_id: editor.old_id,
+                        new_id: editor.value.into_value(),
+                    },
+                    ConfigEntryKind::Target => DashboardAction::RenameTarget {
+                        old_id: editor.old_id,
+                        new_id: editor.value.into_value(),
+                    },
+                };
             }
-            _ => self.mode = Mode::ConfigId(editor),
         }
         DashboardAction::None
     }
@@ -1953,13 +1905,9 @@ impl DashboardState {
         if let Mode::TargetActions(dialog) = &mut self.mode
             && dialog.testing.as_deref() == Some(&target_id)
         {
-            let old = (dialog.testing.clone(), dialog.result.clone());
             dialog.testing = None;
             dialog.result = Some((target_id, result));
             sync_target_actions_form(dialog);
-            if old != (dialog.testing.clone(), dialog.result.clone()) {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -1990,20 +1938,14 @@ impl DashboardState {
             ),
             launch: Box::new(launch),
         });
-        self.mark_render_changed();
     }
 
     pub fn apply_repository_origin_failure(&mut self, repository_id: &str, error: String) {
         if let Mode::RepositoryOrigin(dialog) = &mut self.mode
             && dialog.repository_id == repository_id
         {
-            let old_error = dialog.error.clone();
-            let old_focus = dialog.form.borrow().focused();
             dialog.error = Some(error);
             dialog.form.get_mut().focus(DialogControl::Field);
-            if old_error != dialog.error || old_focus != dialog.form.borrow().focused() {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -2017,24 +1959,15 @@ impl DashboardState {
         mut dialog: RepositoryOriginDialog,
     ) -> DashboardAction {
         let result = dialog.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
             }
             Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                if PathField::apply(&mut dialog.replacement, edit) == Outcome::Changed {
+                if PathField::apply(&mut dialog.replacement, edit) == EditOutcome::Changed {
                     dialog.error = None;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
                 self.mode = Mode::RepositoryOrigin(dialog);
             }
@@ -2042,10 +1975,6 @@ impl DashboardState {
                 if dialog.replacement.trim().is_empty() {
                     dialog.error = Some("Enter the repository's new origin.".into());
                     dialog.form.get_mut().focus(DialogControl::Field);
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                     self.mode = Mode::RepositoryOrigin(dialog);
                 } else {
                     let action = DashboardAction::ReplaceResumeRepositoryOrigin {
@@ -2075,7 +2004,6 @@ impl DashboardState {
             retry: retry.map(Box::new),
             previous,
         }));
-        self.mark_render_changed();
     }
 
     pub fn show_remote_repair_confirmation(
@@ -2095,7 +2023,6 @@ impl DashboardState {
             repairs,
             previous,
         }));
-        self.mark_render_changed();
     }
 
     /// Show the recovery choices after a checkpointed close could not finish.
@@ -2104,7 +2031,6 @@ impl DashboardState {
             session_id,
             error: error.into(),
         }));
-        self.mark_render_changed();
     }
 
     pub fn show_import_progress(&mut self, session_title: String) {
@@ -2116,23 +2042,16 @@ impl DashboardState {
             last_updated: Instant::now(),
             form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
-        self.mark_render_changed();
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
         let Some(progress) = import_progress_mut(&mut self.mode) else {
             return;
         };
-        let previous_status = import_progress_status(progress);
-        let changed =
-            progress.step != step || progress.total != total || progress.message != message;
         progress.step = step;
         progress.total = total;
         progress.message = message;
         progress.last_updated = Instant::now();
-        if changed || previous_status != import_progress_status(progress) {
-            self.mark_render_changed();
-        }
     }
 
     pub fn show_import_bundle_confirmation(
@@ -2175,7 +2094,6 @@ impl DashboardState {
             ignore_untracked: has_untracked_files,
             form,
         });
-        self.mark_render_changed();
     }
 
     /// Ask before a resume moves a local checkout into an isolated workspace.
@@ -2193,7 +2111,6 @@ impl DashboardState {
             preview: Box::new(preview),
             previous,
         }));
-        self.mark_render_changed();
     }
 
     pub fn finish_import(&mut self) {
@@ -2206,12 +2123,7 @@ impl DashboardState {
         mut progress: ImportProgress,
     ) -> DashboardAction {
         let result = progress.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
@@ -2219,7 +2131,6 @@ impl DashboardState {
                     mode: Box::new(Mode::Importing(progress)),
                     intent: DismissalIntent::CancelImport,
                 }));
-                self.mark_render_changed();
                 DashboardAction::None
             }
             _ => {
@@ -2253,7 +2164,6 @@ impl DashboardState {
                 DialogControl::Field,
             ),
         });
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_rename_event(
@@ -2261,45 +2171,27 @@ impl DashboardState {
         event: Event,
         mut editor: RenameEditor,
     ) -> DashboardAction {
-        let result = editor.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
+        let outcome = self.handle_text_prompt_event(
+            editor.form.get_mut(),
+            &mut editor.title,
+            &event,
+            "Session name cannot be empty.",
         );
-        let interaction = result.action;
-        match interaction {
-            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
-                self.cancel_modal();
-            }
-            Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                if TextField::apply(&mut editor.title, edit) == Outcome::Changed {
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                }
+        match outcome {
+            TextPromptOutcome::Cancel => self.cancel_modal(),
+            TextPromptOutcome::Edited => self.mode = Mode::Rename(editor),
+            TextPromptOutcome::Rejected => {
+                // Put the caret back where the missing name has to be typed.
+                editor.form.get_mut().focus(DialogControl::Field);
                 self.mode = Mode::Rename(editor);
             }
-            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
-                if editor.title.trim().is_empty() {
-                    self.notices.set("Session name cannot be empty.");
-                    editor.form.get_mut().focus(DialogControl::Field);
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                    self.mode = Mode::Rename(editor);
-                } else {
-                    self.cancel_modal();
-                    return DashboardAction::RenameSession {
-                        session_id: editor.session_id,
-                        title: editor.title.into_value(),
-                    };
-                }
+            TextPromptOutcome::Submit => {
+                self.cancel_modal();
+                return DashboardAction::RenameSession {
+                    session_id: editor.session_id,
+                    title: editor.title.into_value(),
+                };
             }
-            _ => self.mode = Mode::Rename(editor),
         }
         DashboardAction::None
     }
@@ -2310,12 +2202,7 @@ impl DashboardState {
         mut confirmation: ImportBundleConfirmation,
     ) -> DashboardAction {
         let result = confirmation.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel)
@@ -2395,7 +2282,6 @@ impl DashboardState {
                 _ => return self.handle_confirmation_controls(dialog, event),
             }
             self.mode = Mode::Confirm(dialog);
-            self.mark_render_changed();
             return DashboardAction::None;
         }
         self.handle_confirmation_controls(dialog, event)
@@ -2407,12 +2293,7 @@ impl DashboardState {
         event: Event,
     ) -> DashboardAction {
         let result = dialog.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel) => match dialog.confirmation {
@@ -2565,7 +2446,6 @@ impl DashboardState {
 
     fn restore_dismissed_mode(&mut self, mode: Box<Mode>) -> DashboardAction {
         self.mode = *mode;
-        self.mark_render_changed();
         DashboardAction::None
     }
 

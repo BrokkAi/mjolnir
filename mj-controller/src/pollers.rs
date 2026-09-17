@@ -163,6 +163,10 @@ pub struct Feed<S: FeedSource> {
     source: S,
     pending: Option<S::Item>,
     open: bool,
+    /// Whether the drain has taken a message since it was last asked. A loop
+    /// that gates a frame on a timer still has to draw when a message rode
+    /// along with that timer.
+    delivered: bool,
 }
 
 impl<S: FeedSource> Feed<S> {
@@ -171,6 +175,7 @@ impl<S: FeedSource> Feed<S> {
             source,
             pending: None,
             open: true,
+            delivered: false,
         }
     }
 
@@ -200,7 +205,14 @@ impl<S: FeedSource> Feed<S> {
     /// The next message for the batch drain: the one that won the select
     /// first, then whatever queued behind it.
     pub fn next_ready(&mut self) -> Option<S::Item> {
-        self.pending.take().or_else(|| self.source.poll_now())
+        let message = self.pending.take().or_else(|| self.source.poll_now());
+        self.delivered |= message.is_some();
+        message
+    }
+
+    /// Whether [`Self::next_ready`] produced a message since the last call.
+    pub fn take_delivered(&mut self) -> bool {
+        std::mem::take(&mut self.delivered)
     }
 }
 
@@ -2234,6 +2246,7 @@ mod tests {
                 additional_mounts: Vec::new(),
                 state,
                 target: Some(mj_core::state::TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: "a".repeat(64),
                     workspace_storage: Default::default(),
                 }),
@@ -2857,10 +2870,12 @@ mod tests {
 
         let remotes = [
             TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "podman".into(),
                 workspace_storage: Default::default(),
             },
             TargetLocator::AppleContainer {
+                borrowed_from: None,
                 container_id: "apple".into(),
             },
             TargetLocator::AwsEc2 {
@@ -2873,11 +2888,13 @@ mod tests {
                 worker_id: None,
             },
             TargetLocator::SshPodman {
+                borrowed_from: None,
                 host: "ssh.example".into(),
                 container_id: "remote-podman".into(),
                 workspace_storage: Default::default(),
             },
             TargetLocator::SshDocker {
+                borrowed_from: None,
                 host: "ssh.example".into(),
                 container_id: "remote-docker".into(),
             },
