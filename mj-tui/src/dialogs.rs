@@ -32,8 +32,8 @@ use mj_core::targets::{
 };
 
 use crate::widgets::{
-    centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area, popup_height,
-    truncate_text,
+    Truncate, centered_modal, centered_modal_fixed, dismissible_modal_title, modal_area,
+    popup_height, truncate_to_cells,
 };
 use crate::wizards::{access_marker, render_access_combo};
 use crate::{
@@ -552,7 +552,7 @@ pub(crate) fn render_import_progress(
     let status = import_progress_status(progress);
     let paragraph = Paragraph::new(vec![
         Line::styled(
-            truncate_text(&progress.session_title, 60),
+            truncate_to_cells(&progress.session_title, 60, Truncate::SUMMARY),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),

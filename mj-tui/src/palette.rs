@@ -27,7 +27,7 @@ use mj_chat::text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, hidden_from_palette, spec};
 use crate::render::render_session_scrollbar;
-use crate::widgets::{centered_modal, dismissible_modal_title};
+use crate::widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells};
 use crate::{DashboardAction, DashboardState, Focus, Mode};
 
 /// One row of the palette: a command and whether it can be run.
@@ -349,18 +349,6 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
     lines
 }
 
-/// Cuts `text` to `width` cells without touching the spaces inside it, so a
-/// padded column stays a column.
-fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    text.chars()
-        .take(width.saturating_sub(1))
-        .chain(['…'])
-        .collect()
-}
-
 pub(crate) fn render_palette(
     frame: &mut Frame,
     area: Rect,
@@ -440,7 +428,7 @@ pub(crate) fn render_palette(
             PaletteLine::Heading(heading) => {
                 row_map.push(None);
                 enabled.push(true);
-                let heading = clip(heading, width.saturating_sub(4));
+                let heading = truncate_to_cells(heading, width.saturating_sub(4), Truncate::PLAIN);
                 let rule_width = width.saturating_sub(heading.chars().count() + 4);
                 Line::from(vec![
                     Span::styled(format!("  {heading}  "), theme::title(true)),
@@ -466,10 +454,14 @@ pub(crate) fn render_palette(
                 let ready = entry.availability == Availability::Ready;
                 // Keep command labels aligned and reserve a visible gap before
                 // right-aligned shortcuts, even when a chord has several keys.
-                let keys = clip(&keys, width.saturating_sub(4) / 2);
+                let keys = truncate_to_cells(&keys, width.saturating_sub(4) / 2, Truncate::PLAIN);
                 let key_width = Line::raw(keys.as_str()).width();
                 let label_width = width.saturating_sub(key_width + 4);
-                let text = clip(&format!("{}{reason}", spec.label), label_width);
+                let text = truncate_to_cells(
+                    &format!("{}{reason}", spec.label),
+                    label_width,
+                    Truncate::PLAIN,
+                );
                 let style = if !ready {
                     theme::muted()
                 } else if selected {

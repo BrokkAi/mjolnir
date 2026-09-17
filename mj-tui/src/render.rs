@@ -27,7 +27,7 @@ use crate::dialogs::{
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
-use crate::widgets::format_resource_bytes;
+use crate::widgets::{Truncate, format_resource_bytes, truncate_to_cells};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::workspaces::render_workspace_manager;
 use crate::{
@@ -677,9 +677,10 @@ fn expanded_session_lines(
     lines.push(Line::styled(
         format!(
             "{prefix}{}",
-            truncate_display_text(
+            truncate_to_cells(
                 &name,
-                usize::from(title_width).saturating_sub(Line::raw(prefix).width())
+                usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
+                Truncate::PLAIN
             )
         ),
         style,
@@ -813,9 +814,10 @@ fn session_activity_line(
             <= available
     });
     let spinner_width = spinner.map_or(0, |spinner| Line::raw(spinner).width() + 1);
-    let status = truncate_display_text(
+    let status = truncate_to_cells(
         &status,
         available.saturating_sub(Line::raw(prefix).width() + spinner_width + queue_width),
+        Truncate::PLAIN,
     );
     let status_width = Line::raw(status.as_str()).width() + queue_width + 2;
     let identity_width = if compact {
@@ -841,8 +843,8 @@ fn session_activity_line(
             let half = identity_width.saturating_sub(2) / 2;
             (half, identity_width.saturating_sub(2).saturating_sub(half))
         };
-    let target = truncate_display_text(target, target_width);
-    let profile = truncate_display_text(profile, profile_width);
+    let target = truncate_to_cells(target, target_width, Truncate::PLAIN);
+    let profile = truncate_to_cells(profile, profile_width, Truncate::PLAIN);
     let identity = match (target.is_empty(), profile.is_empty()) {
         (true, true) => String::new(),
         (true, false) => profile,
@@ -880,27 +882,6 @@ fn session_activity_line(
     Line::from(spans)
 }
 
-fn truncate_display_text(text: &str, width: usize) -> String {
-    if Line::raw(text).width() <= width {
-        return text.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    let mut output = String::new();
-    for character in text.chars() {
-        let candidate = format!("{output}{character}…");
-        if Line::raw(candidate.as_str()).width() > width {
-            break;
-        }
-        output.push(character);
-    }
-    format!("{output}…")
-}
-
 /// Folded and minimized sessions retain a fixed two-line summary: identity on
 /// the first line, then status, clock, and queued work on the second.
 #[allow(clippy::too_many_arguments)]
@@ -932,9 +913,10 @@ fn compact_session_lines(
     lines.push(Line::styled(
         format!(
             "{prefix}{}",
-            truncate_display_text(
+            truncate_to_cells(
                 &name,
                 usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
+                Truncate::PLAIN,
             )
         ),
         style,
@@ -1185,7 +1167,7 @@ pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, widt
 fn sessions_title(workspace_name: &str, width: u16, maximize_enabled: bool) -> Line<'static> {
     let budget = usize::from(pane_title_content_width(width, maximize_enabled));
     if workspace_name.is_empty() {
-        return Line::raw(crate::widgets::truncate_text(" Sessions ", budget));
+        return Line::raw(truncate_to_cells(" Sessions ", budget, Truncate::SUMMARY));
     }
     let full_prefix = " Sessions · ";
     let prefix = if full_prefix.chars().count() + workspace_name.chars().count() < budget {
@@ -1197,7 +1179,7 @@ fn sessions_title(workspace_name: &str, width: u16, maximize_enabled: bool) -> L
     Line::from(vec![
         Span::raw(prefix),
         Span::styled(
-            crate::widgets::truncate_text(workspace_name, workspace_room),
+            truncate_to_cells(workspace_name, workspace_room, Truncate::SUMMARY),
             Style::default().fg(theme::palette().muted),
         ),
         Span::raw(" "),
@@ -1448,7 +1430,11 @@ fn session_transition_line(
         failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
     );
     Line::styled(
-        crate::widgets::truncate_text(&line, usize::from(width.saturating_sub(3))),
+        truncate_to_cells(
+            &line,
+            usize::from(width.saturating_sub(3)),
+            Truncate::SUMMARY,
+        ),
         Style::default()
             .fg(if failure.is_some() {
                 theme::palette().session_error
@@ -2438,7 +2424,11 @@ pub(crate) fn render_quotas(
         },
     );
     let status_budget = usize::from(title_budget).saturating_sub(label.chars().count());
-    let status = crate::widgets::truncate_text(&format!("({refresh_status}) "), status_budget);
+    let status = truncate_to_cells(
+        &format!("({refresh_status}) "),
+        status_budget,
+        Truncate::SUMMARY,
+    );
     let title = Line::from(vec![
         Span::raw(label),
         Span::styled(status, Style::default().fg(theme::palette().muted)),

@@ -22,7 +22,9 @@ pub use scope::{
     apply_field_edit,
 };
 pub use scrollbar::{ScrollbarGeometry, render_scrollbar, scrollbar_geometry};
-pub use text_layout::{input_cursor_visual_position, input_visual_rows, set_input_cursor};
+pub use text_layout::{
+    Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,
+};
 
 /// A path field with the standard readline editing and cursor behavior.
 pub struct PathField;

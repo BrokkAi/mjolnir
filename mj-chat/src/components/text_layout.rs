@@ -1,11 +1,12 @@
 //! Word-wrapped text layout shared by multiline controls and the composer.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InputGrapheme {
@@ -19,6 +20,83 @@ pub(crate) struct InputGrapheme {
 pub(crate) struct VisualRow {
     pub(crate) start: usize,
     pub(crate) graphemes: Vec<InputGrapheme>,
+}
+
+/// How [`truncate_to_cells`] treats the text it keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Truncate {
+    /// Fold every run of whitespace, newlines included, into one space before
+    /// measuring, so a multi-line value reads as one row.
+    pub collapse_whitespace: bool,
+    /// Drop trailing whitespace and punctuation before the ellipsis, so a cut
+    /// in the middle of a phrase does not read as `alpha,…`.
+    pub trim_punctuation: bool,
+}
+
+impl Truncate {
+    /// Cut the text where it runs out of room and keep everything before it.
+    pub const PLAIN: Self = Self {
+        collapse_whitespace: false,
+        trim_punctuation: false,
+    };
+    /// Fold the value onto one row and cut it where a reader would: no
+    /// dangling comma, dash, or space in front of the ellipsis.
+    pub const SUMMARY: Self = Self {
+        collapse_whitespace: true,
+        trim_punctuation: true,
+    };
+}
+
+/// The characters a cut swallows before its ellipsis: whitespace, ASCII
+/// punctuation, and the typographic marks that read as punctuation.
+pub(crate) fn trim_before_ellipsis(character: char) -> bool {
+    character.is_whitespace()
+        || character.is_ascii_punctuation()
+        || matches!(
+            character,
+            '…' | '–' | '—' | '‘' | '’' | '“' | '”' | '•' | '·'
+        )
+}
+
+/// Shorten `text` to at most `width` terminal cells, marking a cut with a
+/// trailing ellipsis.
+///
+/// Width is measured in display cells, so a full-width glyph costs two. Text
+/// that already fits comes back unchanged apart from the requested whitespace
+/// collapsing. A `width` of zero yields an empty string and a `width` of one
+/// yields the ellipsis alone, because nothing else fits beside it.
+pub fn truncate_to_cells(text: &str, width: usize, options: Truncate) -> String {
+    let text = if options.collapse_whitespace {
+        Cow::Owned(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if text.width() <= width {
+        return text.into_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    // One cell is reserved for the ellipsis itself.
+    let budget = width - 1;
+    let mut kept = String::new();
+    let mut used = 0usize;
+    for character in text.chars() {
+        let cells = character.width().unwrap_or(0);
+        if used + cells > budget {
+            break;
+        }
+        used += cells;
+        kept.push(character);
+    }
+    if options.trim_punctuation {
+        kept.truncate(kept.trim_end_matches(trim_before_ellipsis).len());
+    }
+    kept.push('…');
+    kept
 }
 
 /// Return the wrapped rows and the visual cursor position for a text value.
@@ -278,4 +356,36 @@ pub fn set_input_cursor(
 /// Rows the word-wrapped input occupies at `width`.
 pub fn input_visual_rows(input: &str, width: usize) -> usize {
     input_cursor_visual_position(input, input.len(), width).1 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_widget_text_removes_cutoff_whitespace_and_punctuation() {
+        let options = Truncate::SUMMARY;
+        assert_eq!(truncate_to_cells("alpha, beta", 7, options), "alpha…");
+        assert_eq!(truncate_to_cells("alpha - beta", 8, options), "alpha…");
+        assert_eq!(truncate_to_cells("alpha beta", 20, options), "alpha beta");
+        assert_eq!(truncate_to_cells("alpha\n beta", 20, options), "alpha beta");
+    }
+
+    #[test]
+    fn truncation_measures_display_cells_not_characters() {
+        let plain = Truncate::PLAIN;
+        // Each ideograph is two cells wide, so only two fit beside the ellipsis.
+        assert_eq!(truncate_to_cells("一二三四", 5, plain), "一二…");
+        assert_eq!(truncate_to_cells("一二", 4, plain), "一二");
+        assert_eq!(truncate_to_cells("alpha", 1, plain), "…");
+        assert_eq!(truncate_to_cells("alpha", 0, plain), "");
+        assert_eq!(truncate_to_cells("", 0, plain), "");
+    }
+
+    #[test]
+    fn plain_truncation_keeps_the_punctuation_it_cuts_after() {
+        let plain = Truncate::PLAIN;
+        assert_eq!(truncate_to_cells("alpha, beta", 7, plain), "alpha,…");
+        assert_eq!(truncate_to_cells("alpha  beta", 20, plain), "alpha  beta");
+    }
 }

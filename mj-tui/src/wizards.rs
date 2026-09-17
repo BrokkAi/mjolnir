@@ -31,7 +31,9 @@ use mj_chat::components::{
 use mj_chat::selection::FrameSurfaces;
 use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination, path_completion};
 
-use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
+use crate::widgets::{
+    Truncate, centered_modal, dismissible_modal_title, format_resource_bytes, truncate_to_cells,
+};
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
@@ -1870,7 +1872,11 @@ fn render_review_wizard(
                 1 => " · 1 attachment".to_owned(),
                 count => format!(" · {count} attachments"),
             };
-            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            let text = truncate_to_cells(
+                &text,
+                inner.width.saturating_sub(4) as usize,
+                Truncate::SUMMARY,
+            );
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     format!("  {}. {text}{attachment_note}", index + 1),
@@ -1900,7 +1906,11 @@ fn render_review_wizard(
             } else {
                 format!("{kind}: {}", text.replace('\n', " "))
             };
-            let text = crate::widgets::truncate_text(&text, inner.width.saturating_sub(4) as usize);
+            let text = truncate_to_cells(
+                &text,
+                inner.width.saturating_sub(4) as usize,
+                Truncate::SUMMARY,
+            );
             let row = queued_entries.len().saturating_add(index);
             frame.render_widget(
                 Paragraph::new(Line::styled(

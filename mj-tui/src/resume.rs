@@ -33,7 +33,8 @@ use mj_chat::text_input::TextInput;
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
 use crate::widgets::{
-    centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes, truncate_text,
+    Truncate, centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes,
+    truncate_to_cells,
 };
 use crate::{DashboardAction, DashboardState, Mode};
 
@@ -949,7 +950,11 @@ pub(crate) fn render_resume_dialog(
     let mut footer = Vec::new();
     if let Some(detail) = selected {
         footer.push(Line::styled(
-            truncate_text(&detail.details, usize::from(rows[3].width)),
+            truncate_to_cells(
+                &detail.details,
+                usize::from(rows[3].width),
+                Truncate::SUMMARY,
+            ),
             Style::default().fg(theme::palette().muted),
         ));
     }
@@ -958,9 +963,10 @@ pub(crate) fn render_resume_dialog(
         && let Some(error) = errors.first()
     {
         footer.push(Line::styled(
-            truncate_text(
+            truncate_to_cells(
                 &format!("Scan failed for {error}"),
                 usize::from(rows[3].width),
+                Truncate::SUMMARY,
             ),
             Style::default().fg(theme::palette().warning),
         ));
@@ -1039,12 +1045,19 @@ fn resume_header_line(layout: &RowLayout) -> Line<'static> {
         Span::raw("  "),
         Span::styled(padded_cell("LAST ACTIVE", layout.activity), style),
         Span::raw("  "),
-        Span::styled(truncate_text("SESSION", layout.title), style),
+        Span::styled(
+            truncate_to_cells("SESSION", layout.title, Truncate::SUMMARY),
+            style,
+        ),
     ])
 }
 
 fn padded_cell(text: &str, width: usize) -> String {
-    format!("{:<width$}", truncate_text(text, width), width = width)
+    format!(
+        "{:<width$}",
+        truncate_to_cells(text, width, Truncate::SUMMARY),
+        width = width
+    )
 }
 
 fn resume_row_line<Tz>(
@@ -1069,7 +1082,7 @@ where
         None => Span::styled(
             format!(
                 "{:<width$}",
-                truncate_text(&row.origin, layout.origin),
+                truncate_to_cells(&row.origin, layout.origin, Truncate::SUMMARY),
                 width = layout.origin
             ),
             Style::default().fg(theme::palette().accent),
@@ -1102,7 +1115,10 @@ where
             Style::default().fg(theme::palette().muted),
         ),
         Span::raw("  "),
-        Span::styled(truncate_text(&row.title, layout.title), title_style),
+        Span::styled(
+            truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+            title_style,
+        ),
         Span::styled(marks, Style::default().fg(theme::palette().muted)),
     ])
 }

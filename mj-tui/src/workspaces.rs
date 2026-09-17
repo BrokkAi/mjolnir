@@ -16,7 +16,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::widgets::{centered_modal, dismissible_modal_title};
+use crate::widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// A detached composer draft shown by the workspace manager.
@@ -955,26 +955,7 @@ fn workspace_label(name: &str, width: u16) -> String {
     if width <= 2 {
         return " ".repeat(usize::from(width));
     }
-    let content_width = usize::from(width.saturating_sub(2));
-    let full = Line::raw(name).width();
-    let content = if full <= content_width {
-        name.to_owned()
-    } else if content_width == 0 {
-        String::new()
-    } else if content_width == 1 {
-        "…".to_owned()
-    } else {
-        let mut clipped = String::new();
-        for character in name.chars() {
-            let candidate = format!("{clipped}{character}…");
-            if Line::raw(candidate.as_str()).width() > content_width {
-                break;
-            }
-            clipped.push(character);
-        }
-        clipped.push('…');
-        clipped
-    };
+    let content = truncate_to_cells(name, usize::from(width - 2), Truncate::PLAIN);
     format!(" {content} ")
 }
 
