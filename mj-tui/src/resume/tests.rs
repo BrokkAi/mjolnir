@@ -1309,8 +1309,8 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
     apply_ready_rows(&mut dashboard, Vec::new());
     assert_eq!(
-        dashboard.next_wiki_brief(),
-        None,
+        dashboard.next_wiki_preview(),
+        DashboardAction::None,
         "a row with no indexed session has no transcript to show"
     );
 
@@ -1322,10 +1322,15 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
             ..wiki_row("held", false)
         }],
     );
-    assert_eq!(dashboard.next_wiki_brief(), Some("held".to_owned()));
     assert_eq!(
-        dashboard.next_wiki_brief(),
-        None,
+        dashboard.next_wiki_preview(),
+        DashboardAction::LoadArchivedBrief {
+            wiki_id: "held".to_owned()
+        }
+    );
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::None,
         "one request per row, not one per answer"
     );
 }
@@ -1777,4 +1782,160 @@ fn search_reply_clears_pending_for_matching_request_only() {
     dashboard.apply_wiki_search(request_id, ready_page(Vec::new()));
     assert!(!pending(&dashboard));
     assert!(!dashboard.needs_fast_tick());
+}
+
+/// One matching message: `filler` lines of context above the match, so two
+/// blocks put their hits far apart in the pane.
+fn hit_block(role: &str, filler: usize) -> WikiHitBlock {
+    let mut text = String::new();
+    for index in 0..filler {
+        text.push_str(&format!("filler line {index}\n"));
+    }
+    let start = text.len();
+    text.push_str("needle");
+    WikiHitBlock {
+        role: role.to_owned(),
+        hits: vec![(start, text.len())],
+        text,
+        omitted_before: 0,
+        truncated: false,
+    }
+}
+
+/// `n` moves the preview pane onto the next match, which sits far enough down
+/// the excerpt that it was off screen before the keystroke.
+#[test]
+fn n_moves_the_preview_pane_to_the_next_hit() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    apply_ready_rows(&mut dashboard, archived_rows(3));
+    switch_to_archive(&mut dashboard);
+    replace_search(&mut dashboard, "needle");
+    apply_ready_rows(&mut dashboard, archived_rows(3));
+    let selected = match &dashboard.mode {
+        Mode::ResumeDialog(dialog) => dialog
+            .preview_wiki_id(dashboard.resume_rows())
+            .expect("an archived row previews its own transcript")
+            .to_owned(),
+        _ => panic!("expected the resume dialog"),
+    };
+    dashboard.apply_wiki_hits(
+        selected,
+        "needle".to_owned(),
+        Some(WikiHitTranscript {
+            blocks: vec![hit_block("user", 0), hit_block("assistant", 60)],
+            omitted_after: 2,
+        }),
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the resume dialog");
+
+    // Where each hit lands once the pane has wrapped the excerpt to its own
+    // width, and which of those rows the pane is showing.
+    let hits_and_view = |dashboard: &DashboardState| {
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        let (lines, hit_lines) = dialog
+            .preview_body(dashboard.resume_rows())
+            .expect("the pane shows the matching passages");
+        let surface = dashboard
+            .frame_surfaces()
+            .surface(SurfaceId::ResumePreview)
+            .copied()
+            .expect("the preview pane registers a scrollable surface");
+        let width = usize::from(surface.rect.width);
+        let rows = hit_lines
+            .iter()
+            .map(|&logical| wrap_preview_lines(&lines[..logical], width).len())
+            .collect::<Vec<_>>();
+        let view = dialog.preview_scroll..dialog.preview_scroll + usize::from(surface.rect.height);
+        (rows, view)
+    };
+
+    let (hit_rows, view) = hits_and_view(&dashboard);
+    assert_eq!(hit_rows.len(), 2, "the fixture has two matches");
+    assert!(
+        view.contains(&hit_rows[0]),
+        "the pane opens on the first hit"
+    );
+    assert!(
+        !view.contains(&hit_rows[1]),
+        "the second match is below the pane"
+    );
+
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    dashboard.handle_key(key(KeyCode::Char('n')));
+    let (hit_rows, view) = hits_and_view(&dashboard);
+    assert!(view.contains(&hit_rows[1]), "n moved the pane to the match");
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.preview_hit, 1);
+    assert!(dialog.preview_scroll > 0, "the pane scrolled to get there");
+}
+
+/// The pane asks for what it shows: the query's matching passages while a
+/// query is active, the briefing when there is none, and a fresh answer for
+/// each new query.
+#[test]
+fn a_query_asks_for_hits_and_no_query_asks_for_a_brief() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    switch_to_archive(&mut dashboard);
+    let pending = match &dashboard.mode {
+        Mode::ResumeDialog(dialog) => dialog.preview_pending.clone(),
+        _ => panic!("expected the resume dialog"),
+    };
+    assert_eq!(
+        pending,
+        Some("archive-0".to_owned()),
+        "with nothing typed the pane asks for the briefing"
+    );
+
+    replace_search(&mut dashboard, "needle");
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    let hits = DashboardAction::LoadArchivedHits {
+        wiki_id: "archive-0".to_owned(),
+        query: "needle".to_owned(),
+    };
+    assert_eq!(dashboard.next_wiki_preview(), hits);
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::None,
+        "one request per query, not one per answer"
+    );
+    dashboard.apply_wiki_hits(
+        "archive-0".to_owned(),
+        "needle".to_owned(),
+        Some(WikiHitTranscript::default()),
+    );
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::None,
+        "a cached answer is not asked for again"
+    );
+
+    replace_search(&mut dashboard, "other");
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::LoadArchivedHits {
+            wiki_id: "archive-0".to_owned(),
+            query: "other".to_owned(),
+        },
+        "a new query is a new answer"
+    );
 }

@@ -290,6 +290,12 @@ pub enum DashboardAction {
     LoadArchivedBrief {
         wiki_id: String,
     },
+    /// Fetch the passages of one archived transcript that match the resume
+    /// dialog's query, which the preview pane shows in place of the briefing.
+    LoadArchivedHits {
+        wiki_id: String,
+        query: String,
+    },
     /// Start a new session carrying a summary of an archived transcript.
     RestoreArchivedSession {
         workspace_id: String,

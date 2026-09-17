@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use mj_chat::chat::wrap_styled_line;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
 use mj_chat::theme;
@@ -25,7 +25,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use mj_client::daemon::{WikiIndexState, WikiRow, WikiSearchPage, WikiStatus};
+use mj_client::daemon::{
+    WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
+};
 use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
 
@@ -243,12 +245,26 @@ pub(crate) struct ResumeDialog {
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
     pub(crate) preview_pending: Option<String>,
+    /// Matching passages already fetched, by SessionWiki id and query. A
+    /// different query over the same session is a different answer.
+    pub(crate) hits: Arc<BTreeMap<PreviewKey, WikiHitTranscript>>,
+    /// The passages being fetched now, so one selection asks only once.
+    pub(crate) hits_pending: Option<PreviewKey>,
     /// First wrapped row the preview pane shows.
     pub(crate) preview_scroll: usize,
-    /// The SessionWiki session the scroll offset belongs to. A different
-    /// session starts at the top.
-    pub(crate) preview_key: Option<String>,
+    /// Which hit of the shown transcript the pane is sitting on, so `n` and
+    /// `N` move from where the reader is.
+    pub(crate) preview_hit: usize,
+    /// The SessionWiki session and query the scroll offset belongs to. Either
+    /// one changing starts the pane at the top, or at the new query's first
+    /// hit.
+    pub(crate) preview_key: Option<PreviewKey>,
 }
+
+/// What the preview pane is showing: a SessionWiki session, and the query
+/// whose passages are shown in it. The query is empty when the pane is
+/// showing the briefing instead.
+pub(crate) type PreviewKey = (String, String);
 
 impl ResumeDialog {
     pub(crate) fn focused(&self) -> ResumeFocus {
@@ -355,25 +371,53 @@ impl ResumeDialog {
         self.preview_wiki_id(rows).is_some()
     }
 
-    /// The preview body as logical lines of spans, before wrapping: the cached
-    /// briefing, or a line saying it is on its way.
+    /// The query the pane is previewing passages for, or `None` when there is
+    /// nothing typed and the pane shows the briefing instead.
+    pub(crate) fn active_query(&self) -> Option<String> {
+        let query = self.search.to_string();
+        (!query.trim().is_empty()).then_some(query)
+    }
+
+    /// The preview body as logical lines of spans, before wrapping, together
+    /// with the logical line each hit starts on so the pane can be opened on a
+    /// hit before the lines are wrapped.
     ///
+    /// The body is the query's matching passages while a query is active, and
+    /// the cached briefing otherwise, or one line saying it is on its way.
     /// Spans rather than a string because a hit preview highlights the matched
     /// words inside a line.
-    pub(crate) fn preview_lines(&self, rows: &[ResumeRow]) -> Option<Vec<Line<'static>>> {
+    pub(crate) fn preview_body(
+        &self,
+        rows: &[ResumeRow],
+    ) -> Option<(Vec<Line<'static>>, Vec<usize>)> {
         let wiki_id = self.preview_wiki_id(rows)?;
-        let Some(brief) = self.previews.get(wiki_id) else {
-            return Some(vec![Line::styled(
-                "Loading the archived transcript…",
-                Style::default().fg(theme::palette().muted),
-            )]);
+        let muted = Style::default().fg(theme::palette().muted);
+        let Some(query) = self.active_query() else {
+            let Some(brief) = self.previews.get(wiki_id) else {
+                return Some((
+                    vec![Line::styled("Loading the archived transcript…", muted)],
+                    Vec::new(),
+                ));
+            };
+            // The briefing's first line is the SessionWiki crate's own
+            // `# Previous session: <title>` heading, which repeats the title
+            // of the row the pane sits under.
+            return Some((
+                brief
+                    .lines()
+                    .skip(1)
+                    .map(|line| Line::raw(line.to_owned()))
+                    .collect(),
+                Vec::new(),
+            ));
         };
-        Some(
-            brief
-                .lines()
-                .map(|line| Line::raw(line.to_owned()))
-                .collect(),
-        )
+        let Some(transcript) = self.hits.get(&(wiki_id.to_owned(), query)) else {
+            return Some((
+                vec![Line::styled("Loading the matching passages…", muted)],
+                Vec::new(),
+            ));
+        };
+        Some(hit_transcript_lines(transcript))
     }
 
     pub(crate) fn errors(&self) -> Vec<String> {
@@ -797,7 +841,10 @@ impl DashboardState {
             wiki_pending: false,
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
+            hits: Arc::new(BTreeMap::new()),
+            hits_pending: None,
             preview_scroll: 0,
+            preview_hit: 0,
             preview_key: None,
         });
         self.rebuild_resume_rows();
@@ -861,17 +908,39 @@ impl DashboardState {
         self.resync_resume_selection();
     }
 
-    /// The briefing the open dialog still needs for the row under its
-    /// selection, if any.
+    /// The preview the open dialog still needs for the row under its
+    /// selection: the query's matching passages while a query is active, and
+    /// the briefing otherwise. [`DashboardAction::None`] when it has it
+    /// already, or has asked for it.
     ///
     /// Moving the selection asks for one. A search answer can also put a
     /// different row under an unmoved selection, and that row's transcript is
     /// what the preview pane is already promising, so it is asked for here.
-    pub fn next_wiki_brief(&mut self) -> Option<String> {
-        match self.wiki_preview_action() {
-            DashboardAction::LoadArchivedBrief { wiki_id } => Some(wiki_id),
-            _ => None,
+    pub fn next_wiki_preview(&mut self) -> DashboardAction {
+        let wiki_id = self
+            .selected_resume_row()
+            .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        let Some(wiki_id) = wiki_id else {
+            return DashboardAction::None;
+        };
+        let Some(query) = dialog.active_query() else {
+            if dialog.previews.contains_key(&wiki_id)
+                || dialog.preview_pending.as_deref() == Some(wiki_id.as_str())
+            {
+                return DashboardAction::None;
+            }
+            dialog.preview_pending = Some(wiki_id.clone());
+            return DashboardAction::LoadArchivedBrief { wiki_id };
+        };
+        let key = (wiki_id.clone(), query.clone());
+        if dialog.hits.contains_key(&key) || dialog.hits_pending.as_ref() == Some(&key) {
+            return DashboardAction::None;
         }
+        dialog.hits_pending = Some(key);
+        DashboardAction::LoadArchivedHits { wiki_id, query }
     }
 
     /// The query to re-issue, and how long to wait first, after an answer said
@@ -918,25 +987,86 @@ impl DashboardState {
         Arc::make_mut(&mut dialog.previews).insert(wiki_id, markdown);
     }
 
-    /// Ask for the briefing of the selected row, unless it is cached or
-    /// already in flight.
-    fn wiki_preview_action(&mut self) -> DashboardAction {
-        let wiki_id = self
-            .selected_resume_row()
-            .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
+    /// Fold one query's matching passages into the open dialog's cache. `None`
+    /// means the index no longer holds that session, which the pane shows the
+    /// same way as a session with no match.
+    pub fn apply_wiki_hits(
+        &mut self,
+        wiki_id: String,
+        query: String,
+        transcript: Option<WikiHitTranscript>,
+    ) {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return DashboardAction::None;
+            return;
         };
-        let Some(wiki_id) = wiki_id else {
-            return DashboardAction::None;
-        };
-        if dialog.previews.contains_key(&wiki_id)
-            || dialog.preview_pending.as_deref() == Some(wiki_id.as_str())
-        {
-            return DashboardAction::None;
+        let key = (wiki_id, query);
+        if dialog.hits_pending.as_ref() == Some(&key) {
+            dialog.hits_pending = None;
         }
-        dialog.preview_pending = Some(wiki_id.clone());
-        DashboardAction::LoadArchivedBrief { wiki_id }
+        let showing = dialog.preview_key.as_ref() == Some(&key);
+        Arc::make_mut(&mut dialog.hits).insert(key, transcript.unwrap_or_default());
+        if showing {
+            // The passages are what the pane is already showing, so open it on
+            // the first match rather than at the top of the excerpt.
+            self.focus_preview_hit(0);
+        }
+    }
+
+    /// Move the preview pane onto hit `index`, reporting whether there was
+    /// such a hit. The lines are wrapped here with the width the pane was last
+    /// drawn at, so the stored offset is the row the reader will see.
+    fn focus_preview_hit(&mut self, index: usize) -> bool {
+        let surface = self
+            .frame_surfaces
+            .surface(SurfaceId::ResumePreview)
+            .copied();
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return false;
+        };
+        let Some((lines, hit_lines)) = dialog.preview_body(&self.resume_rows) else {
+            return false;
+        };
+        let Some(&logical) = hit_lines.get(index) else {
+            return false;
+        };
+        let scroll = match surface {
+            Some(surface) => {
+                let width = usize::from(surface.rect.width);
+                let viewport = usize::from(surface.rect.height);
+                let total = wrap_preview_lines(&lines, width).len();
+                wrap_preview_lines(&lines[..logical], width)
+                    .len()
+                    .min(total.saturating_sub(viewport))
+            }
+            // The pane has not been drawn yet, so its width is unknown; the
+            // next frame shows the excerpt from its top.
+            None => 0,
+        };
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return false;
+        };
+        dialog.preview_hit = index;
+        dialog.preview_scroll = scroll;
+        true
+    }
+
+    /// Move `step` hits from the one the pane is on, stopping at either end,
+    /// and report whether the keystroke belonged to the pane.
+    fn step_preview_hit(&mut self, step: isize) -> bool {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return false;
+        };
+        let Some((_, hit_lines)) = dialog.preview_body(&self.resume_rows) else {
+            return false;
+        };
+        if hit_lines.is_empty() {
+            return false;
+        }
+        let next = dialog
+            .preview_hit
+            .saturating_add_signed(step)
+            .min(hit_lines.len() - 1);
+        self.focus_preview_hit(next)
     }
 
     /// Ask for a new search after the query changed. The debounce and the
@@ -985,25 +1115,31 @@ impl DashboardState {
         self.sync_resume_preview_key();
     }
 
-    /// Keeps the preview's scroll offset with the transcript it was made for.
-    /// A different transcript under the selection opens at its top.
+    /// Keeps the preview's scroll offset with the excerpt it was made for. A
+    /// different transcript, or the same one under a new query, opens at its
+    /// top and then on its first hit.
     fn sync_resume_preview_key(&mut self) {
-        let wiki_id = {
+        let key = {
             let Mode::ResumeDialog(dialog) = &self.mode else {
                 return;
             };
-            dialog
-                .preview_wiki_id(&self.resume_rows)
-                .map(ToOwned::to_owned)
+            dialog.preview_wiki_id(&self.resume_rows).map(|wiki_id| {
+                (
+                    wiki_id.to_owned(),
+                    dialog.active_query().unwrap_or_default(),
+                )
+            })
         };
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return;
         };
-        if dialog.preview_key == wiki_id {
+        if dialog.preview_key == key {
             return;
         }
-        dialog.preview_key = wiki_id;
+        dialog.preview_key = key;
         dialog.preview_scroll = 0;
+        dialog.preview_hit = 0;
+        self.focus_preview_hit(0);
     }
 
     fn switch_resume_tab(&mut self, tab: ResumeTab) -> bool {
@@ -1117,6 +1253,25 @@ impl DashboardState {
         if self.scroll_resume_preview(&event, focused) {
             return DashboardAction::None;
         }
+        // Moving between the query's matches, with the list focused. `N` comes
+        // with Shift, so these cannot sit under the modifier-free block below.
+        if let Event::Key(key) = &event
+            && key.kind == KeyEventKind::Press
+            && focused == ResumeFocus::Sessions
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            let step = match key.code {
+                KeyCode::Char('n') | KeyCode::Char(']') => Some(1),
+                KeyCode::Char('N') | KeyCode::Char('[') => Some(-1),
+                _ => None,
+            };
+            if let Some(step) = step
+                && self.step_preview_hit(step)
+            {
+                self.last_event_consumed.set(true);
+                return DashboardAction::None;
+            }
+        }
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
@@ -1146,7 +1301,7 @@ impl DashboardState {
                         let step = if key.code == KeyCode::Left { 2 } else { 1 };
                         let next = ResumeTab::from_index((dialog.tab.index() + step) % 3);
                         self.switch_resume_tab(next);
-                        return self.wiki_preview_action();
+                        return self.next_wiki_preview();
                     }
                     _ => {}
                 }
@@ -1176,11 +1331,11 @@ impl DashboardState {
             }
             Some(Interaction::Select(Tabs, index)) => {
                 self.switch_resume_tab(ResumeTab::from_index(index));
-                return self.wiki_preview_action();
+                return self.next_wiki_preview();
             }
             Some(Interaction::Select(Sessions, index)) => {
                 self.select_resume_row(index);
-                return self.wiki_preview_action();
+                return self.next_wiki_preview();
             }
             Some(Interaction::Activate(Search | Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
@@ -1339,7 +1494,7 @@ pub(crate) fn render_resume_dialog(
 ) {
     let popup = centered_modal(frame, surfaces, 84, 24, area);
     let inner = theme::modal().inner(popup);
-    let preview = dialog.preview_lines(dashboard.resume_rows());
+    let preview = dialog.preview_body(dashboard.resume_rows());
     let bands = resume_bands(inner, preview.is_some());
     let rows = bands.as_ref();
     // The footer is the last band whether or not a preview sits above it.
@@ -1347,17 +1502,19 @@ pub(crate) fn render_resume_dialog(
 
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    let title_line =
-        dismissible_modal_title(&mut form, popup, "Resume a session", theme::title(true), true);
+    let title_line = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Resume a session",
+        theme::title(true),
+        true,
+    );
     frame.render_widget(theme::modal().title(title_line), popup);
     let tab_labels = resume_tab_labels(dashboard, dialog);
     TabStrip::render(
         frame,
         rows[0],
-        &tab_labels
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
+        &tab_labels.iter().map(String::as_str).collect::<Vec<_>>(),
         dialog.tab.index(),
         &mut form,
         ResumeFocus::Tabs,
@@ -1412,8 +1569,11 @@ pub(crate) fn render_resume_dialog(
     }
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
-    let block = theme::panel(sessions_focused || search_focused)
-        .title(resume_list_title(dashboard, dialog, list_rows.len()));
+    let block = theme::panel(sessions_focused || search_focused).title(resume_list_title(
+        dashboard,
+        dialog,
+        list_rows.len(),
+    ));
     let list_area = block.inner(rows[2]);
     // Registered after the dialog body so a drag over the rows selects the
     // list rather than the popup around it.
@@ -1473,9 +1633,17 @@ pub(crate) fn render_resume_dialog(
         usize::from(list_area.height).max(1),
     );
 
-    if let Some(preview) = preview {
+    if let Some((preview, hit_lines)) = preview {
         let preview_band = rows[3];
-        let block = theme::panel(false).title(" Archived transcript ");
+        let title = match (dialog.active_query(), hit_lines.len()) {
+            (None, _) => " Archived transcript ".to_owned(),
+            (Some(_), 0) => " Transcript · no hits ".to_owned(),
+            (Some(_), hits) => format!(
+                " Transcript · hit {}/{hits} ",
+                dialog.preview_hit.min(hits - 1) + 1
+            ),
+        };
+        let block = theme::panel(false).title(title);
         let body = block.inner(preview_band);
         frame.render_widget(block, preview_band);
         // Wrapped here rather than by the paragraph, so the scroll offset, the
@@ -1654,6 +1822,107 @@ fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> St
         return "No matching sessions".to_owned();
     }
     format!("No matches here · {}", elsewhere.join(", "))
+}
+
+/// The label a matching message carries. The roles are the briefing's own:
+/// anything else, such as the one-line message an error is shown as, carries
+/// no label.
+fn hit_role_label(role: &str) -> Option<&'static str> {
+    match role {
+        "user" => Some("User: "),
+        "assistant" => Some("Assistant: "),
+        "tool" => Some("[tool] "),
+        _ => None,
+    }
+}
+
+fn omitted_marker(messages: usize) -> String {
+    let plural = if messages == 1 { "message" } else { "messages" };
+    format!("*[… {messages} {plural} omitted …]*")
+}
+
+/// One matching message as lines of spans, with the matched ranges styled and
+/// the logical line each match starts on collected for hit navigation.
+///
+/// `hits` are byte ranges into the whole message, so a match that straddles a
+/// newline is split across the lines it covers and only its first line counts
+/// as the hit's position.
+fn hit_block_lines(
+    block: &WikiHitBlock,
+    lines: &mut Vec<Line<'static>>,
+    hit_lines: &mut Vec<usize>,
+) {
+    let hit_style = Style::default()
+        .fg(theme::palette().accent)
+        .add_modifier(Modifier::BOLD);
+    let mut prefix = hit_role_label(&block.role)
+        .map(|label| Span::styled(label, Style::default().fg(theme::palette().muted)));
+    let mut start = 0usize;
+    for text in block.text.split('\n') {
+        let end = start + text.len();
+        let mut spans = Vec::new();
+        if let Some(prefix) = prefix.take() {
+            spans.push(prefix);
+        }
+        let mut cursor = start;
+        for &(hit_start, hit_end) in &block.hits {
+            let from = hit_start.max(cursor);
+            let to = hit_end.min(end);
+            if from >= to {
+                continue;
+            }
+            if from > cursor {
+                spans.push(Span::raw(block.text[cursor..from].to_owned()));
+            }
+            if hit_start >= start {
+                hit_lines.push(lines.len());
+            }
+            spans.push(Span::styled(block.text[from..to].to_owned(), hit_style));
+            cursor = to;
+        }
+        if cursor < end {
+            spans.push(Span::raw(block.text[cursor..end].to_owned()));
+        }
+        lines.push(Line::from(spans));
+        // Past the newline that ended this line.
+        start = end + 1;
+    }
+    if block.truncated {
+        lines.push(Line::styled(
+            "[… truncated …]",
+            Style::default().fg(theme::palette().muted),
+        ));
+    }
+}
+
+/// The matching passages as logical lines of spans, with the logical line each
+/// hit starts on.
+fn hit_transcript_lines(transcript: &WikiHitTranscript) -> (Vec<Line<'static>>, Vec<usize>) {
+    let muted = Style::default().fg(theme::palette().muted);
+    if transcript.blocks.is_empty() {
+        return (
+            vec![Line::styled("No matching passages", muted)],
+            Vec::new(),
+        );
+    }
+    let mut lines = Vec::new();
+    let mut hit_lines = Vec::new();
+    for (index, block) in transcript.blocks.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(String::new()));
+        }
+        if block.omitted_before > 0 {
+            lines.push(Line::styled(omitted_marker(block.omitted_before), muted));
+        }
+        hit_block_lines(block, &mut lines, &mut hit_lines);
+    }
+    if transcript.omitted_after > 0 {
+        lines.push(Line::styled(
+            omitted_marker(transcript.omitted_after),
+            muted,
+        ));
+    }
+    (lines, hit_lines)
 }
 
 /// Wrap preview lines to `width` cells, keeping each span's style.

@@ -1328,6 +1328,44 @@ pub(crate) fn spawn_wiki_brief(wiki_id: String, updates: UnboundedSender<Dashboa
     });
 }
 
+/// How many messages of context the hit preview asks for on each side of a
+/// matching message: enough to see what the match answered.
+const WIKI_HITS_CONTEXT: usize = 1;
+/// How much of one message the hit preview asks for. The pane is scrollable
+/// but hit-centred, so a long message is shown around its match.
+const WIKI_HITS_CHARS: usize = 2_000;
+
+pub(crate) fn spawn_wiki_hits(
+    wiki_id: String,
+    query: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    tokio::spawn(async move {
+        let result = async {
+            daemon::connect_or_start()
+                .await?
+                .wiki_hits(
+                    wiki_id.clone(),
+                    query.clone(),
+                    WIKI_HITS_CONTEXT,
+                    WIKI_HITS_CHARS,
+                )
+                .await
+        }
+        .await
+        .map_err(|error| format!("{error:#}"));
+        report(
+            "reading an archived transcript's matches",
+            &updates,
+            DashboardIoUpdate::WikiHits {
+                wiki_id,
+                query,
+                result,
+            },
+        );
+    });
+}
+
 /// Start a session from an archived transcript and follow it through creation
 /// the same way a new session is followed.
 pub(crate) fn spawn_dashboard_restore_session(

@@ -376,6 +376,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::LoadArchivedBrief { wiki_id } => {
             crate::dashboard::io::spawn_wiki_brief(wiki_id, context.dashboard_io_tx.clone());
         }
+        DashboardAction::LoadArchivedHits { wiki_id, query } => {
+            crate::dashboard::io::spawn_wiki_hits(wiki_id, query, context.dashboard_io_tx.clone());
+        }
         action @ DashboardAction::RestoreArchivedSession { .. } => {
             let DashboardAction::RestoreArchivedSession {
                 workspace_id,
