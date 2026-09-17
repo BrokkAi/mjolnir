@@ -336,7 +336,8 @@ impl DashboardState {
             && !wizard.mounts.source.is_empty()
         {
             let target = wizard.target;
-            return self.complete_new_mount_source(wizard, nth_key(&self.config.targets, target));
+            return self
+                .complete_wizard_mount_source(wizard, nth_key(&self.config.targets, target));
         }
         let form_event = match &event {
             Event::Key(key)
@@ -406,7 +407,7 @@ impl DashboardState {
         {
             let target = wizard.target;
             return self
-                .complete_resume_mount_source(wizard, nth_key(&self.config.targets, target));
+                .complete_wizard_mount_source(wizard, nth_key(&self.config.targets, target));
         }
         let form_event = match &event {
             Event::Key(key)
@@ -1275,7 +1276,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardControl::MountDestination | WizardControl::Add => {
-                self.validate_new_mount(wizard, target_template_id)
+                self.validate_wizard_mount(wizard, target_template_id)
             }
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -1300,43 +1301,39 @@ impl DashboardState {
         }
     }
 
-    fn complete_new_mount_source(
+    fn complete_wizard_mount_source<W: WizardDraft>(
         &mut self,
-        mut wizard: NewWizard,
+        mut wizard: W,
         target_template_id: String,
     ) -> DashboardAction {
-        let prefix = wizard.mounts.source.to_string();
+        let prefix = wizard.mounts().source.to_string();
         if prefix.is_empty() {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
-        if let Some(candidates) = wizard.mounts.completion_cache.get(&prefix).cloned() {
-            apply_mount_completions(&mut wizard.mounts, &prefix, candidates);
-            self.mode = Mode::New(wizard);
-            DashboardAction::None
-        } else {
-            self.mode = Mode::New(wizard);
-            DashboardAction::CompleteMountSource {
-                target_template_id,
-                prefix,
-            }
+        if let Some(candidates) = wizard.mounts().completion_cache.get(&prefix).cloned() {
+            apply_mount_completions(wizard.mounts_mut(), &prefix, candidates);
+            return self.keep(wizard);
+        }
+        self.mode = wizard.into_mode();
+        DashboardAction::CompleteMountSource {
+            target_template_id,
+            prefix,
         }
     }
 
-    fn validate_new_mount(
+    fn validate_wizard_mount<W: WizardDraft>(
         &mut self,
-        mut wizard: NewWizard,
+        mut wizard: W,
         target_template_id: String,
     ) -> DashboardAction {
-        if let Some(error) = validate_mount_entry(&wizard.mounts) {
-            wizard.mounts.error = Some(error);
-            wizard.form.get_mut().focus(WizardControl::MountSource);
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+        if let Some(error) = validate_mount_entry(wizard.mounts()) {
+            wizard.mounts_mut().error = Some(error);
+            wizard.form_mut().focus(WizardControl::MountSource);
+            return self.keep(wizard);
         }
-        let source = wizard.mounts.source.to_string();
-        wizard.form.get_mut().set_submission_pending(true);
-        self.mode = Mode::New(wizard);
+        let source = wizard.mounts().source.to_string();
+        wizard.form_mut().set_submission_pending(true);
+        self.mode = wizard.into_mode();
         DashboardAction::ValidateMountSource {
             target_template_id,
             source,
@@ -1720,24 +1717,26 @@ impl DashboardState {
     /// since the request left the UI. Typed input always outranks suggestions.
     pub fn apply_mount_source_completions(&mut self, prefix: &str, candidates: Vec<String>) {
         match self.mode.clone() {
-            Mode::New(mut wizard)
-                if wizard.step == WizardStep::Mounts
-                    && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-                    && wizard.mounts.source == prefix =>
-            {
-                apply_mount_completions(&mut wizard.mounts, prefix, candidates);
-                self.mode = Mode::New(wizard);
-            }
-            Mode::Resume(mut wizard)
-                if wizard.step == WizardStep::Mounts
-                    && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-                    && wizard.mounts.source == prefix =>
-            {
-                apply_mount_completions(&mut wizard.mounts, prefix, candidates);
-                self.mode = Mode::Resume(wizard);
-            }
+            Mode::New(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
+            Mode::Resume(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
             _ => {}
         }
+    }
+
+    fn apply_wizard_mount_completions<W: WizardDraft>(
+        &mut self,
+        mut wizard: W,
+        prefix: &str,
+        candidates: Vec<String>,
+    ) {
+        if wizard.step() != WizardStep::Mounts
+            || wizard.form().borrow().focused() != Some(WizardControl::MountSource)
+            || wizard.mounts().source != prefix
+        {
+            return;
+        }
+        apply_mount_completions(wizard.mounts_mut(), prefix, candidates);
+        self.mode = wizard.into_mode();
     }
 
     /// Apply the host's answer about one mount source. A source whose
@@ -2192,7 +2191,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardControl::MountDestination | WizardControl::Add => {
-                self.validate_resume_mount(wizard, target_template_id)
+                self.validate_wizard_mount(wizard, target_template_id)
             }
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -2222,49 +2221,6 @@ impl DashboardState {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
-        }
-    }
-
-    fn complete_resume_mount_source(
-        &mut self,
-        mut wizard: ResumeWizard,
-        target_template_id: String,
-    ) -> DashboardAction {
-        let prefix = wizard.mounts.source.to_string();
-        if prefix.is_empty() {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if let Some(candidates) = wizard.mounts.completion_cache.get(&prefix).cloned() {
-            apply_mount_completions(&mut wizard.mounts, &prefix, candidates);
-            self.mode = Mode::Resume(wizard);
-            DashboardAction::None
-        } else {
-            self.mode = Mode::Resume(wizard);
-            DashboardAction::CompleteMountSource {
-                target_template_id,
-                prefix,
-            }
-        }
-    }
-
-    fn validate_resume_mount(
-        &mut self,
-        mut wizard: ResumeWizard,
-        target_template_id: String,
-    ) -> DashboardAction {
-        if let Some(error) = validate_mount_entry(&wizard.mounts) {
-            wizard.mounts.error = Some(error);
-            wizard.form.get_mut().focus(WizardControl::MountSource);
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        let source = wizard.mounts.source.to_string();
-        wizard.form.get_mut().set_submission_pending(true);
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::ValidateMountSource {
-            target_template_id,
-            source,
         }
     }
 
