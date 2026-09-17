@@ -76,6 +76,7 @@ pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Resul
 }
 
 /// Environment variable codex-acp reads as its startup configuration.
+#[cfg(unix)]
 const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 
 /// Pin the model this session accepted into the Codex bridge's environment.

@@ -127,6 +127,7 @@ fn rpc_error(id: Value, code: i64, message: String) -> Value {
 /// How long a connect may wait for the worker to accept. A Unix socket
 /// connect only blocks when the listener's backlog is full, which means the
 /// worker has stopped accepting.
+#[cfg(unix)]
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Send one JSON request line over a worker Unix socket and read one JSON
