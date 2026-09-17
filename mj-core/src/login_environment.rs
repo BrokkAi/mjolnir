@@ -262,7 +262,6 @@ fn parse(output: &[u8], marker: &[u8]) -> Result<Environment> {
 mod tests {
     use super::*;
     use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -308,11 +307,21 @@ mod tests {
 
     fn fixture() -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
-        // Model account startup independently of the machine's /etc/profile.
-        // Verify noninteractive login flags and then source the fixture profile.
-        let shell = home.path().join("login shell");
-        std::fs::write(&shell, "#!/bin/sh\n[ \"$1\" = -l ] && [ \"$2\" = -c ] || exit 80\n. \"$HOME/.profile\"\nexec /bin/sh -c \"$3\"\n").unwrap();
-        std::fs::set_permissions(shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Link to the checked-in fixture shell rather than writing one here.
+        // This test binary is multi-threaded and other tests spawn processes; a
+        // thread that forks while our write descriptor is still open leaves a
+        // child holding it, and the exec then fails with ETXTBSY. The name
+        // keeps its space so the tests still cover quoting of the shell path.
+        let fixture_shell = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("login-shell.sh");
+        assert!(
+            fixture_shell.is_file(),
+            "fixture login shell is missing at {}",
+            fixture_shell.display()
+        );
+        std::os::unix::fs::symlink(&fixture_shell, home.path().join("login shell")).unwrap();
         std::fs::write(
             home.path().join(".profile"),
             "export PROFILE_SETTING='profile value'\n",
@@ -405,12 +414,9 @@ mod tests {
     fn failed_login_never_returns_an_ambient_environment() {
         let home = fixture();
         std::fs::write(home.path().join(".profile"), "echo secret >&2\nexit 42\n").unwrap();
-        // The fixture shell exits immediately, so what is under test is the
-        // reported failure, not the deadline. The deadline is long enough that
-        // a loaded machine cannot turn this into a timeout instead;
-        // `capture_deadline_includes_descendants_holding_output_pipes` is the
-        // test that does bound the wait.
-        let error = discover_account(account(home.path()), Duration::from_secs(600))
+        // The deadline was raised to 600 seconds for an intermittent failure
+        // that was really ETXTBSY on the written fixture shell, not a timeout.
+        let error = discover_account(account(home.path()), Duration::from_secs(5))
             .unwrap_err()
             .to_string();
         assert!(error.contains("42"), "{error}");
@@ -427,7 +433,7 @@ mod tests {
         .unwrap();
         let started = Instant::now();
         let error = discover_account(account(home.path()), Duration::from_millis(250)).unwrap_err();
-        assert!(error.to_string().contains("did not answer"));
+        assert!(error.to_string().contains("did not answer"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
