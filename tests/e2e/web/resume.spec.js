@@ -28,6 +28,7 @@ async function mount(page, {
   ],
   holdAction = null,
   rejectAction = false,
+  wiki = null,
 } = {}) {
   const state = {
     snapshot: {
@@ -44,6 +45,9 @@ async function mount(page, {
     actions: [],
     holdAction,
     rejectAction,
+    wiki,
+    wikiQueries: [],
+    wikiRestores: [],
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
@@ -75,6 +79,36 @@ async function mount(page, {
         });
       }
       return route.fulfill({ status: 202, body: '' });
+    }
+    if (pathname.startsWith('/api/v1/wiki/')) {
+      if (!state.wiki) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'not found' }) });
+      if (state.wiki.disabled) {
+        return route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'SessionWiki is disabled; enable it in Setup' }),
+        });
+      }
+      if (pathname === '/api/v1/wiki/search') {
+        const query = new URL(route.request().url()).searchParams.get('q') || '';
+        state.wikiQueries.push(query);
+        const rows = (state.wiki.rows || []).filter(row =>
+          !query || JSON.stringify(row).toLowerCase().includes(query.toLowerCase()));
+        return json({ rows });
+      }
+      if (pathname.endsWith('/brief')) return json({ markdown: state.wiki.brief || '' });
+      if (pathname.endsWith('/restore')) {
+        state.wikiRestores.push({ id: pathname.split('/')[5], body: route.request().postDataJSON() });
+        state.snapshot.sessions = [
+          ...state.snapshot.sessions,
+          session(state.wiki.restoredId, { state: 'running', lifecycle: 'running', capabilities: { open: true, resume: false } }),
+        ];
+        return route.fulfill({
+          status: 201,
+          contentType: 'application/json',
+          body: JSON.stringify({ session_id: state.wiki.restoredId }),
+        });
+      }
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);
     if (['viewer.html', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest', 'icon.svg'].includes(file)) {
@@ -465,4 +499,73 @@ test('a late success does not redirect a new visit to the same card', async ({ p
   release();
   await expect(page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true })).toBeEnabled();
   await expect(page).toHaveURL(/\/resume\/stopped$/);
+});
+
+test('the Archived section lists what the index kept and marks a hit on a live row', async ({ page }) => {
+  const state = await mount(page, {
+    wiki: {
+      rows: [
+        {
+          id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work',
+          started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello',
+          archived: true, native_id: null, snippet: null, hel_session_id: null,
+        },
+        {
+          id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Stopped test',
+          started: '2026-09-17T01:00:00Z', msgs: 5, preview: 'still here',
+          archived: false, native_id: null, snippet: 'a pomegranate sentinel', hel_session_id: 'stopped',
+        },
+      ],
+      brief: '# Previous session\n\nThe single word is hello.',
+      restoredId: 'restored',
+    },
+  });
+  await expect(page.locator('#resume-archived')).toBeVisible();
+  await expect(page.locator('#resume-archived [data-wiki-id]')).toHaveCount(1);
+  await expect(page.locator('#resume-archived')).toContainText('Archived pomegranate work');
+  await expect(page.locator('#resume-archived')).toContainText('3 messages');
+  await expect(page.locator('#resumable [data-session-id="stopped"]')).toContainText('a pomegranate sentinel');
+  await expect(page.locator('#resume-wiki-note')).toBeHidden();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // One request follows a burst of typing, and it carries the final text.
+  const before = state.wikiQueries.length;
+  await page.locator('#resume-search').pressSequentially('pomegranate', { delay: 20 });
+  await expect.poll(() => state.wikiQueries.length).toBe(before + 1);
+  expect(state.wikiQueries[before]).toBe('pomegranate');
+});
+
+test('an archived row shows its brief and restores into a new session', async ({ page }) => {
+  const state = await mount(page, {
+    wiki: {
+      rows: [{
+        id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work',
+        started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello',
+        archived: true, native_id: null, snippet: null, hel_session_id: null,
+      }],
+      brief: '# Previous session\n\nThe single word is hello.',
+      restoredId: 'restored',
+    },
+  });
+  await page.locator('#resume-archived [data-wiki-id="archived-one"]').click();
+  await expect(page).toHaveURL(/\/resume\/archive\/archived-one$/);
+  await expect(page.locator('#resume-detail .wiki-brief')).toContainText('The single word is hello.');
+  await choose(picker(page.locator('#resume-detail'), 'wiki-profile'), 'beta');
+  await choose(picker(page.locator('#resume-detail'), 'wiki-target'), 'remote');
+  await page.locator('#resume-detail').getByRole('button', { name: 'Restore', exact: true }).click();
+  await expect.poll(() => state.wikiRestores.length).toBe(1);
+  expect(state.wikiRestores[0].id).toBe('archived-one');
+  expect(state.wikiRestores[0].body).toEqual({ workspace_id: 'test', profile_id: 'beta', target_id: 'remote' });
+  await expect(page).toHaveURL(/#conversation\/restored$/);
+});
+
+test('a disabled SessionWiki hides the Archived section behind one line', async ({ page }) => {
+  const state = await mount(page, { wiki: { disabled: true, rows: [], restoredId: 'restored' } });
+  await expect(page.locator('#resume-wiki-note')).toHaveText(/SessionWiki is disabled/);
+  await expect(page.locator('#resume-archived')).toBeHidden();
+  const asked = state.wikiQueries.length;
+  await page.locator('#resume-search').fill('anything');
+  await page.waitForTimeout(600);
+  expect(state.wikiQueries.length).toBe(asked);
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(0);
 });
