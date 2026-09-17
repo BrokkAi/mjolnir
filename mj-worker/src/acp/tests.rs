@@ -2511,6 +2511,7 @@ async fn silent_after_prompt_bridge(
 
 fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
