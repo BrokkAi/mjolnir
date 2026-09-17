@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use crate::config::{PodmanWorkspaceStorage, SshConnection, TargetTemplate};
+use crate::config::{ContainerTemplate, PodmanWorkspaceStorage, SshConnection, TargetTemplate};
 use crate::state::{PodmanWorkspaceLocator, TargetLocator};
 use crate::targets;
 
@@ -90,6 +90,34 @@ impl From<&SshConnection> for targets::SshTarget {
         Self {
             destination,
             ssh_args: ssh_args_with_identity(&ssh.extra_args, ssh.identity_file.as_deref()),
+        }
+    }
+}
+
+impl TargetTemplate {
+    /// The host that downloads this configured target's image, with the
+    /// container settings that name the image. `None` for targets that run no
+    /// image.
+    ///
+    /// This mirrors [`targets::TargetTemplate::image_host`] for the stored
+    /// form of a target, which is what the daemon reads when it decides what
+    /// to download; the two template families never share a type.
+    pub fn image_host(&self) -> Option<(targets::ImageHost, &ContainerTemplate)> {
+        match self {
+            Self::LocalPodman { container } => Some((targets::ImageHost::LocalPodman, container)),
+            Self::LocalDocker { container } => Some((targets::ImageHost::LocalDocker, container)),
+            Self::AppleContainer { container } => {
+                Some((targets::ImageHost::AppleContainer, container))
+            }
+            Self::SshPodman { ssh, container } => Some((
+                targets::ImageHost::SshPodman(targets::SshTarget::from(ssh)),
+                container,
+            )),
+            Self::SshDocker { ssh, container } => Some((
+                targets::ImageHost::SshDocker(targets::SshTarget::from(ssh)),
+                container,
+            )),
+            Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => None,
         }
     }
 }

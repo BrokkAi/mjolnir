@@ -227,7 +227,7 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|notice| session_ids.contains(&notice.session_id))
+            .filter(|notice| notice_reaches_workspace(notice, &session_ids))
             .cloned()
             .collect();
         let records = runtime_records_for_workspace(&controller, &session_ids);
@@ -248,4 +248,17 @@ impl RuntimeState {
             subagents,
         })
     }
+}
+
+/// Whether a notice belongs in one workspace's snapshot.
+///
+/// A notice usually belongs to a session, and only the workspace holding that
+/// session shows it. An empty session id marks a notice the daemon owns
+/// instead, such as a background container image download; there is no
+/// workspace to attach it to, and every workspace wants to see it.
+pub(super) fn notice_reaches_workspace(
+    notice: &RuntimeNotice,
+    session_ids: &BTreeSet<String>,
+) -> bool {
+    notice.session_id.is_empty() || session_ids.contains(&notice.session_id)
 }

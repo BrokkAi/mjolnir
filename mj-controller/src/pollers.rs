@@ -6,6 +6,7 @@
 //! tasks that recover interrupted closes. The loop that consumes them never
 //! blocks; see [`Feed`] for the wait-then-drain shape they all share.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +36,7 @@ use crate::session_manager::{
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
     DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageRefresh,
-    SessionResourceProbe, SessionResourceUsage,
+    RefreshWhen, SessionResourceProbe, SessionResourceUsage,
 };
 use crate::worker_client::CredentialSyncCoordinator;
 
@@ -58,9 +59,16 @@ pub const QUOTA_STALE_AFTER: Duration = Duration::from_secs(2 * QUOTA_REFRESH_IN
 /// `:latest` tag current, and it has to be rare enough to stay off the
 /// registry's back.
 pub const IMAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// The daemon has startup work of its own, and a pull competes with it for the
-/// network. The first refresh waits this long, then the interval takes over.
-const IMAGE_REFRESH_DELAY: Duration = Duration::from_secs(30);
+/// How long the first refresh waits after the daemon starts, before the
+/// interval takes over.
+///
+/// That first refresh is the pre-pull for the person's first session: it
+/// downloads every configured image the host does not have, so a Create does
+/// not sit in "Provisioning" waiting on a multi-gigabyte download. It is kept
+/// short for that reason, and non-zero only so it lands behind the cleanup and
+/// recovery work the daemon also schedules at startup, which competes with it
+/// for the SSH admission slots.
+const IMAGE_REFRESH_DELAY: Duration = Duration::from_secs(2);
 pub const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const RESOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 pub const CAPACITY_POLL_INTERVAL: Duration = Duration::from_secs(30);

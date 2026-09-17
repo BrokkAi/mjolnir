@@ -118,6 +118,26 @@ pub(super) async fn run_daemon_runtime(
             let state = state.clone();
             move || state.with_config(crate::controller::image_refresh_plan)
         },
+        {
+            // A background download is the daemon's own work, not a session's,
+            // so these notices carry an empty session id and reach every
+            // workspace.
+            let state = state.clone();
+            move |report| {
+                let text = match report {
+                    crate::pollers::ImageRefreshReport::Started { host, image } => {
+                        format!("Downloading image {image} for {host}\u{2026}")
+                    }
+                    crate::pollers::ImageRefreshReport::Pulled { host, image } => {
+                        format!("Image {image} is ready on {host}.")
+                    }
+                    crate::pollers::ImageRefreshReport::Failed { host, image, error } => {
+                        format!("Could not pull image {image} on {host}: {error}")
+                    }
+                };
+                state.push_notice("", text);
+            }
+        },
         cancellation.clone(),
     );
     let exit_when_idle = mj_core::config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();

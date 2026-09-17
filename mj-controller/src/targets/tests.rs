@@ -1402,6 +1402,48 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
     assert!(!apple.commands[1].args.contains(&"--init".to_owned()));
 }
 
+/// `never` means never, including the daemon's own background download.
+#[test]
+fn a_never_policy_is_not_pre_pulled() {
+    assert!(
+        image_refresh(
+            ImageHost::LocalPodman,
+            "ghcr.io/example/dev:latest",
+            None,
+            ImagePullPolicy::Never,
+        )
+        .is_none(),
+        "a never policy asked for no background download"
+    );
+}
+
+/// Apple's `container` CLI spells both commands differently from Podman and
+/// Docker: `image pull` rather than `pull`, no `--format` on `image inspect`,
+/// no `--platform` (it runs native images only) and no verified prune.
+#[test]
+fn an_apple_container_image_refresh_uses_the_container_cli() {
+    let refresh = image_refresh(
+        ImageHost::AppleContainer,
+        "ghcr.io/example/dev:latest",
+        Some("linux/arm64"),
+        ImagePullPolicy::Auto,
+    )
+    .expect("an apple container image is downloaded in the background");
+
+    assert_eq!(refresh.host.label(), "apple container");
+    assert_eq!(refresh.pull.program, "container");
+    assert_eq!(
+        refresh.pull.args,
+        ["image", "pull", "ghcr.io/example/dev:latest"]
+    );
+    assert_eq!(refresh.image_id.program, "container");
+    assert_eq!(
+        refresh.image_id.args,
+        ["image", "inspect", "ghcr.io/example/dev:latest"]
+    );
+    assert!(refresh.prune.is_none(), "{:?}", refresh.prune);
+}
+
 /// A launch never waits on a registry under the default policy. The daemon
 /// refreshes remote `:latest` images in the background instead, so a session
 /// starts from whatever the host already has.
