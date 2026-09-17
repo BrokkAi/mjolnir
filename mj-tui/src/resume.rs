@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
@@ -24,7 +24,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use mj_client::daemon::WikiRow;
+use mj_client::daemon::{WikiIndexState, WikiRow, WikiSearchPage, WikiStatus};
 use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
 
@@ -41,6 +41,15 @@ use crate::{DashboardAction, DashboardState, Mode};
 
 /// Origin shown for a native session that has never run under Hel.
 pub(crate) const LOCAL_ORIGIN: &str = "local";
+
+/// How long the dialog waits before asking again while the first index build
+/// is still running.
+pub(crate) const WIKI_INDEXING_POLL: Duration = Duration::from_secs(5);
+/// How long it waits before repeating the current query while a top-up sync
+/// is running.
+pub(crate) const WIKI_TOP_UP_POLL: Duration = Duration::from_secs(2);
+/// How many times one query is repeated for a running top-up sync.
+pub(crate) const WIKI_TOP_UP_LIMIT: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeFocus {
@@ -165,6 +174,10 @@ pub(crate) struct ResumeRow {
     /// The SessionWiki session a search matched to this live row, so the
     /// preview can show the same transcript the hit came from.
     pub(crate) wiki_match: Option<String>,
+    /// Where the matching hit sat in the index's answer. A query lists only
+    /// rows that have one, in this order, so the index's ranking is what the
+    /// dialog shows.
+    pub(crate) wiki_rank: Option<usize>,
 }
 
 impl ResumeRow {
@@ -208,6 +221,12 @@ pub(crate) struct ResumeDialog {
     /// The search this dialog last asked for. A result that names an older
     /// request is stale and dropped.
     pub(crate) wiki_request_id: u64,
+    /// What the last answer said about the index: whether it can be searched
+    /// at all, and whether a sync is adding to it right now.
+    pub(crate) wiki_status: WikiStatus,
+    /// How many times the current query has been re-issued because a sync was
+    /// still running. Bounded so a long sync cannot poll forever.
+    pub(crate) wiki_top_ups: u32,
     /// Briefings already fetched, by SessionWiki id, for the dialog's life.
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
@@ -234,7 +253,7 @@ impl ResumeDialog {
             },
             true,
         );
-        form.declare_with_enabled(Search, ControlKind::TextField, true);
+        form.declare_with_enabled(Search, ControlKind::TextField, self.search_enabled());
         form.declare_with_enabled(
             Sessions,
             ControlKind::ChoiceList {
@@ -253,6 +272,21 @@ impl ResumeDialog {
             format!("{:?}", rows.iter().map(|row| &row.key).collect::<Vec<_>>()),
         );
         form.end_frame(Sessions);
+    }
+
+    /// Whether the search box accepts typing. Search is the index's answer, so
+    /// there is nothing to type into until the index can answer.
+    pub(crate) fn search_enabled(&self) -> bool {
+        self.wiki_status.state == WikiIndexState::Ready
+    }
+
+    /// What stands in the search box while it cannot be typed into.
+    pub(crate) fn search_placeholder(&self) -> Option<&'static str> {
+        match self.wiki_status.state {
+            WikiIndexState::Ready => None,
+            WikiIndexState::Indexing => Some("Indexing…"),
+            WikiIndexState::VersionMismatch => Some("SessionWiki index is at a different version"),
+        }
     }
 
     fn can_open(&self, rows: &[ResumeRow]) -> bool {
@@ -438,6 +472,7 @@ pub(crate) fn merged_resume_rows(
             unavailable_reason: None,
             move_recovery: None,
             wiki_match: None,
+            wiki_rank: None,
         });
     }
     for profile in profiles {
@@ -458,6 +493,7 @@ pub(crate) fn merged_resume_rows(
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
                 wiki_match: None,
+                wiki_rank: None,
             });
         }
     }
@@ -465,7 +501,7 @@ pub(crate) fn merged_resume_rows(
     // rows of their own. A row is archived only when nothing on this machine
     // still holds the session: no Mjolnir record, and no native file an import
     // could adopt.
-    for hit in wiki {
+    for (rank, hit) in wiki.iter().enumerate() {
         let native = hit
             .native_id
             .as_deref()
@@ -480,6 +516,7 @@ pub(crate) fn merged_resume_rows(
         if let Some(key) = existing {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
                 row.wiki_match = Some(hit.id.clone());
+                row.wiki_rank = Some(rank);
                 if let Some(snippet) = snippet_text(hit) {
                     row.details = format!("{} · {snippet}", row.details);
                 }
@@ -509,6 +546,7 @@ pub(crate) fn merged_resume_rows(
             unavailable_reason: None,
             move_recovery: None,
             wiki_match: Some(hit.id.clone()),
+            wiki_rank: Some(rank),
         });
     }
     // Newest first across the whole merged list; the key breaks ties so the
@@ -558,18 +596,23 @@ fn archive_details(hit: &WikiRow) -> String {
 }
 
 /// The rows one dialog tab shows: the merged sources split by ownership, with
-/// checkpoint sizes appended and search applied.
+/// checkpoint sizes appended.
+///
+/// There is one search path. With an empty query a tab lists everything it
+/// owns, newest first. With a query it lists only the rows the index returned,
+/// in the order the index ranked them, so what the dialog shows and what
+/// SessionWiki found are the same thing.
 fn build_resume_rows(
     config: &Config,
     state: &State,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
-    now: &chrono::DateTime<chrono::Local>,
 ) -> Vec<ResumeRow> {
-    let needle = dialog.search.to_lowercase();
-    merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
+    let searching = !dialog.search.is_empty();
+    let mut rows = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
         .into_iter()
         .filter(|row| dialog.tab.includes(row))
+        .filter(|row| !searching || row.wiki_rank.is_some())
         .map(|mut row| {
             // The checkpoint's size is loaded in the background, so it is
             // appended here rather than folded into the pure merge.
@@ -584,29 +627,19 @@ fn build_resume_rows(
             }
             row
         })
-        .filter(|row| {
-            // An archived row is here because the index matched the query, so
-            // the local filter must not drop it for lacking the literal text.
-            if matches!(row.key, ResumeRowKey::Archive(_)) {
-                return true;
-            }
-            let activity = format_last_active(now, row.last_activity_ms).to_lowercase();
-            needle.is_empty()
-                || row.title.to_lowercase().contains(&needle)
-                || row.details.to_lowercase().contains(&needle)
-                || row.profile_id.to_lowercase().contains(&needle)
-                || row.origin.to_lowercase().contains(&needle)
-                || activity.contains(&needle)
-        })
-        .collect()
+        .collect::<Vec<_>>();
+    if searching {
+        // The index ranked these; the newest-first order the merge applied is
+        // not the answer's order and would hide the best hit below the rest.
+        rows.sort_by_key(|row| row.wiki_rank.unwrap_or(usize::MAX));
+    }
+    rows
 }
 
 impl DashboardState {
     /// Rebuilds the open dialog's rows from what they are derived from: the
-    /// Hel records, the scanned native sessions, the checkpoint sizes, the
-    /// search, and the clock the activity labels read. Every mutation of those
-    /// inputs calls this, and the dashboard's one-second clock calls it again
-    /// so searches keep moving.
+    /// Hel records, the scanned native sessions, the checkpoint sizes, and the
+    /// newest search answer. Every mutation of those inputs calls this.
     /// Moving the selection only reads the rows.
     pub fn rebuild_resume_rows(&mut self) {
         let Mode::ResumeDialog(dialog) = &self.mode else {
@@ -618,7 +651,6 @@ impl DashboardState {
             &self.state,
             dialog,
             &self.checkpoint_archive_sizes,
-            &chrono::Local::now(),
         );
         self.resume_rows.retain(|row| {
             row.session_id().is_none_or(|id| {
@@ -703,6 +735,8 @@ impl DashboardState {
             opened_at: Instant::now(),
             wiki: Arc::new(Vec::new()),
             wiki_request_id: 0,
+            wiki_status: WikiStatus::default(),
+            wiki_top_ups: 0,
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
         });
@@ -745,16 +779,50 @@ impl DashboardState {
 
     /// Fold one SessionWiki search result into the open dialog. A result for
     /// an older request is dropped: the person has typed since.
-    pub fn apply_wiki_search(&mut self, request_id: u64, rows: Vec<WikiRow>) {
+    pub fn apply_wiki_search(&mut self, request_id: u64, page: WikiSearchPage) {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return;
         };
-        if dialog.wiki_request_id != request_id || *dialog.wiki == rows {
+        if dialog.wiki_request_id != request_id {
             return;
         }
-        dialog.wiki = Arc::new(rows);
+        // The status moves even when the rows do not: a build that finished
+        // between two identical answers is what re-enables the search box.
+        dialog.wiki_status = page.status;
+        if *dialog.wiki == page.rows {
+            self.rebuild_resume_rows();
+            return;
+        }
+        dialog.wiki = Arc::new(page.rows);
         self.rebuild_resume_rows();
         self.resync_resume_selection();
+    }
+
+    /// The query to re-issue, and how long to wait first, after an answer said
+    /// the index is still changing. `None` when the answer was final.
+    ///
+    /// Two reasons to ask again. The first build has not finished, so the
+    /// whole answer will change: poll every five seconds until it is ready,
+    /// which also re-enables the search box without reopening the dialog. Or a
+    /// top-up sync is running, so this query may gain rows: repeat it every
+    /// two seconds, at most ten times, and then leave it alone.
+    pub fn next_wiki_refresh(&mut self) -> Option<(u64, String, Duration)> {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return None;
+        };
+        let delay = match dialog.wiki_status.state {
+            WikiIndexState::VersionMismatch => return None,
+            WikiIndexState::Indexing => WIKI_INDEXING_POLL,
+            WikiIndexState::Ready => {
+                if !dialog.wiki_status.topping_up || dialog.wiki_top_ups >= WIKI_TOP_UP_LIMIT {
+                    return None;
+                }
+                dialog.wiki_top_ups += 1;
+                WIKI_TOP_UP_POLL
+            }
+        };
+        dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        Some((dialog.wiki_request_id, dialog.search.to_string(), delay))
     }
 
     /// Fold one fetched briefing into the open dialog's preview cache.
@@ -808,6 +876,8 @@ impl DashboardState {
             return None;
         };
         dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        // A new query gets its own top-up budget; the old one's is spent.
+        dialog.wiki_top_ups = 0;
         Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
@@ -883,7 +953,11 @@ impl DashboardState {
             if focused != Search {
                 match key.code {
                     KeyCode::Char('/') => {
-                        dialog.form.get_mut().focus(Search);
+                        // A disabled box cannot take the focus, and asking for
+                        // it would leave the focus pending until it can.
+                        if dialog.search_enabled() {
+                            dialog.form.get_mut().focus(Search);
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Delete if focused == Sessions => {
@@ -1117,18 +1191,42 @@ pub(crate) fn render_resume_dialog(
             search_area.height,
         ),
     );
-    TextField::render(
-        frame,
-        Rect::new(
-            search_area.x + label_width,
-            search_area.y,
-            search_area.width - label_width,
-            search_area.height,
-        ),
-        &dialog.search,
-        &mut form,
-        ResumeFocus::Search,
+    let field_area = Rect::new(
+        search_area.x + label_width,
+        search_area.y,
+        search_area.width - label_width,
+        search_area.height,
     );
+    // Search is the index's answer. While the index cannot answer, the box
+    // says why instead of taking text nothing would act on; the tabs and the
+    // list keep working.
+    if let Some(placeholder) = dialog.search_placeholder() {
+        form.register(
+            ResumeFocus::Search,
+            ControlKind::TextField,
+            field_area,
+            false,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate_to_cells(
+                    placeholder,
+                    usize::from(field_area.width),
+                    Truncate::SUMMARY,
+                ),
+                Style::default().fg(theme::palette().muted),
+            )),
+            field_area,
+        );
+    } else {
+        TextField::render(
+            frame,
+            field_area,
+            &dialog.search,
+            &mut form,
+            ResumeFocus::Search,
+        );
+    }
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
     let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
@@ -1579,6 +1677,37 @@ mod tests {
         }
     }
 
+    /// Move the dialog to a tab by name, through the tab strip.
+    fn switch_to_tab(dashboard: &mut DashboardState, tab: ResumeTab) {
+        for _ in 0..4 {
+            let Mode::ResumeDialog(dialog) = &mut dashboard.mode else {
+                panic!("expected the resume dialog");
+            };
+            if dialog.tab == tab {
+                if dialog.focused() == ResumeFocus::Tabs {
+                    dashboard.handle_key(key(KeyCode::Enter));
+                }
+                return;
+            }
+            let forward = tab.index() > dialog.tab.index();
+            dialog.form.get_mut().focus(ResumeFocus::Tabs);
+            dashboard.handle_key(key(if forward {
+                KeyCode::Right
+            } else {
+                KeyCode::Left
+            }));
+        }
+        panic!("the dialog never reached {tab:?}");
+    }
+
+    fn switch_to_hel(dashboard: &mut DashboardState) {
+        switch_to_tab(dashboard, ResumeTab::Hel);
+    }
+
+    fn switch_to_archive(dashboard: &mut DashboardState) {
+        switch_to_tab(dashboard, ResumeTab::Archive);
+    }
+
     #[test]
     fn last_active_uses_words_through_seven_days_then_a_local_date() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-23T12:00:00-05:00").unwrap();
@@ -2020,6 +2149,28 @@ mod tests {
         }
     }
 
+    /// One answer from an index that has finished building and is not syncing.
+    fn ready_page(rows: Vec<WikiRow>) -> WikiSearchPage {
+        WikiSearchPage {
+            rows,
+            status: WikiStatus {
+                state: WikiIndexState::Ready,
+                topping_up: false,
+            },
+        }
+    }
+
+    /// Put the open dialog in the state one ready answer would leave it in,
+    /// without going through a request: the tests that only care about rows
+    /// should not have to spell the status out.
+    fn apply_ready_rows(dashboard: &mut DashboardState, rows: Vec<WikiRow>) {
+        let request_id = match &dashboard.mode {
+            Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
+            _ => panic!("expected the resume dialog"),
+        };
+        dashboard.apply_wiki_search(request_id, ready_page(rows));
+    }
+
     /// A row is archived only when nothing on this machine still holds the
     /// session: no Mjolnir record and no native file an import could adopt.
     #[test]
@@ -2098,7 +2249,7 @@ mod tests {
         // dashboard does, and the answer names that request.
         let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
         assert_eq!(query, "");
-        dashboard.apply_wiki_search(request_id, vec![wiki_row("gone", true)]);
+        dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("gone", true)]));
 
         assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
         switch_to_import(&mut dashboard);
@@ -2136,6 +2287,7 @@ mod tests {
             BTreeMap::new(),
         );
         dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        apply_ready_rows(&mut dashboard, Vec::new());
         focus_resume_control(&mut dashboard, ResumeFocus::Search);
 
         let action = dashboard.handle_key(key(KeyCode::Char('g')));
@@ -2144,14 +2296,14 @@ mod tests {
         };
         assert_eq!(query, "g");
 
-        dashboard.apply_wiki_search(request_id - 1, vec![wiki_row("stale", true)]);
+        dashboard.apply_wiki_search(request_id - 1, ready_page(vec![wiki_row("stale", true)]));
         assert!(
             !rows(&dashboard)
                 .iter()
                 .any(|row| matches!(row.key, ResumeRowKey::Archive(_))),
             "an answer to an older request is dropped"
         );
-        dashboard.apply_wiki_search(request_id, vec![wiki_row("fresh", true)]);
+        dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("fresh", true)]));
         let Mode::ResumeDialog(dialog) = &dashboard.mode else {
             panic!("expected the resume dialog");
         };
@@ -2211,6 +2363,7 @@ mod tests {
                 NEWER_THAN_THE_CHECKPOINT,
             )])],
         );
+        apply_ready_rows(&mut dashboard, Vec::new());
         dashboard.handle_key(key(KeyCode::Char('/')));
         dashboard.handle_paste("nat");
         dashboard.handle_key(key(KeyCode::Left));
@@ -2579,10 +2732,10 @@ mod tests {
         assert_eq!(dialog.selected, Some(before[1].key.clone()));
     }
 
-    /// Search is one of the inputs the rows are built from, so each keystroke
-    /// narrows what the dialog lists, and erasing it restores them.
+    /// One search path: a query lists the rows the index returned and nothing
+    /// else, on every tab, in the order the index ranked them.
     #[test]
-    fn typing_a_search_narrows_the_visible_rows() {
+    fn a_query_lists_only_what_the_index_returned_in_its_own_order() {
         let mut dashboard = DashboardState::new(
             config(),
             state_with(vec![stopped_session()]),
@@ -2595,57 +2748,209 @@ mod tests {
                 native("native-3", "Native beta", 1),
             ])],
         );
+        apply_ready_rows(&mut dashboard, Vec::new());
+        assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
         switch_to_import(&mut dashboard);
-        assert_eq!(rows(&dashboard).len(), 2);
+        assert_eq!(rows(&dashboard).len(), 2, "an empty query lists the tab");
 
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        for character in "alpha".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        assert_eq!(titles(&rows(&dashboard)), ["Native alpha"]);
+        // The index answers with the older native session first, a hit on the
+        // Mjolnir record, and one archived session.
+        replace_search(&mut dashboard, "phrase");
+        apply_ready_rows(
+            &mut dashboard,
+            vec![
+                WikiRow {
+                    tool: "codex".into(),
+                    native_id: Some("native-3".into()),
+                    snippet: Some("beta said the phrase".into()),
+                    ..wiki_row("beta-hit", false)
+                },
+                WikiRow {
+                    tool: "codex".into(),
+                    native_id: Some("native-2".into()),
+                    snippet: Some("alpha said the phrase".into()),
+                    ..wiki_row("alpha-hit", false)
+                },
+                WikiRow {
+                    hel_session_id: Some("session-1".into()),
+                    ..wiki_row("record-hit", false)
+                },
+                wiki_row("gone", true),
+            ],
+        );
 
-        for _ in 0.."alpha".len() {
-            dashboard.handle_key(key(KeyCode::Backspace));
-        }
-        assert_eq!(rows(&dashboard).len(), 2);
+        assert_eq!(
+            titles(&rows(&dashboard)),
+            ["Native beta", "Native alpha"],
+            "the Import tab keeps the index's ranking, not newest first"
+        );
+        assert!(
+            rows(&dashboard)[0].details.contains("beta said the phrase"),
+            "each row carries its snippet: {}",
+            rows(&dashboard)[0].details
+        );
+
+        switch_to_hel(&mut dashboard);
+        assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+        switch_to_archive(&mut dashboard);
+        assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+
+        // A query the index does not match empties the tab, even though the
+        // row's own text carries the word.
+        replace_search(&mut dashboard, "native");
+        apply_ready_rows(&mut dashboard, Vec::new());
+        switch_to_tab(&mut dashboard, ResumeTab::Import);
+        assert!(
+            rows(&dashboard).is_empty(),
+            "the local text of a row is no longer a search path"
+        );
     }
 
+    /// While the first build runs the box says so and cannot be typed into,
+    /// the dialog keeps asking, and a ready answer opens it without the person
+    /// reopening the dialog.
     #[test]
-    fn search_matches_every_row_text_field_case_insensitively() {
-        let now_ms = chrono::Utc::now().timestamp_millis();
+    fn the_search_box_is_disabled_until_the_first_build_finishes() {
         let mut dashboard = DashboardState::new(
             config(),
             state_with(vec![stopped_session()]),
             BTreeMap::new(),
         );
-        dashboard.show_resume_dialog(
-            1,
-            vec![codex_profile(vec![
-                native("native-2", "Native alpha", now_ms - 2 * 60_000),
-                native("native-3", "Native beta", 1),
-            ])],
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        let request_id = match &dashboard.mode {
+            Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
+            _ => panic!("expected the resume dialog"),
+        };
+        dashboard.apply_wiki_search(
+            request_id,
+            WikiSearchPage {
+                rows: Vec::new(),
+                status: WikiStatus {
+                    state: WikiIndexState::Indexing,
+                    topping_up: true,
+                },
+            },
+        );
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert!(!dialog.search_enabled());
+        assert_eq!(dialog.search_placeholder(), Some("Indexing…"));
+
+        // Tabs and row navigation keep working while it builds.
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_ne!(
+            dialog.focused(),
+            ResumeFocus::Search,
+            "a disabled box does not take the focus"
+        );
+        switch_to_archive(&mut dashboard);
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert_eq!(dialog.tab, ResumeTab::Archive);
+
+        // The build says it is still running, so the dialog asks again.
+        let (next_id, query, delay) = dashboard
+            .next_wiki_refresh()
+            .expect("a building index is asked again");
+        assert_eq!(query, "");
+        assert_eq!(delay, WIKI_INDEXING_POLL);
+
+        dashboard.apply_wiki_search(next_id, ready_page(vec![wiki_row("gone", true)]));
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert!(
+            dialog.search_enabled(),
+            "the box opens as soon as the build finishes"
+        );
+        assert_eq!(dialog.search_placeholder(), None);
+        assert!(
+            dashboard.next_wiki_refresh().is_none(),
+            "a ready, idle index is not polled"
+        );
+        assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+    }
+
+    /// An index at another schema version says so and is never polled.
+    #[test]
+    fn a_version_mismatch_disables_the_box_and_stops_the_polling() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        let request_id = match &dashboard.mode {
+            Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
+            _ => panic!("expected the resume dialog"),
+        };
+        dashboard.apply_wiki_search(
+            request_id,
+            WikiSearchPage {
+                rows: Vec::new(),
+                status: WikiStatus {
+                    state: WikiIndexState::VersionMismatch,
+                    topping_up: false,
+                },
+            },
+        );
+        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+            panic!("expected the resume dialog");
+        };
+        assert!(!dialog.search_enabled());
+        assert_eq!(
+            dialog.search_placeholder(),
+            Some("SessionWiki index is at a different version")
+        );
+        assert!(dashboard.next_wiki_refresh().is_none());
+    }
+
+    /// A sync that is adding rows makes the dialog repeat the query, and the
+    /// repeats stop after ten rather than following a long sync forever.
+    #[test]
+    fn a_running_top_up_repeats_the_query_at_most_ten_times() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        let topping_up = |rows: Vec<WikiRow>| WikiSearchPage {
+            rows,
+            status: WikiStatus {
+                state: WikiIndexState::Ready,
+                topping_up: true,
+            },
+        };
+        let mut request_id = match &dashboard.mode {
+            Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
+            _ => panic!("expected the resume dialog"),
+        };
+        for attempt in 0..WIKI_TOP_UP_LIMIT {
+            dashboard.apply_wiki_search(request_id, topping_up(Vec::new()));
+            let (next_id, _, delay) = dashboard
+                .next_wiki_refresh()
+                .unwrap_or_else(|| panic!("repeat {attempt} was not scheduled"));
+            assert_eq!(delay, WIKI_TOP_UP_POLL);
+            request_id = next_id;
+        }
+        dashboard.apply_wiki_search(request_id, topping_up(Vec::new()));
+        assert!(
+            dashboard.next_wiki_refresh().is_none(),
+            "the repeats are bounded"
         );
 
-        for (query, expected) in [
-            ("ACP PRETTY", vec!["ACP pretty name"]),
-            ("PODMAN", vec!["ACP pretty name"]),
-            ("CODEX-1", vec!["ACP pretty name"]),
-        ] {
-            replace_search(&mut dashboard, query);
-            assert_eq!(titles(&rows(&dashboard)), expected, "query {query:?}");
-        }
-
-        replace_search(&mut dashboard, "");
-        switch_to_import(&mut dashboard);
-        for (query, expected) in [
-            ("LOCAL", vec!["Native alpha", "Native beta"]),
-            ("MINUTES AGO", vec!["Native alpha"]),
-            ("MASTER", vec!["Native alpha", "Native beta"]),
-            ("CODEX-1", vec!["Native alpha", "Native beta"]),
-        ] {
-            replace_search(&mut dashboard, query);
-            assert_eq!(titles(&rows(&dashboard)), expected, "query {query:?}");
-        }
+        // Typing gives the new query its own budget.
+        replace_search(&mut dashboard, "something else");
+        let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
+        assert_eq!(query, "something else");
+        dashboard.apply_wiki_search(request_id, topping_up(Vec::new()));
+        assert!(dashboard.next_wiki_refresh().is_some());
     }
 
     /// Cost of the merged row list and of one keypress, on a dialog the size a
@@ -2692,7 +2997,6 @@ mod tests {
                 &dashboard.state,
                 &dialog,
                 &dashboard.checkpoint_archive_sizes,
-                &chrono::Local::now(),
             )
             .len();
         }

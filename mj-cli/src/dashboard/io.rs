@@ -136,7 +136,7 @@ pub(crate) enum DashboardIoUpdate {
     /// answer for an older one is dropped there.
     WikiRows {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::WikiRow>, String>,
+        result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
@@ -1610,22 +1610,26 @@ pub(crate) fn spawn_dashboard_create_session(
     });
 }
 
-/// Search the SessionWiki index for the resume dialog, 250 ms after the last
-/// keystroke.
+/// Search the SessionWiki index for the resume dialog, after `delay`.
 ///
-/// The debounce is in the task rather than in a timer on the event loop: each
+/// The wait is in the task rather than in a timer on the event loop: each
 /// keystroke starts one, and a task whose request id is no longer the newest
 /// when it wakes stops without asking the daemon. The dialog drops any answer
-/// that names an older request as well, because two searches can still overlap.
+/// that names an older request as well, because two searches can still
+/// overlap. The same task serves the repeats a still-building or still-syncing
+/// index asks for, with their own longer waits.
 pub(crate) fn spawn_wiki_search(
     request_id: u64,
     query: String,
+    delay: Duration,
     newest_request: Arc<AtomicU64>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     newest_request.store(request_id, Ordering::Release);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         if newest_request.load(Ordering::Acquire) != request_id {
             return;
         }
@@ -1636,13 +1640,13 @@ pub(crate) fn spawn_wiki_search(
                 .await
         }
         .await
-        // Milestone 10 shows the index's state; for now the rows are what the
-        // dialog uses.
-        .map(|page| page.rows)
         .map_err(|error| format!("{error:#}"));
         let _ = updates.send(DashboardIoUpdate::WikiRows { request_id, result });
     });
 }
+
+/// How long the dialog waits after a keystroke before asking the index.
+pub(crate) const WIKI_SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// How many archived sessions one search asks for.
 const WIKI_SEARCH_LIMIT: usize = 50;
@@ -2154,7 +2158,22 @@ impl DashboardContext {
                 }
             }
             DashboardIoUpdate::WikiRows { request_id, result } => match result {
-                Ok(rows) => self.dashboard.apply_wiki_search(request_id, rows),
+                Ok(page) => {
+                    self.dashboard.apply_wiki_search(request_id, page);
+                    // An index that is still building, or still topping up,
+                    // answers again by itself: the dialog says when and the
+                    // repeat runs in the same background task the first ask
+                    // used, never on the event loop.
+                    if let Some((request_id, query, delay)) = self.dashboard.next_wiki_refresh() {
+                        spawn_wiki_search(
+                            request_id,
+                            query,
+                            delay,
+                            self.wiki_search_request.clone(),
+                            self.dashboard_io_tx.clone(),
+                        );
+                    }
+                }
                 Err(error) => self
                     .dashboard
                     .set_notice(format!("Archive search failed: {error}")),

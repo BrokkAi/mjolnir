@@ -1970,6 +1970,42 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
 }
 
 #[test]
+fn restoring_an_archive_names_the_step_and_the_archived_session() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let action = dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into());
+    assert_eq!(action, crate::DashboardAction::None);
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let draw = |dashboard: &mut DashboardState, terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw dashboard");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+
+    let rendered = draw(&mut dashboard, &mut terminal);
+    assert!(rendered.contains("Restore · 1/3"), "{rendered}");
+    assert!(rendered.contains("Pomegranate work"), "{rendered}");
+    assert!(!rendered.contains("Resume · 1/3"));
+
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let rendered = draw(&mut dashboard, &mut terminal);
+    assert!(rendered.contains("Restore · 2/3"), "{rendered}");
+    assert!(rendered.contains("Pomegranate work"), "{rendered}");
+
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let rendered = draw(&mut dashboard, &mut terminal);
+    assert!(rendered.contains("Restore · 3/3"), "{rendered}");
+    assert!(rendered.contains("Pomegranate work"), "{rendered}");
+}
+
+#[test]
 fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.profiles.insert(

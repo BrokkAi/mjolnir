@@ -368,6 +368,7 @@ pub(crate) async fn apply_dashboard_action(
             crate::dashboard::io::spawn_wiki_search(
                 request_id,
                 query,
+                crate::dashboard::io::WIKI_SEARCH_DEBOUNCE,
                 context.wiki_search_request.clone(),
                 context.dashboard_io_tx.clone(),
             );
