@@ -286,20 +286,8 @@ mod tests {
     use super::*;
     use crate::Focus;
     use crate::actions::COMMANDS;
-    use crate::render::render;
-    use crate::test_support::{
-        alt_key, buffer_lines, dashboard_with_session, key, running_session,
-    };
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
-    fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw the surface");
-        buffer_lines(terminal.backend().buffer())
-    }
+    use crate::test_support::{alt_key, dashboard_with_session, drawn, key, running_session};
 
     /// The overlay is the reference for the whole surface, so nothing in the
     /// registry may be missing from it — including commands that cannot run

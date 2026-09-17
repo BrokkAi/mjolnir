@@ -1,3 +1,4 @@
+use crate::test_support::git;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,19 +61,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
     }
-}
-
-fn git(repository: &Path, arguments: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(arguments)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn git_repository(temp: &tempfile::TempDir) -> PathBuf {
@@ -5484,10 +5472,10 @@ while True: time.sleep(1)
 /// `control.sock` binds and serves is enough to show the daemon no longer
 /// trips over `sun_path`.
 ///
-/// The daemon runs checkpoint-only so it serves until the test aborts it. A
-/// daemon that starts a harness would exit on its own when the bridge fails
-/// to launch, and under load that exit could land before the status request
-/// is read, resetting the connection.
+/// The daemon runs checkpoint-only so that the test owns its lifetime. A
+/// daemon that starts a harness returns as soon as the bridge fails to
+/// launch, and under load that return could drop the listener before the
+/// status request was served, resetting the connection.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -5501,7 +5489,9 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
             > mj_core::local_sockets::unix_socket_path_limit(),
         "the test root must be long enough to need the relative-name bind"
     );
-    // Checkpoint-only startup requires existing relay state.
+
+    // Checkpoint-only startup refuses a root with no durable relay state, so
+    // record one observation to write it.
     let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     durable
         .record_observation(RelayObservation::SessionOpened {
@@ -5564,5 +5554,8 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
 
     writer.shutdown().await.unwrap();
     daemon.abort();
-    assert!(daemon.await.unwrap_err().is_cancelled());
+    assert!(
+        daemon.await.unwrap_err().is_cancelled(),
+        "the daemon must still have been serving when the test aborted it"
+    );
 }

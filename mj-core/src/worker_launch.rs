@@ -6,6 +6,7 @@
 //! carry no process, network, or worker-runtime behaviour, so both sides of
 //! the relay can depend on them without depending on each other.
 
+use crate::hex::lower_hex;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ExecutionPolicy, HarnessKind};
 
-pub const DISCOVER_LOGIN_PATH_ENV: &str = "MJ_DISCOVER_LOGIN_PATH";
 /// Directory inside the primary worker root that holds everything the reviewer owns.
 pub const REVIEWER_DIR: &str = "reviewer";
 /// Where the controller stages the chosen profile, inside [`REVIEWER_DIR`].
@@ -318,13 +318,22 @@ impl WorkerLaunchConfig {
 /// worker binary is tens of megabytes.
 pub fn worker_executable_digest(path: &Path) -> Result<String> {
     use sha2::Digest;
+    use std::io::Read as _;
 
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("open worker executable {}", path.display()))?;
     let mut digest = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut digest)
-        .with_context(|| format!("hash worker executable {}", path.display()))?;
-    Ok(format!("{:x}", digest.finalize()))
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash worker executable {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(lower_hex(digest.finalize()))
 }
 
 /// Content address of the executable running this process, or `None` when it

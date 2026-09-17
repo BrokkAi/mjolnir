@@ -121,26 +121,11 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        buffer_lines, cell_column, dashboard_with_session, key, running_session,
-    };
+    use crate::test_support::{dashboard_with_session, drawn, key, point, running_session};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-    use ratatui::{Terminal, backend::TestBackend};
 
     fn draw(dashboard: &mut DashboardState) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
-        terminal
-            .draw(|frame| crate::render::render(frame, dashboard))
-            .unwrap();
-        buffer_lines(terminal.backend().buffer())
-    }
-    fn point(lines: &[String], label: &str) -> (u16, u16) {
-        let (row, line) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.contains(label))
-            .unwrap_or_else(|| panic!("missing {label}"));
-        (cell_column(line, label), row as u16)
+        drawn(dashboard, 120, 35)
     }
     fn click(dashboard: &mut DashboardState, position: (u16, u16)) -> DashboardAction {
         for kind in [

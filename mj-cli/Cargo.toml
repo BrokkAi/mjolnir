@@ -26,36 +26,31 @@ mj-client.workspace = true
 mj-controller.workspace = true
 mj-chat.workspace = true
 mj-tui.workspace = true
-agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
-anyhow = "1"
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", features = ["derive", "env"] }
-crossterm = { version = "0.29", features = ["event-stream", "osc52"] }
-dirs = "6"
-getrandom = "0.3"
-libc = "0.2"
-ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
-# The same spec mj-controller uses, so the TLS backend and features unify.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sysinfo = "0.32"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = "2"
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap = { workspace = true, features = ["env"] }
+crossterm = { workspace = true, features = ["osc52"] }
+dirs.workspace = true
+libc.workspace = true
+ratatui.workspace = true
+reqwest = { workspace = true, features = ["json", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # The API client test answers itself from a canned in-process router.
-axum = "0.8"
-libc = "0.2"
-# Same spec as brokk-mj-core's, so the features unify and SQLite compiles once. The
-# store-divergence test migrates the daemon's store from outside the daemon,
-# which is exactly what the incident it reproduces did.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
-tempfile = "3"
+axum.workspace = true
+libc.workspace = true
+# The store-divergence test migrates the daemon's store from outside the
+# daemon, which is exactly what the incident it reproduces did.
+rusqlite.workspace = true
+tempfile.workspace = true
 # `start_paused` drives the force-destroy preemption timeout instantly.
-tokio = { version = "1", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }

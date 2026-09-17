@@ -507,7 +507,7 @@ fn download(triple: &str) -> Result<PathBuf> {
         .error_for_status()
         .with_context(|| format!("download {url}"))?
         .bytes()?;
-    let actual = format!("{:x}", Sha256::digest(&archive));
+    let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
     ensure!(
         actual.eq_ignore_ascii_case(expected),
         "downloaded mbx checksum mismatch: expected {expected}, got {actual}"

@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use mj_core::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
+use mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
 use std::time::Duration;
 
 struct PushFixture {
@@ -256,7 +257,7 @@ fn branch_export_reports_missing_or_invalid_session_setup() {
     assert_ne!(output.status, 0);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("gitconfig"), "{stderr}");
-    assert!(stderr.contains("resume the session"), "{stderr}");
+    assert!(stderr.contains(SESSION_SETUP_GUIDANCE), "{stderr}");
     assert!(!config.exists(), "export must not recreate the setup");
 
     std::os::unix::fs::symlink(&saved, &config).unwrap();
@@ -264,7 +265,7 @@ fn branch_export_reports_missing_or_invalid_session_setup() {
     assert_ne!(output.status, 0);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not a regular file"), "{stderr}");
-    assert!(stderr.contains("resume the session"), "{stderr}");
+    assert!(stderr.contains(SESSION_SETUP_GUIDANCE), "{stderr}");
 
     std::fs::remove_file(&config).unwrap();
     std::fs::rename(&saved, &config).unwrap();
@@ -281,7 +282,7 @@ fn branch_export_reports_missing_or_invalid_session_setup() {
             stderr.contains("read ") && stderr.contains("gitconfig"),
             "{stderr}"
         );
-        assert!(stderr.contains("resume the session"), "{stderr}");
+        assert!(stderr.contains(SESSION_SETUP_GUIDANCE), "{stderr}");
     }
 }
 

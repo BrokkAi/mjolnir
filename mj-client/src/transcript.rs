@@ -1,5 +1,6 @@
 //! Transcript conversion and presentation rules shared by terminal and web clients.
 use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallStatus};
+use mj_core::hex::lower_hex;
 use mj_core::state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -624,7 +625,7 @@ pub fn rich_presentation_key(
             EntryCollapse::None | EntryCollapse::Expanded => index += 1,
         }
     }
-    format!("{:x}", digest.finalize())
+    lower_hex(digest.finalize())
 }
 
 pub fn role_tag(role: ChatRole) -> &'static [u8] {

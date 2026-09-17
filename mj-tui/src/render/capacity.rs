@@ -1,0 +1,215 @@
+use super::*;
+
+/// How many machines an EC2 fleet is running, as the fleet's answer to the
+/// "In Use" question.
+///
+/// A fleet gets one probe per live instance, so the probe list is the fleet's
+/// size. A fleet has no CPU percentage of its own, and how many machines are
+/// up is what it costs.
+pub(crate) fn fleet_vm_label(detail: &CapacityDetail) -> String {
+    let count = detail.target.probes.len();
+    format!("{count} VM{}", if count == 1 { "" } else { "s" })
+}
+
+/// A reading older than this stopped tracking the host: the poller samples
+/// every 30 seconds, so three missed rounds mean the number on screen is no
+/// longer what the host is doing.
+pub(crate) const CAPACITY_SAMPLE_STALE_AFTER_SECONDS: u64 = 90;
+
+/// Why the row's reading cannot be trusted, if it cannot: a probe that failed,
+/// or a sample that stopped refreshing. `None` means the reading is current.
+pub(crate) fn capacity_staleness(
+    detail: &CapacityDetail,
+    now_epoch_seconds: u64,
+) -> Option<String> {
+    if let Some(error) = &detail.probe_error {
+        return Some(format!("stale: {error}"));
+    }
+    let sampled_at = detail.sampled_at_epoch_seconds?;
+    (now_epoch_seconds.saturating_sub(sampled_at) > CAPACITY_SAMPLE_STALE_AFTER_SECONDS).then(
+        || {
+            format!(
+                "stale: sampled {}",
+                refresh_age(now_epoch_seconds, sampled_at)
+            )
+        },
+    )
+}
+
+pub(crate) struct CapacityTableRow {
+    host: String,
+    targets: Line<'static>,
+    in_use: Line<'static>,
+}
+
+pub(crate) fn capacity_table_rows(
+    dashboard: &DashboardState,
+    now_epoch_seconds: u64,
+) -> Vec<CapacityTableRow> {
+    dashboard
+        .capacity_details
+        .values()
+        .map(|detail| {
+            let capacity = if detail.refreshing {
+                "refreshing…".into()
+            } else {
+                match (&detail.target.kind, &detail.usage) {
+                    (DeploymentCapacityKind::Host, Some(usage)) => {
+                        let memory_percent = if usage.memory_total_bytes == 0 {
+                            0
+                        } else {
+                            (u128::from(usage.memory_used_bytes) * 100
+                                / u128::from(usage.memory_total_bytes))
+                            .min(100)
+                        };
+                        format!(
+                            "{}% CPU · {memory_percent}% RAM",
+                            usage.cpu_percent.unwrap_or(0)
+                        )
+                    }
+                    (DeploymentCapacityKind::AwsFleet, Some(usage)) => format!(
+                        "{} · {} cores · {} RAM · {} disk",
+                        fleet_vm_label(detail),
+                        usage.logical_cores,
+                        format_resource_bytes(usage.memory_total_bytes),
+                        format_resource_bytes(usage.disk_total_bytes.unwrap_or(0))
+                    ),
+                    // A fleet with nothing running has no capacity figures,
+                    // and the count is the whole answer.
+                    (DeploymentCapacityKind::AwsFleet, None) if detail.on_demand => {
+                        fleet_vm_label(detail)
+                    }
+                    _ => "unavailable".into(),
+                }
+            };
+            let mut in_use = vec![Span::raw(capacity)];
+            if let Some(staleness) = capacity_staleness(detail, now_epoch_seconds) {
+                in_use.push(Span::styled(
+                    format!("  · {staleness}"),
+                    Style::default().fg(theme::palette().muted),
+                ));
+            }
+            CapacityTableRow {
+                host: detail.target.host.clone(),
+                targets: capacity_target_labels(&detail.target.target_ids, &dashboard.config),
+                in_use: Line::from(in_use),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn capacity_column_widths(rows: &[CapacityTableRow]) -> [u16; 3] {
+    [
+        quota_column_width(
+            "Host / fleet",
+            rows.iter().map(|row| Line::raw(row.host.as_str()).width()),
+            u16::MAX,
+        ),
+        quota_column_width(
+            "Targets",
+            rows.iter().map(|row| row.targets.width()),
+            u16::MAX,
+        ),
+        quota_column_width(
+            "In Use",
+            rows.iter().map(|row| row.in_use.width()),
+            u16::MAX,
+        ),
+    ]
+}
+
+/// Width needed to draw the complete Targets table, including its table
+/// spacing, border, and always-present selection marker.
+pub(crate) fn capacity_table_width(dashboard: &DashboardState) -> u16 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let widths = capacity_column_widths(&capacity_table_rows(dashboard, now));
+    widths
+        .into_iter()
+        .fold(0_u16, u16::saturating_add)
+        .saturating_add(4) // two spaces between each of the three columns
+        .saturating_add(4) // two borders and two highlight cells
+}
+
+pub(crate) fn render_capacity(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &mut DashboardState,
+    size: Option<PaneSize>,
+) {
+    let now_epoch_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let rows = capacity_table_rows(dashboard, now_epoch_seconds);
+    let column_widths = capacity_column_widths(&rows);
+    let focused = dashboard.focus == Focus::Targets;
+    let block = theme::panel(focused).title(" Targets ");
+    let block = size.map_or(block.clone(), |size| {
+        block.title(pane_size_controls(
+            size,
+            dashboard.pane_maximize_enabled(SupportPane::Targets),
+        ))
+    });
+    let table = Table::new(
+        rows.into_iter().map(|row| {
+            Row::new([
+                Cell::from(row.host),
+                Cell::from(row.targets),
+                Cell::from(row.in_use),
+            ])
+        }),
+        column_widths.map(Constraint::Length),
+    )
+    .column_spacing(2)
+    .header(
+        Row::new(["Host / fleet", "Targets", "In Use"])
+            .style(theme::muted().add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(if focused {
+        theme::selection(true)
+    } else {
+        Style::default()
+    })
+    .highlight_symbol(if focused { "› " } else { "  " })
+    .highlight_spacing(HighlightSpacing::Always)
+    .block(block);
+    let mut offset = dashboard.targets_scroll.get();
+    if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Targets) {
+        let row_heights = vec![1; dashboard.capacity_details.len()];
+        offset = offset_with_directional_lookahead(
+            offset,
+            dashboard.capacity_index,
+            direction,
+            &row_heights,
+            usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
+        );
+    }
+    let mut state = TableState::default().with_offset(offset).with_selected(
+        (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),
+    );
+    frame.render_stateful_widget(table, area, &mut state);
+    dashboard.targets_scroll.set(state.offset());
+    render_session_scrollbar(
+        frame,
+        area,
+        dashboard.capacity_details.len(),
+        state.offset(),
+        usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
+    );
+}
+
+/// The colour the quota bar gives a percentage of headroom left.
+///
+/// Both minimized panes read the same scale, which is why it lives in one
+/// place: a quota reports the headroom it has left directly, and a CPU reading
+/// is the inverse — a busy host has little left.
+pub(crate) fn headroom_color(headroom_percent: u8) -> Color {
+    match headroom_percent {
+        0..=20 => theme::palette().error,
+        21..=50 => theme::palette().warning,
+        _ => theme::palette().success,
+    }
+}

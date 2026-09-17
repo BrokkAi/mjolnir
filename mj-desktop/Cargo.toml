@@ -20,12 +20,12 @@ name = "mj-desktop"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-tracing = "0.1"
-url = "2"
+anyhow.workspace = true
+base64.workspace = true
+image.workspace = true
+rustls.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 rcgen = "0.13"
@@ -33,13 +33,13 @@ rcgen = "0.13"
 [target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 mj-core.workspace = true
 mj-controller.workspace = true
-axum = "0.8"
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum.workspace = true
+axum-server.workspace = true
 rcgen = "0.13"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-serde_json = "1"
+reqwest = { workspace = true, features = ["stream"] }
+serde_json.workspace = true
 tao = { version = "0.35", default-features = false, features = ["rwh_06", "x11"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 webbrowser = "1.2"
 wry = "0.55.1"
 

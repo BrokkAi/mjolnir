@@ -798,10 +798,9 @@ fn snapshot_of(
         // session makes two restores of one session agree.
         event_frontier_digest: {
             use sha2::Digest;
-            format!(
-                "{:x}",
-                sha2::Sha256::digest(format!("sessionwiki:{}", session.id).as_bytes())
-            )
+            mj_core::hex::lower_hex(sha2::Sha256::digest(
+                format!("sessionwiki:{}", session.id).as_bytes(),
+            ))
         },
         session: CanonicalSessionState {
             execution: CanonicalExecutionState::Idle,

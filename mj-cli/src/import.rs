@@ -765,19 +765,10 @@ mod tests {
     }
     #[test]
     fn clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported() {
-        const CHILD: &str = "MJ_TEST_IMPORT_WORKTREE_CHOICE";
-        if std::env::var_os(CHILD).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", "import::tests::clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported", "--nocapture"])
-                .env(CHILD, "1").env("MJ_DATA_DIR", directory.path()).env("MJ_CONFIG_DIR", directory.path());
-            let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if crate::test_support::rerun_in_isolated_child(
+            "MJ_TEST_IMPORT_WORKTREE_CHOICE",
+            "import::tests::clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported",
+        ) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();

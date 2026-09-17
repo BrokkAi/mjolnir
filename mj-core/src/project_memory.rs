@@ -4,6 +4,7 @@
 //! paths are virtual absolute paths rooted at that replica; controller and
 //! target filesystem paths never cross the MCP boundary.
 
+use crate::hex::lower_hex;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -73,7 +74,7 @@ impl ProjectMemoryIdentity {
     /// Stable, non-secret directory key for controller-side memory storage.
     pub fn key(&self) -> Result<String> {
         let encoded = serde_json::to_vec(self).context("encode project memory identity")?;
-        Ok(format!("{:x}", Sha256::digest(encoded)))
+        Ok(lower_hex(Sha256::digest(encoded)))
     }
 
     pub fn bundle(
@@ -442,7 +443,7 @@ fn conflict_path(path: &str, session_id: &str, current: &str, local: &str) -> St
         .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
         .take(48)
         .collect::<String>();
-    format!("/conflicts/{session}-{}.md", &format!("{digest:x}")[..16])
+    format!("/conflicts/{session}-{}.md", &lower_hex(digest)[..16])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -729,7 +730,7 @@ fn floor_char_boundary(text: &str, maximum: usize) -> usize {
 }
 
 fn content_version(content: &str) -> String {
-    format!("{:x}", Sha256::digest(content.as_bytes()))[..12].to_owned()
+    lower_hex(Sha256::digest(content.as_bytes()))[..12].to_owned()
 }
 
 fn normalize_content(content: &str) -> String {

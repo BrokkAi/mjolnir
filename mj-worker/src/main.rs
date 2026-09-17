@@ -251,7 +251,10 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
             environment.extend(
                 WorkerLaunchConfig::read(&root.join("launch.json"))
-                    .context("load branch export target settings; resume the session to restore its setup")?
+                    .with_context(|| {
+                        let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
+                        format!("load branch export target settings; {guidance}")
+                    })?
                     .target_environment,
             );
             mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;

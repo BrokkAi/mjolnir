@@ -29,27 +29,24 @@ test-hooks = []
 workspace = true
 
 [dependencies]
-agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
-anyhow = "1"
-base64 = "0.22"
-# `clock` enables local-time support so `Local` can render reset timestamps in
-# the machine's wall-clock time (DST-correct); `default-features = false` drops
-# the wasm-only bits.
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-dirs = "6"
-getrandom = "0.3"
-libc = "0.2"
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+getrandom.workspace = true
+libc.workspace = true
 regex = "1"
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
-sha2 = "0.10"
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
 similar = "2.7"
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
-toml = "0.8"
-tracing = "0.1"
-url = "2"
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["test-util"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

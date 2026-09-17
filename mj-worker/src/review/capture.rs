@@ -178,20 +178,8 @@ fn repository_root(git: &dyn GitCommandRunner, directory: &Path) -> Option<PathB
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+    use crate::test_support::git;
     use mj_checkpoint::archive::SystemGit;
-
-    fn git(repository: &Path, arguments: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(arguments)
-            .current_dir(repository)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();

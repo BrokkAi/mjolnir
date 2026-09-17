@@ -190,11 +190,10 @@ fn configure_staged_review_mcp(
     profile_stage: &Path,
     servers: &[ReviewMcpServer],
 ) -> Result<()> {
-    let (file, kimi) = match harness {
-        mj_core::config::HarnessKind::Claude => (".claude.json", false),
-        mj_core::config::HarnessKind::Kimi => ("mcp.json", true),
-        other => bail!("{other:?} does not read MCP servers from its profile"),
+    let Some(file) = harness.mcp_config_file() else {
+        bail!("{harness:?} does not read MCP servers from its profile");
     };
+    let kimi = harness == mj_core::config::HarnessKind::Kimi;
     let path = profile_stage.join(file);
     let mut document = match std::fs::read(&path) {
         Ok(body) => serde_json::from_slice::<serde_json::Value>(&body)
