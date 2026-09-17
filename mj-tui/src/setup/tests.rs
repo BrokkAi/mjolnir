@@ -1086,3 +1086,26 @@ fn expanded_form_preserves_existing_optional_settings() {
     let decoded: Config = config_from_draft(dialog.draft).unwrap();
     assert_eq!(decoded, original);
 }
+
+#[test]
+fn empty_archive_after_days_renders_as_never() {
+    let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});
+    assert_eq!(
+        value_summary(
+            &["sessionwiki".to_owned()],
+            "archive_after_days",
+            &Value::Null,
+            &draft,
+        ),
+        "Never"
+    );
+    assert_eq!(
+        value_summary(
+            &["phone".to_owned()],
+            "tls_cert",
+            &Value::Null,
+            &serde_json::json!({"phone": {"tls_cert": null}}),
+        ),
+        "Automatic / default"
+    );
+}

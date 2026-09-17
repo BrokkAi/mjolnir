@@ -169,10 +169,21 @@ pub(super) fn label(key: &str) -> String {
     .to_owned()
 }
 
-pub(super) fn choice_label(value: &Value) -> String {
+/// What an empty (JSON null) value means for this setting. Optional fields
+/// whose default the runtime decides keep "Automatic / default"; fields with a
+/// known, fixed effect say what that effect is.
+pub(super) fn null_label(path: &[String]) -> &'static str {
+    match path.last().map(String::as_str).unwrap_or("") {
+        // An empty archive window never archives; there is no hidden number.
+        "archive_after_days" => "Never",
+        _ => "Automatic / default",
+    }
+}
+
+pub(super) fn choice_label(path: &[String], value: &Value) -> String {
     let Some(value) = value.as_str() else {
         return if value.is_null() {
-            "Automatic / default".into()
+            null_label(path).into()
         } else {
             value.to_string()
         };
