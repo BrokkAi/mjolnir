@@ -18,7 +18,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-16 20:05Z) Milestone 1: rusqlite 0.40 bump in mj-worker, mj-cli, mj-controller; full `cargo test`; commit `4994dc15`.
 - [x] (2026-09-16 20:40Z) Milestone 2: fork branch `mj-embed` commit 529b8fe, tag `v0.28.0-mj.1` pushed to `jbellis/sessionwiki`, upstream PR https://github.com/youdie006/sessionwiki/pull/26; Mjolnir git dependency added, `cargo build` and `cargo about generate` pass.
 - [x] (2026-09-17 00:50Z) Milestone 3: `[sessionwiki]` config section (CONFIG_VERSION 10), `MjolnirAdapter`, `WikiIndexer` with close and hourly triggers; commit `60ed7bed`. Live check: two closed sessions listed by `sessionwiki list --tool mjolnir` and shown by `sessionwiki brief <id> --tools`.
-- [ ] Milestone 4: HTTP API and client wrappers; terminal Resume dialog search, preview, Archived tab, restore.
+- [x] (2026-09-17 01:55Z) Milestone 4: fork tag `v0.28.0-mj.2` (commit `ef19d4c`) with quiet non-terminal progress and the tool-name fallback, plus the Mjolnir dependency bump; commits `90c91ca0`, `3b49cc4d` (API, client, restore), `857d10b3` (Archived tab), `fa082d58` (two fixes the live check found). Live check: the three routes answered, a hand-deleted checkpoint became an archived row, and a restored session's first reply quoted the earlier work.
 - [ ] Milestone 5: archive job driven by `archive_after_days`.
 - [ ] Milestone 6: web viewer parity.
 - [ ] Milestone 7: documentation; follow-up ticket for the in-session SessionWiki skill.
@@ -43,7 +43,13 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - Observation: `sessionwiki brief` prints `Tool: unknown` for a Mjolnir session. `index::session_from_index` resolves the display tool through `adapters::by_name`, and the Mjolnir adapter is not in the standalone binary's registry.
   Evidence: `src/index.rs` lines 1957-1959 in the fork. Harmless for `list --tool mjolnir` and for search, but milestone 4's preview would show it too. If that matters, a fourth fork change should pass the row's own tool string through.
 - Observation: SessionWiki's per-session progress output is very loud in the daemon log: one `[tool] indexing n/total` line per session, with no newline, for every tool on every full sync. The plan accepted stderr progress; in practice it fills `daemon.log` with a single multi-megabyte line.
-  Evidence: `$MJ_DATA_DIR/daemon.log` after one full sync of this machine's corpus. Worth a fork change that silences progress when the caller is not a terminal.
+  Evidence: `$MJ_DATA_DIR/daemon.log` after one full sync of this machine's corpus. Fixed in the fork at `v0.28.0-mj.2`: sync asks `std::io::stderr().is_terminal()` once and skips the progress writes when it is false. After milestone 4's live sync the isolated `daemon.log` held four lines, none of them progress.
+- Observation: The restored session's title became the whole hand-off. The harness names a session from its first message, and that message carries the installed hidden context, so `acp_session_title` (which `display_title` prefers) was the summary plus the user's prompt.
+  Evidence: `mj sessions` after the first successful restore. Fixed by pinning `session_title_override` to the archived session's title, which the harness cannot overwrite.
+- Observation: A session on its way up passes through `Disconnected` while its worker reconnects, and the first hand-off wait treated that as a terminal state and gave up.
+  Evidence: `could not install the restored archive's hand-off ... is Disconnected before its hand-off` in the isolated daemon log. The wait now accepts the same states `still_starting` accepts in `server_runtime/api.rs`.
+- Observation: `index::session_from_index` resolving the tool name through the standalone registry (recorded above) also made `brief` useless for Mjolnir rows in the preview pane, so it was fixed in the fork rather than left as a cosmetic note.
+  Evidence: the milestone 4 brief transcript below now reads `Tool: mjolnir`.
 - Observation: The `zcode` profile named in the acceptance steps does not exist in the current `config.toml`; it survives only in a backup written by an older build, whose `kind = "zcode"` is not a `HarnessKind` this build accepts.
   Evidence: `~/.config/mjolnir/config.toml.bak-20260915T121000` line 52 against `HarnessKind` in `mj-core/src/config.rs`. The live check used `codex` and `deepseek` instead; `codex` was out of quota, so `deepseek` supplied the session with a tool call.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
@@ -75,6 +81,28 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - Decision: A session the user destroys by hand stays in the index and becomes archived at the next sync. No delete key on the Archived tab in this plan.
   Rationale: Matches SessionWiki's own "archive, never delete" model. Minimum surface.
   Date/Author: 2026-09-16, Fable.
+
+- Decision: `WikiRow` and `WikiRestoreRequest` live in `mj-client/src/daemon.rs`, not in `mj-controller/src/sessionwiki.rs` as the Interfaces section first said.
+  Rationale: `mj-controller` depends on `mj-client`, not the other way round, and both the daemon protocol and the HTTP contract need the type. `mj-controller` builds the rows and the HTTP routes serialize them.
+  Date/Author: 2026-09-17, Fable.
+- Decision: `WikiRow` carries a `native_id` the daemon extracts with `sessionwiki::index::native_id_of`.
+  Rationale: The terminal has to match a row against an import-scan row by native id, and it has no SessionWiki dependency. SessionWiki's own JSON contract publishes the same field for the same reason, and never the stored path.
+  Date/Author: 2026-09-17, Fable.
+- Decision: The terminal reaches search, brief, and restore over the daemon's own TCP protocol, not over the HTTP API. The HTTP routes exist for the documented API and, in milestone 6, the web viewer.
+  Rationale: Every other thing the dashboard asks the daemon goes through `DaemonAction`. Restore answers with a `RegisteredSession`, so the dashboard follows a restored session through creation with the code it already has for a new one.
+  Date/Author: 2026-09-17, Fable.
+- Decision: A restored session opens the repository above the archived session's managed worktree when the caller names no project directory.
+  Rationale: A Mjolnir session runs in `<repo>/.mj/worktrees/<id>`, and that worktree is gone by the time the session is archived. The repository above it is what the user still has. A caller that wants somewhere else passes `project_directory`.
+  Date/Author: 2026-09-17, Fable.
+- Decision: An archived session with no user message cannot be restored; the request fails with a plain message.
+  Rationale: Compaction builds turns and attaches assistant and tool items to the open turn, so a transcript with no prompt has nothing to hand over. Leading assistant and tool messages are dropped for the same reason.
+  Date/Author: 2026-09-17, Fable.
+- Decision: The restored session's hand-off is the ordinary compaction output prefixed with `ARCHIVE_HANDOFF_PREAMBLE`, rather than a second rendering path inside `compaction.rs`.
+  Rationale: `is_synthetic_handoff` matches on the opening sentence, so a prefix is enough for a later compaction to recognize it, and the compaction pipeline stays one path.
+  Date/Author: 2026-09-17, Fable.
+- Decision: The search debounce lives in the spawned task, not in a timer on the dashboard's event loop.
+  Rationale: Each keystroke starts a task that sleeps 250 ms and gives up if a later keystroke has replaced it; the dialog drops answers naming an older request. No new tick had to be added to the select loop, and the event loop never waits.
+  Date/Author: 2026-09-17, Fable.
 
 ## Outcomes & Retrospective
 
@@ -298,9 +326,144 @@ defect in the stored row; see Surprises.
 Workspace validation for the commit: `cargo build`, `cargo test` (3485 passed,
 0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
 
+Milestone 4, 2026-09-17. The same isolated environment as milestone 3, reusing
+its index so the cold sync did not have to run again:
+
+    S=/tmp/claude-1000/-home-jonathan-Projects-hel3/68c2d9bc-4218-4756-9eaa-7d0de76bb3b9/scratchpad
+    export MJ_CONFIG_DIR=$S/mj-config MJ_DATA_DIR=$S/mj-data SESSIONWIKI_DATA=$S/wiki
+    ./target/debug/mj sessions          # starts the isolated daemon
+    ./target/debug/mj api-info          # base url and token file
+    TOKEN=$(cat $S/mj-data/api-token)
+    B=https://minasmorgul-wsl.tail5caf7.ts.net:37650/api/v1
+
+The API authenticates with the bearer token in `$MJ_DATA_DIR/api-token`;
+`mj api-info` prints both the base URL and the file. The bind address is the
+`[phone]` one, so the isolated daemon answers on port 37650.
+
+`GET /wiki/search?limit=3` with no query, abridged to the fields that matter:
+
+    {"rows": [
+      {"id": "1e0d61a75458ca85a9f040878e6aee8e", "tool": "mjolnir",
+       "title": "project via deepseek", "msgs": 3, "archived": false,
+       "preview": "The single word in README.md is: **hello**",
+       "native_id": null, "snippet": null,
+       "hel_session_id": "1e0d61a75458ca85a9f040878e6aee8e"},
+      {"id": "dc393ff29ce9", "tool": "codex",
+       "title": "Reply with exactly: pomegranate sentinel", "msgs": 3,
+       "archived": false, "native_id": "01a0acbe-d358-7862-ab70-3848daa57bee",
+       "hel_session_id": null},
+      {"id": "04852244ba07430fabca26288502b642", "tool": "mjolnir",
+       "title": "project via codex", "msgs": 2, "archived": false,
+       "hel_session_id": "04852244ba07430fabca26288502b642"}]}
+
+`GET /wiki/search?q=pomegranate&limit=3` returns the same rows with the
+matching text, for example `"snippet": "…ly: \u0002pomegranate\u0003 sent…"`,
+where U+0002 and U+0003 are SessionWiki's own match markers.
+
+`GET /wiki/sessions/1e0d61a75458ca85a9f040878e6aee8e/brief?max_chars=600`:
+
+    # Previous session: project via deepseek
+
+    - Tool: mjolnir | Project: /tmp/.../worktrees/1e0d61a75458ca85a9f040878e6aee8e/ | Date: 2026-09-17 00:23
+
+    **User:**
+    Read README.md and tell me the single word it contains.
+
+    > [tool] Read file '/tmp/.../README.md'
+
+    **Assistant:**
+    The single word in README.md is: **hello**
+
+`Tool: mjolnir` rather than the `Tool: unknown` of milestone 3, which is the
+fork's tool-name fallback working. An unknown id answers 404:
+
+    $ curl -s -w "\n%{http_code}\n" -H "Authorization: Bearer $TOKEN" \
+        "$B/wiki/sessions/nosuchid/brief"
+    {"error":"no indexed session nosuchid"}
+    404
+
+Archiving by hand. The milestone 5 job does not exist yet, so its end state was
+produced manually: stop the daemon, delete the checkpoint, and delete the
+record the way that job will.
+
+    ./target/debug/mj daemon stop
+    rm $S/mj-data/sessions/1e0d61a75458ca85a9f040878e6aee8e-*.hel.zip
+    sqlite3 $S/mj-data/mj.sqlite3 \
+      "DELETE FROM session_checkpoints WHERE session_id='1e0d61a75458ca85a9f040878e6aee8e';
+       DELETE FROM sessions WHERE session_id='1e0d61a75458ca85a9f040878e6aee8e';"
+    ./target/debug/mj sessions          # restarts the daemon
+    # a search triggers the bounded sync; the row flipped within two minutes
+    curl -s -H "Authorization: Bearer $TOKEN" "$B/wiki/search?q=single%20word&limit=5"
+    # -> id 1e0d61a7…: "archived": true, "hel_session_id": null
+
+The whole of `daemon.log` for that run was four lines, none of them progress:
+
+    Mjolnir viewer code: 540958
+    [aider] the store could not be read in full; skipping deletion reconciliation this run
+    archived 1 session(s) the tool removed (1 kept that your tools have deleted)
+    Mjolnir: Synced skills for profile deepseek to 1 session(s).
+
+Restore:
+
+    $ curl -s -w "\n%{http_code}\n" -X POST -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"workspace_id":"default","profile_id":"deepseek","target_id":"localhost"}' \
+        "$B/wiki/sessions/1e0d61a75458ca85a9f040878e6aee8e/restore"
+    {"session_id":"fdc9fa7a29575b7e52356483467f55ed"}
+    201
+
+The daemon log a few seconds later:
+
+    INFO mj_controller::daemon: installed the restored archive's hand-off
+      session_id="fdc9fa7a29575b7e52356483467f55ed" bytes=523
+
+The restored session carries the old conversation without any file in its
+workspace naming it, and `mj sessions` shows it under the archived session's
+own title, `project via deepseek`:
+
+    $ ./target/debug/mj prompt --session fdc9fa7a29575b7e52356483467f55ed --wait \
+        "In one sentence: what did we conclude earlier?"
+    finished (EndTurn) turn 1 in 9.6s
+
+    We concluded earlier that README.md contains the single word "hello".
+
+An earlier attempt against the same row answered, before the title fix, with
+`The single word was **hello**, found in README.md at
+scratchpad/project/.mj/worktrees/1e0d61a75458ca85a9f040878e6aee8e/README.md` —
+the old worktree path, which only the hand-off could have supplied.
+
+Terminal UI. Driven over a PTY (a small `pty.fork` script; the repository's own
+PTY harness is in `mj-cli/tests/termination_pty.rs`): Alt-S opens the dialog,
+Right twice reaches the Archived tab. The rendered screen, abridged:
+
+    ╭ × Resume a session ──────────────────────────────────────────────────────╮
+    │ Mjolnir   Import   Archived                                              │
+    │Search:                                                                   │
+    │╭ Archived sessions · newest first ──────────────────────────────────────╮│
+    ││  PROFILE      TARGET                  LAST ACTIVE   SESSION            ││
+    ││mjolnir      local/1e0d61a75458ca85a…  1 hour ago    project via deepseek│
+    │╰────────────────────────────────────────────────────────────────────────╯│
+    │╭ Archived transcript ───────────────────────────────────────────────────╮│
+    ││# Previous session: project via deepseek                                ││
+    ││- Tool: mjolnir | Project: /tmp/.../worktrees/1e0d61a75458ca85a9f040878e…││
+    │╰────────────────────────────────────────────────────────────────────────╯│
+    │      archived · 3 messages · The single word in README.md is: **hello**  │
+    │            Enter restores · ←/→ tabs · / searches · Tab moves            │
+    │  Cancel     Restore                                                      │
+    ╰──────────────────────────────────────────────────────────────────────────╯
+
+The tab lists the archived session, the preview pane under the list holds the
+briefing fetched in the background, the row's details line carries the message
+count and the tail of the conversation, and the action button reads Restore.
+
+Workspace validation for these commits: `cargo build`, `cargo test` (3490
+passed, 0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt
+--check`. The fork's own `cargo test` (127 passing in the library alone) and
+`cargo clippy --all-targets -- -D warnings` pass at `v0.28.0-mj.2`.
+
 ## Interfaces and Dependencies
 
-SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.1`):
+SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.2`):
 
     // src/index.rs
     pub fn sync_with(conn: &mut Connection, adapters: &[Box<dyn Adapter>], since: Option<i64>) -> Result<()>;
@@ -317,16 +480,23 @@ Mjolnir:
     pub struct MjolnirAdapter;            // implements sessionwiki::adapters::Adapter
     impl MjolnirAdapter { pub fn from_state(state: &mj_core::state::State) -> Self; }
     pub struct WikiIndexer;               // request_sync(full: bool), sync_now(full: bool) -> Result<()>
-    pub struct WikiRow { id, tool, project, title, started, msgs, preview, archived, snippet, hel_session_id }
+    pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<Vec<WikiRow>>;
+    pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>>;
+    pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>>;
+    // mj-client/src/daemon.rs (the protocol needs it, and mj-controller depends on mj-client)
+    pub struct WikiRow { id, tool, project, title, started, msgs, preview, archived, native_id, snippet, hel_session_id }
+    pub struct WikiRestoreRequest { wiki_id, workspace_id, profile_id, target_template_id, project_directory, additional_mounts, resource_allocation }
     // mj-controller/src/controller/lifecycle.rs
     pub enum BranchDisposition { Delete, Keep }
     // mj-client/src/daemon.rs
-    pub async fn wiki_search(&self, q: &str, limit: usize) -> Result<Vec<WikiRow>>;
-    pub async fn wiki_brief(&self, id: &str, max_chars: usize) -> Result<String>;
-    pub async fn wiki_restore(&self, id: &str, request: WikiRestoreRequest) -> Result<String>;
+    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<Vec<WikiRow>>;
+    pub async fn wiki_brief(&mut self, wiki_id: String, max_chars: usize) -> Result<String>;
+    pub async fn wiki_restore(&mut self, request: WikiRestoreRequest) -> Result<RegisteredSession>;
     // mj-tui/src/resume.rs
     enum ResumeTab { Hel, Import, Archive }
     enum ResumeRowKey { Hel(String), Native(HarnessKind, String), Archive(String) }
+    // mj-tui/src/wizards.rs
+    enum ResumeSource { Session, Archive }   // what ResumeWizard is starting
 
 Dependency: `sessionwiki` via git tag during development (milestone 2), via crates.io as `brokk-sessionwiki` before release (milestone 8). `rusqlite` 0.40 with `bundled` everywhere.
 
