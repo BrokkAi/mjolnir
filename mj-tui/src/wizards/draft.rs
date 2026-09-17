@@ -75,6 +75,9 @@ pub(crate) trait WizardDraft: Sized {
         &self,
         dashboard: &'a DashboardState,
     ) -> Option<&'a SessionResourceAllocation>;
+    /// Puts the draft back on the review step. A move re-requests its
+    /// preparation, because the draft it was prepared for has changed.
+    fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction;
 }
 
 impl WizardDraft for NewWizard {
@@ -150,6 +153,12 @@ impl WizardDraft for NewWizard {
         _dashboard: &'a DashboardState,
     ) -> Option<&'a SessionResourceAllocation> {
         None
+    }
+
+    /// Creation asks nothing of the daemon before Create, so returning to the
+    /// review only puts the draft back.
+    fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+        dashboard.keep(self)
     }
 }
 
@@ -230,6 +239,18 @@ impl WizardDraft for ResumeWizard {
             .sessions
             .get(&self.session_id)
             .and_then(|session| session.resource_allocation.as_ref())
+    }
+
+    fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+        if !self.moving {
+            return dashboard.keep(self);
+        }
+        let profile_id = dashboard
+            .compatible_profiles(&self.session_id)
+            .get(self.profile)
+            .map(|(id, _)| (*id).clone())
+            .expect("move wizard is only opened with a compatible profile");
+        dashboard.request_move_preparation_for_review(self, profile_id)
     }
 }
 

@@ -439,19 +439,22 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
         .min(mounts.mounts.len().saturating_sub(1));
 }
 
-fn prepare_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Empties the attachment editor for a new entry. The caller moves the
+/// wizard to [`WizardStep::Mounts`].
+fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
     mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
 }
 
-fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Loads the selected attachment into the editor. Answers false when there is
+/// nothing to edit, in which case the wizard must stay on its current step.
+fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     if mounts.mounts.is_empty() {
-        return;
+        return false;
     }
     let index = mounts.history_index;
     let mount = mounts.mounts[index].clone();
@@ -464,31 +467,26 @@ fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard
     mounts.error = None;
     mounts.editing_mount = Some(index);
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
+    true
 }
 
-fn begin_mount_editor(wizard: &mut NewWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn begin_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    prepare_mount_editor(wizard.mounts_mut());
+    wizard.set_step(WizardStep::Mounts);
+    open_mount_editor(wizard);
 }
 
-fn edit_selected_mount(wizard: &mut NewWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn edit_selected_mount<W: WizardDraft>(wizard: &mut W) {
+    if prepare_selected_mount_editor(wizard.mounts_mut()) {
+        wizard.set_step(WizardStep::Mounts);
+    }
+    open_mount_editor(wizard);
 }
 
-fn begin_resume_mount_editor(wizard: &mut ResumeWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
-}
-
-fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn open_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    let form = wizard.form_mut();
+    form.forget_draft_part("attachment editor");
+    form.focus(WizardControl::MountSource);
 }
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {

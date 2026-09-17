@@ -866,7 +866,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if wizard.step == WizardStep::Mounts {
-            return self.activate_new_mount(id, wizard);
+            return self.activate_wizard_mount(id, wizard);
         }
         if wizard.step == WizardStep::Review {
             return self.activate_new_review(id, wizard);
@@ -995,7 +995,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if wizard.step == WizardStep::Mounts {
-            return self.activate_resume_mount(id, wizard);
+            return self.activate_wizard_mount(id, wizard);
         }
         if wizard.step == WizardStep::Review {
             return self.activate_resume_review(id, wizard);
@@ -1238,42 +1238,43 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    fn activate_new_mount(&mut self, id: WizardControl, mut wizard: NewWizard) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
+    fn activate_wizard_mount<W: WizardDraft>(
+        &mut self,
+        id: WizardControl,
+        mut wizard: W,
+    ) -> DashboardAction {
+        let target_template_id = nth_key(&self.config.targets, wizard.target());
         match id {
-            WizardControl::MountSource if !wizard.mounts.completion_candidates.is_empty() => {
-                wizard.mounts.source = wizard.mounts.completion_candidates
-                    [wizard.mounts.completion_index]
-                    .clone()
-                    .into();
-                wizard.mounts.completion_candidates.clear();
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+            WizardControl::MountSource if !wizard.mounts().completion_candidates.is_empty() => {
+                let candidate =
+                    wizard.mounts().completion_candidates[wizard.mounts().completion_index].clone();
+                let mounts = wizard.mounts_mut();
+                mounts.source = candidate.into();
+                mounts.completion_candidates.clear();
+                self.keep(wizard)
             }
-            WizardControl::MountSource if wizard.mounts.source.is_empty() => {
-                wizard.mounts.error = Some("Choose or type a directory on the controller.".into());
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+            WizardControl::MountSource if wizard.mounts().source.is_empty() => {
+                wizard.mounts_mut().error =
+                    Some("Choose or type a directory on the controller.".into());
+                self.keep(wizard)
             }
             WizardControl::MountSource => {
-                if wizard.mounts.destination.is_empty() {
-                    wizard.mounts.destination = default_resource_destination(
+                if wizard.mounts().destination.is_empty() {
+                    let destination = default_resource_destination(
                         &self.config.targets[&target_template_id],
-                        std::path::Path::new(&wizard.mounts.source),
-                        &wizard.mounts.mounts,
+                        std::path::Path::new(&wizard.mounts().source),
+                        &wizard.mounts().mounts,
                     )
                     .to_string_lossy()
-                    .into_owned()
-                    .into();
+                    .into_owned();
+                    wizard.mounts_mut().destination = destination.into();
                 }
-                wizard.form.get_mut().focus(WizardControl::MountDestination);
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+                wizard.form_mut().focus(WizardControl::MountDestination);
+                self.keep(wizard)
             }
             WizardControl::MountAccess => {
-                open_mount_access(&mut wizard.mounts);
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+                open_mount_access(wizard.mounts_mut());
+                self.keep(wizard)
             }
             WizardControl::MountDestination | WizardControl::Add => {
                 self.validate_wizard_mount(wizard, target_template_id)
@@ -1283,21 +1284,18 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardControl::Back => {
-                wizard.mounts.source.clear();
-                wizard.mounts.destination.clear();
-                wizard.mounts.error = None;
-                wizard.mounts.completion_candidates.clear();
-                wizard.form.get_mut().forget_draft_part("attachment editor");
-                wizard.step = WizardStep::Review;
-                wizard.form.get_mut().focus(WizardControl::Add);
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+                let mounts = wizard.mounts_mut();
+                mounts.source.clear();
+                mounts.destination.clear();
+                mounts.error = None;
+                mounts.completion_candidates.clear();
+                wizard.form_mut().forget_draft_part("attachment editor");
+                wizard.set_step(WizardStep::Review);
+                wizard.form_mut().focus(WizardControl::Add);
+                wizard.reenter_review(self)
             }
 
-            _ => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
+            _ => self.keep(wizard),
         }
     }
 
@@ -2118,7 +2116,7 @@ impl DashboardState {
         match id {
             WizardControl::ReviewAttachments => {
                 invalidate_move_preparation(&mut wizard);
-                edit_selected_resume_mount(&mut wizard);
+                edit_selected_mount(&mut wizard);
             }
             WizardControl::Cancel => {
                 self.cancel_modal();
@@ -2131,7 +2129,7 @@ impl DashboardState {
             }
             WizardControl::Add if can_attach => {
                 invalidate_move_preparation(&mut wizard);
-                begin_resume_mount_editor(&mut wizard);
+                begin_mount_editor(&mut wizard);
             }
             WizardControl::Add => {}
             WizardControl::Submit => {
@@ -2147,81 +2145,6 @@ impl DashboardState {
         }
         self.mode = Mode::Resume(wizard);
         DashboardAction::None
-    }
-
-    fn activate_resume_mount(
-        &mut self,
-        id: WizardControl,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
-        match id {
-            WizardControl::MountSource if !wizard.mounts.completion_candidates.is_empty() => {
-                wizard.mounts.source = wizard.mounts.completion_candidates
-                    [wizard.mounts.completion_index]
-                    .clone()
-                    .into();
-                wizard.mounts.completion_candidates.clear();
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountSource if wizard.mounts.source.is_empty() => {
-                wizard.mounts.error = Some("Choose or type a directory on the controller.".into());
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountSource => {
-                if wizard.mounts.destination.is_empty() {
-                    wizard.mounts.destination = default_resource_destination(
-                        &self.config.targets[&target_template_id],
-                        std::path::Path::new(&wizard.mounts.source),
-                        &wizard.mounts.mounts,
-                    )
-                    .to_string_lossy()
-                    .into_owned()
-                    .into();
-                }
-                wizard.form.get_mut().focus(WizardControl::MountDestination);
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountAccess => {
-                open_mount_access(&mut wizard.mounts);
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountDestination | WizardControl::Add => {
-                self.validate_wizard_mount(wizard, target_template_id)
-            }
-            WizardControl::Cancel => {
-                self.cancel_modal();
-                DashboardAction::None
-            }
-            WizardControl::Back => {
-                wizard.mounts.source.clear();
-                wizard.mounts.destination.clear();
-                wizard.mounts.error = None;
-                wizard.mounts.completion_candidates.clear();
-                wizard.form.get_mut().forget_draft_part("attachment editor");
-                wizard.step = WizardStep::Review;
-                wizard.form.get_mut().focus(WizardControl::Add);
-                if wizard.moving {
-                    let profile_id = self
-                        .compatible_profiles(&wizard.session_id)
-                        .get(wizard.profile)
-                        .map(|(id, _)| (*id).clone())
-                        .expect("move wizard is only opened with a compatible profile");
-                    return self.request_move_preparation_for_review(wizard, profile_id);
-                }
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-
-            _ => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-        }
     }
 
     fn start_move_preparation(
@@ -2259,7 +2182,7 @@ impl DashboardState {
         action
     }
 
-    fn request_move_preparation_for_review(
+    pub(super) fn request_move_preparation_for_review(
         &mut self,
         wizard: ResumeWizard,
         profile_id: String,
@@ -2405,7 +2328,9 @@ impl DashboardState {
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
                     wizard.mounts.history_index = index;
-                    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+                    if prepare_selected_mount_editor(&mut wizard.mounts) {
+                        wizard.step = WizardStep::Mounts;
+                    }
                 }
                 // The check has ended. Keeping its failure on the review means
                 // leaving the editor does not start the same failing check again.
@@ -2421,7 +2346,9 @@ impl DashboardState {
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
                     wizard.mounts.history_index = index;
-                    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+                    if prepare_selected_mount_editor(&mut wizard.mounts) {
+                        wizard.step = WizardStep::Mounts;
+                    }
                 }
                 wizard.mounts.error = Some(error);
             }
