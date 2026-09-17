@@ -5259,7 +5259,7 @@ dependencies = [
 [[package]]
 name = "sessionwiki"
 version = "0.28.0"
-source = "git+https://github.com/jbellis/sessionwiki.git?tag=v0.28.0-mj.1#529b8fea7b6013f9776fc431df15427bf1a0ceda"
+source = "git+https://github.com/jbellis/sessionwiki.git?tag=v0.28.0-mj.2#ef19d4c1f70c8e596df82a6e4636f1c96d42af7e"
 dependencies = [
  "anyhow",
  "chrono",
