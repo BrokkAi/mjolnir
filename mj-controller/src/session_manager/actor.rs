@@ -462,6 +462,46 @@ pub(super) async fn run_session_actor(
                             );
                         }
                     }
+                    ActorCommand::InstallPromptContext { text, reply } => {
+                        if lifecycle.is_leased() {
+                            let _ = reply.send(Err(
+                                "session is reserved for a lifecycle operation".into(),
+                            ));
+                            continue;
+                        }
+                        let result = async {
+                            sync_actor_connection(&target, &mut connection).await?;
+                            let connection = connection
+                                .as_mut()
+                                .context("relay is disconnected")?;
+                            connection.install_prompt_context(text).await
+                        }
+                        .await;
+                        // Installing context changes nothing the projection
+                        // shows, so there is no view to publish; a transport
+                        // failure still drops the connection for a reconnect.
+                        if let Err(ref error) = result {
+                            if !is_final_rejection(error) {
+                                connection = None;
+                            }
+                            tracing::warn!(
+                                session_id = %target.session_id,
+                                operation = "install_prompt_context",
+                                error = %error,
+                                "installing relay prompt context failed"
+                            );
+                        }
+                        if reply
+                            .send(result.map_err(|error| format!("{error:#}")))
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                session_id = %target.session_id,
+                                operation = "install_prompt_context",
+                                "prompt context result receiver was already closed"
+                            );
+                        }
+                    }
                     ActorCommand::StopBackgroundTask {
                         background_task_id,
                         reply,

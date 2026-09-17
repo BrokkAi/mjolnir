@@ -563,7 +563,11 @@ fn unfinished_tool_output_is_never_pruned() {
 
 #[test]
 fn prior_handoff_turn_keeps_its_work_under_a_placeholder() {
-    for preamble in [HANDOFF_PREAMBLE, LEGACY_HANDOFF_PREAMBLE] {
+    for preamble in [
+        HANDOFF_PREAMBLE,
+        LEGACY_HANDOFF_PREAMBLE,
+        ARCHIVE_HANDOFF_PREAMBLE,
+    ] {
         let handoff_text = format!("{preamble} Everything the prior harness knew, verbatim.");
         let turns = turns_from_snapshot(&snapshot(vec![
             user("real user"),

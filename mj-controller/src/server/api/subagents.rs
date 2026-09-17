@@ -40,13 +40,15 @@ pub(super) async fn spawn_subagent(
         selected_effort =
             selected_effort.or_else(|| snapshot.operational.config.get("effort").cloned());
     }
-    if selected_model.is_some() || selected_effort.is_some() {
-        let choices = backend
-            .profile_config(profile_id.clone(), selected_model.clone(), false)
-            .await
-            .map_err(|error| {
-                ApiFailure::unavailable(format!("profile discovery failed: {error:#}"))
-            })?;
+    // Checked against the warm catalogue only. Discovering a profile launches
+    // a harness, which takes tens of seconds, and the caller is a model
+    // waiting on its tool call. A selector the catalogue could not check is
+    // validated by the start follow-up against the child's live harness; an
+    // unsupported one fails the child's start and is reported to the parent as
+    // that child's error through `wait` and `list_agents`.
+    if (selected_model.is_some() || selected_effort.is_some())
+        && let Some(choices) = backend.published_profile_config(&profile_id)
+    {
         validate_selectors(
             &choices,
             selected_model.as_deref(),

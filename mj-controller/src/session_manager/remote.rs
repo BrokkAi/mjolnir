@@ -152,6 +152,14 @@ pub(super) async fn run_remote_session_actor(
                 action,
                 reply,
             },
+            ActorCommand::InstallPromptContext { reply, .. } => {
+                // Only the daemon that owns the relay can install context, and
+                // only a session it started is ever restored into.
+                let _ = reply.send(Err(
+                    "prompt context can be installed only inside the controller daemon".into(),
+                ));
+                continue;
+            }
             ActorCommand::Lease { reply } => {
                 let _ = reply.send(Err(anyhow::anyhow!(
                     "relay connection leases are available only inside the controller daemon"

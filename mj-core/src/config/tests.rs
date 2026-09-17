@@ -384,6 +384,7 @@ fn sample_config() -> Config {
         theme: Default::default(),
         phone: PhoneConfig::default(),
         review: ReviewConfig::default(),
+        sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
         build_cache: BuildCacheConfig::default(),
         legacy_startup: (),

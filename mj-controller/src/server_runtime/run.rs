@@ -187,7 +187,7 @@ pub async fn run_server(
         // Stored viewer state expires with the authentication that created it.
         // The sweep is hourly rather than on every request, because it is
         // housekeeping and nothing waits for it.
-        let mut prune_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        let mut prune_tick = tokio::time::interval(prune_tick_interval());
         let client_state_retention = options_session_ttl;
         let (action_done_tx, mut action_done_rx) = tokio::sync::mpsc::unbounded_channel::<(
             u64,
@@ -205,6 +205,7 @@ pub async fn run_server(
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
         let mut dictation_jobs = tokio::task::JoinSet::new();
+        let mut archive_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
@@ -657,6 +658,34 @@ pub async fn run_server(
                     }
                 }
                 _ = prune_tick.tick() => {
+                    // The hourly full SessionWiki sync. Session closes drive
+                    // bounded syncs; this one also reconciles sessions deleted
+                    // outside the daemon and picks up any bounded run that
+                    // failed.
+                    //
+                    // With `archive_after_days` set, the same tick runs the
+                    // archive job instead, because that job starts with the
+                    // full sync itself. It runs as a background task, and only
+                    // when no earlier one is still running: a pass over a large
+                    // corpus can outlast the tick.
+                    let archive_after_days = controller
+                        .config
+                        .sessionwiki
+                        .enabled
+                        .then_some(controller.config.sessionwiki.archive_after_days)
+                        .flatten();
+                    match archive_after_days {
+                        Some(days) if archive_jobs.is_empty() => {
+                            let runtime = daemon_runtime.clone();
+                            archive_jobs.spawn(async move {
+                                runtime.archive_aged_sessions(days).await
+                            });
+                        }
+                        Some(_) => tracing::debug!(
+                            "the previous SessionWiki archive pass is still running; skipping this tick"
+                        ),
+                        None => daemon_runtime.wiki().request_sync(true),
+                    }
                     // Only rows whose client id names a phone are considered:
                     // a terminal client's place in a conversation is not the
                     // phone's to expire.
@@ -706,6 +735,21 @@ pub async fn run_server(
                 job = dictation_jobs.join_next(), if !dictation_jobs.is_empty() => {
                     if let Some(Err(error)) = job {
                         tracing::warn!(%error, "web dictation task failed");
+                    }
+                }
+                job = archive_jobs.join_next(), if !archive_jobs.is_empty() => {
+                    match job {
+                        Some(Ok(Ok(0))) | None => {}
+                        Some(Ok(Ok(archived))) => tracing::debug!(
+                            archived, "the SessionWiki archive pass finished"
+                        ),
+                        Some(Ok(Err(error))) => tracing::warn!(
+                            error = %format!("{error:#}"),
+                            "the SessionWiki archive pass failed"
+                        ),
+                        Some(Err(error)) => tracing::warn!(
+                            %error, "the SessionWiki archive task panicked"
+                        ),
                     }
                 }
                 stored = client_state_rx.recv() => {

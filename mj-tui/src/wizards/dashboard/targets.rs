@@ -38,6 +38,25 @@ impl DashboardState {
         check.recorded_at = Instant::now();
     }
 
+    /// The profiles the resume wizard offers. A record's resume is limited to
+    /// the profiles compatible with it; an archived session has no record, so
+    /// every enabled profile can carry its summary.
+    pub(crate) fn resume_wizard_profiles(
+        &self,
+        wizard: &ResumeWizard,
+    ) -> Vec<(&String, HarnessKind)> {
+        match wizard.source {
+            ResumeSource::Session => self.compatible_profiles(&wizard.session_id),
+            ResumeSource::Archive => self
+                .config
+                .profiles
+                .iter()
+                .filter(|(_, profile)| profile.enabled)
+                .map(|(id, profile)| (id, profile.kind))
+                .collect(),
+        }
+    }
+
     /// Why this session cannot resume on `target_id`, or `None` when it can.
     pub(in crate::wizards) fn resume_target_rejection(
         &self,

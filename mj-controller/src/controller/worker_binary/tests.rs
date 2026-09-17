@@ -799,6 +799,10 @@ fn worker_last_words_reads_a_root_containing_spaces() {
         reported.contains("Mjolnir worker exited with an error"),
         "{reported}"
     );
+    // No worker runs for this temporary root, so the process section must
+    // say so rather than being omitted.
+    assert!(reported.contains("--- worker process ---"), "{reported}");
+    assert!(reported.contains("absent"), "{reported}");
 
     let recorder = RecordingExecutor {
         commands: RefCell::new(Vec::new()),

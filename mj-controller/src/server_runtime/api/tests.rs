@@ -420,6 +420,97 @@ async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
     );
 }
 
+/// A backend whose parent session is the `parent` profile, over the given
+/// catalogue, so a spawn can be driven against a warm or a cold one.
+fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
+    Arc::new(
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(ParentExports(parent_record("parent-1", "parent"))),
+        )
+        .with_profile_catalog(catalog),
+    )
+}
+
+fn spawn_request(model: &str) -> mj_core::subagent::SubagentToolRequest {
+    mj_core::subagent::SubagentToolRequest {
+        request_id: "request-1".into(),
+        created_at_ms: 0,
+        action: mj_core::subagent::SubagentToolAction::Spawn {
+            task_name: "audit deps".into(),
+            instructions: "check the lockfile".into(),
+            profile_id: None,
+            model: Some(model.into()),
+            effort: None,
+            working_directory: Default::default(),
+            context: None,
+            files: Vec::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn spawn_rejects_a_model_the_warm_catalogue_says_is_not_offered() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+    catalog
+        .sync_now(&test_config(&[("parent", HarnessKind::Codex)], &[]))
+        .await;
+    let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
+
+    let result = spawn_backend(catalog)
+        .execute_subagent_tool("parent-1".into(), spawn_request("no-such-model"))
+        .await;
+
+    assert!(result.is_error, "the spawn should have been refused");
+    assert!(
+        result.message.contains("does not offer \"no-such-model\""),
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        warmed,
+        "the check must not launch a discovery harness"
+    );
+}
+
+/// With nothing published, spawn does not discover and does not refuse the
+/// selector: the child's start follow-up checks it against the live
+/// harness. Here the spawn gets past validation and fails on this fake's
+/// missing sub-agent runtime instead.
+#[tokio::test]
+async fn spawn_over_a_cold_catalogue_does_not_discover_or_refuse_the_model() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+
+    let result = spawn_backend(catalog)
+        .execute_subagent_tool("parent-1".into(), spawn_request("no-such-model"))
+        .await;
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a cold catalogue must not be warmed by a spawn"
+    );
+    assert!(
+        !result.message.contains("does not offer"),
+        "an unchecked selector must not be refused here: {}",
+        result.message
+    );
+    assert!(
+        result.message.contains("sub-agent creation is unavailable"),
+        "the spawn should have reached the start: {}",
+        result.message
+    );
+}
+
 #[tokio::test]
 async fn prompt_submits_one_text_block_and_returns_its_acceptance_ordinal() {
     let (submitted_tx, mut submitted) = mpsc::unbounded_channel();

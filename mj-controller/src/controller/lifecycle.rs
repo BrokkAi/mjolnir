@@ -19,6 +19,16 @@ use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::worktree::{cleanup_managed_worktree, retire_managed_worktree};
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
+/// What destroying a session does with its managed worktree's git branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchDisposition {
+    /// Delete the branch with the rest of the session. What a destroy does.
+    Delete,
+    /// Leave the branch in the repository. What archiving does, because the
+    /// branch may hold work the user still wants.
+    Keep,
+}
+
 impl Controller {
     /// Checkpoint, ask the harness to close, and only then tear down the exact
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
@@ -552,6 +562,22 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        self.destroy_session_controlled_with(session_id, executor, BranchDisposition::Delete)
+    }
+
+    /// The same, with a say in what happens to the managed worktree's branch.
+    ///
+    /// A session that is already `Stopped` has had its checkout removed by
+    /// [`retire_managed_worktree`], so only the branch is left for
+    /// [`cleanup_managed_worktree`] to take. [`BranchDisposition::Keep`]
+    /// therefore just skips that call, which is what archiving wants: the
+    /// record, the checkpoint, and the attachments go, and the branch stays.
+    pub fn destroy_session_controlled_with(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+    ) -> Result<()> {
         let session = self
             .state
             .sessions
@@ -561,7 +587,9 @@ impl Controller {
         if session.state.is_active() {
             bail!("refusing to destroy active session {session_id}");
         }
-        if let Some(worktree) = &session.managed_worktree {
+        if branch == BranchDisposition::Delete
+            && let Some(worktree) = &session.managed_worktree
+        {
             cleanup_managed_worktree(executor, worktree)
                 .context("remove managed raw-session worktree")?;
         }

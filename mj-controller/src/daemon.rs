@@ -28,7 +28,7 @@ use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
 use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
-    Controller, ControllerStoreGuard, SessionLaunchOptions, SessionResumeOptions,
+    BranchDisposition, Controller, ControllerStoreGuard, SessionLaunchOptions, SessionResumeOptions,
 };
 use crate::review_host::TurnReviewHost;
 use crate::session_manager::{
@@ -126,6 +126,8 @@ pub struct RuntimeState {
     /// Turn review runs here, in the process that owns every session, so a
     /// review happens whether the terminal, the phone, or nobody is attached.
     review_host: TurnReviewHost,
+    /// Publishes checkpointed sessions into the user's SessionWiki index.
+    wiki: crate::sessionwiki::WikiIndexer,
 }
 
 /// One monotonic cursor shared by daemon snapshots and their wake-up feed.
@@ -193,6 +195,9 @@ enum LifecycleKind {
     Move,
     ForceStop,
     DestroyStopped,
+    /// The archive job's destruction: the same teardown as `DestroyStopped`
+    /// with the session's git branch kept. Surfaces see it as a destroy.
+    ArchiveStopped,
     ForceDestroy,
     Cleanup,
 }
@@ -329,7 +334,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Resume => Self::Resume,
             LifecycleKind::Move => Self::Move,
             LifecycleKind::ForceStop => Self::ForceStop,
-            LifecycleKind::DestroyStopped => Self::DestroyStopped,
+            LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,
             LifecycleKind::ForceDestroy => Self::ForceDestroy,
             LifecycleKind::Cleanup => Self::Cleanup,
         }

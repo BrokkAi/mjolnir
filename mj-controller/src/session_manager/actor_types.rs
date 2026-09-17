@@ -26,6 +26,12 @@ pub(super) enum ActorCommand {
         background_task_id: String,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+    /// Background text only the target harness sees, prepended to the next
+    /// real prompt. A restored archive installs its hand-off this way.
+    InstallPromptContext {
+        text: String,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
     Reviewer {
         role: Option<String>,
         action: ReviewerAction,
@@ -46,6 +52,7 @@ impl ActorCommand {
             Self::Sync { .. } => "sync",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
+            Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::Reviewer { action, .. } => action.operation_name(),
             Self::Lease { .. } => "lease",
         }
@@ -86,6 +93,15 @@ impl ActorCommand {
                         %session_id,
                         operation = "stop_background_task",
                         "background task stop rejection receiver was already closed"
+                    );
+                }
+            }
+            Self::InstallPromptContext { reply, .. } => {
+                if reply.send(Err(message.to_owned())).is_err() {
+                    tracing::debug!(
+                        %session_id,
+                        operation = "install_prompt_context",
+                        "prompt context rejection receiver was already closed"
                     );
                 }
             }

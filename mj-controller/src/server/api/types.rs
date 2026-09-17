@@ -460,3 +460,50 @@ impl From<ExportError> for ApiFailure {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// SessionWiki
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiSearchResponse {
+    pub rows: Vec<mj_client::daemon::WikiRow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiBriefQuery {
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiBriefResponse {
+    pub markdown: String,
+}
+
+/// The fields of a start request a restore needs. The archived session decides
+/// the rest: its title, and the project it ran in when the caller names none.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiRestoreBody {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    pub profile_id: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}

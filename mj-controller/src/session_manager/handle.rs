@@ -236,6 +236,20 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Install background text the harness reads with the next real prompt.
+    /// It creates no transcript turn, so the user never sees it.
+    pub async fn install_prompt_context(&self, text: String) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::InstallPromptContext { text, reply })
+            .await
+            .context("session manager stopped")?;
+        result
+            .await
+            .context("session manager stopped")?
+            .map_err(anyhow::Error::msg)
+    }
+
     /// Drive the session's second-opinion reviewer.
     ///
     /// The reviewer shares this session's relay connection, so its actions

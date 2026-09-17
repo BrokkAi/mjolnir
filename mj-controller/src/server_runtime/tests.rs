@@ -540,6 +540,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
+            sessionwiki: Default::default(),
             legacy_startup: (),
             profiles: ids
                 .iter()

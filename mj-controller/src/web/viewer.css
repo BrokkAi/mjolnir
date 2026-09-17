@@ -1067,6 +1067,52 @@ details.block-fold > pre {
   align-self: center;
 }
 
+.resume-session-snippet {
+  grid-column: 1 / -1;
+  color: var(--dim);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-session-snippet mark {
+  background: transparent;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.resume-archived h3 {
+  margin: 16px 0 0;
+}
+
+.archived-session-row {
+  border-style: dashed;
+}
+
+/* A briefing carries long paths and a heading of its own; both have to stay
+   inside the card on a phone. */
+.wiki-card p {
+  overflow-wrap: anywhere;
+}
+
+.wiki-brief {
+  max-height: 40vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.wiki-brief h1,
+.wiki-brief h2,
+.wiki-brief h3 {
+  font-size: 15px;
+  margin: 4px 0;
+}
+
 .resume-detail-actions {
   margin: 0 0 8px;
 }

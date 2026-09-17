@@ -24,6 +24,17 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+    /// What the daemon's background-warmed profile catalogue already holds for
+    /// a profile. It never launches a harness and never waits, so a caller a
+    /// model is blocked on can check a selector without paying for discovery.
+    /// `None` means the catalogue cannot answer yet, not that the profile is
+    /// unusable.
+    fn published_profile_config(
+        &self,
+        _profile: &str,
+    ) -> Option<mj_core::worker_launch::ProfileConfig> {
+        None
+    }
     fn start_subagent(
         &self,
         _request: crate::controller::RegisterSubagentRequest,
@@ -142,6 +153,47 @@ pub trait SubagentBackend: Send + Sync {
 
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;
+
+    /// Whether the user has switched SessionWiki on.
+    fn wiki_enabled(&self) -> bool {
+        false
+    }
+
+    /// Whether the index was synced recently enough that a query need not ask
+    /// for one.
+    fn wiki_sync_is_stale(&self) -> bool {
+        false
+    }
+
+    /// Ask for a background sync. It is never waited for: a query answers from
+    /// what the index holds now.
+    fn wiki_request_sync(&self) {}
+
+    fn wiki_search(
+        &self,
+        _query: String,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_client::daemon::WikiRow>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
+    }
+
+    /// `None` when the index holds no session with that id.
+    fn wiki_brief(
+        &self,
+        _wiki_id: String,
+        _max_chars: usize,
+    ) -> BoxFuture<'_, AnyResult<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki briefings are unavailable") })
+    }
+
+    /// Start a session from an archived transcript, answering with its id, or
+    /// `None` when the index holds no session with that id.
+    fn wiki_restore(
+        &self,
+        _request: mj_client::daemon::WikiRestoreRequest,
+    ) -> BoxFuture<'_, AnyResult<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
+    }
 }
 
 pub(super) fn backend(state: &ServerState) -> Result<&Arc<dyn SubagentBackend>, ApiFailure> {

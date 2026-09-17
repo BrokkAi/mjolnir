@@ -141,6 +141,22 @@ pub(super) fn request_controller_reload(
     }
 }
 
+/// How often the housekeeping tick runs: hourly, unless the test-only
+/// environment variable `MJ_PRUNE_TICK_SECONDS` names something shorter.
+///
+/// Test-only: it exists so a live check of the SessionWiki archive job does not
+/// have to wait an hour, and it is read once per daemon.
+pub(super) fn prune_tick_interval() -> Duration {
+    static INTERVAL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var("MJ_PRUNE_TICK_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map_or(Duration::from_secs(60 * 60), Duration::from_secs)
+    })
+}
+
 pub(super) fn request_daemon_controller_reload(
     daemon_runtime: Arc<RuntimeState>,
     reason: &'static str,

@@ -166,6 +166,98 @@ impl RuntimeState {
         self: &Arc<Self>,
         session_id: String,
     ) -> Result<()> {
+        self.tear_down_stopped_session(
+            session_id,
+            LifecycleKind::DestroyStopped,
+            BranchDisposition::Delete,
+        )
+        .await
+    }
+
+    /// Archive every stopped session older than `older_than_days` whose
+    /// conversation SessionWiki holds. Answers with how many were archived.
+    ///
+    /// The whole job belongs in a background task: it runs a full index sync,
+    /// which walks every tool's store, and then one lifecycle per session.
+    pub(crate) async fn archive_aged_sessions(
+        self: &Arc<Self>,
+        older_than_days: u32,
+    ) -> Result<usize> {
+        self.wiki()
+            .sync_now(true)
+            .await
+            .context("sync SessionWiki before archiving stopped sessions")?;
+        let candidates = blocking(move || {
+            let controller = Controller::load()?;
+            Ok(crate::sessionwiki::sessions_ready_to_archive(
+                &controller.state.sessions,
+                &controller.state.subagents,
+                chrono::Utc::now(),
+                older_than_days,
+            ))
+        })
+        .await
+        .context("select the stopped sessions old enough to archive")?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let indexed = blocking({
+            let candidates = candidates.clone();
+            move || crate::sessionwiki::indexed_with_messages(&candidates)
+        })
+        .await
+        .context("check the SessionWiki index before archiving")?;
+        let mut archived = 0;
+        for session_id in candidates {
+            if !indexed.contains(&session_id) {
+                tracing::warn!(
+                    %session_id,
+                    "SessionWiki holds no conversation for this stopped session; keeping it"
+                );
+                continue;
+            }
+            match self.archive_stopped_session(session_id.clone()).await {
+                Ok(()) => {
+                    archived += 1;
+                    tracing::info!(
+                        %session_id,
+                        older_than_days,
+                        "archived a stopped session: SessionWiki keeps the conversation and the repository keeps the branch"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    %session_id,
+                    error = %format!("{error:#}"),
+                    "could not archive a stopped session"
+                ),
+            }
+        }
+        if archived > 0 {
+            // Flip the rows the job just emptied to archived.
+            self.wiki().request_sync(false);
+        }
+        Ok(archived)
+    }
+
+    /// Destroy a stopped session the way the archive job wants: the record,
+    /// the checkpoint, and the attachments go, and the session's git branch
+    /// stays in the repository. The conversation itself stays searchable, and
+    /// restorable, through SessionWiki.
+    async fn archive_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.tear_down_stopped_session(
+            session_id,
+            LifecycleKind::ArchiveStopped,
+            BranchDisposition::Keep,
+        )
+        .await
+    }
+
+    async fn tear_down_stopped_session(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        branch: BranchDisposition,
+    ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -192,8 +284,8 @@ impl RuntimeState {
         }
         self.run_lifecycle(
             session_id,
-            LifecycleKind::DestroyStopped,
-            |state, session_id, cancelled| async move {
+            kind,
+            move |state, session_id, cancelled| async move {
                 blocking(move || {
                     let mut controller = Controller::load()?;
                     let executor = DaemonStageReportingExecutor::new(
@@ -201,7 +293,7 @@ impl RuntimeState {
                         state,
                         session_id.clone(),
                     );
-                    controller.destroy_session_controlled(&session_id, &executor)?;
+                    controller.destroy_session_controlled_with(&session_id, &executor, branch)?;
                     Ok(DaemonLifecycleResult::Done)
                 })
                 .await

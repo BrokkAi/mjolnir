@@ -5,7 +5,7 @@ impl DashboardState {
         &mut self,
         mut wizard: ResumeWizard,
     ) -> DashboardAction {
-        let profiles = self.compatible_profiles(&wizard.session_id);
+        let profiles = self.resume_wizard_profiles(&wizard);
         match wizard.step {
             WizardStep::Profile => {
                 wizard.step = WizardStep::Target;
@@ -145,6 +145,18 @@ impl DashboardState {
                 } else {
                     ResumeQueueDisposition::Start
                 }),
+            };
+            self.mode = Mode::Resume(wizard);
+            return action;
+        }
+        if wizard.source == ResumeSource::Archive {
+            // A restored archive has no checkpoint and no repositories to
+            // preflight: it starts as a new session and the summary follows.
+            let action = DashboardAction::RestoreArchivedSession {
+                workspace_id: wizard.workspace_id.clone(),
+                wiki_id: wizard.session_id.clone(),
+                profile_id,
+                target_template_id,
             };
             self.mode = Mode::Resume(wizard);
             return action;

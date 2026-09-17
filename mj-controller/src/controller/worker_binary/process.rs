@@ -204,15 +204,45 @@ pub(super) fn worker_binary_probe_failure(
     }
 }
 
-/// Fetch the dead worker's structured exit record and log tail from the
-/// target, so unreachable-worker errors carry the root cause.
+/// Fetch the worker's structured exit record, log tail, and current process
+/// state from the target, so unreachable-worker errors carry the root cause.
+/// The process section distinguishes a worker that died early from one that
+/// is still running but never accepted a relay connection; it must be read
+/// before the caller stops the worker.
 pub(in crate::controller) fn worker_last_words(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Option<String> {
     let script = format!(
-        "if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi; if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi",
+        r#"{identity}
+if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi
+if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi
+echo '--- worker process ---'
+if hel_pid=$(hel_recorded_worker); then
+    echo "alive (recorded pid $hel_pid)"
+    hel_ps -o pid=,ppid=,stat=,etime=,args= -p "$hel_pid"
+    exit 0
+fi
+hel_found=0
+while read -r hel_pid hel_args; do
+    case "$hel_pid" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    [ "$hel_pid" -eq $$ ] && continue
+    case "$hel_args" in
+        *"$hel_match"*|*"$hel_match_home"*)
+            hel_found=1
+            echo "alive (unrecorded pid $hel_pid)"
+            hel_ps -o pid=,ppid=,stat=,etime=,args= -p "$hel_pid"
+            ;;
+    esac
+done <<MJ_PS
+$(hel_ps -eo pid=,args=)
+MJ_PS
+[ "$hel_found" -eq 1 ] || echo 'absent'
+"#,
+        identity = targets::worker_daemon_identity_script(worker_root),
         root = targets::posix_quote(worker_root),
         marker = WORKER_EXIT_RECORD_MARKER
     );

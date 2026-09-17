@@ -485,6 +485,7 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
             theme: Default::default(),
             phone: Default::default(),
             review: Default::default(),
+            sessionwiki: Default::default(),
             legacy_startup: (),
             profiles: Default::default(),
             bundles: Default::default(),

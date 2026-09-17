@@ -3,7 +3,7 @@ use super::*;
 /// POSIX shell helpers that identify the daemon for one exact worker root.
 /// The match is assembled at run time so the script's own command line cannot
 /// select itself, and `worker proxy` command lines cannot match either.
-pub(super) fn worker_daemon_identity_script(worker_root: &str) -> String {
+pub fn worker_daemon_identity_script(worker_root: &str) -> String {
     format!(
         r#"hel_root={root}
 hel_match="hel worker run --root $hel_root"

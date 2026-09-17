@@ -1279,7 +1279,7 @@ pub(crate) fn render_resume_wizard(
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let profile_id = dashboard
-            .compatible_profiles(&wizard.session_id)
+            .resume_wizard_profiles(wizard)
             .get(wizard.profile)
             .map(|(id, _)| id.as_str())
             .unwrap_or("unknown");
@@ -1415,7 +1415,7 @@ pub(crate) fn render_resume_wizard(
     }
     let (title, choices, selected, help) = match wizard.step {
         WizardStep::Profile => {
-            let profiles = dashboard.compatible_profiles(&wizard.session_id);
+            let profiles = dashboard.resume_wizard_profiles(wizard);
             let session_harness = dashboard
                 .state
                 .sessions

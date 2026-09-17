@@ -22,6 +22,7 @@ pub mod review_host;
 pub mod review_settings;
 pub mod server;
 pub mod session_manager;
+pub mod sessionwiki;
 pub mod setup;
 pub mod tailscale;
 pub mod utility_llm;

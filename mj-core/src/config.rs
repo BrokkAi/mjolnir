@@ -128,6 +128,41 @@ pub struct ReviewConfig {
     pub effort: Option<String>,
 }
 
+/// Indexing every checkpointed session into the user's SessionWiki index.
+///
+/// SessionWiki is a separate tool that keeps one searchable index of AI coding
+/// sessions across every tool the user runs. When this is enabled the daemon
+/// writes Mjolnir's own closed sessions into it under the tool name
+/// `mjolnir`, so one search covers every harness.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionWikiConfig {
+    /// Whether the daemon indexes closed sessions into SessionWiki.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    /// Age after which a stopped session Mjolnir has indexed is removed from
+    /// Mjolnir's own storage. `None` keeps every session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_days: Option<u32>,
+}
+
+impl SessionWikiConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Rejects an age that would archive a session the moment it stops.
+    fn validate(&self) -> Result<()> {
+        if self.archive_after_days == Some(0) {
+            bail!(
+                "[sessionwiki] archive_after_days = 0 would remove a session as soon as it stops; \
+                 use 1 or more, or leave it empty to keep every session"
+            );
+        }
+        Ok(())
+    }
+}
+
 const fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -277,7 +312,7 @@ impl BuildCacheConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 9;
+pub const CONFIG_VERSION: u32 = 10;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -310,6 +345,8 @@ pub struct Config {
     pub phone: PhoneConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
+    pub sessionwiki: SessionWikiConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
     pub subagents: SubagentConfig,
     #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
@@ -340,6 +377,7 @@ impl Default for Config {
             theme: Default::default(),
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
+            sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             build_cache: BuildCacheConfig::default(),
             legacy_startup: (),
@@ -426,6 +464,7 @@ impl Config {
         // Checked after the profiles, so a review pointing at a malformed
         // profile reports the profile's own error first.
         self.review.validate(&self.profiles)?;
+        self.sessionwiki.validate()?;
         self.subagents.validate(&self.profiles)?;
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
@@ -506,10 +545,10 @@ impl Config {
         // version 5 adds the terminal theme preference; version 6 adds
         // optional advanced settings; version 7 restores stopped-session
         // visibility as an advanced setting; version 8 lets profiles be
-        // disabled; version 9 adds sub-agent policy. Earlier configs acquire
-        // defaults in memory and upgrade on
-        // the next ordinary save.
-        if matches!(config.version, 1..=8) {
+        // disabled; version 9 adds sub-agent policy; version 10 adds the
+        // SessionWiki section. Earlier configs acquire defaults in memory and
+        // upgrade on the next ordinary save.
+        if matches!(config.version, 1..=9) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;

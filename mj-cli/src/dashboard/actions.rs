@@ -364,6 +364,47 @@ pub(crate) async fn apply_dashboard_action(
             context.acknowledge_dashboard_sessions(receipts);
         }
         DashboardAction::OpenResumeDialog => context.start_resume_discovery(),
+        DashboardAction::SearchArchivedSessions { request_id, query } => {
+            crate::dashboard::io::spawn_wiki_search(
+                request_id,
+                query,
+                context.wiki_search_request.clone(),
+                context.dashboard_io_tx.clone(),
+            );
+        }
+        DashboardAction::LoadArchivedBrief { wiki_id } => {
+            crate::dashboard::io::spawn_wiki_brief(wiki_id, context.dashboard_io_tx.clone());
+        }
+        action @ DashboardAction::RestoreArchivedSession { .. } => {
+            let DashboardAction::RestoreArchivedSession {
+                workspace_id,
+                wiki_id,
+                profile_id,
+                target_template_id,
+            } = action.clone()
+            else {
+                return Ok(());
+            };
+            context
+                .dashboard
+                .set_notice("Restoring the archived session…");
+            crate::dashboard::io::spawn_dashboard_restore_session(
+                mj_client::daemon::WikiRestoreRequest {
+                    wiki_id,
+                    workspace_id,
+                    profile_id,
+                    target_template_id,
+                    project_directory: None,
+                    additional_mounts: Vec::new(),
+                    resource_allocation: None,
+                },
+                action,
+                context.dashboard_io_tx.clone(),
+                context.lifecycle_updates_tx.clone(),
+                tokio::runtime::Handle::current(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::ImportSession {
             profile_id,
             native_session_id,

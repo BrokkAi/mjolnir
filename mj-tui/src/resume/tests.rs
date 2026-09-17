@@ -223,6 +223,7 @@ fn a_hel_record_replaces_the_native_session_it_was_imported_from() {
             native("native-1", "Same conversation", 10),
             native("native-2", "A different conversation", 5),
         ])],
+        &[],
     );
 
     assert_eq!(merged.len(), 2, "{:?}", titles(&merged));
@@ -327,6 +328,7 @@ fn a_live_session_hides_its_native_counterpart_from_the_dialog() {
             native("native-1", "Running under Hel right now", 10),
             native("native-2", "Idle native session", 5),
         ])],
+        &[],
     );
     assert_eq!(titles(&merged), ["Idle native session"]);
 }
@@ -339,7 +341,7 @@ fn the_origin_chip_shows_the_stored_target_even_when_config_forgot_it() {
     session.target_template_id = "retired-target".into();
     let mut config = config();
     config.targets.clear();
-    let merged = merged_resume_rows(&config, &state_with(vec![session]), &[]);
+    let merged = merged_resume_rows(&config, &state_with(vec![session]), &[], &[]);
     assert_eq!(merged[0].origin, "retired-target");
 }
 
@@ -368,6 +370,7 @@ fn rows_sort_by_last_activity_descending_across_both_sources() {
             native("native-mid", "Native March", march),
             native("native-new", "Native July", july),
         ])],
+        &[],
     );
 
     assert_eq!(
@@ -591,6 +594,173 @@ fn a_native_only_row_cannot_be_destroyed_from_hel() {
 
 /// The default Hel tab and the Import tab each expose only the source they
 /// name, with a valid selection after every switch.
+fn wiki_row(id: &str, archived: bool) -> WikiRow {
+    WikiRow {
+        id: id.into(),
+        tool: "mjolnir".into(),
+        project: "/home/dev/project".into(),
+        title: format!("archived {id}"),
+        started: Some("2026-09-01T00:00:00Z".into()),
+        msgs: 7,
+        preview: Some("the last thing it said".into()),
+        archived,
+        native_id: None,
+        snippet: None,
+        hel_session_id: None,
+    }
+}
+
+/// A row is archived only when nothing on this machine still holds the
+/// session: no Mjolnir record and no native file an import could adopt.
+#[test]
+fn only_indexed_sessions_nothing_else_holds_become_archived_rows() {
+    let config = config();
+    let state = state_with(vec![stopped_session()]);
+    let profiles = [codex_profile(vec![native(
+        "native-2",
+        "Native",
+        NEWER_THAN_THE_CHECKPOINT,
+    )])];
+
+    let gone = wiki_row("gone", true);
+    let held = WikiRow {
+        hel_session_id: Some("session-1".into()),
+        snippet: Some("the phrase that matched".into()),
+        ..wiki_row("held", true)
+    };
+    let imported = WikiRow {
+        tool: "codex".into(),
+        native_id: Some("native-2".into()),
+        snippet: Some("a native hit".into()),
+        ..wiki_row("imported", true)
+    };
+    let live_elsewhere = wiki_row("still-there", false);
+
+    let merged = merged_resume_rows(
+        &config,
+        &state,
+        &profiles,
+        &[gone, held, imported, live_elsewhere],
+    );
+    let archived = merged
+        .iter()
+        .filter(|row| matches!(row.key, ResumeRowKey::Archive(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        archived
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<Vec<_>>(),
+        vec![ResumeRowKey::Archive("gone".into())],
+        "only the session nothing else holds is archived"
+    );
+    assert_eq!(archived[0].status, ResumeRowStatus::Restorable);
+
+    let hel = merged
+        .iter()
+        .find(|row| row.key == ResumeRowKey::Hel("session-1".into()))
+        .expect("the Mjolnir record is still listed");
+    assert_eq!(hel.wiki_id(), Some("held"));
+    assert!(
+        hel.details.contains("the phrase that matched"),
+        "a hit on a live record shows its snippet: {}",
+        hel.details
+    );
+    let native_row = merged
+        .iter()
+        .find(|row| matches!(row.key, ResumeRowKey::Native(..)))
+        .expect("the importable session is still listed");
+    assert_eq!(native_row.wiki_id(), Some("imported"));
+    assert!(native_row.details.contains("a native hit"));
+}
+
+/// The Archived tab shows archived rows only, and Enter on one opens the
+/// wizard that restores it rather than resuming a record.
+#[test]
+fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
+    let mut config = config();
+    config.sessionwiki.enabled = true;
+    let mut dashboard =
+        DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    // The dialog asks for the recent list as it opens, the way the
+    // dashboard does, and the answer names that request.
+    let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
+    assert_eq!(query, "");
+    dashboard.apply_wiki_search(request_id, vec![wiki_row("gone", true)]);
+
+    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
+    switch_to_import(&mut dashboard);
+    assert!(rows(&dashboard).is_empty());
+
+    if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+        dialog.form.get_mut().focus(ResumeFocus::Sessions);
+    }
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Right)),
+        DashboardAction::LoadArchivedBrief { .. } | DashboardAction::None
+    ));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Archive);
+    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
+    assert_eq!(dialog.selected, Some(ResumeRowKey::Archive("gone".into())));
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected the resume wizard, got {:?}", dashboard.mode);
+    };
+    assert_eq!(wizard.source, crate::wizards::ResumeSource::Archive);
+    assert_eq!(wizard.session_id, "gone");
+}
+
+/// Typing asks the daemon for a new search, and an answer to an older
+/// request is ignored because the person has typed since.
+#[test]
+fn typing_asks_for_a_search_and_stale_answers_are_dropped() {
+    let mut config = config();
+    config.sessionwiki.enabled = true;
+    let mut dashboard =
+        DashboardState::new(config, state_with(vec![stopped_session()]), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    focus_resume_control(&mut dashboard, ResumeFocus::Search);
+
+    let action = dashboard.handle_key(key(KeyCode::Char('g')));
+    let DashboardAction::SearchArchivedSessions { request_id, query } = action else {
+        panic!("typing must ask for a search, got {action:?}");
+    };
+    assert_eq!(query, "g");
+
+    dashboard.apply_wiki_search(request_id - 1, vec![wiki_row("stale", true)]);
+    assert!(
+        !rows(&dashboard)
+            .iter()
+            .any(|row| matches!(row.key, ResumeRowKey::Archive(_))),
+        "an answer to an older request is dropped"
+    );
+    dashboard.apply_wiki_search(request_id, vec![wiki_row("fresh", true)]);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.wiki.len(), 1);
+    assert_eq!(dialog.wiki[0].id, "fresh");
+}
+
+/// With SessionWiki off the tab says so and nothing is searched.
+#[test]
+fn the_archived_tab_says_when_sessionwiki_is_off() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    assert_eq!(dashboard.next_wiki_search(), None);
+    focus_resume_control(&mut dashboard, ResumeFocus::Search);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('g'))),
+        DashboardAction::None,
+        "no search is asked for while SessionWiki is off"
+    );
+}
+
 #[test]
 fn tabs_separate_hel_records_from_importable_native_sessions() {
     let mut dashboard = DashboardState::new(

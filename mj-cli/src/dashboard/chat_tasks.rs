@@ -16,6 +16,16 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
+        // The Archived tab lists the most recent indexed sessions before
+        // anything is typed, so the first search runs as the dialog opens.
+        if let Some((request_id, query)) = self.dashboard.next_wiki_search() {
+            crate::dashboard::io::spawn_wiki_search(
+                request_id,
+                query,
+                self.wiki_search_request.clone(),
+                self.dashboard_io_tx.clone(),
+            );
+        }
         let discovery_id = self.import_discovery_id;
         for (profile_id, profile) in self
             .controller

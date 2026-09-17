@@ -211,6 +211,24 @@ pub(super) async fn handle_action(
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
         )),
+        DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
+            state.wiki_search(query, limit).await?,
+        )),
+        DaemonAction::WikiBrief { wiki_id, max_chars } => {
+            let markdown = state
+                .wiki_brief(wiki_id.clone(), max_chars)
+                .await?
+                .with_context(|| format!("no indexed session {wiki_id}"))?;
+            Ok(DaemonReply::Text(markdown))
+        }
+        DaemonAction::WikiRestore(request) => {
+            let wiki_id = request.wiki_id.clone();
+            let registered = state
+                .restore_wiki_session(request)
+                .await?
+                .with_context(|| format!("no indexed session {wiki_id}"))?;
+            Ok(DaemonReply::RegisteredSession(Box::new(registered)))
+        }
         DaemonAction::ScanRecovery { all_instances } => {
             let scan = blocking(move || {
                 Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))

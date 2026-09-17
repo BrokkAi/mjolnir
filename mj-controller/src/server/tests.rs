@@ -48,6 +48,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         theme: Default::default(),
         phone: Default::default(),
         review: Default::default(),
+        sessionwiki: Default::default(),
         legacy_startup: (),
         profiles: BTreeMap::from([(
             "codex-1".into(),

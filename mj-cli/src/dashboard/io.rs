@@ -11,7 +11,7 @@ pub(crate) use spawn::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -134,6 +134,17 @@ pub(crate) enum DashboardIoUpdate {
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
+    },
+    /// One SessionWiki search result. The request id is the dialog's; an
+    /// answer for an older one is dropped there.
+    WikiRows {
+        request_id: u64,
+        result: std::result::Result<Vec<mj_client::daemon::WikiRow>, String>,
+    },
+    /// One archived session's briefing, for the resume dialog's preview.
+    WikiBrief {
+        wiki_id: String,
+        result: std::result::Result<String, String>,
     },
     WebListeners {
         generation: u64,
@@ -778,6 +789,18 @@ impl DashboardContext {
                     self.dashboard.apply_web_access(access);
                 }
             }
+            DashboardIoUpdate::WikiRows { request_id, result } => match result {
+                Ok(rows) => self.dashboard.apply_wiki_search(request_id, rows),
+                Err(error) => self
+                    .dashboard
+                    .set_notice(format!("Archive search failed: {error}")),
+            },
+            DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
+                Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
+                Err(error) => self
+                    .dashboard
+                    .apply_wiki_brief(wiki_id, format!("Could not load the transcript: {error}")),
+            },
             DashboardIoUpdate::WebListeners { generation, result } => {
                 if generation == self.web_request_generation {
                     self.dashboard.apply_web_listeners(result);

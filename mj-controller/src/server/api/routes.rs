@@ -35,6 +35,9 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             post(respond_elicitation),
         )
         .route("/sessions/{session_id}/export", post(export))
+        .route("/wiki/search", get(wiki_search))
+        .route("/wiki/sessions/{wiki_id}/brief", get(wiki_brief))
+        .route("/wiki/sessions/{wiki_id}/restore", post(wiki_restore))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             require_api_auth,

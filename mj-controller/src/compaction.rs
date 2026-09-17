@@ -15,6 +15,10 @@ pub const DEFAULT_CONTEXT_BYTES: usize = 256 * 1024;
 /// handoff turns.
 pub const HANDOFF_PREAMBLE: &str =
     "You are continuing a coding session previously run by another ACP harness.";
+/// Opening sentence of a hand-off written when an archived session is restored
+/// from the SessionWiki index. The restored session has no workspace from the
+/// old one, so it is marked apart from a cross-harness resume.
+pub const ARCHIVE_HANDOFF_PREAMBLE: &str = "Archived session restored from SessionWiki.";
 /// Opening sentence of the byte-truncating handoff this pipeline replaced.
 /// Sessions resumed by that build still carry it in their transcripts.
 pub const LEGACY_HANDOFF_PREAMBLE: &str =
@@ -505,7 +509,9 @@ fn push_turn_event(turns: &mut [Turn], event: TurnEvent) -> Result<()> {
 /// wrote into an earlier resume.
 fn is_synthetic_handoff(user_text: &str) -> bool {
     let text = user_text.trim_start();
-    text.starts_with(HANDOFF_PREAMBLE) || text.starts_with(LEGACY_HANDOFF_PREAMBLE)
+    text.starts_with(HANDOFF_PREAMBLE)
+        || text.starts_with(LEGACY_HANDOFF_PREAMBLE)
+        || text.starts_with(ARCHIVE_HANDOFF_PREAMBLE)
 }
 
 fn append_turn_event(turn: &mut Turn, item: TurnEvent) {

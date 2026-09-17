@@ -159,6 +159,7 @@ impl RuntimeState {
                             );
                         }
                     }
+                    state.note_lifecycle_outcome(&operation_session_id);
                     if let Err(error) =
                         reach_test_hook("lifecycle_reservation_before_result_publication").await
                     {

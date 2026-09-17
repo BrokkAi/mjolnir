@@ -132,6 +132,7 @@ pub(crate) fn config() -> Config {
         theme: Default::default(),
         phone: Default::default(),
         review: Default::default(),
+        sessionwiki: Default::default(),
         legacy_startup: (),
         profiles: BTreeMap::from([
             (

@@ -42,6 +42,7 @@ mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.10.0
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.10.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.10.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.10.0" }
+sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }
 
 # Every external dependency that two or more crates share is declared once
 # here, so a version can only be raised in one place. Each entry carries the
@@ -74,7 +75,7 @@ rayon = "1"
 # cross-compilation. Every executable installs the ring provider at startup
 # through `mj_controller::server::install_rustls_crypto_provider`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
