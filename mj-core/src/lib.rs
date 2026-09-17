@@ -3,6 +3,7 @@
 pub mod clock;
 
 pub mod acp;
+pub mod activity;
 pub mod archive;
 pub mod attachment;
 pub mod bounded_frame;
