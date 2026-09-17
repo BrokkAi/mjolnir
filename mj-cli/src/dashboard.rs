@@ -328,6 +328,9 @@ pub(crate) struct DashboardContext {
     import_tasks: Feed<Receiver<DashboardImportUpdate>>,
     pub(crate) pending_import: Option<PendingDashboardImport>,
     pub(crate) import_discovery_id: u64,
+    /// One scan cache for the process, so reopening the resume dialog
+    /// reparses only the native session files that changed.
+    pub(crate) native_scan_cache: mj_controller::import::NativeScanCache,
     pub(crate) next_import_task_id: u64,
     pub(crate) active_import: Option<ActiveDashboardImport>,
     /// At most one desktop clipboard IPC request is allowed at a time. The
@@ -1050,6 +1053,7 @@ impl DashboardContext {
             import_tasks: Feed::new(import_task_rx),
             pending_import: None,
             import_discovery_id: 0,
+            native_scan_cache: mj_controller::import::NativeScanCache::new(),
             next_import_task_id: 0,
             active_import: None,
             clipboard_read_in_flight: false,

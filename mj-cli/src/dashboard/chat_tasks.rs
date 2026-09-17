@@ -38,11 +38,13 @@ impl DashboardContext {
             .map(|(id, profile)| (id.to_owned(), profile.clone()))
         {
             let updates = self.import_updates_tx.clone();
+            let cache = self.native_scan_cache.clone();
             tokio::task::spawn_blocking(move || {
                 let completed = crate::import::discover_import_profile(
                     profile_id,
                     profile.kind,
                     profile.home,
+                    &cache,
                     |profile| {
                         if let Ok(permit) = updates.try_reserve() {
                             permit.send((discovery_id, profile.clone()));

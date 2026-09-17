@@ -75,7 +75,7 @@ pub(super) fn locate_unlisted_claude_sessions(
 /// List native Claude sessions newest first.
 pub fn list_claude_sessions(home: &Path) -> Result<Vec<LocatedClaudeSession>> {
     let mut sessions = Vec::new();
-    scan_claude_sessions(home, |progress| {
+    scan_claude_sessions(home, &NativeScanCache::new(), |progress| {
         if let Some(session) = progress.session {
             sessions.push(session);
         }
@@ -86,6 +86,7 @@ pub fn list_claude_sessions(home: &Path) -> Result<Vec<LocatedClaudeSession>> {
 /// Scan native Claude sessions newest first, reporting after every candidate file.
 pub fn scan_claude_sessions(
     home: &Path,
+    cache: &NativeScanCache,
     mut report: impl FnMut(SessionScanProgress<LocatedClaudeSession>),
 ) -> Result<()> {
     let projects = home.join("projects");
@@ -157,7 +158,12 @@ pub fn scan_claude_sessions(
             .and_then(|name| name.strip_suffix(".jsonl"))
             .expect("Claude candidates were validated during enumeration")
             .to_owned();
-        let metadata = match claude_native_metadata(&candidate.path) {
+        let metadata = match cache.claude_metadata(
+            &candidate.path,
+            candidate.modified_at,
+            candidate.size_bytes,
+            || claude_native_metadata(&candidate.path),
+        ) {
             Ok(Some(metadata)) => metadata,
             Ok(None) => {
                 report(SessionScanProgress {
@@ -188,6 +194,47 @@ pub fn scan_claude_sessions(
     Ok(())
 }
 
+/// Whether one transcript line can still change what `claude_native_metadata`
+/// returns. Every key that function reads has a byte substring here, so a line
+/// that matches none of them parses to nothing the function would use.
+fn claude_line_may_matter(
+    line: &str,
+    needs_cwd: bool,
+    needs_git_branch: bool,
+    needs_entrypoint: bool,
+) -> bool {
+    (needs_cwd && line.contains("\"cwd\""))
+        || (needs_git_branch && line.contains("\"gitBranch\""))
+        || (needs_entrypoint && line.contains("\"entrypoint\""))
+        || line.contains("\"customTitle\"")
+        || line.contains("\"aiTitle\"")
+        || line.contains("\"agentName\"")
+        // Filter markers: a sidechain, a team session, a daemon worker, or a
+        // `/loop` command record.
+        || json_field_is_true(line, "isSidechain")
+        || line.contains("\"teamName\"")
+        || line.contains("daemon-worker")
+        || line.contains("<command-name>/loop</command-name>")
+}
+
+/// Whether `"<field>"` is followed by `true` somewhere in this line, allowing
+/// for whitespace around the colon.
+fn json_field_is_true(line: &str, field: &str) -> bool {
+    let mut rest = line;
+    loop {
+        let Some(index) = rest.find(field) else {
+            return false;
+        };
+        rest = &rest[index + field.len()..];
+        if let Some(after) = rest.trim_start().strip_prefix('"')
+            && let Some(after) = after.trim_start().strip_prefix(':')
+            && after.trim_start().starts_with("true")
+        {
+            return true;
+        }
+    }
+}
+
 pub(super) fn claude_native_metadata(path: &Path) -> Result<Option<(String, PathBuf, String)>> {
     let mut custom_title = None;
     let mut agent_name = None;
@@ -197,7 +244,22 @@ pub(super) fn claude_native_metadata(path: &Path) -> Result<Option<(String, Path
     let mut entrypoint = None;
     let mut filtered = false;
     for line in BufReader::new(fs::File::open(path)?).lines() {
-        let record: Value = serde_json::from_str(&line?)?;
+        let line = line?;
+        // Parsing every record of every transcript is what made the import
+        // scan slow: a large session is megabytes of JSON, and only a handful
+        // of records can change the answer. A line that cannot contain any of
+        // the keys read below is skipped without being parsed. The position
+        // keys drop out of the test as soon as their value is known, which is
+        // usually on the first line.
+        if !claude_line_may_matter(
+            &line,
+            cwd.is_none(),
+            git_branch.is_none(),
+            entrypoint.is_none(),
+        ) {
+            continue;
+        }
+        let record: Value = serde_json::from_str(&line)?;
         if record
             .get("isSidechain")
             .and_then(Value::as_bool)

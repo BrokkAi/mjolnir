@@ -1624,7 +1624,7 @@ fn codex_scan_reports_progress_and_emits_newest_first() {
         .unwrap();
     }
     let mut updates = Vec::new();
-    scan_codex_sessions(directory.path(), |progress| {
+    scan_codex_sessions(directory.path(), &NativeScanCache::new(), |progress| {
         updates.push((
             progress.scanned,
             progress.total,
@@ -2140,4 +2140,99 @@ fn detached_import_uses_the_selected_nonorigin_remote_baseline() {
     run_git(&app, &["checkout", "--detach"]);
     let baseline = import_delta_base(&app, "https://github.com/example/app.git").unwrap();
     assert!(!baseline.is_empty());
+}
+
+/// One Claude transcript whose title record sits on the last line, after
+/// enough chatter to make the line prefilter matter.
+fn claude_scan_fixture(path: &Path, title: &str) {
+    let mut lines = vec![
+        r#"{"type":"user","entrypoint":"cli","cwd":"/work/app","gitBranch":"feature","message":{"content":"start"}}"#
+            .to_owned(),
+    ];
+    for index in 0..200 {
+        lines.push(format!(
+            r#"{{"type":"assistant","uuid":"line-{index}","message":{{"content":"chatter {index}"}}}}"#
+        ));
+    }
+    lines.push(format!(
+        r#"{{"type":"custom-title","customTitle":"{title}"}}"#
+    ));
+    fs::write(path, lines.join("\n")).unwrap();
+}
+
+fn scan_claude_titles(home: &Path, cache: &NativeScanCache) -> Vec<String> {
+    let mut titles = Vec::new();
+    scan_claude_sessions(home, cache, |progress| {
+        if let Some(session) = progress.session {
+            titles.push(session.title);
+        }
+    })
+    .unwrap();
+    titles
+}
+
+#[test]
+fn unchanged_claude_transcripts_are_not_reopened_on_a_second_scan() {
+    let directory = tempfile::tempdir().unwrap();
+    let rollout = directory
+        .path()
+        .join("projects/work/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    claude_scan_fixture(&rollout, "First title");
+    let stamp = fs::metadata(&rollout).unwrap().modified().unwrap();
+
+    let cache = NativeScanCache::new();
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+    assert_eq!(cache.parsed_files(), 1);
+
+    // Rewrite the file with different content of the same length and restore
+    // its modified time. A second scan that opened the file would see the new
+    // title; a cached scan cannot.
+    claude_scan_fixture(&rollout, "Later title");
+    fs::File::options()
+        .write(true)
+        .open(&rollout)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+    assert_eq!(cache.parsed_files(), 1);
+}
+
+#[test]
+fn a_changed_modified_time_reparses_the_claude_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let rollout = directory
+        .path()
+        .join("projects/work/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    claude_scan_fixture(&rollout, "First title");
+    let stamp = fs::metadata(&rollout).unwrap().modified().unwrap();
+
+    let cache = NativeScanCache::new();
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+
+    claude_scan_fixture(&rollout, "Later title");
+    fs::File::options()
+        .write(true)
+        .open(&rollout)
+        .unwrap()
+        .set_modified(stamp + Duration::from_secs(10))
+        .unwrap();
+
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["Later title"]
+    );
+    assert_eq!(cache.parsed_files(), 2);
 }
