@@ -34,89 +34,13 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        session.validate_configuration(&self.config)?;
         let profile = self
             .config
             .profiles
             .get(&session.last_profile)
             .context("session profile is missing")?;
-        let bundle = session
-            .project_directory
-            .is_none()
-            .then(|| self.config.bundles.get(&session.bundle_id))
-            .flatten();
-        let target = self
-            .config
-            .targets
-            .get(&session.target_template_id)
-            .context("session target template is missing")?;
-        let subagent = crate::database::load_subagent(session_id)?;
-        // A sub-agent child shares its parent's container, so it works in the
-        // parent's workspace. The parent record is authoritative for that path.
-        let (workspace_session_id, workspace_container) = match subagent.as_ref() {
-            Some(child) => {
-                let parent = self
-                    .state
-                    .sessions
-                    .get(&child.parent_session_id)
-                    .context("sub-agent parent session is missing")?;
-                (parent.id.clone(), parent.container_workspace.clone())
-            }
-            None => (session_id.to_owned(), session.container_workspace.clone()),
-        };
-        let (mut launch, project_memory, target_profile_home) = worker_launch_config(
-            session,
-            profile,
-            bundle,
-            backend,
-            &workspace_session_id,
-            workspace_container.as_deref(),
-            target,
-        )?;
-        launch.subagent_tools =
-            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
-        if let Some(subagent) = &subagent {
-            let parent = self
-                .state
-                .sessions
-                .get(&subagent.parent_session_id)
-                .context("sub-agent parent session is missing")?;
-            let parent_profile = self
-                .config
-                .profiles
-                .get(&parent.last_profile)
-                .context("sub-agent parent profile is missing")?;
-            let parent_target = self
-                .config
-                .targets
-                .get(&parent.target_template_id)
-                .context("sub-agent parent target template is missing")?;
-            let parent_locator = parent
-                .target
-                .as_ref()
-                .context("sub-agent parent has no live target")?;
-            let parent_backend = backend_locator(parent_locator, parent, &self.config)?;
-            let parent_bundle = parent
-                .project_directory
-                .is_none()
-                .then(|| self.config.bundles.get(&parent.bundle_id))
-                .flatten();
-            let (parent_launch, _, _) = worker_launch_config(
-                parent,
-                parent_profile,
-                parent_bundle,
-                &parent_backend,
-                &parent.id,
-                parent.container_workspace.as_deref(),
-                parent_target,
-            )?;
-            launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
-                parent_launch.cwd
-            } else {
-                parent_launch.cwd.join(&subagent.working_directory)
-            };
-            launch.additional_directories = parent_launch.additional_directories;
-        }
+        let (mut launch, project_memory, target_profile_home) =
+            self.session_launch_config(session_id, backend)?;
 
         if session.native_session_id.is_some()
             && profile.kind == mj_core::config::HarnessKind::Codex
@@ -325,11 +249,15 @@ impl Controller {
         })
     }
 
-    pub(in crate::controller) fn current_worker_launch_config(
+    /// The launch config for a session, including what depends on its
+    /// sub-agent role. The first launch and every relaunch use this, so a
+    /// relaunched worker keeps its delegation tools and a relaunched child
+    /// keeps its parent's workspace.
+    fn session_launch_config(
         &self,
         session_id: &str,
         backend: &targets::TargetLocator,
-    ) -> Result<WorkerLaunchConfig> {
+    ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
         let session = self
             .state
             .sessions
@@ -351,15 +279,87 @@ impl Controller {
             .targets
             .get(&session.target_template_id)
             .context("session target template is missing")?;
-        let (mut launch, _, _) = worker_launch_config(
+        let subagent = crate::database::load_subagent(session_id)?;
+        // A sub-agent child shares its parent's container, so it works in the
+        // parent's workspace. The parent record is authoritative for that path.
+        let (workspace_session_id, workspace_container) = match subagent.as_ref() {
+            Some(child) => {
+                let parent = self
+                    .state
+                    .sessions
+                    .get(&child.parent_session_id)
+                    .context("sub-agent parent session is missing")?;
+                (parent.id.clone(), parent.container_workspace.clone())
+            }
+            None => (session_id.to_owned(), session.container_workspace.clone()),
+        };
+        let (mut launch, project_memory, target_profile_home) = worker_launch_config(
             session,
             profile,
             bundle,
             backend,
-            session_id,
-            session.container_workspace.as_deref(),
+            &workspace_session_id,
+            workspace_container.as_deref(),
             target,
         )?;
+        launch.subagent_tools =
+            subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        if let Some(subagent) = &subagent {
+            let parent = self
+                .state
+                .sessions
+                .get(&subagent.parent_session_id)
+                .context("sub-agent parent session is missing")?;
+            let parent_profile = self
+                .config
+                .profiles
+                .get(&parent.last_profile)
+                .context("sub-agent parent profile is missing")?;
+            let parent_target = self
+                .config
+                .targets
+                .get(&parent.target_template_id)
+                .context("sub-agent parent target template is missing")?;
+            let parent_locator = parent
+                .target
+                .as_ref()
+                .context("sub-agent parent has no live target")?;
+            let parent_backend = backend_locator(parent_locator, parent, &self.config)?;
+            let parent_bundle = parent
+                .project_directory
+                .is_none()
+                .then(|| self.config.bundles.get(&parent.bundle_id))
+                .flatten();
+            let (parent_launch, _, _) = worker_launch_config(
+                parent,
+                parent_profile,
+                parent_bundle,
+                &parent_backend,
+                &parent.id,
+                parent.container_workspace.as_deref(),
+                parent_target,
+            )?;
+            launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
+                parent_launch.cwd
+            } else {
+                parent_launch.cwd.join(&subagent.working_directory)
+            };
+            launch.additional_directories = parent_launch.additional_directories;
+        }
+        Ok((launch, project_memory, target_profile_home))
+    }
+
+    pub(in crate::controller) fn current_worker_launch_config(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+    ) -> Result<WorkerLaunchConfig> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        let (mut launch, _, _) = self.session_launch_config(session_id, backend)?;
         if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
                 && operation.destination_target.is_none()

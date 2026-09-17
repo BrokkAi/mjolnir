@@ -824,3 +824,40 @@ fn local_mount_source_must_be_an_existing_directory() {
         );
     }
 }
+
+/// A relaunch rewrites `launch.json`. It must carry the session's delegation
+/// choice, or the new worker never serves the sub-agent socket (#1067).
+#[test]
+fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
+    const MARKER: &str = "MJ_TEST_RELAUNCH_SUBAGENT_TOOLS_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_relaunch_config_keeps_the_sessions_subagent_tools",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let mut options = launch_options(Vec::new());
+    options.mjolnir_subagents = Some(true);
+    let id = controller
+        .register_session_with_resources("codex", "project", "podman", "delegating", options)
+        .unwrap();
+    let backend = crate::targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "container".into(),
+        workspace_storage: Default::default(),
+    };
+
+    let relaunch = controller
+        .current_worker_launch_config(&id, &backend)
+        .unwrap();
+
+    assert!(relaunch.subagent_tools);
+}
