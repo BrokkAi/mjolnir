@@ -28,6 +28,12 @@ pub enum BranchDisposition {
     /// Leave the branch in the repository. The default for every destroy,
     /// because the branch may hold work the user still wants.
     Keep,
+    /// Delete the branch only when every commit on it is reachable from some
+    /// other branch, local or remote-tracking, that is not a session branch.
+    /// Anything else keeps the branch, exactly as [`BranchDisposition::Keep`]
+    /// would. The archive job uses this so a branch whose work has landed
+    /// elsewhere does not pile up forever.
+    DeleteIfMerged,
 }
 
 impl Controller {

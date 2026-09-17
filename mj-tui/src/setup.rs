@@ -107,6 +107,9 @@ pub(crate) struct SetupDialog {
     /// The host-resolved values behind the blank fields of the build cache
     /// page being viewed, keyed by the settings they were resolved from.
     build_cache_preview: Option<BuildCachePreviewState>,
+    /// What the SessionWiki page's archive window would reclaim, keyed by the
+    /// number of days it was measured for.
+    archive_space_preview: Option<ArchiveSpacePreviewState>,
     preferred_width: u16,
     preferred_height: u16,
 }
@@ -117,6 +120,21 @@ struct BuildCachePreviewState {
     /// edit that changes them starts a new resolution.
     key: Value,
     result: BuildCachePreviewResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveSpacePreviewState {
+    /// The `archive_after_days` value the answer is about; `None` is the
+    /// "Never" case, which still reports the space sessions use today.
+    key: Option<u32>,
+    result: ArchiveSpacePreviewResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveSpacePreviewResult {
+    Resolving,
+    Ready(mj_core::state::ArchiveSpacePreview),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +249,12 @@ fn value_summary(
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
         Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path).to_owned()),
-        _ => schema::choice_label(&child_path, value),
+        // The archive window's live estimate carries the value itself, so it
+        // replaces the number as well as the "Never" placeholder.
+        _ => match automatic.filter(|_| key == "archive_after_days") {
+            Some(label) => label,
+            None => schema::choice_label(&child_path, value),
+        },
     };
     if !value.is_object()
         && !value.is_array()
@@ -374,6 +397,7 @@ impl SetupDialog {
             discovering: false,
             notice: None,
             build_cache_preview: None,
+            archive_space_preview: None,
             preferred_width: preferred.width,
             preferred_height: preferred.height,
         };
@@ -756,6 +780,97 @@ impl SetupDialog {
             },
         };
         Some(label)
+    }
+
+    /// The `archive_after_days` value the SessionWiki page is showing right
+    /// now: the text being typed when that editor is open, otherwise the
+    /// saved value. The outer `None` means no SessionWiki page is showing, so
+    /// there is nothing to estimate.
+    fn archive_after_days_page(&self) -> Option<Option<u32>> {
+        if !self.path.iter().map(String::as_str).eq(["sessionwiki"]) {
+            return None;
+        }
+        if let Some(editor) = self.editor.as_ref().filter(|editor| {
+            editor
+                .path
+                .last()
+                .is_some_and(|key| key == "archive_after_days")
+        }) {
+            // A half-typed or cleared number means "Never" until it parses.
+            return Some(editor.input.to_string().trim().parse::<u32>().ok());
+        }
+        // The draft keeps an edited number as text until it is saved, so both
+        // shapes have to read the same.
+        Some(match &self.draft["sessionwiki"]["archive_after_days"] {
+            Value::String(text) => text.trim().parse::<u32>().ok(),
+            value => value.as_u64().and_then(|days| u32::try_from(days).ok()),
+        })
+    }
+
+    /// Start measuring what the SessionWiki page's current archive window
+    /// would reclaim, unless that value is already measured or in flight.
+    fn preview_archive_space_action(&mut self) -> DashboardAction {
+        let Some(older_than_days) = self.archive_after_days_page() else {
+            return DashboardAction::None;
+        };
+        if self
+            .archive_space_preview
+            .as_ref()
+            .is_some_and(|preview| preview.key == older_than_days)
+        {
+            return DashboardAction::None;
+        }
+        self.archive_space_preview = Some(ArchiveSpacePreviewState {
+            key: older_than_days,
+            result: ArchiveSpacePreviewResult::Resolving,
+        });
+        DashboardAction::PreviewArchiveSpace {
+            generation: self.generation,
+            older_than_days,
+        }
+    }
+
+    /// What the SessionWiki page shows in the value column of "Archive after
+    /// (days)": the value, then the space sessions use today and what that
+    /// value would reclaim. Replaces the plain number, not just the placeholder.
+    fn archive_space_automatic_label(&self, field: &str) -> Option<String> {
+        if field != "archive_after_days" {
+            return None;
+        }
+        let key = self.archive_after_days_page()?;
+        let estimate = self.archive_space_estimate()?;
+        Some(match key {
+            None => estimate,
+            Some(days) => format!("{days} · {estimate}"),
+        })
+    }
+
+    /// The estimate for the archive window the SessionWiki page is showing,
+    /// without the value itself: under the open editor the value is the text
+    /// being typed, so repeating it would only add noise.
+    fn archive_space_estimate(&self) -> Option<String> {
+        let key = self.archive_after_days_page()?;
+        let preview = self.archive_space_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        Some(match &preview.result {
+            ArchiveSpacePreviewResult::Resolving => "Resolving…".to_owned(),
+            ArchiveSpacePreviewResult::Failed(_) => "Unknown".to_owned(),
+            ArchiveSpacePreviewResult::Ready(preview) => match key {
+                None => format!(
+                    "Never · sessions use {}",
+                    crate::widgets::format_resource_bytes(preview.bytes)
+                ),
+                Some(_) => format!(
+                    "would reclaim {} of {} ({} of {} sessions)",
+                    crate::widgets::format_resource_bytes(preview.reclaimable_bytes),
+                    crate::widgets::format_resource_bytes(preview.bytes),
+                    preview.reclaimable_sessions,
+                    preview.sessions
+                ),
+            },
+        })
     }
 
     fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
@@ -1319,6 +1434,9 @@ impl DashboardState {
         if action == DashboardAction::None {
             action = dialog.preview_build_cache_action();
         }
+        if action == DashboardAction::None {
+            action = dialog.preview_archive_space_action();
+        }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
         action
@@ -1365,6 +1483,40 @@ impl DashboardState {
             },
         });
         dialog.notice = Some(notice);
+        dialog.prepare();
+    }
+
+    /// Take the space an archive window would reclaim, dropping an answer the
+    /// user has already typed past.
+    pub fn archive_space_previewed(
+        &mut self,
+        generation: u64,
+        older_than_days: Option<u32>,
+        result: Result<mj_core::state::ArchiveSpacePreview, String>,
+    ) {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            return;
+        };
+        if dialog.generation != generation
+            || dialog
+                .archive_space_preview
+                .as_ref()
+                .is_none_or(|preview| preview.key != older_than_days)
+        {
+            return;
+        }
+        // The estimate itself is drawn beside the value; the notice line only
+        // carries a failure to measure.
+        if let Err(error) = &result {
+            dialog.notice = Some(format!("Could not measure what sessions use: {error}"));
+        }
+        dialog.archive_space_preview = Some(ArchiveSpacePreviewState {
+            key: older_than_days,
+            result: match result {
+                Ok(preview) => ArchiveSpacePreviewResult::Ready(preview),
+                Err(error) => ArchiveSpacePreviewResult::Failed(error),
+            },
+        });
         dialog.prepare();
     }
 
@@ -1642,6 +1794,20 @@ pub(crate) fn render_setup(
             EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
         }
+        // The archive window's estimate follows the number as it is typed, so
+        // it sits right under the input rather than on the notice line.
+        if editor
+            .path
+            .last()
+            .is_some_and(|key| key == "archive_after_days")
+            && body.height > 2
+            && let Some(estimate) = dialog.archive_space_estimate()
+        {
+            frame.render_widget(
+                Paragraph::new(estimate).style(theme::muted()),
+                Rect::new(body.x, body.y + 2, body.width, 1),
+            );
+        }
         initial = Field;
     } else {
         let rows = dialog
@@ -1679,7 +1845,9 @@ pub(crate) fn render_setup(
                             key,
                             value,
                             &dialog.draft,
-                            dialog.build_cache_automatic_label(key),
+                            dialog
+                                .build_cache_automatic_label(key)
+                                .or_else(|| dialog.archive_space_automatic_label(key)),
                         )
                     } else {
                         String::new()

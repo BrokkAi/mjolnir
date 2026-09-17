@@ -1293,3 +1293,118 @@ fn empty_archive_after_days_renders_as_never() {
         "Automatic / default"
     );
 }
+
+#[test]
+fn the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim() {
+    use mj_core::state::ArchiveSpacePreview;
+    let used = ArchiveSpacePreview {
+        sessions: 40,
+        bytes: 5_153_960_755,
+        reclaimable_sessions: 0,
+        reclaimable_bytes: 0,
+    };
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "sessionwiki")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+
+    // Entering the page measures what sessions use now, exactly once.
+    let DashboardAction::PreviewArchiveSpace {
+        generation,
+        older_than_days: None,
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("entering the page must ask for the space sessions use");
+    };
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Down)),
+        DashboardAction::None
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    let mut rendered = |dashboard: &mut DashboardState| {
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        buffer_lines(terminal.backend().buffer()).join("\n")
+    };
+    assert!(rendered(&mut dashboard).contains("Resolving…"));
+
+    dashboard.archive_space_previewed(generation, None, Ok(used.clone()));
+    let never = rendered(&mut dashboard);
+    assert!(
+        never.contains("Never · sessions use 4.8G"),
+        "the row must report the space sessions use:\n{never}"
+    );
+
+    // Typing a number asks again for that number, keystroke by keystroke.
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "archive_after_days")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('3'))),
+        DashboardAction::PreviewArchiveSpace {
+            generation,
+            older_than_days: Some(3),
+        }
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('0'))),
+        DashboardAction::PreviewArchiveSpace {
+            generation,
+            older_than_days: Some(30),
+        }
+    );
+
+    // The answer for the value already typed past is dropped.
+    dashboard.archive_space_previewed(
+        generation,
+        Some(3),
+        Ok(ArchiveSpacePreview {
+            reclaimable_sessions: 39,
+            reclaimable_bytes: 5_000_000_000,
+            ..used.clone()
+        }),
+    );
+    let stale = rendered(&mut dashboard);
+    assert!(
+        !stale.contains("39 sessions"),
+        "an answer for a value typed past must not be shown:\n{stale}"
+    );
+
+    dashboard.archive_space_previewed(
+        generation,
+        Some(30),
+        Ok(ArchiveSpacePreview {
+            reclaimable_sessions: 12,
+            reclaimable_bytes: 1_288_490_188,
+            ..used
+        }),
+    );
+    // The open editor covers the page, so while typing the estimate sits
+    // under the input, without repeating the number being typed; closing the
+    // editor puts the estimate, with the value, back in the row.
+    let editing = rendered(&mut dashboard);
+    assert!(
+        editing.contains("would reclaim 1.2G of 4.8G (12 of 40 sessions)")
+            && !editing.contains("30 · would reclaim"),
+        "the editor must show what the typed value would reclaim:\n{editing}"
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    let reclaim = rendered(&mut dashboard);
+    assert!(
+        reclaim.contains("30 · would reclaim 1.2G of 4.8G (12 of 40 sessions)"),
+        "the row must report what the saved value would reclaim:\n{reclaim}"
+    );
+}

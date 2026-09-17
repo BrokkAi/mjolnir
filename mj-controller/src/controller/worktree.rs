@@ -1709,6 +1709,48 @@ fn remove_managed_worktree_checkout(
     Ok(true)
 }
 
+/// Whether the session branch is contained in a branch that is not a Mjolnir
+/// session branch, so deleting it loses no commits. `Ok(None)` means the
+/// source repository is gone and there is nothing to answer about.
+///
+/// This is git's own meaning of "merged": the branch tip is an ancestor of
+/// another ref. A squash merge or a rebase rewrites the commits, so it does
+/// not count and the branch is kept.
+fn managed_branch_is_merged(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<Option<bool>> {
+    if !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
+        return Ok(None);
+    }
+    let branch_ref = format!("refs/heads/{}", worktree.branch);
+    let refs = managed_git_stdout(
+        executor,
+        &worktree.target,
+        &worktree.source_repository,
+        [
+            "for-each-ref",
+            "--contains",
+            &branch_ref,
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        "list the branches containing a managed worktree branch",
+    )?;
+    Ok(Some(refs.lines().any(containing_ref_is_not_a_session)))
+}
+
+/// A ref that proves the session branch's commits live somewhere else: any
+/// branch outside `refs/heads/mj/`, including a remote-tracking branch, since
+/// work merged upstream and fetched is merged. A remote's symbolic `HEAD` is
+/// not a branch of its own and never counts.
+fn containing_ref_is_not_a_session(reference: &str) -> bool {
+    let reference = reference.trim();
+    let remote_head = reference.starts_with("refs/remotes/") && reference.ends_with("/HEAD");
+    !reference.is_empty() && !reference.starts_with("refs/heads/mj/") && !remote_head
+}
+
 /// Remove a managed worktree's checkout, and its branch only when the caller
 /// asks for that. The branch can hold work the user still wants, so deleting
 /// it is always an explicit decision; see [`BranchDisposition`].
@@ -1731,23 +1773,43 @@ pub(super) fn cleanup_managed_worktree(
         "check managed worktree branch",
     );
     let output = executor.execute(&check)?;
-    match output.status {
-        0 => {
-            execute_checked(
-                executor,
-                managed_git_command(
-                    &worktree.target,
-                    &worktree.source_repository,
-                    ["branch", "-D", "--", &worktree.branch],
-                    "delete managed raw-session branch",
-                ),
-            )?;
-        }
-        1 => {}
+    let present = match output.status {
+        0 => true,
+        1 => false,
         status => bail!(
             "check managed worktree branch failed with status {status}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ),
+    };
+    let delete = match branch {
+        BranchDisposition::Delete => present,
+        BranchDisposition::DeleteIfMerged if present => {
+            let merged = managed_branch_is_merged(executor, worktree)?;
+            let delete = merged == Some(true);
+            tracing::info!(
+                branch = %worktree.branch,
+                delete,
+                reason = match merged {
+                    Some(true) => "another branch already contains its commits",
+                    Some(false) => "it holds commits no other branch contains",
+                    None => "its repository is gone",
+                },
+                "archiving decided what to do with a session branch"
+            );
+            delete
+        }
+        BranchDisposition::DeleteIfMerged | BranchDisposition::Keep => false,
+    };
+    if delete {
+        execute_checked(
+            executor,
+            managed_git_command(
+                &worktree.target,
+                &worktree.source_repository,
+                ["branch", "-D", "--", &worktree.branch],
+                "delete managed raw-session branch",
+            ),
+        )?;
     }
     remove_empty_managed_worktree_directories(executor, worktree)
 }

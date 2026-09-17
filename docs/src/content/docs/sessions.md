@@ -235,6 +235,12 @@ session is kept before Mjolnir's own copy is removed:
 archive_after_days = 30
 ```
 
+The Setup screen's SessionWiki page shows how much disk your sessions use and,
+while you type a value for **Archive after (days)**, an estimate of what that
+value would reclaim. The estimate covers checkpoints and image attachments, and
+it counts every aged stopped session whether or not the index has caught up
+with it yet, so it describes the policy rather than the next hourly pass.
+
 ### What gets indexed, and when
 
 A running session is indexed from the transcript the daemon holds, and a stopped
@@ -296,8 +302,11 @@ restored.
 With `archive_after_days = N`, the hourly job removes Mjolnir's own copy of a
 stopped session older than N days, but only after confirming SessionWiki holds
 its conversation. It deletes the session record, the checkpoint archive, and the
-session's image attachments. It keeps the `mj/<session id>` branch in the
-repository, so any work the session committed is still there. A session with a
+session's image attachments. It deletes the `mj/<session id>` branch only when
+every commit on it is already on another branch, local or remote-tracking, that
+is not itself a session branch; otherwise the branch stays, so any work the
+session committed is still there. A branch whose work was squash-merged or
+rebased onto another branch looks unmerged to git and is kept. A session with a
 sub-agent child that is not ready to be archived waits for the next pass. Leave
 `archive_after_days` unset to keep every session forever.
 

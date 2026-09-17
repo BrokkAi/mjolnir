@@ -1162,6 +1162,86 @@ fn ancestor_depth(
     depth
 }
 
+/// How much disk Mjolnir's own copies of sessions use, and how much an
+/// `archive_after_days` value would free. "Mjolnir's own copy" is the
+/// checkpoint archive plus the session's image attachments; the conversation
+/// itself lives in the SessionWiki index and is not counted, because archiving
+/// keeps it. The type lives in `mj-core` so the terminal UI can name it too.
+pub use mj_core::state::ArchiveSpacePreview;
+
+/// The space every session uses now and, when `older_than_days` is set, the
+/// space archiving after that many days would reclaim.
+///
+/// The reclaim figure uses the archive job's own selection rule but not its
+/// "is it indexed yet" gate: that gate depends on how far the hourly index
+/// sync has got, so applying it would make the estimate swing between zero and
+/// the true value while the first index builds. This answers what the policy
+/// would reclaim, not what the next tick happens to reclaim.
+///
+/// Walks the filesystem, so callers on the async runtime must run it in a
+/// blocking task.
+pub fn archive_space_preview(older_than_days: Option<u32>) -> Result<ArchiveSpacePreview> {
+    let controller =
+        Controller::load().context("load the session records to size their storage")?;
+    Ok(archive_space_over(
+        &mj_core::config::sessions_dir(),
+        &controller.state.sessions,
+        &controller.state.subagents,
+        Utc::now(),
+        older_than_days,
+    ))
+}
+
+/// The sizing itself, over given records and a given sessions directory, so it
+/// can be tested without the live data directory.
+fn archive_space_over(
+    sessions_root: &Path,
+    sessions: &BTreeMap<String, SessionRecord>,
+    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+    now: DateTime<Utc>,
+    older_than_days: Option<u32>,
+) -> ArchiveSpacePreview {
+    let mut preview = ArchiveSpacePreview {
+        sessions: sessions.len(),
+        bytes: sessions
+            .iter()
+            .map(|(session_id, record)| session_bytes(sessions_root, session_id, record))
+            .sum(),
+        reclaimable_sessions: 0,
+        reclaimable_bytes: 0,
+    };
+    if let Some(days) = older_than_days {
+        let aged = sessions_ready_to_archive(sessions, subagents, now, days);
+        preview.reclaimable_sessions = aged.len();
+        preview.reclaimable_bytes = aged
+            .iter()
+            .filter_map(|session_id| {
+                sessions
+                    .get(session_id)
+                    .map(|record| session_bytes(sessions_root, session_id, record))
+            })
+            .sum();
+    }
+    preview
+}
+
+/// What archiving one session would free: its checkpoint archive and its
+/// attachments. Anything already missing counts as zero.
+fn session_bytes(sessions_root: &Path, session_id: &str, record: &SessionRecord) -> u64 {
+    let checkpoint = record
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| std::fs::metadata(&checkpoint.archive_path).ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let attachments = sessions_root
+        .join(session_id)
+        .join(mj_core::attachment::ATTACHMENT_DIR);
+    let attachments = crate::import::claude::directory_size(&attachments).unwrap_or(0);
+    checkpoint.saturating_add(attachments)
+}
+
 /// Which of `session_ids` the index holds under this instance's own key, with
 /// at least one message and not already archived.
 ///
@@ -1953,6 +2033,84 @@ mod tests {
             now,
             3,
         )
+    }
+
+    /// A session whose checkpoint archive and attachments sit under `root`.
+    fn sized_session(
+        root: &Path,
+        session_id: &str,
+        updated_at: &str,
+        checkpoint_bytes: usize,
+        attachment_bytes: &[usize],
+    ) -> SessionRecord {
+        let archive_path = root.join(format!("{session_id}.hel.zip"));
+        std::fs::write(&archive_path, vec![b'c'; checkpoint_bytes]).unwrap();
+        if !attachment_bytes.is_empty() {
+            let attachments = root
+                .join(session_id)
+                .join(mj_core::attachment::ATTACHMENT_DIR);
+            std::fs::create_dir_all(&attachments).unwrap();
+            for (index, size) in attachment_bytes.iter().enumerate() {
+                std::fs::write(attachments.join(format!("{index}.png")), vec![b'a'; *size])
+                    .unwrap();
+            }
+        }
+        SessionRecord {
+            checkpoint: Some(mj_core::state::CheckpointMetadata {
+                archive_path,
+                sha256: "0".repeat(64),
+                created_at: updated_at.into(),
+                event_frontier: 1,
+            }),
+            ..record(
+                session_id,
+                mj_core::state::SessionState::Stopped,
+                updated_at,
+            )
+        }
+    }
+
+    #[test]
+    fn the_space_preview_sizes_every_session_and_only_the_aged_ones_as_reclaimable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let sessions: BTreeMap<String, SessionRecord> = [
+            sized_session(root, "old-stopped", "2026-09-01T00:00:00Z", 1000, &[10, 20]),
+            sized_session(root, "just-stopped", "2026-09-09T00:00:00Z", 500, &[]),
+            // A record whose checkpoint file is already gone counts as zero
+            // rather than failing the whole estimate.
+            SessionRecord {
+                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                    archive_path: root.join("missing.hel.zip"),
+                    sha256: "0".repeat(64),
+                    created_at: "2026-09-01T00:00:00Z".into(),
+                    event_frontier: 1,
+                }),
+                ..record(
+                    "lost-checkpoint",
+                    mj_core::state::SessionState::Stopped,
+                    "2026-09-01T00:00:00Z",
+                )
+            },
+        ]
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect();
+        let now = parse_time("2026-09-10T00:00:00Z").unwrap();
+
+        let all = archive_space_over(root, &sessions, &BTreeMap::new(), now, None);
+        assert_eq!(all.sessions, 3);
+        assert_eq!(all.bytes, 1530);
+        assert_eq!(all.reclaimable_sessions, 0);
+        assert_eq!(all.reclaimable_bytes, 0);
+
+        let aged = archive_space_over(root, &sessions, &BTreeMap::new(), now, Some(3));
+        assert_eq!(aged.bytes, 1530);
+        assert_eq!(
+            (aged.reclaimable_sessions, aged.reclaimable_bytes),
+            (2, 1030),
+            "only the sessions the job would archive count, attachments included"
+        );
     }
 
     #[test]

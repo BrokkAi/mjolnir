@@ -929,6 +929,21 @@ pub struct SessionBuildCache {
     pub target_root: Option<PathBuf>,
 }
 
+/// How much disk Mjolnir's own copies of sessions use, and how much an
+/// `archive_after_days` value would free. Settings shows this on the
+/// SessionWiki page so the effect of a value is visible before it is saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveSpacePreview {
+    /// Every session record Mjolnir holds, archived or not.
+    pub sessions: usize,
+    /// What those sessions' checkpoints and attachments occupy.
+    pub bytes: u64,
+    /// The sessions an `archive_after_days` value would catch, and their
+    /// share of `bytes`. Both are zero when no value is set.
+    pub reclaimable_sessions: usize,
+    pub reclaimable_bytes: u64,
+}
+
 /// What a container target's host resolves for its blank build cache
 /// settings right now. Settings shows this beside each "automatic" field so
 /// the values a session would actually run with are visible before one starts.

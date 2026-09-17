@@ -1796,3 +1796,99 @@ fn managed_worktree_ssh_commands_preserve_hostile_path_boundaries() {
         "'git' '-C' '/srv/project with '\\'' quote' 'worktree' 'prune'"
     );
 }
+
+/// Whether the repository still has the session's branch.
+fn branch_exists(repository: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["show-ref", "--verify", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// Commit one file on the session's branch, inside its own checkout.
+fn commit_on_session_branch(worktree: &ManagedWorktree) {
+    std::fs::write(worktree.worktree_root.join("session.txt"), "session\n").unwrap();
+    test_git(&worktree.worktree_root, &["add", "."]);
+    test_git(&worktree.worktree_root, &["commit", "-m", "session work"]);
+}
+
+#[test]
+fn archiving_deletes_a_branch_another_branch_contains() {
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let session = managed_worktree_session(repository.path(), session_id);
+    let worktree = session.managed_worktree.unwrap();
+    commit_on_session_branch(&worktree);
+    test_git(
+        repository.path(),
+        &["merge", "--no-ff", "-m", "merge session", &worktree.branch],
+    );
+
+    cleanup_managed_worktree(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::DeleteIfMerged,
+    )
+    .unwrap();
+
+    assert!(
+        !branch_exists(repository.path(), &worktree.branch),
+        "master contains every commit on the branch, so archiving may delete it"
+    );
+}
+
+#[test]
+fn archiving_keeps_a_branch_holding_unmerged_commits() {
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let session = managed_worktree_session(repository.path(), session_id);
+    let worktree = session.managed_worktree.unwrap();
+    commit_on_session_branch(&worktree);
+
+    cleanup_managed_worktree(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::DeleteIfMerged,
+    )
+    .unwrap();
+
+    assert!(
+        branch_exists(repository.path(), &worktree.branch),
+        "the branch holds work no other branch has, so archiving must keep it"
+    );
+}
+
+#[test]
+fn archiving_keeps_a_branch_only_another_session_branch_contains() {
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let session = managed_worktree_session(repository.path(), session_id);
+    let worktree = session.managed_worktree.unwrap();
+    commit_on_session_branch(&worktree);
+    // A sibling session branched from this one holds the same commits, but it
+    // is just as disposable, so it proves nothing about the work surviving.
+    test_git(
+        repository.path(),
+        &[
+            "branch",
+            "mj/fedcba9876543210fedcba9876543210",
+            &worktree.branch,
+        ],
+    );
+
+    cleanup_managed_worktree(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::DeleteIfMerged,
+    )
+    .unwrap();
+
+    assert!(
+        branch_exists(repository.path(), &worktree.branch),
+        "only another session branch contains these commits, so archiving must keep it"
+    );
+}
