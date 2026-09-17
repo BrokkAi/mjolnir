@@ -382,12 +382,14 @@ pub fn materialized_session_from_canonical(
                 CanonicalTranscriptBody::User { content } => TranscriptBody::User {
                     content: content.clone(),
                 },
+                // Chunks stored before streamed text was merged on the way in
+                // arrive one per token; collapse them as they come back.
                 CanonicalTranscriptBody::Agent { chunks, streaming } => TranscriptBody::Agent {
-                    chunks: chunks.clone(),
+                    chunks: coalesced_chunks(chunks),
                     streaming: *streaming,
                 },
                 CanonicalTranscriptBody::Thought { chunks, streaming } => TranscriptBody::Thought {
-                    chunks: chunks.clone(),
+                    chunks: coalesced_chunks(chunks),
                     streaming: *streaming,
                 },
                 CanonicalTranscriptBody::Tool {
@@ -481,4 +483,11 @@ pub fn materialized_queued_prompts_from_canonical(
             accepted_ordinal: None,
         })
         .collect()
+}
+
+/// Clone stored ACP content chunks with runs of streamed text merged.
+fn coalesced_chunks(chunks: &[Value]) -> Vec<Value> {
+    let mut chunks = chunks.to_vec();
+    coalesce_content_chunks(&mut chunks);
+    chunks
 }

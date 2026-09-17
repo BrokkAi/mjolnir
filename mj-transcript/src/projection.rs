@@ -44,6 +44,7 @@ use mj_core::state::{
     provisional_session_title,
 };
 use mj_core::storage::{MaterializedSessionMutation, ProjectionIntegrityError, TranscriptMutation};
+use mj_core::transcript::{coalesce_content_chunks, push_content_chunk};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedRelayEvent {

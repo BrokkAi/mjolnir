@@ -251,11 +251,11 @@ pub(super) fn push_stream_chunk(
         let mut item = TranscriptItem::clone(existing);
         match &mut item.body {
             TranscriptBody::Agent { chunks, streaming } if agent => {
-                chunks.push(serde_json::to_value(chunk)?);
+                push_content_chunk(chunks, serde_json::to_value(chunk)?);
                 *streaming = running;
             }
             TranscriptBody::Thought { chunks, streaming } if !agent => {
-                chunks.push(serde_json::to_value(chunk)?);
+                push_content_chunk(chunks, serde_json::to_value(chunk)?);
                 *streaming = running;
             }
             _ => bail!(
@@ -286,10 +286,10 @@ pub(super) fn push_stream_chunk(
             let mut item = TranscriptItem::clone(last);
             match &mut item.body {
                 TranscriptBody::Agent { chunks, .. } if agent => {
-                    chunks.push(serde_json::to_value(chunk)?);
+                    push_content_chunk(chunks, serde_json::to_value(chunk)?);
                 }
                 TranscriptBody::Thought { chunks, .. } if !agent => {
-                    chunks.push(serde_json::to_value(chunk)?);
+                    push_content_chunk(chunks, serde_json::to_value(chunk)?);
                 }
                 _ => unreachable!("same_kind matched the item's body above"),
             }

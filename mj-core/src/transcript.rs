@@ -116,6 +116,95 @@ pub enum TranscriptBody {
     },
 }
 
+/// Append one ACP `ContentChunk` value to a transcript item's chunk list,
+/// merging it into the previous chunk when the two are the same text stream.
+///
+/// Agents stream text one token at a time, so a long turn arrives as
+/// thousands of chunks that differ only in `content.text`. Stored separately
+/// they cost far more memory than the text they carry: each chunk is its own
+/// pair of nested `serde_json::Value` maps. Merging them keeps one chunk per
+/// run of text, which is what every reader of `chunks` already reconstructs.
+///
+/// Two chunks merge only when nothing but the text differs: both are objects
+/// whose `content.type` is `"text"` with a string `content.text`, their
+/// `messageId` values are equal (both absent counts as equal), and every
+/// other top-level key (such as `meta`) and every other `content` key (such
+/// as `annotations`) is identical. Anything else is pushed as its own chunk.
+pub fn push_content_chunk(chunks: &mut Vec<serde_json::Value>, chunk: serde_json::Value) {
+    if chunks
+        .last()
+        .is_some_and(|last| text_chunks_mergeable(last, &chunk))
+    {
+        let addition = chunk
+            .get("content")
+            .and_then(|content| content.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(serde_json::Value::Object(last)) = chunks.last_mut()
+            && let Some(serde_json::Value::Object(content)) = last.get_mut("content")
+            && let Some(serde_json::Value::String(text)) = content.get_mut("text")
+        {
+            text.push_str(&addition);
+            return;
+        }
+    }
+    chunks.push(chunk);
+}
+
+/// Collapse runs of per-token text chunks that were stored before they were
+/// merged on the way in. Rebuilds the list through [`push_content_chunk`], so
+/// it applies exactly the same merge rule and leaves chunk boundaries that
+/// carry real differences (a new message ID, non-text content, differing
+/// metadata) where they are.
+pub fn coalesce_content_chunks(chunks: &mut Vec<serde_json::Value>) {
+    if chunks.len() < 2 {
+        return;
+    }
+    let mut merged = Vec::with_capacity(chunks.len());
+    for chunk in std::mem::take(chunks) {
+        push_content_chunk(&mut merged, chunk);
+    }
+    merged.shrink_to_fit();
+    *chunks = merged;
+}
+
+/// Whether `next` carries only more text for the same stream as `last`, so
+/// the two can share one chunk. The single definition of the merge rule used
+/// by both [`push_content_chunk`] and [`coalesce_content_chunks`].
+fn text_chunks_mergeable(last: &serde_json::Value, next: &serde_json::Value) -> bool {
+    let (serde_json::Value::Object(last), serde_json::Value::Object(next)) = (last, next) else {
+        return false;
+    };
+    let (
+        Some(serde_json::Value::Object(last_content)),
+        Some(serde_json::Value::Object(next_content)),
+    ) = (last.get("content"), next.get("content"))
+    else {
+        return false;
+    };
+    let is_text = |content: &serde_json::Map<String, serde_json::Value>| {
+        content.get("type").and_then(serde_json::Value::as_str) == Some("text")
+            && content.get("text").is_some_and(serde_json::Value::is_string)
+    };
+    if !is_text(last_content) || !is_text(next_content) {
+        return false;
+    }
+    // Every other top-level key, `messageId` and `meta` included, must match.
+    if last.len() != next.len()
+        || !last
+            .iter()
+            .all(|(key, value)| key == "content" || next.get(key) == Some(value))
+    {
+        return false;
+    }
+    // ... as must every other content key, such as `annotations`.
+    last_content.len() == next_content.len()
+        && last_content
+            .iter()
+            .all(|(key, value)| key == "text" || next_content.get(key) == Some(value))
+}
+
 /// What one client-run terminal produced, as hel recorded it when the child
 /// was reaped. `exit_code` and `signal` mirror ACP `TerminalExitStatus`; both
 /// are `None` when the terminal was released before a status was observed.
@@ -725,4 +814,135 @@ pub enum PlanStatus {
 pub struct PlanLine {
     pub text: String,
     pub status: PlanStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn text_chunk(text: &str, message_id: Option<&str>) -> serde_json::Value {
+        match message_id {
+            Some(id) => json!({"content": {"type": "text", "text": text}, "messageId": id}),
+            None => json!({"content": {"type": "text", "text": text}}),
+        }
+    }
+
+    #[test]
+    fn push_content_chunk_merges_adjacent_text_for_the_same_message_id() {
+        let mut chunks = vec![text_chunk("The", Some("m1"))];
+        push_content_chunk(&mut chunks, text_chunk(" quick", Some("m1")));
+        push_content_chunk(&mut chunks, text_chunk(" fox", Some("m1")));
+        assert_eq!(chunks, vec![text_chunk("The quick fox", Some("m1"))]);
+    }
+
+    #[test]
+    fn push_content_chunk_merges_adjacent_text_without_message_ids() {
+        let mut chunks = vec![text_chunk("one", None)];
+        push_content_chunk(&mut chunks, text_chunk(" two", None));
+        assert_eq!(chunks, vec![text_chunk("one two", None)]);
+    }
+
+    #[test]
+    fn push_content_chunk_keeps_chunks_from_different_message_ids_apart() {
+        let mut chunks = vec![text_chunk("first", Some("m1"))];
+        push_content_chunk(&mut chunks, text_chunk("second", Some("m2")));
+        push_content_chunk(&mut chunks, text_chunk("third", None));
+        assert_eq!(
+            chunks,
+            vec![
+                text_chunk("first", Some("m1")),
+                text_chunk("second", Some("m2")),
+                text_chunk("third", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_content_chunk_keeps_non_text_content_separate() {
+        let image = json!({"content": {"type": "image", "data": "abc", "mimeType": "image/png"}});
+        let mut chunks = vec![text_chunk("before", None)];
+        push_content_chunk(&mut chunks, image.clone());
+        push_content_chunk(&mut chunks, image.clone());
+        push_content_chunk(&mut chunks, text_chunk("after", None));
+        assert_eq!(
+            chunks,
+            vec![
+                text_chunk("before", None),
+                image.clone(),
+                image,
+                text_chunk("after", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_content_chunk_keeps_chunks_with_differing_metadata_apart() {
+        let mut chunks =
+            vec![json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}})];
+        push_content_chunk(
+            &mut chunks,
+            json!({"content": {"type": "text", "text": "b"}, "meta": {"source": "two"}}),
+        );
+        push_content_chunk(
+            &mut chunks,
+            json!({"content": {"type": "text", "text": "c"}, "meta": {"source": "two"}}),
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}}),
+                json!({"content": {"type": "text", "text": "bc"}, "meta": {"source": "two"}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_content_chunk_keeps_chunks_with_differing_annotations_apart() {
+        let mut chunks = vec![
+            json!({"content": {"type": "text", "text": "a", "annotations": {"audience": ["user"]}}}),
+        ];
+        push_content_chunk(
+            &mut chunks,
+            json!({"content": {"type": "text", "text": "b"}}),
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                json!({"content": {"type": "text", "text": "a", "annotations": {"audience": ["user"]}}}),
+                json!({"content": {"type": "text", "text": "b"}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_content_chunks_collapses_runs_and_keeps_segment_boundaries() {
+        let mut chunks = vec![
+            text_chunk("He", Some("m1")),
+            text_chunk("llo", Some("m1")),
+            text_chunk("!", Some("m1")),
+            text_chunk("next", Some("m2")),
+            text_chunk(" turn", Some("m2")),
+        ];
+        coalesce_content_chunks(&mut chunks);
+        assert_eq!(
+            chunks,
+            vec![
+                text_chunk("Hello!", Some("m1")),
+                text_chunk("next turn", Some("m2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_content_chunks_leaves_unmergeable_chunks_alone() {
+        let original = vec![
+            text_chunk("a", Some("m1")),
+            text_chunk("b", Some("m2")),
+            json!({"content": {"type": "image", "data": "x", "mimeType": "image/png"}}),
+        ];
+        let mut chunks = original.clone();
+        coalesce_content_chunks(&mut chunks);
+        assert_eq!(chunks, original);
+    }
 }

@@ -2305,3 +2305,63 @@ fn appending_a_chunk_replaces_only_the_streaming_tail_item() {
     assert_eq!(agent_text(&published.transcript[1]), "hel");
     assert_eq!(agent_text(&session.transcript[1]), "hello");
 }
+
+#[test]
+fn streamed_text_for_one_message_id_becomes_a_single_chunk() {
+    let mut session = MaterializedSession::empty("session-1");
+    session.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    for token in ["think", "ing ", "it ", "through"] {
+        apply_observation(
+            &mut session,
+            RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::AgentThoughtChunk(
+                    agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                        TextContent::new(token),
+                    ))
+                    .message_id("msg-1"),
+                )),
+            },
+        );
+    }
+    for token in ["here ", "is ", "the ", "answer"] {
+        apply_observation(
+            &mut session,
+            RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::AgentMessageChunk(
+                    agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                        TextContent::new(token),
+                    ))
+                    .message_id("msg-1"),
+                )),
+            },
+        );
+    }
+
+    let thought = session
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == "thought:msg-1")
+        .expect("thought recorded");
+    let TranscriptBody::Thought { chunks, .. } = &thought.body else {
+        panic!("expected a thought body: {:?}", thought.body);
+    };
+    assert_eq!(chunks.len(), 1, "chunks: {chunks:?}");
+    assert_eq!(
+        crate::transcript::materialized_chunks_text(chunks),
+        "thinking it through"
+    );
+
+    let agent = session
+        .transcript
+        .iter()
+        .find(|item| item.stable_id == "agent:msg-1")
+        .expect("agent message recorded");
+    let TranscriptBody::Agent { chunks, .. } = &agent.body else {
+        panic!("expected an agent body: {:?}", agent.body);
+    };
+    assert_eq!(chunks.len(), 1, "chunks: {chunks:?}");
+    assert_eq!(
+        crate::transcript::materialized_chunks_text(chunks),
+        "here is the answer"
+    );
+}

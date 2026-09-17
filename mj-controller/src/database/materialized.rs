@@ -432,9 +432,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
                     latest_content_event_ordinal,
                     created_at_ms,
                     last_changed_at_ms,
-                    body: serde_json::from_str(&body_json).with_context(|| {
-                        format!("parse materialized transcript body for session {session_id}")
-                    })?,
+                    body: decode_transcript_body(&body_json, session_id)?,
                 }))
             },
         )
@@ -930,9 +928,7 @@ pub(super) fn read_materialized_transcript(
                     latest_content_event_ordinal,
                     created_at_ms,
                     last_changed_at_ms,
-                    body: serde_json::from_str(&body_json).with_context(|| {
-                        format!("parse materialized transcript body for session {session_id}")
-                    })?,
+                    body: decode_transcript_body(&body_json, session_id)?,
                 }))
             },
         )
@@ -1433,4 +1429,21 @@ pub(super) fn advance_viewed_through_event_ordinal_to(
     )?;
     tx.commit()?;
     Ok(receipt)
+}
+
+/// Decode a stored transcript body, merging runs of streamed text chunks.
+///
+/// Rows written before streamed text was merged on the way in hold one chunk
+/// per token, which costs far more memory decoded than the text it carries.
+/// Collapsing them here shrinks long sessions without rewriting stored JSON.
+fn decode_transcript_body(body_json: &str, session_id: &str) -> Result<TranscriptBody> {
+    let mut body: TranscriptBody = serde_json::from_str(body_json)
+        .with_context(|| format!("parse materialized transcript body for session {session_id}"))?;
+    match &mut body {
+        TranscriptBody::Agent { chunks, .. } | TranscriptBody::Thought { chunks, .. } => {
+            mj_core::transcript::coalesce_content_chunks(chunks);
+        }
+        _ => {}
+    }
+    Ok(body)
 }
