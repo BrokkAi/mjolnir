@@ -1,5 +1,6 @@
 //! Session-private immutable image blobs. Internal image references are resolved
 //! only at the ACP boundary; image bytes never belong in durable relay commands.
+use crate::hex::lower_hex;
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -29,7 +30,7 @@ pub struct AttachmentRef {
 impl AttachmentRef {
     pub fn new(bytes: &[u8], mime_type: String, width: u32, height: u32) -> Result<Self> {
         let reference = Self {
-            sha256: format!("{:x}", Sha256::digest(bytes)),
+            sha256: lower_hex(Sha256::digest(bytes)),
             mime_type,
             size: bytes.len(),
             width,
@@ -69,7 +70,7 @@ impl AttachmentRef {
     pub fn verify(&self, bytes: &[u8]) -> Result<()> {
         self.validate()?;
         ensure!(
-            bytes.len() == self.size && format!("{:x}", Sha256::digest(bytes)) == self.sha256,
+            bytes.len() == self.size && lower_hex(Sha256::digest(bytes)) == self.sha256,
             "attachment data does not match its digest or size"
         );
         let correct_format = match self.mime_type.as_str() {
@@ -306,7 +307,7 @@ impl AttachmentStore {
             );
             let data = fs::read(entry.path())?;
             ensure!(
-                format!("{:x}", Sha256::digest(&data)) == digest,
+                lower_hex(Sha256::digest(&data)) == digest,
                 "corrupt attachment in checkpoint"
             );
             artifacts.push(crate::archive::NativeArtifact {
@@ -333,7 +334,7 @@ impl AttachmentStore {
         ensure!(
             bytes.len() <= MAX_IMAGE_BYTES
                 && !bytes.is_empty()
-                && format!("{:x}", Sha256::digest(bytes)) == digest,
+                && lower_hex(Sha256::digest(bytes)) == digest,
             "archived attachment failed integrity check"
         );
         fs::create_dir_all(&self.root)?;

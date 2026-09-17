@@ -458,17 +458,7 @@ pub fn new_command_id(prefix: &str) -> Result<String> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random)
         .map_err(|error| anyhow::anyhow!("generate command ID: {error}"))?;
-    Ok(format!("{prefix}-{}", hex(&random)))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    output
+    Ok(format!("{prefix}-{}", mj_core::hex::lower_hex(random)))
 }
 
 /// A stopped session and a manager that resolves its live replacement.

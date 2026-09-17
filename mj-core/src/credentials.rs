@@ -15,6 +15,7 @@
 //! never enter the durable event stream or a checkpoint archive. Fingerprints
 //! and freshness timestamps are not secret and may appear in logs.
 
+use crate::hex::lower_hex;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,7 +42,7 @@ pub const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn credential_fingerprint(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    lower_hex(Sha256::digest(bytes))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

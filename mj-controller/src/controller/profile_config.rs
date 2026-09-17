@@ -1,5 +1,6 @@
 //! Automatically populated, persistent profile capabilities.
 
+use mj_core::hex::lower_hex;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -139,7 +140,7 @@ fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>)
             .install_id
             .as_bytes(),
     );
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(lower_hex(hash.finalize()))
 }
 
 fn discover_blocking(

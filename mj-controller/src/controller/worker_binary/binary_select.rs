@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 /// Linux appends " (deleted)" to `/proc/<pid>/exe` for a removed image. That
 /// marker belongs in a message but never in a decision, which `is_file` makes.
@@ -140,7 +141,7 @@ pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) ->
                 destination.display()
             )
         })?;
-        if format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256) {
+        if lower_hex(Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_sha256) {
             return Ok(destination);
         }
         bail!(
@@ -156,7 +157,7 @@ pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) ->
         .send()?
         .error_for_status()?
         .bytes()?;
-    let actual = format!("{:x}", Sha256::digest(&bytes));
+    let actual = lower_hex(Sha256::digest(&bytes));
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         bail!("downloaded worker checksum mismatch: expected {expected_sha256}, got {actual}");
     }

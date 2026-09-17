@@ -10,6 +10,7 @@
 //! print the command, because a live `cargo install` rebuild or a nested
 //! `npx` run is not something to start from inside mj.
 
+use mj_core::hex::lower_hex;
 use std::ffi::OsString;
 use std::io::{self, BufRead, Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -805,7 +806,7 @@ async fn verify_checksum(update: &UpdateInfo, archive: &[u8]) -> Result<()> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    lower_hex(hasher.finalize())
 }
 
 /// Extract the complete application bundle before changing any installed file.

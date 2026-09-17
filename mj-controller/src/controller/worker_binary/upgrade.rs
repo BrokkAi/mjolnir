@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 /// Replace `{worker_root}/hel` with the controller's current worker binary.
 ///
@@ -335,7 +336,7 @@ pub(super) fn worker_launch_refresh_plan(
     let installed_arg = targets::join_remote_command(std::slice::from_ref(&installed));
     let script = format!("umask 077; cat > {staged_arg} && mv -f -- {staged_arg} {installed_arg}");
     let body = serde_json::to_vec_pretty(launch).context("serialize worker launch config")?;
-    let expected_sha256 = format!("{:x}", Sha256::digest(&body));
+    let expected_sha256 = lower_hex(Sha256::digest(&body));
     let replace = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
         .purpose("replace stale Mjolnir worker launch config")
         .with_sensitive_stdin(body);

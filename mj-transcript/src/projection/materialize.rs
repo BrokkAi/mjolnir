@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::hex::lower_hex;
 
 /// Convert a transcript projection into the controller's canonical logical
 /// session. The chat view and the native importers both build [`ChatEntry`]
@@ -162,7 +163,7 @@ pub fn materialized_session_from_entries(
         digest.update(b"hel-imported-transcript-frontier-v1\0");
         digest.update(session_id.as_bytes());
         digest.update(latest_seq.to_le_bytes());
-        format!("{:x}", digest.finalize())
+        lower_hex(digest.finalize())
     };
     MaterializedSession {
         session_id: session_id.to_owned(),

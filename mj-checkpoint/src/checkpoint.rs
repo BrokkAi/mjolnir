@@ -14,6 +14,7 @@ pub use harness_paths::*;
 pub use native_scan::*;
 pub use restore::*;
 
+use mj_core::hex::lower_hex;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
@@ -444,7 +445,7 @@ pub fn checkpoint_sha256(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(lower_hex(digest.finalize()))
 }
 
 #[cfg(test)]

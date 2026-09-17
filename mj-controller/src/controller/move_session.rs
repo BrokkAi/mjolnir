@@ -4,6 +4,7 @@
 mod tests;
 
 use anyhow::{Context, Result, bail, ensure};
+use mj_core::hex::lower_hex;
 use sha2::{Digest, Sha256};
 
 use super::{Controller, SessionResumeOptions, now};
@@ -127,7 +128,7 @@ pub async fn refresh_move_source(
 }
 
 fn digest(value: &impl serde::Serialize) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+    Ok(lower_hex(Sha256::digest(serde_json::to_vec(value)?)))
 }
 
 struct MovePhaseTimer<'a> {

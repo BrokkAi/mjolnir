@@ -1,5 +1,6 @@
 //! Best-effort host-side Git object caches for container-backed sessions.
 
+use mj_core::hex::lower_hex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -285,7 +286,7 @@ fn repository_cache_key(source: &str) -> Result<String> {
         repository.owner.to_ascii_lowercase(),
         repository.repository.to_ascii_lowercase()
     );
-    Ok(format!("{:x}", Sha256::digest(identity.as_bytes())))
+    Ok(lower_hex(Sha256::digest(identity.as_bytes())))
 }
 
 const PREPARE_REPOSITORY_SCRIPT: &str = r#"
