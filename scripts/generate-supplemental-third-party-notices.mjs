@@ -40,6 +40,10 @@ const auditedLinksPackages = new Set([
   // script does not link or ship a native library.
   "rayon-core",
   "ring",
+  // rusqlite selects sqlite-wasm-rs only for wasm32-unknown-unknown. Official
+  // Mjolnir archives target native platforms, so its compiled SQLite payload
+  // is not present in any release artifact.
+  "sqlite-wasm-rs",
   // tree-sitter compiles its MIT-licensed C runtime from the Cargo package;
   // tree-sitter-language uses `links` only to enforce one language ABI and
   // emits wasm source metadata without linking another native payload.
@@ -181,12 +185,12 @@ async function checkedInLegalFile(relativePath) {
 
 
 async function sqliteNativePayload(metadata) {
-  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.35.0");
+  const packageInfo = resolvedPackage(metadata, "libsqlite3-sys", "0.38.2");
   const amalgamation = await readFile(
     path.join(packageRoot(packageInfo), "sqlite3", "sqlite3.c"),
     "utf8",
   );
-  const sqliteVersion = "3.50.2";
+  const sqliteVersion = "3.53.2";
   if (!amalgamation.includes(`SQLite\n** version ${sqliteVersion}`)) {
     throw new Error(
       `libsqlite3-sys does not contain the audited SQLite ${sqliteVersion} amalgamation`,
