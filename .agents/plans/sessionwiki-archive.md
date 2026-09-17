@@ -48,6 +48,8 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: `mj-core/src/state.rs` line 649 against `recovery_scan.rs` line 1306. Fixed in the same commit because it blocked `cargo test`.
 - Observation: `mj-worker`'s `acp::tests::ten_large_photos_reach_acp_for_both_prompt_and_steering` failed once under whole-workspace load and passed alone and in its own crate suite. It is timing-sensitive, not a rusqlite regression.
   Evidence: the workspace run took 207s for that suite against 86s for the crate alone.
+- Observation: `acp::tests::bridge_exit_during_initialize_returns_an_actionable_error` belongs to the same timing-sensitive family. It failed once during milestone 10 in a whole-workspace run that the machine was also running two indexing daemons under, and passed alone and in a repeat of the whole suite.
+  Evidence: `mj-worker/src/acp/tests.rs` line 4095 in the failing run; the crate's suite took 73s in that run.
 - Observation: The fork's `main` already carried upstream through 0.28.0 when milestone 2 started, so the tag was cut as `v0.28.0-mj.1` rather than the 0.26.0 name in the first draft. The tag was created once and never moved after Mjolnir referenced it.
   Evidence: `git log --oneline mj-embed` shows the 0.27.0 and 0.28.0 release merges below commit 529b8fe.
 - Observation: The adapter's view of controller state goes stale during a long sync, and nothing later corrects it. A sync pass walks every other tool's store before it reaches the Mjolnir adapter; on this machine the first pass took about twenty minutes (746 Claude Code and 1639 Codex sessions). Sessions closed during that walk were indexed with no record at all: empty project, no start or end time, and the title guessed from the first prompt. Because the checkpoint's modification time is the change token and the checkpoint never changes again, no later sync re-parses them.
@@ -1134,7 +1136,7 @@ The restored session had the old conversation and nothing else:
     │Target: aws-runson (AWS EC2)                                         │
     │  Cancel     Back     Add directory…     Restore                     │
 
-Workspace validation for these commits: `cargo build`, `cargo test` (3502
+Workspace validation for these commits: `cargo build`, `cargo test` (3512
 passed, 0 failed, on the dev profile outside the sandbox), `cargo clippy
 --all-targets -- -D warnings`, `cargo fmt --check`, the viewer's 34 node unit
 tests, and Playwright: `resume.spec.js` 21 passed, `new-session.spec.js` 15
