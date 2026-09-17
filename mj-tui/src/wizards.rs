@@ -2672,6 +2672,11 @@ fn apply_mount_completions(wizard: &mut MountWizard, prefix: &str, candidates: V
 }
 
 mod dashboard;
+mod draft;
+
+// The first generic body that names these arrives in the next commit.
+#[allow(unused_imports)]
+pub(crate) use draft::{DraftChange, WizardDraft};
 
 #[cfg(test)]
 mod tests;
