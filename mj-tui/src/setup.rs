@@ -831,12 +831,24 @@ impl SetupDialog {
     }
 
     /// What the SessionWiki page shows in the value column of "Archive after
-    /// (days)": the space sessions use today, and what the value being typed
-    /// would reclaim. Replaces the plain number, not just the placeholder.
+    /// (days)": the value, then the space sessions use today and what that
+    /// value would reclaim. Replaces the plain number, not just the placeholder.
     fn archive_space_automatic_label(&self, field: &str) -> Option<String> {
         if field != "archive_after_days" {
             return None;
         }
+        let key = self.archive_after_days_page()?;
+        let estimate = self.archive_space_estimate()?;
+        Some(match key {
+            None => estimate,
+            Some(days) => format!("{days} · {estimate}"),
+        })
+    }
+
+    /// The estimate for the archive window the SessionWiki page is showing,
+    /// without the value itself: under the open editor the value is the text
+    /// being typed, so repeating it would only add noise.
+    fn archive_space_estimate(&self) -> Option<String> {
         let key = self.archive_after_days_page()?;
         let preview = self.archive_space_preview.as_ref()?;
         if preview.key != key {
@@ -850,8 +862,8 @@ impl SetupDialog {
                     "Never · sessions use {}",
                     crate::widgets::format_resource_bytes(preview.bytes)
                 ),
-                Some(days) => format!(
-                    "{days} · would reclaim {} of {} ({} of {} sessions)",
+                Some(_) => format!(
+                    "would reclaim {} of {} ({} of {} sessions)",
                     crate::widgets::format_resource_bytes(preview.reclaimable_bytes),
                     crate::widgets::format_resource_bytes(preview.bytes),
                     preview.reclaimable_sessions,
@@ -1493,19 +1505,11 @@ impl DashboardState {
         {
             return;
         }
-        let notice = match (&result, older_than_days) {
-            (Ok(preview), None) => format!(
-                "Sessions use {}. No archive window is set, so none of it is reclaimed.",
-                crate::widgets::format_resource_bytes(preview.bytes)
-            ),
-            (Ok(preview), Some(days)) => format!(
-                "Sessions use {}. Archiving after {days} days would reclaim {} across {} sessions.",
-                crate::widgets::format_resource_bytes(preview.bytes),
-                crate::widgets::format_resource_bytes(preview.reclaimable_bytes),
-                preview.reclaimable_sessions
-            ),
-            (Err(error), _) => format!("Could not measure what sessions use: {error}"),
-        };
+        // The estimate itself is drawn beside the value; the notice line only
+        // carries a failure to measure.
+        if let Err(error) = &result {
+            dialog.notice = Some(format!("Could not measure what sessions use: {error}"));
+        }
         dialog.archive_space_preview = Some(ArchiveSpacePreviewState {
             key: older_than_days,
             result: match result {
@@ -1513,7 +1517,6 @@ impl DashboardState {
                 Err(error) => ArchiveSpacePreviewResult::Failed(error),
             },
         });
-        dialog.notice = Some(notice);
         dialog.prepare();
     }
 
@@ -1790,6 +1793,20 @@ pub(crate) fn render_setup(
         match &editor.input {
             EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
+        }
+        // The archive window's estimate follows the number as it is typed, so
+        // it sits right under the input rather than on the notice line.
+        if editor
+            .path
+            .last()
+            .is_some_and(|key| key == "archive_after_days")
+            && body.height > 2
+            && let Some(estimate) = dialog.archive_space_estimate()
+        {
+            frame.render_widget(
+                Paragraph::new(estimate).style(theme::muted()),
+                Rect::new(body.x, body.y + 2, body.width, 1),
+            );
         }
         initial = Field;
     } else {

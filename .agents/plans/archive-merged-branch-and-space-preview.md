@@ -21,7 +21,7 @@ Success is visible from a terminal. For the branch: with `archive_after_days = 1
 
 ## Surprises & Discoveries
 
-- Observation: The Setup screen replaces the whole page with the text editor while a value is being typed, so the estimate in the row is not visible during typing. The notice line under the page is what the user reads then, and the row shows the estimate again once the editor closes.
+- Observation: The Setup screen replaces the whole page with the text editor while a value is being typed, so the estimate in the row is not visible during typing. It first went to the notice line at the bottom of the dialog; a follow-up moved it to the row directly under the input, without repeating the number being typed, and the notice line now carries only a failure to measure.
   Evidence: The rendered buffer in `the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim` shows only `Archive after (days)` and the draft `30` while the editor is open, with `Sessions use 4.8G. Archiving after 30 days would reclaim 1.2G across 12 sessions.` on the notice line.
 
 - Observation: The setup draft keeps an edited number as a JSON string until the configuration is parsed on save, so reading `archive_after_days` back needs to accept both a string and a number. Reading only `as_u64` made the row fall back to the `Never` estimate right after the editor closed.

@@ -1392,12 +1392,14 @@ fn the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim() {
             ..used
         }),
     );
-    // The open editor covers the page, so while typing the estimate reads
-    // from the notice line; closing it puts the estimate back in the row.
+    // The open editor covers the page, so while typing the estimate sits
+    // under the input, without repeating the number being typed; closing the
+    // editor puts the estimate, with the value, back in the row.
     let editing = rendered(&mut dashboard);
     assert!(
-        editing.contains("Archiving after 30 days would reclaim 1.2G across 12 sessions."),
-        "the notice must report what the typed value would reclaim:\n{editing}"
+        editing.contains("would reclaim 1.2G of 4.8G (12 of 40 sessions)")
+            && !editing.contains("30 · would reclaim"),
+        "the editor must show what the typed value would reclaim:\n{editing}"
     );
     dashboard.handle_key(key(KeyCode::Enter));
     let reclaim = rendered(&mut dashboard);
