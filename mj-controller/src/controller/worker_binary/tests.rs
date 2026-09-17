@@ -2203,6 +2203,20 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         with.environment.get("MBX_CACHE_DIR").map(String::as_str),
         Some("/mnt/fast/mbx-cache")
     );
+    // The summary and savings lines are suppressed in sessions.
+    assert_eq!(
+        with.target_environment
+            .get("MBX_SUMMARY")
+            .map(String::as_str),
+        Some("off")
+    );
+    assert_eq!(
+        with.target_environment
+            .get("MBX_SAVINGS")
+            .map(String::as_str),
+        Some("off")
+    );
+    assert!(!without.target_environment.contains_key("MBX_SUMMARY"));
 }
 
 #[test]

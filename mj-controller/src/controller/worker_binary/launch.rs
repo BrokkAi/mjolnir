@@ -523,6 +523,10 @@ pub(super) fn worker_launch_config(
         if let Some(max_size) = &build_cache.max_size {
             target_environment.insert("MBX_GC_MAX_SIZE".into(), max_size.clone());
         }
+        // The per-build summary and savings lines are for a human at a
+        // terminal; in a harness session they only add noise to Cargo output.
+        target_environment.insert("MBX_SUMMARY".into(), "off".into());
+        target_environment.insert("MBX_SAVINGS".into(), "off".into());
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.clone());
