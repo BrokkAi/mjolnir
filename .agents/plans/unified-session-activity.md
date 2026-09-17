@@ -72,10 +72,17 @@ mid-turn must keep the session reporting `running`.
 - [x] (2026-09-17 22:40Z) Milestone 7, added during the work (`b4ada197`): two behaviour
       tests drive the real ACP loop against a scripted silent bridge, and the daemon
       carries the turn bounds to the workers it starts.
-- [ ] Remaining: a locally available harness the watchdog covers, so the two watchdog
-      scenarios can also be shown in a live session rather than against a scripted bridge
-      (completed: the scripted-bridge tests and the live restart evidence; remaining: a
-      live run on Muse, ZCode, DSH, Grok or Kimi).
+- [x] (2026-09-17 22:45Z) Milestone 8, from review (`42bdcbdf`, `a40a8a60`): the watchdog
+      wakes at most a second apart, a session nobody can see always holds work, a wait can
+      never conclude a turn finished while the session is unaccounted for, and the last
+      hand-rolled predicates — the worker's capacity-retry admission, the file-write
+      barrier, the close's cancellation, and `SessionActivity::is_idle` — became calls into
+      the mechanism.
+- [ ] Remaining: the tool-call bound has never been seen to fire in a live Muse session,
+      although it fires in the ACP-loop test (completed: the live silence bound, the live
+      restart evidence, the end-to-end tests; remaining: one instrumented live run logging
+      what `turn_stall_facts` sees, to find out whether Muse's shell cards register as
+      in-flight tool calls at all).
 
 ## Surprises & Discoveries
 
@@ -108,12 +115,34 @@ mid-turn must keep the session reporting `running`.
   `mj-core/src/login_environment.rs` deliberately drops every `MJ_` name. The daemon now
   carries the two turn bounds explicitly.
 
-- Observation: the durable `execution_state` column is what a restarted daemon reads, and
-  in a local live test it never showed `running` for a turn that was running.
-  Evidence: `materialized_sessions.execution_state` read straight from the instance
-  database stayed `idle` through a turn the daemon reported as running. The in-memory
-  cache the daemon keeps is current; the column it re-seeds from after a restart can lag.
-  The fallback is therefore only as fresh as that column, which is worth a follow-up.
+- Observation: the durable `execution_state` column is **not** stale. The earlier reading
+  that suggested it was came from a session whose worker was being killed repeatedly,
+  where each restart records `SessionRestarted` and returns the projection to `Idle`.
+  Evidence: sampling the column and the daemon's live answer together through a Muse turn
+  gives `live=running durable=running@11` on every sample for the whole turn. The column
+  moves to `running` at `CommandStarted`
+  (`mj-transcript/src/projection/observation.rs:166`), which is turn start.
+
+- Observation: the watchdog computed when to look again from the facts it had at that
+  moment and then slept for that whole interval, so a tool call that opened or ended in
+  the meantime was invisible until the sleep ended. With the default ten-minute silence
+  bound the tool-call bound could never trip at all.
+  Evidence: `a_tool_call_that_outlives_its_bound_ends_the_turn` timed out against the real
+  ACP loop before the wake interval was capped, and passes after.
+
+- Observation: `Unknown { last_known: Idle }` reported that the session held no work,
+  because the answer recursed into what was last known. A session nobody can see may have
+  started a turn since, so a checkpoint or a worker replacement could have run against it.
+  Evidence: the assertion in
+  `a_wait_never_concludes_finished_while_the_session_is_unaccounted_for` failed on exactly
+  that state before `has_work_in_flight` stopped recursing.
+
+- Observation: a live Muse session on a local target cannot demonstrate the tool-call rule,
+  because Muse keeps the activity clock fresh right through a blocking shell command.
+  Evidence: with the silence bound cut to five seconds, a turn spending ninety seconds
+  inside one `sleep 90` finished normally — and so did the same run on a build patched back
+  to the pre-change rule. Only a genuinely silent harness discriminates, which is what the
+  scripted-bridge tests provide and what the issue reporters saw in containers.
 
 - Observation: the worker already tracks in-flight tool calls with their start times, in
   two places at once, and the stall watchdog can reach neither.
@@ -918,12 +947,25 @@ wait and the stall watchdog all go through `mj_core::activity`. The worker's pri
 `activity_is_idle` and `foreground_tools`, and `mj-client`'s `is_idle`/`is_working`/`kind`
 bodies, are deleted.
 
-What remains: the two watchdog scenarios were proved against a scripted bridge rather than
-a live session, because the watchdog covers only harnesses that do not mark their own turn
-end and the only profiles available locally are Claude and Codex, both of which mark
-their own. The durable `execution_state` column a restarted daemon re-seeds from can lag
-behind the live turn, which bounds how much the disconnected fallback can say; that is a
-follow-up, not a regression.
+Live evidence after review, with a Muse profile copied into the private instance:
+
+A silent harness loses its turn with a visible reason. With the bridge suspended and
+nothing in flight, `mj wait` printed `error (harness_inactive) turn 4 in 30.3s` followed by
+the sentence naming the silence — 30.3 seconds against a 30-second bound.
+
+A turn that outlives a daemon that was killed outright is never reported idle. With the
+turn running, the worker suspended so the replacement daemon could not reattach, and the
+durable record saying `running`, eight consecutive probes reported
+`"chat_phase":"running","is_idle":false,"activity_state":{"state":"unknown","last_known":
+{"state":"turn",...}}`. The same window on a build patched back to the old fallback
+reported `"chat_phase":"idle"` — the ticket's symptom, side by side.
+
+What remains: the tool-call bound has not been seen to fire in a live Muse session. It
+fires in the ACP-loop test, the handle the watchdog reads is pinned by test to the tracker
+the relay fills, and Muse never goes silent during a tool call on a local target, so the
+live runs never reach either bound. Whether Muse's shell cards register as in-flight tool
+calls at all is unresolved and is the one thing worth an instrumented live run before this
+is relied on for a harness that does go silent.
 
 ---
 
@@ -941,3 +983,11 @@ substantive departures from it are recorded in the Decision Log — the four-hou
 bound, `ApiSession.error` deliberately not widened, a running flag needing corroboration
 before it counts as the agent working, and the daemon carrying the turn bounds to its
 workers so the knobs work on a target that is not a container.
+
+
+Revision note (2026-09-17, after review): three gaps the reviewer named are closed. The
+durable-column worry turned out to be a measurement artefact and the Surprises section now
+records what the column actually does. Closing it uncovered two real defects — a watchdog
+that slept through changes in what was in flight, so the tool-call bound never tripped, and
+an unknown session that reported it held no work — both fixed with tests. The migration is
+finished: every predicate in the list below is deleted or a call into `mj_core::activity`.
