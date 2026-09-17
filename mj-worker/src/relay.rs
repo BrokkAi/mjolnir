@@ -534,6 +534,11 @@ impl DurableRelay {
             acp_ready: Some(self.acp_ready),
             checkpoint_only: self.checkpoint_only,
             checkpoint_barrier: self.snapshot.checkpoint_barrier.is_some(),
+            capacity_retry_armed: self
+                .snapshot
+                .capacity_retry
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted),
             last_acp_activity_at_ms: self.acp_activity.last_at_ms(),
             current_step_started_at_ms: self.step_clock.started_at_ms(),
             idle_since_ms: self.snapshot.idle_since_ms,

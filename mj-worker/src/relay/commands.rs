@@ -825,12 +825,17 @@ impl DurableRelay {
         else {
             return Ok(false);
         };
-        // Nothing at all may be happening: a retry submits a prompt of its
-        // own, so anything the session still owns would collide with it. That
-        // is the shared quiet predicate, not a list of its own.
+        // Nothing else may be happening: a retry submits a prompt of its own,
+        // so anything the session still owns would collide with it. That is
+        // the shared quiet predicate, not a list of its own. The retry's own
+        // armed state is cleared first, the same way a caller holding a
+        // checkpoint barrier asks whether anything *else* is running: it is
+        // the reason this is being asked, not a reason to refuse.
+        let mut facts = self.activity_facts();
+        facts.capacity_retry_armed = false;
         if retry.retry_at_ms > now_ms
             || self.background_work != BackgroundWorkPolicy::CodexExecCards
-            || !mj_core::activity::is_quiet(&self.activity_facts())
+            || !mj_core::activity::is_quiet(&facts)
             || self.pending_close_barrier_id().is_some()
         {
             return Ok(false);

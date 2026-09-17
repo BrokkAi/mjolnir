@@ -573,6 +573,10 @@ impl RelayOperationalState {
             acp_ready: self.acp_ready,
             checkpoint_only: self.checkpoint_only,
             checkpoint_barrier: self.checkpoint_barrier.is_some(),
+            capacity_retry_armed: self
+                .capacity_retry
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted),
             last_acp_activity_at_ms: self.last_acp_activity_at_ms,
             current_step_started_at_ms: self.current_step_started_at_ms,
             idle_since_ms: self.idle_since_ms,

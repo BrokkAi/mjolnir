@@ -70,6 +70,9 @@ pub struct ActivityFacts {
     pub checkpoint_only: bool,
     /// A checkpoint barrier is waiting to capture.
     pub checkpoint_barrier: bool,
+    /// The worker has armed a capacity retry: it will submit a prompt of its
+    /// own when the wait is up, so the session is not finished with its work.
+    pub capacity_retry_armed: bool,
     /// When anything at all last arrived over ACP.
     pub last_acp_activity_at_ms: Option<i64>,
     /// When the step the agent is on began, while a step is in flight.
@@ -105,6 +108,7 @@ impl Default for ActivityFacts {
             acp_ready: None,
             checkpoint_only: false,
             checkpoint_barrier: false,
+            capacity_retry_armed: false,
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
             idle_since_ms: None,
@@ -152,6 +156,9 @@ pub enum ActivityState {
     },
     /// A native goal owns the session.
     Goal,
+    /// The worker is waiting to resubmit a prompt the provider refused for
+    /// capacity. Nothing is computing, but the session is not finished.
+    Retry,
     Idle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since_ms: Option<i64>,
@@ -184,7 +191,9 @@ impl ActivityState {
         match self {
             Self::Turn { .. } | Self::Tool { .. } | Self::Background { .. } | Self::Closing => true,
             Self::Unknown { last_known, .. } => last_known.is_working(),
-            Self::Idle { .. } | Self::Goal | Self::Closed | Self::Unrecognized => false,
+            Self::Idle { .. } | Self::Goal | Self::Retry | Self::Closed | Self::Unrecognized => {
+                false
+            }
         }
     }
 
@@ -217,7 +226,9 @@ impl ActivityState {
             Self::Turn { .. } | Self::Tool { .. } | Self::Unrecognized => {
                 RelayExecutionState::Running
             }
-            Self::Background { .. } | Self::Goal | Self::Idle { .. } => RelayExecutionState::Idle,
+            Self::Background { .. } | Self::Goal | Self::Retry | Self::Idle { .. } => {
+                RelayExecutionState::Idle
+            }
             Self::Unknown { last_known, .. } => last_known.chat_phase(),
         }
     }
@@ -280,6 +291,9 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
     }
     if facts.goal_active || facts.goal_running {
         return ActivityState::Goal;
+    }
+    if facts.capacity_retry_armed {
+        return ActivityState::Retry;
     }
     ActivityState::Idle {
         since_ms: facts.idle_since_ms,

@@ -101,12 +101,7 @@ impl SessionActivity {
     /// than the relay's operational snapshot.
     #[must_use]
     pub fn is_idle(&self, current_turn_started_at: Option<u64>) -> bool {
-        !self.pursuing_goal
-            && self.capacity_retry.is_none()
-            && matches!(
-                self.kind(current_turn_started_at),
-                SessionActivityKind::Idle
-            )
+        current_turn_started_at.is_none() && self.state().is_idle()
     }
 
     /// Waiting for an answer and queued work are not computation. Background
@@ -298,6 +293,10 @@ impl SessionActivity {
             background_commands: self.background_commands.len(),
             active_user_shells: self.active_user_shells.len(),
             goal_active: self.pursuing_goal,
+            capacity_retry_armed: self
+                .capacity_retry
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted),
             idle_since_ms: self.idle_since_ms,
             ..mj_core::activity::ActivityFacts::default()
         }
@@ -317,7 +316,7 @@ impl SessionActivity {
             ActivityState::Turn { .. } => SessionActivityKind::Turn,
             ActivityState::Tool { .. } => SessionActivityKind::Step,
             ActivityState::Background { .. } => SessionActivityKind::Background,
-            ActivityState::Goal => SessionActivityKind::Goal,
+            ActivityState::Goal | ActivityState::Retry => SessionActivityKind::Goal,
             ActivityState::Idle { .. } => SessionActivityKind::Idle,
             // A state this build does not know is something happening, and
             // "Turn" is the honest way to render an unnamed something.

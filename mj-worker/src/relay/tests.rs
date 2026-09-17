@@ -268,6 +268,13 @@ fn worker_facts_match_the_published_state() {
     );
 
     relay.acp_activity_clock().mark();
+    // The handle the ACP driver's watchdog holds is taken before the session
+    // runs, exactly as the worker runtime takes it, and must see what the
+    // relay records afterwards. If these ever stop being the same tracker,
+    // the watchdog goes blind and a turn blocked in a long tool call is
+    // failed again (#1020).
+    let watchdog_view = relay.tools_in_flight();
+    assert!(watchdog_view.is_empty());
     relay
         .record_observation(RelayObservation::HarnessTurnStarted {
             started_at_ms: 1_234,
@@ -284,6 +291,11 @@ fn worker_facts_match_the_published_state() {
         "the published answer is the one a consumer would compute"
     );
     assert_eq!(published.tools_in_flight.len(), 1);
+    assert_eq!(
+        watchdog_view.snapshot(),
+        published.tools_in_flight,
+        "the watchdog's handle and the published list are one tracker"
+    );
     assert!(!published.activity_state().is_idle());
 }
 
