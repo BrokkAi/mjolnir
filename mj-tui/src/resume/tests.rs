@@ -1976,3 +1976,111 @@ fn a_query_asks_for_hits_and_no_query_asks_for_a_brief() {
         "a new query is a new answer"
     );
 }
+
+/// One message with no match, so a fixture can place plain blocks of a given
+/// role around the ones that match.
+fn plain_block(role: &str, text: &str) -> WikiHitBlock {
+    WikiHitBlock {
+        role: role.to_owned(),
+        hits: Vec::new(),
+        text: text.to_owned(),
+        omitted_before: 0,
+        truncated: false,
+    }
+}
+
+/// A run of tool messages is one `[tool calls]` line however long the run is,
+/// and the two conversational roles carry the colours the conversation view
+/// gives them, so a reader moves between the two surfaces without relearning
+/// them.
+#[test]
+fn the_preview_collapses_tool_runs_and_colours_the_conversation_roles() {
+    let (lines, _) = hit_transcript_lines(&WikiHitTranscript {
+        blocks: vec![
+            plain_block("user", "make it build"),
+            plain_block("tool", "cargo build"),
+            plain_block("tool", "cargo clippy"),
+            plain_block("tool", "cargo test"),
+            plain_block("assistant", "it builds"),
+            plain_block("tool", "git commit"),
+        ],
+        omitted_after: 0,
+    });
+    let text = |line: &Line<'static>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let rendered: Vec<String> = lines.iter().map(text).collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "User: make it build",
+            "",
+            "[tool calls]",
+            "",
+            "Assistant: it builds",
+            "",
+            "[tool calls]",
+        ],
+        "three tool messages in a row are one line, and a later run is its own"
+    );
+
+    let line_for = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| text(line).starts_with(needle))
+            .expect("a line for the role")
+    };
+    // The role label is one span in front of the message text, so its colour
+    // is the span's; the collapsed run is a whole styled line.
+    assert_eq!(
+        line_for("User: ").spans[0].style.fg,
+        Some(theme::palette().accent)
+    );
+    assert_eq!(
+        line_for("Assistant: ").spans[0].style.fg,
+        Some(theme::palette().secondary)
+    );
+    assert_eq!(
+        line_for("[tool calls]").style.fg,
+        Some(theme::palette().muted)
+    );
+}
+
+/// A collapsed run does not swallow the count of messages skipped before the
+/// group it opens: the marker still separates the two runs it sits between.
+#[test]
+fn an_omission_between_two_tool_runs_keeps_both_runs_visible() {
+    let (lines, _) = hit_transcript_lines(&WikiHitTranscript {
+        blocks: vec![
+            plain_block("tool", "cargo build"),
+            WikiHitBlock {
+                omitted_before: 4,
+                ..plain_block("tool", "cargo test")
+            },
+        ],
+        omitted_after: 0,
+    });
+    let rendered: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "[tool calls]",
+            "",
+            "*[… 4 messages omitted …]*",
+            "[tool calls]",
+        ]
+    );
+}
