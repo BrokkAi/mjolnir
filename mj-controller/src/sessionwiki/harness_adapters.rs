@@ -106,7 +106,7 @@ impl Adapter for HarnessAdapter {
         let sources = match list_native_session_sources(self.kind, &self.home) {
             Ok(sources) => sources,
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     tool = self.tool,
                     home = %self.home.display(),
                     %error,
