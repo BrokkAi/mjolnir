@@ -174,6 +174,11 @@ pub(crate) enum DashboardIoUpdate {
         key: serde_json::Value,
         result: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
     },
+    ArchiveSpacePreviewed {
+        generation: u64,
+        older_than_days: Option<u32>,
+        result: std::result::Result<mj_core::state::ArchiveSpacePreview, String>,
+    },
     ReviewSettingsDiscovered {
         generation: u64,
         profile_id: String,
@@ -877,6 +882,13 @@ impl DashboardContext {
             } => self
                 .dashboard
                 .build_cache_previewed(generation, &key, result),
+            DashboardIoUpdate::ArchiveSpacePreviewed {
+                generation,
+                older_than_days,
+                result,
+            } => self
+                .dashboard
+                .archive_space_previewed(generation, older_than_days, result),
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }

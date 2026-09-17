@@ -235,6 +235,12 @@ session is kept before Mjolnir's own copy is removed:
 archive_after_days = 30
 ```
 
+The Setup screen's SessionWiki page shows how much disk your sessions use and,
+while you type a value for **Archive after (days)**, an estimate of what that
+value would reclaim. The estimate covers checkpoints and image attachments, and
+it counts every aged stopped session whether or not the index has caught up
+with it yet, so it describes the policy rather than the next hourly pass.
+
 ### What gets indexed, and when
 
 A running session is indexed from the transcript the daemon holds, and a stopped

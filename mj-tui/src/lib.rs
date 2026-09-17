@@ -171,6 +171,13 @@ pub enum DashboardAction {
         target: Box<mj_core::config::TargetTemplate>,
         global: mj_core::config::BuildCacheConfig,
     },
+    /// Measure how much disk Mjolnir's session copies use, and how much an
+    /// `archive_after_days` value would free, for the SessionWiki settings
+    /// page. `older_than_days` is the value being shown or typed.
+    PreviewArchiveSpace {
+        generation: u64,
+        older_than_days: Option<u32>,
+    },
     ValidateProjectDirectory {
         target_template_id: String,
         directory: String,

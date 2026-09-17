@@ -11,17 +11,24 @@ After this change:
 1. When the archive job removes a session that ran in a managed worktree, it also deletes the session's `mj/<session id>` branch, but only when every commit on that branch is already reachable from some other branch in the repository. A branch with unmerged work is kept exactly as before.
 2. In the Setup screen (the terminal configuration editor opened from the dashboard), the SessionWiki page shows how much disk space sessions use today, and as you type a value for "Archive after (days)" it shows how much of that space the job would reclaim under that value. The help text tells the user up front that an estimate will appear, and the estimate is computed in the background so the screen never stalls.
 
-Success is visible from a terminal. For the branch: with `archive_after_days = 1`, stop a session whose branch was merged into the repository's main branch, age it two days, wait for the archive tick, and `git branch --list 'mj/*'` no longer shows it, while a sibling session whose branch holds an unmerged commit keeps its branch. For the preview: open Setup, go to SessionWiki, and the "Archive after (days)" row reads `Never · sessions use 4.8 GB`; type `30` and within a moment it reads `30 · would reclaim 1.2 GB of 4.8 GB (12 of 40 sessions)`.
+Success is visible from a terminal. For the branch: with `archive_after_days = 1`, stop a session whose branch was merged into the repository's main branch, age it two days, wait for the archive tick, and `git branch --list 'mj/*'` no longer shows it, while a sibling session whose branch holds an unmerged commit keeps its branch. For the preview: open Setup, go to SessionWiki, and the "Archive after (days)" row reads `Never · sessions use 4.8G`; type `30` and the notice line reads `Sessions use 4.8G. Archiving after 30 days would reclaim 1.2G across 12 sessions.`, with the row reading `30 · would reclaim 1.2G of 4.8G (12 of 40 sessions)` once the editor closes. Sizes use the terminal UI's own byte format, and the promise of an estimate sits in the SessionWiki section help, which is the text on screen when the row is visible; see the Decision Log.
 
 ## Progress
 
 - [x] (2026-09-17) Milestone 1: `BranchDisposition::DeleteIfMerged` and the merge check in `cleanup_managed_worktree`; archive job uses it; three real-git tests in `mj-controller/src/controller/worktree/tests.rs`; `docs/src/content/docs/sessions.md` and the `archive_after_days` help text updated. `cargo test` and `cargo clippy --all-targets -- -D warnings` pass. The daemon live check was skipped as too heavy for its value; the tests exercise the real git behaviour.
-- [ ] Milestone 2: `archive_space_preview` in `mj-controller`, the `PreviewArchiveSpace` dashboard action and `ArchiveSpacePreviewed` update, live rendering in the SessionWiki setup page; unit tests; docs and help text updated.
-- [ ] Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the dev profile; each milestone committed on the current branch.
+- [x] (2026-09-17) Milestone 2: `archive_space_preview` in `mj-controller/src/sessionwiki.rs`, `ArchiveSpacePreview` in `mj-core/src/state.rs`, the `PreviewArchiveSpace` dashboard action, the `ArchiveSpacePreviewed` io update, and live rendering in the SessionWiki setup page; a sizing unit test in `mj-controller/src/sessionwiki.rs` and a rendering test in `mj-tui/src/setup/tests.rs`; docs and help text updated.
+- [x] (2026-09-17) Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the dev profile; each milestone committed on the current branch. The interactive live checks were skipped: they need a real terminal and the user's own data directory, and the rendering test covers the same behaviour.
 
 ## Surprises & Discoveries
 
-(none yet)
+- Observation: The Setup screen replaces the whole page with the text editor while a value is being typed, so the estimate in the row is not visible during typing. The notice line under the page is what the user reads then, and the row shows the estimate again once the editor closes.
+  Evidence: The rendered buffer in `the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim` shows only `Archive after (days)` and the draft `30` while the editor is open, with `Sessions use 4.8G. Archiving after 30 days would reclaim 1.2G across 12 sessions.` on the notice line.
+
+- Observation: The setup draft keeps an edited number as a JSON string until the configuration is parsed on save, so reading `archive_after_days` back needs to accept both a string and a number. Reading only `as_u64` made the row fall back to the `Never` estimate right after the editor closed.
+  Evidence: `apply_editor` in `mj-tui/src/setup.rs` stores `Value::String(editor.input.to_string())` for every field except `context_window_bytes`; before the fix the test rendered `Archive after (days)   Resolving…` after pressing Enter.
+
+- Observation: The help area is a fixed two rows about 85 columns wide, and the existing `archive_after_days` help was already being cut off mid-sentence before this change.
+  Evidence: The rendered buffer ended the help at "The checkpoint and any image attachments are deleted. The session's".
 
 ## Decision Log
 
@@ -49,9 +56,53 @@ Success is visible from a terminal. For the branch: with `archive_after_days = 1
   Rationale: Each milestone's help text should describe what the build actually does at that commit.
   Date/Author: 2026-09-17, Opus 5 (implementation).
 
+- Decision: `ArchiveSpacePreview` is defined in `mj-core/src/state.rs` and re-exported from `mj_controller::sessionwiki`, rather than defined in `mj-controller`.
+  Rationale: `mj-tui` does not depend on `mj-controller`, so the terminal UI cannot name a type that lives there. `mj_core::state::BuildCachePreview` already sets this precedent for the same reason. The path named in the plan's interface list still resolves through the re-export.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
+- Decision: The rendered sizes reuse `crate::widgets::format_resource_bytes` in `mj-tui`, which prints `4.8G` rather than `4.8 GB`. No new formatter was added.
+  Rationale: The plan asked for an existing formatter to be reused if one exists. This one is what the rest of the terminal UI uses for byte sizes, so the row stays consistent, and it is shorter, which matters in a narrow value column.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
+- Decision: The recursive directory sizing reuses `directory_size` from `mj-controller/src/import/claude.rs`, widened from `pub(super)` to `pub(crate)` with its module made `pub(crate) mod claude`.
+  Rationale: One definition of "how big is this directory" rather than a second copy in `sessionwiki.rs`.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
+- Decision: The sentence promising the estimate went into the `sessionwiki` section help, not the `archive_after_days` field help, and both texts were shortened to fit.
+  Rationale: The help area is two rendered rows, and the field's existing text already overflowed them. The section help is what is on screen when the estimate row is visible, so the promise is read exactly where it can be seen.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
+- Decision: The estimate's preview job is not cancelled when a later keystroke supersedes it; stale answers are dropped by their days value instead.
+  Rationale: This is how the build cache preview behaves, the walk is short, and cancelling would need a token the sizing code does not check. Dropping by key is what keeps the row correct.
+  Date/Author: 2026-09-17, Opus 5 (implementation).
+
 ## Outcomes & Retrospective
 
-(to be written at completion)
+Both milestones are implemented, validated, and committed on the `hel4` branch.
+
+The archive job now deletes a session branch whose commits another branch
+already contains, using git's own containment test through the existing
+managed-target command helpers, and keeps every other branch exactly as
+before. Three tests drive a real temporary git repository for the merged,
+unmerged, and sibling-session-branch cases.
+
+The Setup screen's SessionWiki page now measures, in a background blocking
+task, what Mjolnir's session copies occupy and what an `archive_after_days`
+value would free. Entering the page asks for the "Never" figure; each
+keystroke in the editor asks for the number being typed; stale answers are
+dropped by their days value. The row reads `Never · sessions use 4.8G` and,
+after the editor closes, `30 · would reclaim 1.2G of 4.8G (12 of 40
+sessions)`, with the same information on the notice line while typing.
+
+What remains: neither interactive live check was run. Milestone 1's needs a
+daemon, two real sessions, and a hand-edited isolated database; Milestone 2's
+needs a real terminal and would read the user's own data directory. The unit
+and rendering tests cover the same behaviour, including the git commands
+themselves.
+
+Lesson for the next contributor: the Setup screen has two places to put live
+text, the value column and the notice, and which one the user can see depends
+on whether the editor is open. Use both, as this change does.
 
 ## Context and Orientation
 
