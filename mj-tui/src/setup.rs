@@ -104,8 +104,27 @@ pub(crate) struct SetupDialog {
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
+    /// The host-resolved values behind the blank fields of the build cache
+    /// page being viewed, keyed by the settings they were resolved from.
+    build_cache_preview: Option<BuildCachePreviewState>,
     preferred_width: u16,
     preferred_height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildCachePreviewState {
+    /// The target and global settings the preview was resolved from. A draft
+    /// edit that changes them starts a new resolution.
+    key: Value,
+    result: BuildCachePreviewResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BuildCachePreviewResult {
+    Resolving,
+    /// `None` when the target kind cannot share a cache.
+    Ready(Option<mj_core::state::BuildCachePreview>),
+    Failed(String),
 }
 
 fn storage_path(path: &[String]) -> Vec<String> {
@@ -189,7 +208,15 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     }
 }
 
-fn value_summary(path: &[String], key: &str, value: &Value, draft: &Value) -> String {
+/// `automatic` replaces the placeholder for an unset value when its resolved
+/// default is known.
+fn value_summary(
+    path: &[String],
+    key: &str,
+    value: &Value,
+    draft: &Value,
+    automatic: Option<String>,
+) -> String {
     let mut child_path = path.to_vec();
     child_path.push(key.to_owned());
     let summary = match value {
@@ -203,7 +230,7 @@ fn value_summary(path: &[String], key: &str, value: &Value, draft: &Value) -> St
             if *value { "☑" } else { "☐" }.to_owned()
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
-        Value::Null => "Automatic / default".to_owned(),
+        Value::Null => automatic.unwrap_or_else(|| "Automatic / default".to_owned()),
         _ => schema::choice_label(value),
     };
     if !value.is_object()
@@ -269,7 +296,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
             };
             let mut child_path = path.to_vec();
             child_path.push(key.clone());
-            let mut summary = value_summary(path, &key, child, draft);
+            let mut summary = value_summary(path, &key, child, draft, None);
             if !child.is_object()
                 && !child.is_array()
                 && !child.is_boolean()
@@ -349,6 +376,7 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             notice: None,
+            build_cache_preview: None,
             preferred_width: preferred.width,
             preferred_height: preferred.height,
         };
@@ -627,6 +655,92 @@ impl SetupDialog {
             value: editor.input.value().to_owned(),
             target: Box::new(target),
         }))
+    }
+
+    /// The target whose build cache page is showing, with the settings its
+    /// preview depends on.
+    fn build_cache_page(&self) -> Option<(String, Value)> {
+        let [section, target_id, page] = self.path.as_slice() else {
+            return None;
+        };
+        if section != "targets" || page != "build_cache" {
+            return None;
+        }
+        let key = serde_json::json!({
+            "target": self.draft["targets"][target_id],
+            "global": self.draft["build_cache"],
+        });
+        Some((target_id.clone(), key))
+    }
+
+    /// Start resolving the build cache page's automatic values on the target's
+    /// host, unless the current settings are already resolved or in flight.
+    fn preview_build_cache_action(&mut self) -> DashboardAction {
+        let Some((_, key)) = self.build_cache_page() else {
+            return DashboardAction::None;
+        };
+        if self
+            .build_cache_preview
+            .as_ref()
+            .is_some_and(|preview| preview.key == key)
+        {
+            return DashboardAction::None;
+        }
+        let target: mj_core::config::TargetTemplate =
+            match serde_json::from_value(key["target"].clone()) {
+                Ok(target) => target,
+                // A draft that does not parse yet has nothing to resolve.
+                Err(_) => return DashboardAction::None,
+            };
+        let global: mj_core::config::BuildCacheConfig =
+            serde_json::from_value(key["global"].clone()).unwrap_or_default();
+        self.build_cache_preview = Some(BuildCachePreviewState {
+            key: key.clone(),
+            result: BuildCachePreviewResult::Resolving,
+        });
+        self.notice = Some("Resolving the build cache defaults on the target's host…".into());
+        DashboardAction::PreviewBuildCache {
+            generation: self.generation,
+            key,
+            target: Box::new(target),
+            global,
+        }
+    }
+
+    /// What the build cache page shows for a blank field, once its host has
+    /// answered.
+    fn build_cache_automatic_label(&self, field: &str) -> Option<String> {
+        use mj_core::state::BuildCacheLimit;
+        let (_, key) = self.build_cache_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        let detail = match &preview.result {
+            BuildCachePreviewResult::Resolving => "resolving…".to_owned(),
+            BuildCachePreviewResult::Failed(_) => "unknown".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "not available for this target kind".to_owned(),
+            BuildCachePreviewResult::Ready(Some(preview)) => match field {
+                "enabled" if preview.off_reason.is_some() => "off".to_owned(),
+                "enabled" => "on".to_owned(),
+                "directory" => preview
+                    .directory
+                    .as_ref()
+                    .map(|directory| directory.display().to_string())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                "max_size" => match &preview.max_size {
+                    Some(BuildCacheLimit::Size(size)) => size.clone(),
+                    // The value column is narrow, so these stay short.
+                    Some(BuildCacheLimit::HostConfiguration(Some(size))) => {
+                        format!("{size}, host mbx config")
+                    }
+                    Some(BuildCacheLimit::HostConfiguration(None)) => "host mbx config".to_owned(),
+                    None => "unknown".to_owned(),
+                },
+                _ => return None,
+            },
+        };
+        Some(format!("Automatic ({detail})"))
     }
 
     fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
@@ -1187,9 +1301,56 @@ impl DashboardState {
             }
             _ => {}
         }
+        if action == DashboardAction::None {
+            action = dialog.preview_build_cache_action();
+        }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
         action
+    }
+
+    pub fn build_cache_previewed(
+        &mut self,
+        generation: u64,
+        key: &Value,
+        result: Result<Option<mj_core::state::BuildCachePreview>, String>,
+    ) {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            return;
+        };
+        if dialog.generation != generation
+            || dialog
+                .build_cache_preview
+                .as_ref()
+                .is_none_or(|preview| &preview.key != key)
+        {
+            return;
+        }
+        let notice = match &result {
+            Ok(Some(preview)) => {
+                let host_mbx = match &preview.native_mbx {
+                    Some(version) => format!("host mbx {version}"),
+                    None => "no mbx on the host".to_owned(),
+                };
+                match &preview.off_reason {
+                    Some(reason) => {
+                        format!("Sessions here run without the build cache: {reason} ({host_mbx}).")
+                    }
+                    None => format!("Sessions here share the build cache ({host_mbx})."),
+                }
+            }
+            Ok(None) => "This target kind cannot share a build cache.".to_owned(),
+            Err(error) => format!("Could not resolve the build cache defaults: {error}"),
+        };
+        dialog.build_cache_preview = Some(BuildCachePreviewState {
+            key: key.clone(),
+            result: match result {
+                Ok(preview) => BuildCachePreviewResult::Ready(preview),
+                Err(error) => BuildCachePreviewResult::Failed(error),
+            },
+        });
+        dialog.notice = Some(notice);
+        dialog.prepare();
     }
 
     pub fn setup_path_resolved(
@@ -1487,7 +1648,13 @@ pub(crate) fn render_setup(
                     if interface {
                         "3 settings  ›".to_owned()
                     } else if let Some(value) = value {
-                        value_summary(&dialog.path, key, value, &dialog.draft)
+                        value_summary(
+                            &dialog.path,
+                            key,
+                            value,
+                            &dialog.draft,
+                            dialog.build_cache_automatic_label(key),
+                        )
                     } else {
                         String::new()
                     }

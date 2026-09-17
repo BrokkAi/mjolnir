@@ -749,7 +749,13 @@ fn the_stacked_action_column_leaves_the_widest_row_its_full_width() {
     // The root row is `{name:<32}  {summary}`, the widest line this config
     // renders. The column sits beside the body, so a dialog sized without
     // it would cut the summary off where the column begins.
-    let summary = value_summary(&[], "targets", &dialog.draft["targets"], &dialog.draft);
+    let summary = value_summary(
+        &[],
+        "targets",
+        &dialog.draft["targets"],
+        &dialog.draft,
+        None,
+    );
     let row = format!("{:<32}  {summary}", schema::label("targets"));
     let line = lines
         .iter()
@@ -1085,4 +1091,85 @@ fn expanded_form_preserves_existing_optional_settings() {
     let dialog = SetupDialog::new(&original);
     let decoded: Config = config_from_draft(dialog.draft).unwrap();
     assert_eq!(decoded, original);
+}
+
+#[test]
+fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
+    use mj_core::state::{BuildCacheLimit, BuildCachePreview};
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.targets.insert(
+        "podman-host".into(),
+        serde_json::from_value(json!({"kind":"local-podman","image":"example/image:latest"}))
+            .unwrap(),
+    );
+    dashboard.begin_setup();
+    choose(&mut dashboard, "targets");
+    choose(&mut dashboard, "podman-host");
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "build_cache")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    // Opening the page starts the host lookup exactly once.
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("preview build cache");
+    };
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Down)),
+        DashboardAction::None
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let resolving = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(resolving.contains("Automatic (resolving…)"), "{resolving}");
+
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(BuildCachePreview {
+            native_mbx: Some("1.12.0".into()),
+            directory: Some("/mnt/fast/mbx-cache".into()),
+            max_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
+            off_reason: Some(
+                "the filesystem under /mnt/fast/mbx-cache does not support reflinks".into(),
+            ),
+        })),
+    );
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
+    for expected in [
+        "Automatic (off)",
+        "Automatic (/mnt/fast/mbx-cache)",
+        "Automatic (500GiB, host mbx config)",
+        "run without the build cache: the filesystem under",
+    ] {
+        assert!(
+            resolved.contains(expected),
+            "missing {expected:?} in\n{resolved}"
+        );
+    }
+
+    // Changing a setting on the page makes the answer stale and asks again.
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.draft["targets"]["podman-host"]["build_cache"]["max_size"] = json!("1GiB");
+    assert!(matches!(
+        dashboard.handle_key(key(KeyCode::Down)),
+        DashboardAction::PreviewBuildCache { .. }
+    ));
 }

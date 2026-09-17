@@ -162,6 +162,11 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<Config, String>,
     },
+    BuildCachePreviewed {
+        generation: u64,
+        key: serde_json::Value,
+        result: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
+    },
     ReviewSettingsDiscovered {
         generation: u64,
         profile_id: String,
@@ -832,6 +837,13 @@ impl DashboardContext {
                     self.dashboard.apply_web_error(error);
                 }
             }
+            DashboardIoUpdate::BuildCachePreviewed {
+                generation,
+                key,
+                result,
+            } => self
+                .dashboard
+                .build_cache_previewed(generation, &key, result),
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }

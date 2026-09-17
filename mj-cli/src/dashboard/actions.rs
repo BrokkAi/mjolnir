@@ -214,6 +214,32 @@ pub(crate) async fn apply_dashboard_action(
             );
             context.track_path_input(cancelled);
         }
+        DashboardAction::PreviewBuildCache {
+            generation,
+            key,
+            target,
+            global,
+        } => {
+            // A stale answer is dropped by its key, so the job is not tied
+            // to the path-input job that a later edit would cancel.
+            spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "previewing the build cache",
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    // Several host commands, one of which may be an SSH
+                    // round trip each.
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(60));
+                    mj_controller::controller::preview_build_cache(&target, &global, &executor)
+                },
+                move |result| DashboardIoUpdate::BuildCachePreviewed {
+                    generation,
+                    key,
+                    result,
+                },
+            );
+        }
         DashboardAction::SaveSetup {
             generation,
             original,

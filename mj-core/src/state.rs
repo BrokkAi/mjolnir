@@ -929,6 +929,32 @@ pub struct SessionBuildCache {
     pub target_root: Option<PathBuf>,
 }
 
+/// What a container target's host resolves for its blank build cache
+/// settings right now. Settings shows this beside each "automatic" field so
+/// the values a session would actually run with are visible before one starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildCachePreview {
+    /// The host's own mbx version, or `None` when it has none on `PATH`.
+    pub native_mbx: Option<String>,
+    /// The cache directory sessions would mount, once known.
+    pub directory: Option<PathBuf>,
+    /// The budget sessions would run with, once known.
+    pub max_size: Option<BuildCacheLimit>,
+    /// Why sessions on this target run without a cache, or `None` when they
+    /// share one.
+    pub off_reason: Option<String>,
+}
+
+/// Where a build cache session's size budget comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildCacheLimit {
+    /// An mbx size string passed as `MBX_GC_MAX_SIZE`.
+    Size(String),
+    /// The host's own `~/.config/mbx/config.toml` carries the budget. The
+    /// `gc.max_size` it sets, when it sets one.
+    HostConfiguration(Option<String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {

@@ -68,6 +68,7 @@ use crate::targets::{
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
+pub use mbx::preview_build_cache;
 use provisioning::apply_failed_new_session_rollback;
 pub(crate) use worker_binary::refresh_remote_worker_binary_if_stale;
 pub(crate) use worktree::path_exists_on_managed_target;

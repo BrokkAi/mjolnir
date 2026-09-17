@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::{BuildCacheConfig, TargetBuildCache};
-use mj_core::state::SessionBuildCache;
+use mj_core::state::{BuildCacheLimit, BuildCachePreview, SessionBuildCache};
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
@@ -119,17 +119,90 @@ fn resolve_host(
     settings: &TargetBuildCache,
     executor: &impl CommandExecutor,
 ) -> Result<Option<ResolvedBuildCache>> {
+    let inspection = inspect_host(host, settings, executor)?;
+    match inspection.cache {
+        Some(cache) => {
+            create_directory(host, &cache.directory, executor)?;
+            Ok(Some(cache))
+        }
+        None => {
+            if let Some(reason) = &inspection.preview.off_reason {
+                tracing::warn!(
+                    directory = inspection
+                        .preview
+                        .directory
+                        .as_ref()
+                        .map(|d| d.display().to_string()),
+                    "sessions on this target run without the build cache: {reason}"
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// What the settings screen shows for one target's blank build cache fields:
+/// the same host inspection a session runs, without creating the directory.
+/// `None` when the target kind cannot share a cache at all.
+pub fn preview_build_cache(
+    target: &mj_core::config::TargetTemplate,
+    global: &BuildCacheConfig,
+    executor: &impl CommandExecutor,
+) -> Result<Option<BuildCachePreview>> {
+    // Resource allocation and per-session overrides do not affect the host
+    // the cache lives on.
+    let target = super::backend::backend_target(
+        target,
+        None,
+        super::backend::ContainerOverrides {
+            cpus: None,
+            memory: None,
+        },
+    )?;
+    let Some((host, settings)) = supported_host(&target) else {
+        return Ok(None);
+    };
+    if !global.enabled {
+        return Ok(Some(BuildCachePreview {
+            native_mbx: None,
+            directory: None,
+            max_size: None,
+            off_reason: Some("the build cache is turned off for every target".into()),
+        }));
+    }
+    inspect_host(&host, &settings, executor).map(|inspection| Some(inspection.preview))
+}
+
+/// Everything the host says about a target's build cache, read without
+/// changing the host.
+struct Inspection {
+    preview: BuildCachePreview,
+    /// The cache a session would mount, or `None` when it runs without one.
+    cache: Option<ResolvedBuildCache>,
+}
+
+fn inspect_host(
+    host: &CacheHost,
+    settings: &TargetBuildCache,
+    executor: &impl CommandExecutor,
+) -> Result<Inspection> {
     let native = native_version(host, executor);
+    let off = |preview: BuildCachePreview| Inspection {
+        preview,
+        cache: None,
+    };
     if let Some(version) = &native
         && !version_at_least(version, MBX_VERSION)
     {
-        tracing::warn!(
-            version,
-            pin = MBX_VERSION,
-            "the container host's mbx is older than the version Mjolnir installs; \
-             sessions there run without the build cache"
-        );
-        return Ok(None);
+        return Ok(off(BuildCachePreview {
+            native_mbx: native.clone(),
+            directory: None,
+            max_size: None,
+            off_reason: Some(format!(
+                "the host's mbx {version} is older than the {MBX_VERSION} Mjolnir installs, \
+                 so they cannot share a store"
+            )),
+        }));
     }
     let directory = match &settings.directory {
         Some(directory) => directory.clone(),
@@ -153,42 +226,63 @@ fn resolve_host(
         (None, Some(_)) => None,
         (None, None) => Some(default_max_size(host, &directory, executor)?),
     };
+    let limit = match (&max_size, &config_file) {
+        (Some(max_size), _) => BuildCacheLimit::Size(max_size.clone()),
+        (None, Some(text)) => BuildCacheLimit::HostConfiguration(configured_max_size(text)),
+        (None, None) => unreachable!("a missing budget is derived above"),
+    };
+    let preview = |off_reason: Option<String>| BuildCachePreview {
+        native_mbx: native.clone(),
+        directory: Some(directory.clone()),
+        max_size: Some(limit.clone()),
+        off_reason,
+    };
 
+    // The directory may not exist yet; its filesystem is its nearest
+    // existing ancestor's.
+    let volume = nearest_existing_ancestor(host, &directory, executor)?;
     let enabled = match settings.enabled {
         Some(enabled) => enabled,
-        None => {
-            let probe = nearest_existing_ancestor(host, &directory, executor)?;
-            let reflinks = reflinks_supported(host, &probe, executor)?;
-            if !reflinks {
-                tracing::warn!(
-                    directory = %directory.display(),
-                    "the build cache filesystem does not support reflinks, so restoring cached \
-                     outputs would copy every byte; the build cache stays off for this target"
-                );
-            }
-            reflinks
-        }
+        None => reflinks_supported(host, &volume, executor)?,
     };
     if !enabled {
-        return Ok(None);
+        let reason = if settings.enabled == Some(false) {
+            "turned off for this target".to_owned()
+        } else {
+            format!(
+                "the filesystem under {} does not support reflinks, so restoring cached \
+                 outputs would copy every byte",
+                directory.display()
+            )
+        };
+        return Ok(off(preview(Some(reason))));
     }
-    create_directory(host, &directory, executor)?;
-
-    if let Some(reason) = unusable_filesystem(host, &directory, executor)? {
-        tracing::warn!(
-            directory = %directory.display(),
-            "the build cache directory is on a {reason}, where mbx's file locks are unreliable; \
-             the build cache stays off for this target"
-        );
-        return Ok(None);
+    if let Some(reason) = unusable_filesystem(host, &volume, executor)? {
+        return Ok(off(preview(Some(format!(
+            "{} is on a {reason}, where mbx's file locks are unreliable",
+            directory.display()
+        )))));
     }
 
-    Ok(Some(ResolvedBuildCache {
-        directory,
-        max_size,
-        target_root,
-        config_file,
-    }))
+    Ok(Inspection {
+        preview: preview(None),
+        cache: Some(ResolvedBuildCache {
+            directory,
+            max_size,
+            target_root,
+            config_file,
+        }),
+    })
+}
+
+/// The `gc.max_size` a host configuration sets, for display only.
+fn configured_max_size(config_file: &str) -> Option<String> {
+    let document: toml::Value = toml::from_str(config_file).ok()?;
+    document
+        .get("gc")?
+        .get("max_size")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// `true` when `found` is at least `required`, comparing release versions.
@@ -744,6 +838,16 @@ mod tests {
         TargetTemplate::LocalPodman(container(build_cache))
     }
 
+    /// The settings draft's view of a local Podman target with blank build
+    /// cache fields.
+    fn configured_podman() -> mj_core::config::TargetTemplate {
+        serde_json::from_value(serde_json::json!({
+            "kind": "local-podman",
+            "image": "example/image:latest",
+        }))
+        .unwrap()
+    }
+
     /// The canned answers a host with no native mbx and a reflink-capable
     /// home directory gives.
     fn plain_host() -> Vec<(&'static str, i32, &'static str)> {
@@ -909,6 +1013,73 @@ mod tests {
             resolve(&podman(None), &BuildCacheConfig::default(), &executor),
             None
         );
+    }
+
+    #[test]
+    fn the_preview_names_the_resolved_values_and_the_reason_the_cache_is_off() {
+        let _isolated = isolated();
+        let mut answers = plain_host();
+        answers.retain(|(needle, _, _)| *needle != "mj-reflink");
+        answers.push(("mj-reflink", 1, ""));
+        let executor = ProbeExecutor::new(&answers);
+        let preview = preview_build_cache(
+            &configured_podman(),
+            &BuildCacheConfig::default(),
+            &executor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(preview.native_mbx, None);
+        assert_eq!(
+            preview.directory,
+            Some(PathBuf::from("/home/dev/.cache/mbx"))
+        );
+        assert_eq!(
+            preview.max_size,
+            Some(BuildCacheLimit::Size("100000000000B".into()))
+        );
+        assert!(
+            preview
+                .off_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("reflinks")),
+            "{:?}",
+            preview.off_reason
+        );
+        // A preview reads the host; it never creates the directory.
+        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
+
+        let executor = ProbeExecutor::new(&[
+            ("mbx --version", 0, "mbx 1.12.0"),
+            (
+                "mbx cache dir --json",
+                0,
+                r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
+            ),
+            (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
+            ("[ -f \"$1\" ]", 0, "[gc]\nmax_size = \"500GiB\"\n"),
+            ("while [ ! -d", 0, "/mnt/fast"),
+            ("mj-reflink", 0, ""),
+            ("stat -f -c %T", 0, "xfs"),
+        ]);
+        let preview = preview_build_cache(
+            &configured_podman(),
+            &BuildCacheConfig::default(),
+            &executor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(preview.native_mbx.as_deref(), Some("1.12.0"));
+        assert_eq!(
+            preview.directory,
+            Some(PathBuf::from("/mnt/fast/mbx-cache"))
+        );
+        assert_eq!(
+            preview.max_size,
+            Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into())))
+        );
+        assert_eq!(preview.off_reason, None);
+        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
     }
 
     #[test]

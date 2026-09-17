@@ -163,6 +163,14 @@ pub enum DashboardAction {
         value: String,
         target: Box<mj_core::config::TargetTemplate>,
     },
+    /// Resolve the automatic build cache values for a target's host so the
+    /// settings page can show them. `key` identifies the settings resolved.
+    PreviewBuildCache {
+        generation: u64,
+        key: serde_json::Value,
+        target: Box<mj_core::config::TargetTemplate>,
+        global: mj_core::config::BuildCacheConfig,
+    },
     ValidateProjectDirectory {
         target_template_id: String,
         directory: String,
