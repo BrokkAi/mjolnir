@@ -446,12 +446,8 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_grok(directory: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = directory.join("grok");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        crate::controller::test_support::install_fake_command(directory, "grok", script);
+        directory.join("grok")
     }
 
     #[cfg(unix)]
