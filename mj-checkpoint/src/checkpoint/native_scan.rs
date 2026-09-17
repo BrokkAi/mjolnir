@@ -101,12 +101,7 @@ pub(super) fn collect_native_artifacts_cached(
     cache: Option<&mut CodexScanCache>,
 ) -> Result<Vec<NativeArtifact>> {
     validate_component(session_id, "native session ID")?;
-    let roots: &[&str] = match harness {
-        HarnessKind::Codex => &["sessions", "archived_sessions"],
-        HarnessKind::Claude => &["projects", "session-env", "file-history"],
-        HarnessKind::Kimi | HarnessKind::Grok => &["sessions"],
-        HarnessKind::Muse => &[".data/muse/sessions"],
-    };
+    let roots = harness.native_session_dirs();
     let mut probe = match harness {
         HarnessKind::Codex => CodexProbeContext {
             floor_ms: uuid_v7_timestamp_ms(session_id)

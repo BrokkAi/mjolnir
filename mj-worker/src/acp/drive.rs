@@ -937,7 +937,7 @@ pub(super) fn turn_stall_timeout() -> Option<Duration> {
 /// leaves the turn Running until the reply, so a lost reply hangs it forever
 /// unless the watchdog steps in.
 pub(super) fn turn_ends_only_on_prompt_reply(harness: HarnessKind) -> bool {
-    !matches!(harness, HarnessKind::Claude | HarnessKind::Codex)
+    !harness.marks_own_turn_end()
 }
 
 /// Milliseconds since the last ACP activity, saturating at zero.

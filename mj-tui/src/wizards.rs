@@ -277,10 +277,8 @@ impl NewWizard {
     /// Only Claude and Codex receive Mjolnir's delegation tools, so only they
     /// get the choice.
     pub(crate) fn subagent_choice_applies(&self, config: &Config) -> bool {
-        matches!(
-            self.selected_profile_kind(config),
-            Some(HarnessKind::Claude | HarnessKind::Codex)
-        )
+        self.selected_profile_kind(config)
+            .is_some_and(HarnessKind::supports_delegation_tools)
     }
 
     fn selected_worktree_options(

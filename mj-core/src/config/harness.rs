@@ -443,6 +443,50 @@ impl HarnessKind {
         }
     }
 
+    /// The file in a staged harness home that holds its MCP server list, for
+    /// the harnesses that read that list from disk rather than over ACP.
+    pub const fn mcp_config_file(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some(".claude.json"),
+            Self::Kimi => Some("mcp.json"),
+            Self::Codex | Self::Grok | Self::Muse => None,
+        }
+    }
+
+    /// Whether this harness receives Mjolnir's delegation tools, and so gets
+    /// the subagent choice in the wizards.
+    pub const fn supports_delegation_tools(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
+    /// Whether this harness marks the end of its own turn. Every other harness
+    /// leaves the turn running until the `session/prompt` reply arrives, so a
+    /// lost reply hangs it until the watchdog steps in.
+    pub const fn marks_own_turn_end(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
+    /// The harness-home-relative directories that hold its native session
+    /// files, scanned when a checkpoint captures or restores native state.
+    pub const fn native_session_dirs(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => &["sessions", "archived_sessions"],
+            Self::Claude => &["projects", "session-env", "file-history"],
+            Self::Kimi | Self::Grok => &["sessions"],
+            Self::Muse => &[".data/muse/sessions"],
+        }
+    }
+
+    /// An executable a managed install must create beside its pinned
+    /// entrypoint, relative to the install root.
+    pub const fn extra_managed_entrypoint(self) -> Option<&'static str> {
+        match self {
+            Self::Muse => Some("bin/muse"),
+            Self::Grok => Some("bin/agent"),
+            Self::Codex | Self::Claude | Self::Kimi => None,
+        }
+    }
+
     /// Harness-specific arguments that start its ACP stdio server.
     pub fn bridge_args(self, policy: ExecutionPolicy) -> Vec<&'static str> {
         let flag = self.launch_flag_for(policy);
