@@ -2160,6 +2160,12 @@ impl DashboardContext {
             DashboardIoUpdate::WikiRows { request_id, result } => match result {
                 Ok(page) => {
                     self.dashboard.apply_wiki_search(request_id, page);
+                    // A new answer can put a different row under an unmoved
+                    // selection, and the preview pane is already promising
+                    // that row's transcript.
+                    if let Some(wiki_id) = self.dashboard.next_wiki_brief() {
+                        spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
+                    }
                     // An index that is still building, or still topping up,
                     // answers again by itself: the dialog says when and the
                     // repeat runs in the same background task the first ask

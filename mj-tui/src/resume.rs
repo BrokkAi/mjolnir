@@ -798,6 +798,19 @@ impl DashboardState {
         self.resync_resume_selection();
     }
 
+    /// The briefing the open dialog still needs for the row under its
+    /// selection, if any.
+    ///
+    /// Moving the selection asks for one. A search answer can also put a
+    /// different row under an unmoved selection, and that row's transcript is
+    /// what the preview pane is already promising, so it is asked for here.
+    pub fn next_wiki_brief(&mut self) -> Option<String> {
+        match self.wiki_preview_action() {
+            DashboardAction::LoadArchivedBrief { wiki_id } => Some(wiki_id),
+            _ => None,
+        }
+    }
+
     /// The query to re-issue, and how long to wait first, after an answer said
     /// the index is still changing. `None` when the answer was final.
     ///
@@ -2803,6 +2816,40 @@ mod tests {
         assert!(
             rows(&dashboard).is_empty(),
             "the local text of a row is no longer a search path"
+        );
+    }
+
+    /// A search answer can put a row with a transcript under an unmoved
+    /// selection. The preview pane promises that transcript, so the dialog
+    /// asks for it without waiting for the selection to move.
+    #[test]
+    fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
+        let mut dashboard = DashboardState::new(
+            config(),
+            state_with(vec![stopped_session()]),
+            BTreeMap::new(),
+        );
+        dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+        apply_ready_rows(&mut dashboard, Vec::new());
+        assert_eq!(
+            dashboard.next_wiki_brief(),
+            None,
+            "a row with no indexed session has no transcript to show"
+        );
+
+        apply_ready_rows(
+            &mut dashboard,
+            vec![WikiRow {
+                hel_session_id: Some("session-1".into()),
+                snippet: Some("the phrase that matched".into()),
+                ..wiki_row("held", false)
+            }],
+        );
+        assert_eq!(dashboard.next_wiki_brief(), Some("held".to_owned()));
+        assert_eq!(
+            dashboard.next_wiki_brief(),
+            None,
+            "one request per row, not one per answer"
         );
     }
 
