@@ -443,8 +443,11 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
     if !controller.config.sessionwiki.enabled {
         return Ok(false);
     }
-    let mut adapters = sessionwiki::adapters::all();
-    adapters.push(Box::new(MjolnirAdapter::reloading(&controller.state)));
+    // Mjolnir's own sessions go first: a cold index walks every other tool's
+    // store for many minutes, and a just-closed session should not wait on it.
+    let mut adapters: Vec<Box<dyn sessionwiki::adapters::Adapter>> =
+        vec![Box::new(MjolnirAdapter::reloading(&controller.state))];
+    adapters.extend(sessionwiki::adapters::all());
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
     sessionwiki::index::sync_with(&mut connection, &adapters, since)
         .context("sync the SessionWiki index")?;
