@@ -1096,7 +1096,7 @@ impl DashboardState {
                 "resources",
                 vec![format!("{:?}", wizard.resource_allocation)],
             );
-            self.adjust_new_resources(&mut wizard, key.code);
+            self.adjust_wizard_resources(&mut wizard, key.code);
             wizard.form.get_mut().track_draft_part(
                 "resources",
                 vec![format!("{:?}", wizard.resource_allocation)],
@@ -1732,24 +1732,11 @@ impl DashboardState {
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 
-    fn adjust_new_resources(&self, wizard: &mut NewWizard, code: KeyCode) {
-        let target_id = nth_key(&self.config.targets, wizard.target);
-        adjust_resources(
-            &mut wizard.resource_allocation,
-            wizard.aws_options.get(&target_id),
-            self.host_limits(&target_id),
-            code,
-        );
-    }
-
-    fn adjust_resume_resources(&self, wizard: &mut ResumeWizard, code: KeyCode) {
-        let target_id = nth_key(&self.config.targets, wizard.target);
-        adjust_resources(
-            &mut wizard.resource_allocation,
-            wizard.aws_options.get(&target_id),
-            self.host_limits(&target_id),
-            code,
-        );
+    fn adjust_wizard_resources<W: WizardDraft>(&self, wizard: &mut W, code: KeyCode) {
+        let target_id = nth_key(&self.config.targets, wizard.target());
+        let limits = self.host_limits(&target_id);
+        let (aws_options, allocation, _) = wizard.sizing_mut();
+        adjust_resources(allocation, aws_options.get(&target_id), limits, code);
     }
 
     /// Apply a completion response only when the source text has not changed
@@ -2066,7 +2053,7 @@ impl DashboardState {
                 "resources",
                 vec![format!("{:?}", wizard.resource_allocation)],
             );
-            self.adjust_resume_resources(&mut wizard, key.code);
+            self.adjust_wizard_resources(&mut wizard, key.code);
             wizard.form.get_mut().track_draft_part(
                 "resources",
                 vec![format!("{:?}", wizard.resource_allocation)],
