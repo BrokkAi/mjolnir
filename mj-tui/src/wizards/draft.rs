@@ -95,6 +95,14 @@ pub(crate) trait WizardDraft: Sized {
     ) -> Result<DashboardAction, Self>;
     /// Moves the draft to its next step.
     fn advance(self, dashboard: &mut DashboardState) -> DashboardAction;
+    /// Edits a text field that only one wizard has. `Err(edit)` hands the
+    /// edit on to the shared attachment-editor fields.
+    fn apply_extra_field_edit(
+        &mut self,
+        dashboard: &mut DashboardState,
+        id: WizardControl,
+        edit: FieldEdit,
+    ) -> Result<(), FieldEdit>;
 }
 
 impl WizardDraft for NewWizard {
@@ -238,6 +246,54 @@ impl WizardDraft for NewWizard {
     fn advance(self, dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.advance_new_wizard(self)
     }
+
+    /// The project directory and the bundle creator's source belong to
+    /// creation alone. Up and Down on the project directory walk the host's
+    /// remembered directories.
+    fn apply_extra_field_edit(
+        &mut self,
+        dashboard: &mut DashboardState,
+        id: WizardControl,
+        edit: FieldEdit,
+    ) -> Result<(), FieldEdit> {
+        match id {
+            WizardControl::ProjectDirectory => {
+                if let FieldEdit::Key(key) = edit
+                    && !self.project_history.is_empty()
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                {
+                    self.project_history_index = if key.code == KeyCode::Up {
+                        self.project_history_index
+                            .checked_sub(1)
+                            .unwrap_or(self.project_history.len() - 1)
+                    } else {
+                        (self.project_history_index + 1) % self.project_history.len()
+                    };
+                    self.project_directory = self.project_history[self.project_history_index]
+                        .to_string_lossy()
+                        .into_owned()
+                        .into();
+                    self.project_directory_error = None;
+                    return Ok(());
+                }
+                if PathField::apply(&mut self.project_directory, edit) == EditOutcome::Changed {
+                    self.project_directory_error = None;
+                    dashboard.record_event_handled();
+                }
+                Ok(())
+            }
+            WizardControl::NewBundleSource => {
+                if self.bundle_creation_in_flight {
+                    return Ok(());
+                }
+                if PathField::apply(&mut self.new_bundle_source, edit) == EditOutcome::Changed {
+                    dashboard.record_event_handled();
+                }
+                Ok(())
+            }
+            _ => Err(edit),
+        }
+    }
 }
 
 impl WizardDraft for ResumeWizard {
@@ -357,6 +413,16 @@ impl WizardDraft for ResumeWizard {
 
     fn advance(self, dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.advance_resume_wizard(self)
+    }
+
+    /// Resume edits only the attachment editor's fields.
+    fn apply_extra_field_edit(
+        &mut self,
+        _dashboard: &mut DashboardState,
+        _id: WizardControl,
+        edit: FieldEdit,
+    ) -> Result<(), FieldEdit> {
+        Err(edit)
     }
 }
 

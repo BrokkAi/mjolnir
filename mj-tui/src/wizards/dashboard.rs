@@ -451,7 +451,7 @@ impl DashboardState {
                 DashboardAction::None
             }
             Interaction::Edit(id, edit) => {
-                self.apply_new_field_edit(&mut wizard, id, edit);
+                self.apply_wizard_field_edit(&mut wizard, id, edit);
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
@@ -571,7 +571,7 @@ impl DashboardState {
             }
             Interaction::Edit(id, edit) => {
                 invalidate_move_preparation(&mut wizard);
-                self.apply_resume_field_edit(&mut wizard, id, edit);
+                self.apply_wizard_field_edit(&mut wizard, id, edit);
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
@@ -646,212 +646,55 @@ impl DashboardState {
         }
     }
 
-    fn apply_new_field_edit(
+    fn apply_wizard_field_edit<W: WizardDraft>(
         &mut self,
-        wizard: &mut NewWizard,
-        id: WizardControl,
-        edit: FieldEdit,
-    ) -> bool {
-        if let FieldEdit::Key(key) = edit {
-            if id == WizardControl::ProjectDirectory {
-                if key.code == KeyCode::Up && !wizard.project_history.is_empty() {
-                    wizard.project_history_index = wizard
-                        .project_history_index
-                        .checked_sub(1)
-                        .unwrap_or(wizard.project_history.len() - 1);
-                    wizard.project_directory = wizard.project_history[wizard.project_history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    wizard.project_directory_error = None;
-                    return true;
-                }
-                if key.code == KeyCode::Down && !wizard.project_history.is_empty() {
-                    wizard.project_history_index =
-                        (wizard.project_history_index + 1) % wizard.project_history.len();
-                    wizard.project_directory = wizard.project_history[wizard.project_history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    wizard.project_directory_error = None;
-                    return true;
-                }
-                let changed = PathField::apply(&mut wizard.project_directory, FieldEdit::Key(key))
-                    == EditOutcome::Changed;
-                if changed {
-                    wizard.project_directory_error = None;
-                    self.record_event_handled();
-                }
-                return changed;
-            }
-            if id == WizardControl::NewBundleSource {
-                if wizard.bundle_creation_in_flight {
-                    return false;
-                }
-                let changed = PathField::apply(&mut wizard.new_bundle_source, FieldEdit::Key(key))
-                    == EditOutcome::Changed;
-                if changed {
-                    self.record_event_handled();
-                }
-                return changed;
-            }
-            if id == WizardControl::MountSource {
-                if key.code == KeyCode::Up && !wizard.mounts.completion_candidates.is_empty() {
-                    move_index(
-                        &mut wizard.mounts.completion_index,
-                        wizard.mounts.completion_candidates.len(),
-                        -1,
-                    );
-                    return true;
-                }
-                if key.code == KeyCode::Down && !wizard.mounts.completion_candidates.is_empty() {
-                    move_index(
-                        &mut wizard.mounts.completion_index,
-                        wizard.mounts.completion_candidates.len(),
-                        1,
-                    );
-                    return true;
-                }
-                if key.code == KeyCode::Up
-                    && wizard.mounts.source.is_empty()
-                    && !wizard.mounts.history.is_empty()
-                {
-                    move_index(
-                        &mut wizard.mounts.history_index,
-                        wizard.mounts.history.len(),
-                        -1,
-                    );
-                    wizard.mounts.source = wizard.mounts.history[wizard.mounts.history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    return true;
-                }
-                if key.code == KeyCode::Down
-                    && wizard.mounts.source.is_empty()
-                    && !wizard.mounts.history.is_empty()
-                {
-                    move_index(
-                        &mut wizard.mounts.history_index,
-                        wizard.mounts.history.len(),
-                        1,
-                    );
-                    wizard.mounts.source = wizard.mounts.history[wizard.mounts.history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    return true;
-                }
-                let changed = PathField::apply(&mut wizard.mounts.source, FieldEdit::Key(key))
-                    == EditOutcome::Changed;
-                if changed {
-                    wizard.mounts.completion_candidates.clear();
-                    wizard.mounts.error = None;
-                    self.record_event_handled();
-                }
-                return changed;
-            }
-            if id == WizardControl::MountDestination {
-                let changed = PathField::apply(&mut wizard.mounts.destination, FieldEdit::Key(key))
-                    == EditOutcome::Changed;
-                if changed {
-                    wizard.mounts.error = None;
-                    self.record_event_handled();
-                }
-                return changed;
-            }
-        }
-        let input = match id {
-            WizardControl::ProjectDirectory => &mut wizard.project_directory,
-            WizardControl::NewBundleSource => &mut wizard.new_bundle_source,
-            WizardControl::MountSource => &mut wizard.mounts.source,
-            WizardControl::MountDestination => &mut wizard.mounts.destination,
-            _ => return false,
-        };
-        let changed = PathField::apply(input, edit) == EditOutcome::Changed;
-        if changed {
-            wizard.project_directory_error = None;
-            wizard.mounts.error = None;
-            self.record_event_handled();
-        }
-        changed
-    }
-
-    fn apply_resume_field_edit(
-        &mut self,
-        wizard: &mut ResumeWizard,
+        wizard: &mut W,
         id: WizardControl,
         edit: FieldEdit,
     ) {
-        if let FieldEdit::Key(key) = edit {
-            if id == WizardControl::MountSource {
-                if key.code == KeyCode::Up && !wizard.mounts.completion_candidates.is_empty() {
-                    move_index(
-                        &mut wizard.mounts.completion_index,
-                        wizard.mounts.completion_candidates.len(),
-                        -1,
-                    );
-                    return;
-                }
-                if key.code == KeyCode::Down && !wizard.mounts.completion_candidates.is_empty() {
-                    move_index(
-                        &mut wizard.mounts.completion_index,
-                        wizard.mounts.completion_candidates.len(),
-                        1,
-                    );
-                    return;
-                }
-                if key.code == KeyCode::Up
-                    && wizard.mounts.source.is_empty()
-                    && !wizard.mounts.history.is_empty()
-                {
-                    move_index(
-                        &mut wizard.mounts.history_index,
-                        wizard.mounts.history.len(),
-                        -1,
-                    );
-                    wizard.mounts.source = wizard.mounts.history[wizard.mounts.history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    return;
-                }
-                if key.code == KeyCode::Down
-                    && wizard.mounts.source.is_empty()
-                    && !wizard.mounts.history.is_empty()
-                {
-                    move_index(
-                        &mut wizard.mounts.history_index,
-                        wizard.mounts.history.len(),
-                        1,
-                    );
-                    wizard.mounts.source = wizard.mounts.history[wizard.mounts.history_index]
-                        .to_string_lossy()
-                        .into_owned()
-                        .into();
-                    return;
-                }
-            }
-            let input = match id {
-                WizardControl::MountSource => &mut wizard.mounts.source,
-                WizardControl::MountDestination => &mut wizard.mounts.destination,
-                _ => return,
-            };
-            if PathField::apply(input, FieldEdit::Key(key)) == EditOutcome::Changed {
-                wizard.mounts.completion_candidates.clear();
-                wizard.mounts.error = None;
-                self.record_event_handled();
-            }
+        let Err(edit) = wizard.apply_extra_field_edit(self, id, edit) else {
             return;
+        };
+        self.apply_mount_field_edit(wizard.mounts_mut(), id, edit);
+    }
+
+    /// Edits the attachment editor's two path fields. Up and Down walk the
+    /// completion list when there is one, and the source history when the
+    /// source is empty, before the field itself sees the key.
+    fn apply_mount_field_edit(&self, mounts: &mut MountWizard, id: WizardControl, edit: FieldEdit) {
+        if let FieldEdit::Key(key) = edit
+            && id == WizardControl::MountSource
+        {
+            if !mounts.completion_candidates.is_empty()
+                && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                let len = mounts.completion_candidates.len();
+                move_index(&mut mounts.completion_index, len, delta);
+                return;
+            }
+            if mounts.source.is_empty()
+                && !mounts.history.is_empty()
+                && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                let len = mounts.history.len();
+                move_index(&mut mounts.history_index, len, delta);
+                mounts.source = mounts.history[mounts.history_index]
+                    .to_string_lossy()
+                    .into_owned()
+                    .into();
+                return;
+            }
         }
         let input = match id {
-            WizardControl::MountSource => &mut wizard.mounts.source,
-            WizardControl::MountDestination => &mut wizard.mounts.destination,
+            WizardControl::MountSource => &mut mounts.source,
+            WizardControl::MountDestination => &mut mounts.destination,
             _ => return,
         };
         if PathField::apply(input, edit) == EditOutcome::Changed {
-            wizard.mounts.completion_candidates.clear();
-            wizard.mounts.error = None;
+            mounts.completion_candidates.clear();
+            mounts.error = None;
             self.record_event_handled();
         }
     }
