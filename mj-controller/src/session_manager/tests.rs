@@ -1,7 +1,6 @@
 use super::*;
-use crate::controller::test_support::IsolatedTest;
 #[cfg(unix)]
-use crate::controller::test_support::test_name;
+use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 
 fn recovery_source_target() -> mj_core::state::TargetLocator {
@@ -1095,6 +1094,7 @@ async fn stopped_actor_is_replaced_without_late_completion_removing_replacement(
     tasks.abort_all();
 }
 
+#[cfg(unix)]
 const UNREACHABLE_VIEW_TEST_CHILD: &str = "MJ_TEST_UNREACHABLE_RELAY_CHILD";
 
 #[cfg(unix)]
@@ -1157,6 +1157,7 @@ async fn unreachable_relay_publishes_error_view() {
     assert!(!update.view.connected);
 }
 
+#[cfg(unix)]
 const UNREADABLE_PROJECTION_TEST_CHILD: &str = "MJ_TEST_UNREADABLE_PROJECTION_CHILD";
 
 #[cfg(unix)]
