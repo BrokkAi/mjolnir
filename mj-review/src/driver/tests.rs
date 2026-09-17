@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::verdict::ReviewPassEvidence;
 use mj_core::review::lanes::UserMessage;
