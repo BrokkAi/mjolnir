@@ -7,21 +7,82 @@ pub fn locate_grok_session(
     selection: &GrokSessionSelection,
 ) -> Result<LocatedGrokSession> {
     let candidates = list_grok_sessions(home)?;
-    let sessions = home.join("sessions");
     match selection {
         GrokSessionSelection::NativeSessionId(native_session_id) => candidates
             .into_iter()
             .find(|candidate| candidate.native_session_id == *native_session_id)
-            .with_context(|| {
-                format!(
-                    "Grok Build session {native_session_id:?} was not found under {}",
-                    sessions.display()
-                )
-            }),
+            .map(Ok)
+            .unwrap_or_else(|| locate_named_grok_session(home, native_session_id)),
         GrokSessionSelection::Latest => candidates
             .into_iter()
             .next()
             .context("no Grok Build session directories were found"),
+    }
+}
+
+/// Find the session directory a named id points at, for the ids the listing
+/// leaves out. The listing skips whatever it cannot make a row from, including
+/// a session whose working directory it cannot recover. Naming a session must
+/// say why it was skipped rather than report it as missing.
+///
+/// A directory reached through a symlink is still refused, because the archive
+/// step stores only files that sit directly inside the harness home.
+fn locate_named_grok_session(home: &Path, native_session_id: &str) -> Result<LocatedGrokSession> {
+    validate_id("Grok Build session", native_session_id)?;
+    let sessions = home.join("sessions");
+    let mut rejected = Vec::new();
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&sessions)
+        .with_context(|| format!("read Grok Build sessions directory {}", sessions.display()))?
+    {
+        let cwd_directory = entry?.path();
+        let directory_metadata = fs::symlink_metadata(&cwd_directory)?;
+        let session_path = cwd_directory.join(native_session_id);
+        if directory_metadata.file_type().is_symlink() {
+            if session_path.exists() {
+                rejected.push(GROK_STORE.symlinked_container(&cwd_directory, "working directory"));
+            }
+            continue;
+        }
+        if !directory_metadata.is_dir() {
+            continue;
+        }
+        let metadata = match GROK_STORE.directory(&session_path) {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                rejected.push(reason);
+                continue;
+            }
+            NamedEntry::Importable(metadata) => metadata,
+        };
+        let (title, summary_cwd) = grok_listing_metadata(&session_path);
+        // Grok Build records the working directory in the session summary and
+        // again in the name of the directory holding it. The archive is
+        // collected relative to that directory, so neither may be missing.
+        let Some(cwd) = summary_cwd.or_else(|| grok_decode_cwd_dirname(&cwd_directory)) else {
+            rejected.push(GROK_STORE.no_cwd(&session_path));
+            continue;
+        };
+        matches.push(LocatedGrokSession {
+            title: title.unwrap_or_else(|| native_session_id.to_owned()),
+            native_session_id: native_session_id.to_owned(),
+            modified_at: grok_session_modified_at(&session_path, &metadata),
+            git_branch: git_branch_or_head(&cwd),
+            size_bytes: directory_size(&session_path)?,
+            cwd,
+            session_path,
+        });
+    }
+    match matches.len() {
+        0 if !rejected.is_empty() => Err(GROK_STORE.cannot_import(native_session_id, &rejected)),
+        0 => bail!(
+            "Grok Build session {native_session_id:?} was not found under {}",
+            sessions.display()
+        ),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            bail!("Grok Build session {native_session_id:?} occurs in multiple working directories")
+        }
     }
 }
 

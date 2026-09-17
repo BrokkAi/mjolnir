@@ -39,6 +39,8 @@ use mj_transcript::projection::canonical_session_from_materialized;
 use crate::targets::ProcessExecutor;
 use mj_core::relay::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
 
+mod named_session;
+use named_session::{CLAUDE_STORE, CODEX_STORE, GROK_STORE, KIMI_STORE, NamedEntry};
 mod types;
 pub use types::*;
 mod safety;

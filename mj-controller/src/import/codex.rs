@@ -21,46 +21,150 @@ pub fn locate_codex_session(
     select_jsonl_session(listed, selection, "Codex")
 }
 
+/// Find the rollout a named session id points at, for the ids the listing does
+/// not show. The listing is a resume picker: it needs a thread Codex itself
+/// indexed with a preview, and it hides subagent and ephemeral rollouts. None
+/// of that applies once the user names a session, so this lookup takes the
+/// rollout whatever the picker would have made of it.
+///
+/// A rollout reached through a symlink is still refused, because the archive
+/// step stores only regular files inside the harness home. That refusal is
+/// reported, so the caller can say why the named path was rejected instead of
+/// reporting the session as missing.
 pub(super) fn locate_unindexed_codex_session(
     home: &Path,
     session_id: &str,
 ) -> Result<LocatedCodexSession> {
     validate_id("Codex session", session_id)?;
-    let mut requested = BTreeMap::new();
-    requested.insert(session_id.to_owned(), session_id.to_owned());
-    let mut candidates = Vec::new();
+    let mut walk = NamedCodexWalk {
+        session_id,
+        visited: BTreeSet::new(),
+        found: Vec::new(),
+        rejected: Vec::new(),
+    };
     let root = home.join("sessions");
     if root.is_dir() {
-        collect_codex_candidate_paths(&root, &requested, &mut candidates)?;
+        walk.walk(&root, None)?;
     }
     let titles = codex_native_titles(home)?;
     let mut matches = Vec::new();
-    for candidate in candidates {
-        let Some(metadata) = codex_session_metadata(&candidate.path)? else {
+    for candidate in std::mem::take(&mut walk.found) {
+        let summary = codex_session_summary(&candidate.path)?;
+        let Some(metadata) = summary.metadata else {
+            walk.rejected.push(format!(
+                "{} records no Codex session id",
+                candidate.path.display()
+            ));
             continue;
         };
-        if metadata.id == session_id {
-            matches.push(LocatedCodexSession {
-                natively_archived: false,
-                title: titles
-                    .get(session_id)
-                    .cloned()
-                    .unwrap_or_else(|| session_id.to_owned()),
-                native_session_id: metadata.id,
-                jsonl_path: candidate.path,
-                modified_at: candidate.modified_at,
-                cwd: metadata.cwd,
-                git_branch: metadata.git_branch,
-                size_bytes: candidate.size_bytes,
-                history_mode: metadata.history_mode,
-            });
+        // The rollout at this path belongs to a different thread, so it is not
+        // the named session and nothing about it is worth reporting.
+        if metadata.id != session_id {
+            continue;
         }
+        // Codex records the directory a thread ran in once, in its header. The
+        // archive is collected relative to that directory.
+        if metadata.cwd.as_os_str().is_empty() {
+            walk.rejected.push(CODEX_STORE.no_cwd(&candidate.path));
+            continue;
+        }
+        matches.push(LocatedCodexSession {
+            natively_archived: false,
+            title: titles
+                .get(session_id)
+                .cloned()
+                .unwrap_or_else(|| session_id.to_owned()),
+            native_session_id: metadata.id,
+            jsonl_path: candidate.path,
+            modified_at: candidate.modified_at,
+            cwd: metadata.cwd,
+            git_branch: metadata.git_branch,
+            size_bytes: candidate.size_bytes,
+            history_mode: metadata.history_mode,
+        });
+    }
+    if matches.is_empty() && !walk.rejected.is_empty() {
+        return Err(CODEX_STORE.cannot_import(session_id, &walk.rejected));
     }
     select_jsonl_session(
         matches,
         &CodexSessionSelection::NativeSessionId(session_id.to_owned()),
         "Codex",
     )
+}
+
+/// The walk behind a Codex lookup by session id. Unlike the listing walk it
+/// follows symlinked directories, so a rollout that exists only behind one is
+/// refused with its reason instead of being reported as missing. `visited`
+/// holds the directories already walked, which stops a symlink loop.
+struct NamedCodexWalk<'a> {
+    session_id: &'a str,
+    visited: BTreeSet<PathBuf>,
+    found: Vec<FileScanCandidate>,
+    rejected: Vec<String>,
+}
+
+impl NamedCodexWalk<'_> {
+    /// Walk one directory. `via_symlink` names the symlinked directory this
+    /// one was reached through, if any: nothing under it can be archived.
+    fn walk(&mut self, directory: &Path, via_symlink: Option<&Path>) -> Result<()> {
+        let Ok(canonical) = directory.canonicalize() else {
+            return Ok(());
+        };
+        if !self.visited.insert(canonical) {
+            return Ok(());
+        }
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            // A rollout filename ends in the thread's UUID. Only a path that
+            // names this session is worth refusing out loud; a file with no
+            // UUID in its name is still read, because its header may name the
+            // session anyway.
+            let rollout_id = codex_rollout_id_from_path(&path);
+            let names_session = rollout_id == Some(self.session_id);
+            let may_be_session = rollout_id.is_none_or(|id| id == self.session_id);
+            if metadata.file_type().is_symlink() {
+                if fs::metadata(&path).is_ok_and(|target| target.is_dir()) {
+                    self.walk(&path, via_symlink.or(Some(&path)))?;
+                } else if names_session
+                    && let NamedEntry::Rejected(reason) = CODEX_STORE.file(&path)
+                {
+                    self.rejected.push(reason);
+                }
+                continue;
+            }
+            if metadata.is_dir() {
+                self.walk(&path, via_symlink)?;
+                continue;
+            }
+            if !may_be_session || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            {
+                continue;
+            }
+            if let Some(symlink) = via_symlink {
+                if names_session {
+                    self.rejected
+                        .push(CODEX_STORE.symlinked_container(symlink, "rollout directory"));
+                }
+                continue;
+            }
+            match CODEX_STORE.file(&path) {
+                NamedEntry::Absent => continue,
+                NamedEntry::Rejected(reason) => {
+                    if names_session {
+                        self.rejected.push(reason);
+                    }
+                }
+                NamedEntry::Importable(metadata) => self.found.push(FileScanCandidate {
+                    path,
+                    modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    size_bytes: metadata.len(),
+                }),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// List native Codex sessions newest first.
@@ -269,11 +373,32 @@ pub(super) fn codex_rollout_id_from_path(path: &Path) -> Option<&str> {
     .then_some(id)
 }
 
+/// What one Codex rollout's own header says about it.
+pub(super) struct CodexSessionSummary {
+    /// The resume picker's verdict: a subagent rollout or an ephemeral thread.
+    /// Importing a session the user named by id ignores this.
+    pub filtered: bool,
+    /// Absent when no `session_meta` record in the header names a session.
+    pub metadata: Option<CodexSessionMetadata>,
+}
+
+/// The picker's view of one rollout: `None` when the file is filtered out of
+/// the resume list or names no session at all.
 pub(super) fn codex_session_metadata(path: &Path) -> Result<Option<CodexSessionMetadata>> {
+    let summary = codex_session_summary(path)?;
+    Ok(if summary.filtered {
+        None
+    } else {
+        summary.metadata
+    })
+}
+
+pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> {
     let file =
         fs::File::open(path).with_context(|| format!("open Codex session {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
+    let mut filtered = false;
     for _ in 0..8 {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -284,18 +409,15 @@ pub(super) fn codex_session_metadata(path: &Path) -> Result<Option<CodexSessionM
         if record.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
-        if !codex_source_is_interactive(record.pointer("/payload/source")) {
-            return Ok(None);
-        }
-        // Ephemeral Codex threads normally have no rollout path at all. Keep
-        // this defensive check so a future writer cannot expose one here.
-        if record
-            .pointer("/payload/ephemeral")
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            return Ok(None);
-        }
+        // A structured source identifies a subagent, and an ephemeral thread
+        // normally has no rollout path at all; the ephemeral check stays
+        // defensive so a future writer cannot expose one in the picker.
+        filtered = filtered
+            || !codex_source_is_interactive(record.pointer("/payload/source"))
+            || record
+                .pointer("/payload/ephemeral")
+                .and_then(Value::as_bool)
+                == Some(true);
         // Codex ACP loads a rollout by its payload `id`, which is also the
         // UUID embedded in the rollout filename. `session_id` can name a
         // parent thread and therefore is not necessarily resumable itself.
@@ -325,15 +447,21 @@ pub(super) fn codex_session_metadata(path: &Path) -> Result<Option<CodexSessionM
                 .map(parse_codex_history_mode)
                 .transpose()?
                 .unwrap_or(CodexHistoryMode::Legacy);
-            return Ok(Some(CodexSessionMetadata {
-                id,
-                cwd,
-                git_branch,
-                history_mode,
-            }));
+            return Ok(CodexSessionSummary {
+                filtered,
+                metadata: Some(CodexSessionMetadata {
+                    id,
+                    cwd,
+                    git_branch,
+                    history_mode,
+                }),
+            });
         }
     }
-    Ok(None)
+    Ok(CodexSessionSummary {
+        filtered,
+        metadata: None,
+    })
 }
 
 pub(super) fn parse_codex_history_mode(value: &str) -> Result<CodexHistoryMode> {
