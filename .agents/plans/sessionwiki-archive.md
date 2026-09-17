@@ -20,9 +20,9 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-17 00:50Z) Milestone 3: `[sessionwiki]` config section (CONFIG_VERSION 10), `MjolnirAdapter`, `WikiIndexer` with close and hourly triggers; commit `60ed7bed`. Live check: two closed sessions listed by `sessionwiki list --tool mjolnir` and shown by `sessionwiki brief <id> --tools`.
 - [x] (2026-09-17 01:55Z) Milestone 4: fork tag `v0.28.0-mj.2` (commit `ef19d4c`) with quiet non-terminal progress and the tool-name fallback, plus the Mjolnir dependency bump; commits `90c91ca0`, `3b49cc4d` (API, client, restore), `857d10b3` (Archived tab), `fa082d58` (two fixes the live check found). Live check: the three routes answered, a hand-deleted checkpoint became an archived row, and a restored session's first reply quoted the earlier work.
 - [x] (2026-09-17 02:20Z) Milestone 5: archive job driven by `archive_after_days`; commit `a9f0e473`. Live check: a two-day-old stopped session left `mj sessions`, its `.hel.zip` went, `mj/<id>` stayed in the repository, and `sessionwiki list --tool mjolnir` showed the row `[archived]`.
-- [ ] Milestone 6: web viewer parity.
-- [ ] Milestone 7: documentation; follow-up ticket for the in-session SessionWiki skill.
-- [ ] Milestone 8 (release gate, needs crates.io credentials): publish the fork as `brokk-sessionwiki` and switch the dependency from git to the registry.
+- [x] (2026-09-17 02:15Z) Milestone 6: web viewer parity, commit 77f7cc80.
+- [x] (2026-09-17 03:30Z) Milestone 7: documentation, commits `b345b976` (docs site) and `fd16c8d9` (`.agents/docs/sessionwiki-fork.md`); follow-up ticket https://github.com/BrokkAi/mjolnir/issues/1066. The docs build the Docs workflow runs passes, including its internal link check.
+- [~] (2026-09-17 03:30Z) Milestone 8: prepared; the publish step awaits the user. Fork branch `publish` commit `33f67f6`, pushed to `origin`, renames the package to `brokk-sessionwiki` and keeps both the library and binary target named `sessionwiki`. `cargo build`, `cargo test`, and `cargo package --allow-dirty --list` pass on it. Nothing has been published. The commands the user runs are in the milestone 8 section below.
 
 ## Surprises & Discoveries
 
@@ -62,6 +62,14 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: the milestone 5 live check below.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
   Evidence: `src/index.rs` lines 375-395. A `sessionwiki` binary at a different schema version than the library Mjolnir links would force a full re-index on every alternation. Documented in milestone 7.
+- Observation: The viewer's assets are compiled into the daemon binary, so editing `viewer.js` alone changes nothing at runtime.
+  Evidence: `const VIEWER_JS: &str = include_str!("web/viewer.js");` at `mj-controller/src/server.rs` line 3597. Every viewer change in this milestone needed `cargo build` and a daemon restart before the browser saw it.
+- Observation: The resume list's local filter tested only title, project, location, target, and profile, so a live session that a wiki search matched only by its transcript text was filtered out of the list it belonged in.
+  Evidence: a search for a phrase that appears in a transcript returned the row from `/wiki/search` while the list showed nothing. The filter now also keeps a session whose id has a wiki snippet.
+- Observation: The archived detail card overflowed a 420 px phone viewport. Long briefing lines and long titles have no spaces to break on.
+  Evidence: horizontal page scroll at 420 px in the Playwright run. Fixed with `overflow-wrap` on the card body and a cap on the heading.
+- Observation: The viewer selects the first workspace in the snapshot, which in the isolated environment was not the default workspace holding the sessions.
+  Evidence: the archived section was empty until the workspace was switched by hand. Not changed; recorded because it makes a live check look like a failure.
 
 ## Decision Log
 
@@ -122,9 +130,69 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Rationale: The job begins with `sync_now(true)`, so a separate full sync on the same tick would only duplicate it. A pass over a large corpus can outlast the tick, and a second concurrent pass would only meet a busy index, so a tick that finds one running logs at debug and waits.
   Date/Author: 2026-09-17, Fable with Opus.
 
+- Decision: A 404 from the wiki routes means "not available" and the viewer shows nothing; only a 409 shows the line saying SessionWiki is disabled.
+  Rationale: A daemon that predates these routes answers 404, and an older daemon is not a disabled feature. 409 is the only answer that means the user turned it off.
+  Date/Author: 2026-09-17, Fable with Opus.
+- Decision: The archived detail is its own route, `#workspace/{id}/resume/archive/{wikiId}`.
+  Rationale: The viewer routes on the hash, so an archived briefing needs a hash of its own to be linkable and to survive Back. It sits under the resume route because that is where the row is.
+  Date/Author: 2026-09-17, Fable with Opus.
+- Decision: The web restore sends `workspace_id`, `profile_id`, and `target_id` only; there is no project-directory control in the browser yet.
+  Rationale: The viewer already has profile and target selectors, and the daemon defaults the project directory to the repository above the archived worktree. A directory picker is a larger piece of UI; it is recorded as an open item.
+  Date/Author: 2026-09-17, Fable with Opus.
+
 ## Outcomes & Retrospective
 
-To be written at completion. Open question carried forward: whether `Lost` and `Error` sessions with a checkpoint should be archivable.
+The Purpose asked for three things, and all three work.
+
+Every checkpointed Mjolnir session is in the user's SessionWiki index under the
+tool name `mjolnir`. `sessionwiki list --tool mjolnir` and `sessionwiki brief
+<id> --tools` show them with their real project, title, times, and user, tool,
+and assistant lines, which the milestone 3 and 4 transcripts record. One index
+holds them beside Claude Code, Codex, and the rest, and several Mjolnir
+instances share the one tool name without archiving each other's rows.
+
+Resume searches that index as you type, in the terminal and in the browser, with
+a preview of the selected session and a third tab listing archived ones. Enter
+or **Restore** starts a new session carrying a compacted summary of the old
+conversation; both the terminal and the web check ended with a new session
+answering a question about work it never did, from the hand-off alone.
+
+`archive_after_days` deletes Mjolnir's copy of an old stopped session once
+SessionWiki has it, and keeps the branch. The milestone 5 check saw the record,
+the checkpoint, and the attachments go, the `mj/<id>` branch stay, and the
+index row flip to `[archived]`.
+
+The success test in the Purpose — close a session, find it from a terminal,
+search for a word from it, watch the row move to Archived, restore it — was run
+end to end and is in Artifacts.
+
+What it cost: one dependency bump (rusqlite 0.37 to 0.40, mechanical once
+`fallible_uint` was enabled), a fork of SessionWiki with three small library
+changes and a pull request offering them upstream, and about 800 lines of new
+Mjolnir code in an adapter, an indexer, three routes, a restore path, an
+archive job, and two user interfaces.
+
+Open items:
+
+- A prompt sent in the instant between a restored session becoming ready and its
+  hand-off being installed goes out without the context. The window is short and
+  the user has to be quick, but nothing closes it; the hand-off is installed
+  after provisioning, not before the session accepts input.
+- `Lost` and `Error` sessions that have a checkpoint are indexed but never
+  archived, because the archive job only considers `Stopped`. Whether they
+  should be archivable is still open.
+- The web restore has no project-directory control, so the browser always takes
+  the default (the repository above the archived worktree). The terminal has the
+  same gap; only the API accepts `project_directory`.
+- The viewer's node unit tests and its Playwright suite are run by
+  `.github/workflows/reliability.yml`, not by `ci.yml`. A viewer regression is
+  therefore not caught by an ordinary pull-request run.
+- Milestone 8 is prepared but not done: the dependency is still a git tag, so
+  this branch cannot be released until the fork is published to crates.io.
+- The follow-up for a SessionWiki skill inside client sessions is
+  https://github.com/BrokkAi/mjolnir/issues/1066. The hard part there is
+  reaching the binary and the index from container and SSH targets, and keeping
+  the binary's schema version in step with the linked library.
 
 ## Context and Orientation
 
@@ -242,7 +310,23 @@ Add a `sessionwiki` row to the configuration table in `docs/src/content/docs/con
 
 ### Milestone 8: release gate
 
-A git dependency cannot be published to crates.io. Before the next release, publish the fork under the package name `brokk-sessionwiki` (on a `publish` branch of the fork that renames the package and keeps `[[bin]] name = "sessionwiki"`), then change the workspace dependency to `sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }` and re-lock. This needs crates.io credentials the automated work does not have; the plan stops at preparing the branch and stating the command.
+A git dependency cannot be published to crates.io, and Mjolnir publishes every workspace crate, so the dependency has to come from the registry before the next release. The fork's `publish` branch is ready: commit `33f67f6`, pushed to `origin`, renaming the package to `brokk-sessionwiki` at version 0.28.0 with explicit `[lib] name = "sessionwiki"` and `[[bin]] name = "sessionwiki"` targets, so the library still compiles as `sessionwiki` and the installed command is still `sessionwiki`. `cargo build`, `cargo test`, and `cargo package --allow-dirty --list` pass on that branch. Nothing has been published; that needs crates.io credentials this work does not have.
+
+The exact commands, for the user to run:
+
+    # in the fork, /home/jonathan/Projects/sessionwiki
+    git checkout publish
+    cargo publish
+
+    # then in Mjolnir, in the root Cargo.toml [workspace.dependencies],
+    # replace
+    #   sessionwiki = { git = "https://github.com/jbellis/sessionwiki.git", tag = "v0.28.0-mj.2" }
+    # with
+    #   sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }
+    cargo update -p brokk-sessionwiki
+    cargo build
+
+Schema-version caveat, and the reason this is worth doing beyond the publishing rule: once the crate is on crates.io, a binary from `cargo install brokk-sessionwiki` is built from the same source as the library Mjolnir links, so it matches the index schema version by construction. The `cargo install --git ... --tag v0.28.0-mj.2` command in `docs/src/content/docs/sessions.md` should change to `cargo install brokk-sessionwiki` in the same change that moves the dependency, so the documented tool and the linked library cannot drift.
 
 ## Concrete Steps
 
@@ -555,6 +639,29 @@ The one info line per archived session, from the daemon's own log in
 Workspace validation for this commit: `cargo build`, `cargo test` (3494
 passed, 0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt
 --check`.
+
+Milestone 6, 2026-09-17. The web viewer, driven in a browser against the
+isolated daemon's `[phone]` address. The resume page's **Archived** section
+listed the one archived deepseek session. Typing `single word` into the resume
+search box called `GET /wiki/search` on the 250 ms debounce and attached the
+returned snippets to two live rows as well as listing the archived one.
+Selecting the archived row opened its detail card, which held the briefing from
+`GET /wiki/sessions/{id}/brief` and a **Restore** button beside the profile and
+target selectors. Restore posted to the restore route and the viewer navigated
+straight to the new conversation, `1c6028f7c856fd8a4d6e9b4f66d3fb5f`. Asked in
+that conversation:
+
+    In one sentence: what did we conclude earlier?
+
+    We concluded that the single word contained in the README.md file is "hello".
+
+The reply can only have come from the installed hand-off; nothing in the new
+session's workspace names the earlier conversation.
+
+Validation for this commit: 31 node unit tests in
+`tests/e2e/web/viewer.unit.test.mjs` and 20 Playwright tests in
+`tests/e2e/web/resume.spec.js` pass; `cargo build` and
+`cargo clippy --all-targets -- -D warnings` are clean.
 
 ## Interfaces and Dependencies
 
