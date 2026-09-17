@@ -18,7 +18,19 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - [x] (2026-09-16 23:18Z) Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
 - [x] (2026-09-16 23:43Z) Milestone 3: background job helpers report panics and share one send path.
 - [x] (2026-09-17 00:14Z) Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
-- [ ] Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in the staged order given below.
+- [x] (2026-09-17 02:05Z) Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in twelve commits. The steps ran in the order 0, 1, 2, 3, 4, 6, 7, 8, 9, 5, 11, 10; see the Decision Log for why.
+  - [x] Step 0: `mj-tui/src/wizards/draft.rs` with `DraftChange`, `WizardDraft`, both impls, and `DashboardState::keep`.
+  - [x] Step 1: `adjust_wizard_resources`.
+  - [x] Step 2: `prepare_wizard_target` and `apply_wizard_aws_options`.
+  - [x] Step 3: `complete_wizard_mount_source`, `validate_wizard_mount`, `apply_wizard_mount_completions`.
+  - [x] Step 4: `activate_wizard_mount`, generic `begin_mount_editor` and `edit_selected_mount`.
+  - [x] Step 6: `activate_wizard_review`.
+  - [x] Step 7: `activate_wizard_control`.
+  - [x] Step 8: `apply_wizard_field_edit` and `apply_mount_field_edit`, with the stated alignment.
+  - [x] Step 9: `apply_wizard_interaction`.
+  - [x] Step 5: `handle_wizard_shortcut`.
+  - [x] Step 11: `declare_wizard_controls`; `can_advance_target` replaced by `target_advance_enabled`.
+  - [x] Step 10: `handle_wizard_event`; `component_events.rs` calls it for both modes.
 - [ ] Milestone 6: small single-purpose cleanups (ActiveChat `Deref`, one truncation helper, one text-prompt dialog, one row viewport type).
 
 ## Surprises & Discoveries
@@ -115,6 +127,48 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   (its test binary took 198 seconds under full-suite load). Neither crate depends on
   `mj-chat`. The accepted run is the elevated `cargo test --no-fail-fast` that reports every
   target green.
+
+- Observation: the plan's step order does not compile. `handle_wizard_shortcut` (step 5)
+  calls the control-activation body (step 7) and the interaction body (step 9), and
+  `handle_wizard_event` (step 10) calls the control declaration (step 11). Running the steps
+  in the written order would have needed two throwaway trait hooks in step 5 and one in
+  step 10, each deleted a commit or two later. The steps were run 0, 1, 2, 3, 4, 6, 7, 8, 9,
+  5, 11, 10 instead, which is the same twelve commits with no scaffolding.
+- Observation: `ResumeWizard::can_advance_target` has a second caller the milestone text did
+  not mention, the resume picker's footer at `mj-tui/src/wizards.rs` (`next_enabled:
+  wizard.step != WizardStep::Target || wizard.can_advance_target(dashboard)`). Deleting it
+  outright would have left that site without a rule, so the rule is now one free function,
+  `target_advance_enabled`, shared by the footer and the target step's declaration.
+- Observation: the two field-edit twins had drifted on four side effects, not the two the
+  milestone counted. Besides the non-key edit differences it names, creation cleared the
+  completion candidates only for a typed key in the mount *source* (not for a paste, and
+  never for the destination), while resume cleared them for every changing edit to either
+  field. Every one of the four is invisible, because each cleared value belongs to a control
+  on a step the edited field does not appear on; they are listed in the step 8 commit
+  message.
+- Observation: the accessor `sizing_error` from the milestone's trait sketch has no caller.
+  The two `advance_*` bodies, which are the only readers of that field, stay unmerged and
+  read it directly, so the accessor was removed rather than carried with an `allow`.
+- Observation: two tests named in the milestone do not exist under those names.
+  `a_source_the_host_forces_read_only_cannot_be_unchecked` (step 3) has no match in
+  `mj-tui/src/wizards/tests.rs`; the nearest is
+  `a_new_attachment_starts_read_only_and_the_combobox_picks_its_access`. Every other named
+  test exists and passes, and each step also ran the whole `brokk-mj-tui` suite.
+- Observation: three full-suite runs during this milestone each failed one test in a crate
+  that does not depend on `mj-tui`, and each of those tests passed on its own straight
+  afterwards: `brokk-mj-chat clipboard::tests::downsizes_oversized_synthetic_image_in_powershell`,
+  `brokk-mj-core local_sockets::tests::a_short_path_binds_without_switching_directory` (the
+  same one Milestone 4 saw) and `brokk-mj-worker subagent_mcp::tests::a_slow_tool_call_does_not_block_a_later_one`.
+  All three are load-sensitive. The accepted runs are the elevated `cargo test --no-fail-fast`
+  after step 0 and after step 5, which reported every target green.
+- Observation: Milestone 5 saves about 155 lines, not the 300 to 330 predicted.
+  `mj-tui/src/wizards/dashboard.rs` went from 2,840 lines to 1,979 and `mj-tui/src/wizards.rs`
+  from 2,677 to 2,667, against a new 716-line `mj-tui/src/wizards/draft.rs`. Of those 716,
+  about 200 are the two accessor blocks (thirteen one-line methods each, written out twice
+  because a trait cannot derive them) and about 180 are the New-only bodies that moved out of
+  `dashboard.rs` rather than disappearing. This is the fourth milestone in a row where the
+  estimate counted the deleted copy and not its replacement. The benefit is the one the plan
+  always named: a change to the wizards' shared behaviour is now written once.
 
 ## Decision Log
 
@@ -238,6 +292,58 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   the repository guidelines forbid. It now logs like every other one.
   Date/Author: 2026-09-16 / Claude Opus 5.
 
+- Decision: run Milestone 5's twelve steps in the order 0, 1, 2, 3, 4, 6, 7, 8, 9, 5, 11, 10
+  rather than 0 through 11.
+  Rationale: three steps call bodies that later steps unify (see Surprises & Discoveries).
+  The written order would have needed three throwaway trait hooks. The reordering keeps every
+  commit a self-contained unification with nothing to undo.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `WizardDraft::sizing_mut` hands out `&mut BTreeMap<String, Vec<SessionResourceAllocation>>`
+  rather than the shared reference the milestone sketched.
+  Rationale: `apply_aws_resource_options` caches a newly resolved size list for a target the
+  draft is not currently on, which is a write. A shared reference would have forced a second
+  accessor for that one site. Every reader takes a reborrow, so nothing else changed.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `apply_extra_interaction` returns `()` and `apply_extra_field_edit` returns
+  `Result<(), FieldEdit>`, rather than the `bool` the milestone gave the first one.
+  Rationale: both outcomes of `apply_extra_interaction` end in the same thing, putting the
+  draft back, so a handled flag would have been computed and dropped at its only call site.
+  The field-edit hook keeps a `Result` because it really does hand the edit on.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `DraftChange::AttachmentOpened` is the review's attachment list being activated
+  (editing an entry that already exists) and `DraftChange::AttachmentEditorOpened` is the
+  review's Add button (a fresh entry).
+  Rationale: the milestone names both variants but does not say which is which, and the two
+  wizards disagree about exactly one of them: creation invalidates its preflight when an
+  existing attachment is opened and not when a new one is started, while a move invalidates
+  on both. This reading is the one that preserves today's behaviour, and it matches the
+  milestone's list of the changes creation reacts to.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `ResumeWizard::can_advance_target` is replaced by a free function
+  `target_advance_enabled(dashboard, wizard)` instead of simply being deleted.
+  Rationale: it had a second caller in the resume picker's footer; see Surprises & Discoveries.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `prepare_mount_editor` and `prepare_selected_mount_editor` no longer take the
+  wizard's step by mutable reference. The selected-entry one answers whether it loaded
+  anything and the caller sets the step.
+  Rationale: a generic `begin_mount_editor<W>` cannot hand out `&mut wizard.step` and
+  `&mut wizard.mounts` at once through accessors. Returning the fact instead of writing
+  through an out-parameter is also the clearer signature. Behaviour is unchanged: the only
+  other caller reaches the function having just found the entry's index, so the list is never
+  empty there.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the draft-trait hooks call `DashboardState` methods that are now `pub(super)`
+  (`invalidate_new_remote_preflight`, `preflight_create_session_action`,
+  `preflight_resume_session_action`, `advance_new_wizard`, `advance_resume_wizard`,
+  `validate_new_project`, `activate_new_bundle_control`, `request_move_preparation_for_review`)
+  plus the two free functions `invalidate_move_preparation` and `declare_wizard_buttons`.
+  Rationale: the impls live in `mj-tui/src/wizards/draft.rs` and the bodies they delegate to
+  live in `mj-tui/src/wizards/dashboard.rs`, which is a sibling module, so file-private was
+  not enough. `pub(super)` keeps them inside `crate::wizards`. The alternative, moving the
+  impls into `dashboard.rs`, would have put the trait's definition and its implementations in
+  different files for no gain.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+
 ## Outcomes & Retrospective
 
 Milestone 1 (2026-09-16). The dashboard now draws once per event-loop wakeup.
@@ -346,6 +452,35 @@ now has line motion, vertical motion with a preferred column, and line kills --
 rather than relocated code. The milestone's benefit is the closed bug class,
 which is that word or line movement can no longer be fixed in one editor and
 missed in the other.
+
+Milestone 5 (2026-09-17). The New-session and Move/Resume wizards have one
+body each. `mj-tui/src/wizards/draft.rs` defines `DraftChange` and the
+`WizardDraft` trait: thirteen accessors, `into_mode`, and thirteen hooks for
+the places the two wizards genuinely differ. Fourteen twin function pairs in
+`mj-tui/src/wizards/dashboard.rs` became fourteen generic bodies
+(`declare_wizard_controls`, `handle_wizard_event`, `apply_wizard_interaction`,
+`apply_wizard_field_edit`, `activate_wizard_control`, `activate_wizard_review`,
+`activate_wizard_mount`, `handle_wizard_shortcut`, `complete_wizard_mount_source`,
+`validate_wizard_mount`, `apply_wizard_mount_completions`,
+`apply_wizard_aws_options`, `prepare_wizard_target`, `adjust_wizard_resources`),
+and `begin_mount_editor` and `edit_selected_mount` in `mj-tui/src/wizards.rs`
+lost their resume copies. `ResumeWizard::can_advance_target` is gone, replaced
+by one `target_advance_enabled` that the target step and the resume picker's
+footer share.
+
+What stays unmerged is what the milestone said would: the two `preflight_*`
+submit actions, the two `advance_*` step machines, and the two
+`text_input_focused` methods that Milestone 2 moved into
+`mj-tui/src/modal_surface.rs`.
+
+One step changes behaviour on purpose. Step 8 aligned four side effects the
+two field-edit copies had drifted on, all of them invisible because each
+cleared value belongs to a control on a different step; they are listed in
+that commit's message and in Surprises & Discoveries.
+
+Like the three milestones before it, it saves less than predicted: about 155
+lines against 300 to 330. Two hand-written accessor blocks and the New-only
+bodies that moved rather than vanished account for most of the difference.
 
 ## Context and Orientation
 
@@ -658,3 +793,13 @@ names, and the two facts that made the port safe to do mechanically: the
 composer's chained Ctrl-K and `TextInput::kill(range, append)` already build the
 same kill buffer, and a single-line `TextInput` can never hold a newline, so the
 new line motions reduce to the old whole-value ones.
+
+2026-09-17, after implementing Milestone 5. Recorded the step reordering the
+written plan required to compile (three steps called bodies that later steps
+unified), the six decisions that departed from the written milestone (a mutable
+AWS-options accessor, two hook return types, the reading of the two attachment
+`DraftChange` variants, `target_advance_enabled` in place of a deleted
+`can_advance_target`, the attachment-editor helpers losing their step
+out-parameter, and the `pub(super)` widenings the sibling-module trait impls
+need), the two milestone-named tests that no longer exist under those names,
+the four rather than two side effects step 8 aligned, and the honest line count.

@@ -108,8 +108,8 @@ impl DashboardState {
             Mode::Importing(dialog) => self.handle_import_progress_event(event, dialog),
             Mode::ConfirmImportBundle(dialog) => self.handle_import_bundle_event(event, dialog),
             Mode::Confirm(dialog) => self.handle_confirmation_event(event, dialog),
-            Mode::New(wizard) => self.handle_new_event(event, wizard),
-            Mode::Resume(wizard) => self.handle_resume_event(event, wizard),
+            Mode::New(wizard) => self.handle_wizard_event(event, wizard),
+            Mode::Resume(wizard) => self.handle_wizard_event(event, wizard),
             mode => {
                 self.mode = mode;
                 DashboardAction::None

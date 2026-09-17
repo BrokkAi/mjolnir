@@ -10,10 +10,6 @@
 //! across a call to `wizard.form_mut()`. The form is a `RefCell`, so that pair
 //! panics at runtime rather than failing to compile.
 
-// Removed once every step of the wizard unification has landed; until then the
-// trait carries accessors whose first caller arrives in a later step.
-#![allow(dead_code)]
-
 use super::dashboard::{declare_wizard_buttons, invalidate_move_preparation};
 use super::*;
 
@@ -58,7 +54,6 @@ pub(crate) trait WizardDraft: Sized {
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
     fn form_mut(&mut self) -> &mut Dialog<WizardControl>;
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation>;
-    fn sizing_error(&self) -> Option<&str>;
     /// The three sizing fields at once, so a caller can read the cached AWS
     /// sizes while writing the chosen allocation and the sizing error.
     fn sizing_mut(
@@ -127,6 +122,11 @@ pub(crate) trait WizardDraft: Sized {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool;
+    /// Whether the wizard is refusing input while a background job runs.
+    fn input_locked(&self) -> bool;
+    /// Handles an event on a step only one wizard has. Answers true when the
+    /// step took responsibility for it.
+    fn handle_step_event(&mut self, dashboard: &mut DashboardState, event: &Event) -> bool;
 }
 
 /// Whether the target step's Next is enabled: the draft must be able to use
@@ -187,10 +187,6 @@ impl WizardDraft for NewWizard {
 
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation> {
         self.resource_allocation.as_ref()
-    }
-
-    fn sizing_error(&self) -> Option<&str> {
-        self.sizing_error.as_deref()
     }
 
     fn sizing_mut(
@@ -459,6 +455,27 @@ impl WizardDraft for NewWizard {
         }
     }
 
+    /// Creating a bundle rewrites the config, so the form is frozen until the
+    /// daemon answers.
+    fn input_locked(&self) -> bool {
+        self.bundle_creation_in_flight
+    }
+
+    /// The bundle creator and the project directory are all text field, so
+    /// they consume every event the form did not: no shortcut key may edit a
+    /// field while a footer button owns focus.
+    fn handle_step_event(&mut self, _dashboard: &mut DashboardState, event: &Event) -> bool {
+        if self.step == WizardStep::NewBundle {
+            if matches!(event, Event::Key(key) if key.code == KeyCode::Delete)
+                && self.form.borrow().focused() == Some(WizardControl::NewBundleRepositories)
+            {
+                self.remove_selected_new_bundle_repository();
+            }
+            return true;
+        }
+        self.step == WizardStep::ProjectDirectory
+    }
+
     fn declare_review_extras(
         &self,
         dashboard: &DashboardState,
@@ -530,10 +547,6 @@ impl WizardDraft for ResumeWizard {
 
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation> {
         self.resource_allocation.as_ref()
-    }
-
-    fn sizing_error(&self) -> Option<&str> {
-        self.sizing_error.as_deref()
     }
 
     fn sizing_mut(
@@ -659,6 +672,16 @@ impl WizardDraft for ResumeWizard {
 
     fn declare_extra_step(&self, _dashboard: &DashboardState, _form: &mut Dialog<WizardControl>) {
         unreachable!("invalid resume wizard step")
+    }
+
+    /// A resume never waits on a background job before accepting input.
+    fn input_locked(&self) -> bool {
+        false
+    }
+
+    /// Resume has no step outside the shared ones.
+    fn handle_step_event(&mut self, _dashboard: &mut DashboardState, _event: &Event) -> bool {
+        false
     }
 
     fn declare_review_extras(

@@ -154,30 +154,28 @@ fn declare_review_controls(
 
 impl DashboardState {
     /// Handles a wizard event through its persistent component form.
-    pub(crate) fn handle_new_event(
+    pub(crate) fn handle_wizard_event<W: WizardDraft>(
         &mut self,
         event: Event,
-        mut wizard: NewWizard,
+        mut wizard: W,
     ) -> DashboardAction {
-        if wizard.bundle_creation_in_flight {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+        if wizard.input_locked() {
+            return self.keep(wizard);
         }
         declare_wizard_controls(self, &wizard);
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Release
         {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
         if let Event::Key(key) = &event
             && key.kind == crossterm::event::KeyEventKind::Press
             && key.modifiers == KeyModifiers::CONTROL
             && key.code == KeyCode::Char(' ')
-            && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-            && !wizard.mounts.source.is_empty()
+            && wizard.form().borrow().focused() == Some(WizardControl::MountSource)
+            && !wizard.mounts().source.is_empty()
         {
-            let target = wizard.target;
+            let target = wizard.target();
             return self
                 .complete_wizard_mount_source(wizard, nth_key(&self.config.targets, target));
         }
@@ -190,95 +188,23 @@ impl DashboardState {
             }
             _ => event.clone(),
         };
-        let result = wizard.form.borrow_mut().handle(&form_event);
+        let result = wizard.form().borrow_mut().handle(&form_event);
         self.last_event_consumed.set(result.consumed);
-        if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
+        if let Some(interaction) = wizard.mounts_mut().access_combo.route(result.action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
         if result.consumed {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
         if matches!(&event, Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Repeat) {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            return self.keep(wizard);
         }
-        // Shared fields already received editing input. Do not let the old
-        // step handler edit a field while a footer button owns focus.
-        if wizard.step == WizardStep::NewBundle {
-            if matches!(&event, Event::Key(key) if key.code == KeyCode::Delete)
-                && wizard.form.borrow().focused() == Some(WizardControl::NewBundleRepositories)
-            {
-                wizard.remove_selected_new_bundle_repository();
-            }
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
-        }
-        if wizard.step == WizardStep::ProjectDirectory {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+        if wizard.handle_step_event(self, &event) {
+            return self.keep(wizard);
         }
         match event {
             Event::Key(key) => self.handle_wizard_shortcut(key, wizard),
-            _ => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-        }
-    }
-
-    /// Handles a resume wizard event through its persistent component form.
-    pub(crate) fn handle_resume_event(
-        &mut self,
-        event: Event,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        declare_wizard_controls(self, &wizard);
-        if let Event::Key(key) = &event
-            && key.kind == crossterm::event::KeyEventKind::Release
-        {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if let Event::Key(key) = &event
-            && key.kind == crossterm::event::KeyEventKind::Press
-            && key.modifiers == KeyModifiers::CONTROL
-            && key.code == KeyCode::Char(' ')
-            && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-            && !wizard.mounts.source.is_empty()
-        {
-            let target = wizard.target;
-            return self
-                .complete_wizard_mount_source(wizard, nth_key(&self.config.targets, target));
-        }
-        let form_event = match &event {
-            Event::Key(key)
-                if key.kind == crossterm::event::KeyEventKind::Repeat
-                    && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) =>
-            {
-                Event::Key(KeyEvent::new(key.code, key.modifiers))
-            }
-            _ => event.clone(),
-        };
-        let result = wizard.form.borrow_mut().handle(&form_event);
-        self.last_event_consumed.set(result.consumed);
-        if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
-            return self.apply_wizard_interaction(wizard, interaction);
-        }
-        if result.consumed {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if matches!(&event, Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Repeat) {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        match event {
-            Event::Key(key) => self.handle_wizard_shortcut(key, wizard),
-            _ => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
+            _ => self.keep(wizard),
         }
     }
 
