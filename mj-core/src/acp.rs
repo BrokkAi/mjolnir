@@ -298,6 +298,30 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
     )
 }
 
+/// Whether this update is the agent doing the work a prompt asked for.
+///
+/// This is how Mjolnir tells "the harness answered" from "the harness ended
+/// the turn without acting on the prompt" (#970). Answering is deliberately
+/// defined widely: a turn that only ran tools, edited files or executed
+/// commands and never wrote a word has answered. Only traffic that arrives
+/// without the agent having done anything is excluded — command catalogues,
+/// mode and configuration announcements, session metadata, and usage
+/// accounting, all of which a harness emits on its own schedule.
+///
+/// An unrecognized future variant counts as output. `SessionUpdate` is
+/// `#[non_exhaustive]`, and reporting an answered turn as unanswered because
+/// this build is older than the harness would be worse than missing a swallow.
+pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool {
+    !matches!(
+        update,
+        SessionUpdate::AvailableCommandsUpdate(_)
+            | SessionUpdate::ConfigOptionUpdate(_)
+            | SessionUpdate::CurrentModeUpdate(_)
+            | SessionUpdate::SessionInfoUpdate(_)
+            | SessionUpdate::UsageUpdate(_)
+    )
+}
+
 /// The stable part of Codex's refusal to resume a thread it never wrote to
 /// disk. Codex defers a thread's rollout file until the first user message, so
 /// a thread that was created and never prompted does not exist to resume.
@@ -766,5 +790,63 @@ mod missing_thread_tests {
         }))
         .unwrap();
         assert!(session_update_has_native_history(&agent_content));
+    }
+
+}
+
+/// What counts as the harness answering a prompt (#970).
+#[cfg(test)]
+mod agent_output_tests {
+    use super::*;
+
+    fn update(value: serde_json::Value) -> SessionUpdate {
+        serde_json::from_value(value).expect("session update fixture")
+    }
+
+    #[test]
+    fn traffic_the_harness_emits_on_its_own_is_not_an_answer() {
+        for value in [
+            serde_json::json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
+            serde_json::json!({"sessionUpdate": "current_mode_update", "currentModeId": "default"}),
+            serde_json::json!({"sessionUpdate": "config_option_update", "configOptions": []}),
+            serde_json::json!({"sessionUpdate": "session_info_update"}),
+            serde_json::json!({"sessionUpdate": "usage_update", "used": 12, "size": 100}),
+        ] {
+            assert!(
+                !session_update_is_agent_output(&update(value.clone())),
+                "{value} must not count as the agent answering"
+            );
+        }
+    }
+
+    /// A turn that only ran tools answered the prompt. Text is not the test:
+    /// an agent that edits a file and says nothing has still done the work.
+    #[test]
+    fn tool_calls_and_text_both_count_as_an_answer() {
+        for value in [
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Edit README.md",
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "done"},
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "thinking"},
+            }),
+        ] {
+            assert!(
+                session_update_is_agent_output(&update(value.clone())),
+                "{value} must count as the agent answering"
+            );
+        }
     }
 }
