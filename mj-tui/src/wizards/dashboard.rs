@@ -555,7 +555,7 @@ impl DashboardState {
                 self.mode = Mode::New(wizard);
                 DashboardAction::None
             }
-            Interaction::Activate(id) => self.activate_new_control(wizard, id),
+            Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
         }
     }
 
@@ -642,7 +642,7 @@ impl DashboardState {
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
-            Interaction::Activate(id) => self.activate_resume_control(wizard, id),
+            Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
         }
     }
 
@@ -856,49 +856,39 @@ impl DashboardState {
         }
     }
 
-    fn activate_new_control(
+    fn activate_wizard_control<W: WizardDraft>(
         &mut self,
-        mut wizard: NewWizard,
+        wizard: W,
         id: WizardControl,
     ) -> DashboardAction {
         if id == WizardControl::Cancel {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if wizard.step == WizardStep::Mounts {
+        if wizard.step() == WizardStep::Mounts {
             return self.activate_wizard_mount(id, wizard);
         }
-        if wizard.step == WizardStep::Review {
+        if wizard.step() == WizardStep::Review {
             return self.activate_wizard_review(id, wizard);
         }
-        if wizard.step == WizardStep::NewBundle {
-            return self.activate_new_bundle_control(wizard, id);
-        }
-        if wizard.step == WizardStep::Bundle && id == WizardControl::Add {
-            self.invalidate_new_remote_preflight(&mut wizard);
-            wizard.step = WizardStep::NewBundle;
-            wizard.form.get_mut().focus(step_initial(wizard.step));
-            wizard.form.get_mut().focus(WizardControl::NewBundleSource);
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
-        }
+        let mut wizard = match wizard.activate_extra(self, id) {
+            Ok(action) => return action,
+            Err(wizard) => wizard,
+        };
         if id == WizardControl::Back {
-            wizard.step = match wizard.step {
+            let step = match wizard.step() {
                 WizardStep::Target => WizardStep::Profile,
                 WizardStep::Bundle | WizardStep::ProjectDirectory => WizardStep::Target,
                 step => step,
             };
-            wizard.form.get_mut().focus(step_initial(wizard.step));
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
+            wizard.set_step(step);
+            wizard.form_mut().focus(step_initial(step));
+            return self.keep(wizard);
         }
-        if wizard.step == WizardStep::ProjectDirectory {
-            return self.validate_new_project(wizard);
-        }
-        self.advance_new_wizard(wizard)
+        wizard.advance(self)
     }
 
-    fn activate_new_bundle_control(
+    pub(super) fn activate_new_bundle_control(
         &mut self,
         mut wizard: NewWizard,
         id: WizardControl,
@@ -984,40 +974,10 @@ impl DashboardState {
         self.mode = Mode::New(wizard);
         DashboardAction::CreateBundle { sources }
     }
-
-    fn activate_resume_control(
-        &mut self,
-        mut wizard: ResumeWizard,
-        id: WizardControl,
-    ) -> DashboardAction {
-        if id == WizardControl::Cancel {
-            self.cancel_modal();
-            return DashboardAction::None;
-        }
-        if wizard.step == WizardStep::Mounts {
-            return self.activate_wizard_mount(id, wizard);
-        }
-        if wizard.step == WizardStep::Review {
-            return self.activate_wizard_review(id, wizard);
-        }
-
-        if id == WizardControl::Back {
-            wizard.step = match wizard.step {
-                WizardStep::Target => WizardStep::Profile,
-                WizardStep::Bundle | WizardStep::ProjectDirectory => WizardStep::Target,
-                step => step,
-            };
-            wizard.form.get_mut().focus(step_initial(wizard.step));
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-
-        self.advance_resume_wizard(wizard)
-    }
 }
 
 impl DashboardState {
-    fn validate_new_project(&mut self, mut wizard: NewWizard) -> DashboardAction {
+    pub(super) fn validate_new_project(&mut self, mut wizard: NewWizard) -> DashboardAction {
         let path = std::path::Path::new(wizard.project_directory.trim());
         if wizard.project_directory.trim().is_empty() {
             wizard.project_directory_error = Some("Project directory cannot be empty.".into());
@@ -1054,7 +1014,7 @@ impl DashboardState {
                 )
             )
         {
-            return self.activate_new_control(wizard, WizardControl::Back);
+            return self.activate_wizard_control(wizard, WizardControl::Back);
         }
         if matches!(key.code, KeyCode::Char('j' | 'k'))
             && matches!(
@@ -1108,7 +1068,7 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    fn advance_new_wizard(&mut self, mut wizard: NewWizard) -> DashboardAction {
+    pub(super) fn advance_new_wizard(&mut self, mut wizard: NewWizard) -> DashboardAction {
         match wizard.step {
             WizardStep::Profile => {
                 wizard.step = WizardStep::Target;
@@ -1982,7 +1942,7 @@ impl DashboardState {
                 )
             )
         {
-            return self.activate_resume_control(wizard, WizardControl::Back);
+            return self.activate_wizard_control(wizard, WizardControl::Back);
         }
         if matches!(key.code, KeyCode::Char('j' | 'k'))
             && matches!(
@@ -2049,7 +2009,7 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    fn advance_resume_wizard(&mut self, mut wizard: ResumeWizard) -> DashboardAction {
+    pub(super) fn advance_resume_wizard(&mut self, mut wizard: ResumeWizard) -> DashboardAction {
         let profiles = self.compatible_profiles(&wizard.session_id);
         match wizard.step {
             WizardStep::Profile => {

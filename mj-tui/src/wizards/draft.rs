@@ -86,6 +86,15 @@ pub(crate) trait WizardDraft: Sized {
     fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange);
     /// Acts on the review's primary button.
     fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction;
+    /// Handles a control that only one wizard has, before the shared Back and
+    /// Next arms run. `Err(self)` hands the draft back for those arms.
+    fn activate_extra(
+        self,
+        dashboard: &mut DashboardState,
+        id: WizardControl,
+    ) -> Result<DashboardAction, Self>;
+    /// Moves the draft to its next step.
+    fn advance(self, dashboard: &mut DashboardState) -> DashboardAction;
 }
 
 impl WizardDraft for NewWizard {
@@ -199,6 +208,36 @@ impl WizardDraft for NewWizard {
     fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.preflight_create_session_action(self)
     }
+
+    /// The bundle creator and the project directory belong to creation alone.
+    /// Back is handed back so the shared step machine runs it.
+    fn activate_extra(
+        mut self,
+        dashboard: &mut DashboardState,
+        id: WizardControl,
+    ) -> Result<DashboardAction, Self> {
+        if self.step == WizardStep::NewBundle {
+            return Ok(dashboard.activate_new_bundle_control(self, id));
+        }
+        if self.step == WizardStep::Bundle && id == WizardControl::Add {
+            dashboard.invalidate_new_remote_preflight(&mut self);
+            self.step = WizardStep::NewBundle;
+            self.form.get_mut().focus(step_initial(self.step));
+            self.form.get_mut().focus(WizardControl::NewBundleSource);
+            return Ok(dashboard.keep(self));
+        }
+        if id == WizardControl::Back {
+            return Err(self);
+        }
+        if self.step == WizardStep::ProjectDirectory {
+            return Ok(dashboard.validate_new_project(self));
+        }
+        Err(self)
+    }
+
+    fn advance(self, dashboard: &mut DashboardState) -> DashboardAction {
+        dashboard.advance_new_wizard(self)
+    }
 }
 
 impl WizardDraft for ResumeWizard {
@@ -305,6 +344,19 @@ impl WizardDraft for ResumeWizard {
     fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction {
         let profile_id = self.destination_profile(dashboard);
         dashboard.preflight_resume_session_action(self, profile_id)
+    }
+
+    /// Resume has no controls outside the shared step machine.
+    fn activate_extra(
+        self,
+        _dashboard: &mut DashboardState,
+        _id: WizardControl,
+    ) -> Result<DashboardAction, Self> {
+        Err(self)
+    }
+
+    fn advance(self, dashboard: &mut DashboardState) -> DashboardAction {
+        dashboard.advance_resume_wizard(self)
     }
 }
 
