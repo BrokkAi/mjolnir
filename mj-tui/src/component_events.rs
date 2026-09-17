@@ -188,6 +188,20 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_profile_row_below_the_heading_selects_that_profile() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_new();
+        // The heading row sits above the profiles, so the third profile is the
+        // fourth display row; the click has to land on the profile, not the row.
+        let position = point(&draw(&mut dashboard), "codex-2");
+        click(&mut dashboard, position);
+        assert!(
+            matches!(&dashboard.mode, Mode::New(wizard) if wizard.profile == 2),
+            "the click did not select the third profile"
+        );
+    }
+
+    #[test]
     fn help_over_a_dialog_reports_no_confirmation_and_no_text_focus() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_container_edit();

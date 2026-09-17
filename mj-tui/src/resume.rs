@@ -235,6 +235,11 @@ pub(crate) struct ResumeDialog {
     /// What the last answer said about the index: whether it can be searched
     /// at all, and whether a sync is adding to it right now.
     pub(crate) wiki_status: WikiStatus,
+    /// The dialog opens with the search box focused, but the box cannot take
+    /// the focus until the index says it is ready. This stays set until that
+    /// answer arrives, or until the person presses or clicks something first,
+    /// which is a choice about where the focus goes.
+    pub(crate) search_focus_pending: bool,
     /// How many times the current query has been re-issued because a sync was
     /// still running. It picks the wait before the next repeat.
     pub(crate) wiki_top_ups: u32,
@@ -837,6 +842,7 @@ impl DashboardState {
             wiki: Arc::new(Vec::new()),
             wiki_request_id: 0,
             wiki_status: WikiStatus::default(),
+            search_focus_pending: true,
             wiki_top_ups: 0,
             wiki_pending: false,
             previews: Arc::new(BTreeMap::new()),
@@ -899,6 +905,10 @@ impl DashboardState {
         // The status moves even when the rows do not: a build that finished
         // between two identical answers is what re-enables the search box.
         dialog.wiki_status = page.status;
+        if dialog.search_focus_pending && dialog.search_enabled() {
+            dialog.search_focus_pending = false;
+            dialog.form.get_mut().focus(ResumeFocus::Search);
+        }
         if *dialog.wiki == page.rows {
             self.rebuild_resume_rows();
             return;
@@ -1246,9 +1256,17 @@ impl DashboardState {
 
     pub(crate) fn handle_resume_dialog_event(&mut self, event: Event) -> DashboardAction {
         use ResumeFocus::*;
-        let Mode::ResumeDialog(dialog) = &self.mode else {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
+        // A press or click before the index is ready is the person choosing
+        // where the focus goes; the box must not take it back later.
+        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press)
+            || matches!(&event, Event::Mouse(mouse) if !matches!(mouse.kind, MouseEventKind::Moved))
+        {
+            dialog.search_focus_pending = false;
+        }
+        let dialog = &*dialog;
         let focused = dialog.focused();
         if self.scroll_resume_preview(&event, focused) {
             return DashboardAction::None;

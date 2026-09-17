@@ -663,6 +663,40 @@ fn apply_ready_rows(dashboard: &mut DashboardState, rows: Vec<WikiRow>) {
     dashboard.apply_wiki_search(request_id, ready_page(rows));
 }
 
+#[test]
+fn the_dialog_focuses_the_search_box_once_the_index_is_ready() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.show_resume_dialog(1, Vec::new());
+    // The box is disabled until the index answers, so it cannot hold the
+    // focus at first.
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_ne!(dialog.focused(), ResumeFocus::Search);
+    apply_ready_rows(&mut dashboard, Vec::new());
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.focused(), ResumeFocus::Search);
+}
+
+#[test]
+fn a_key_before_the_index_is_ready_keeps_the_focus_where_it_was_put() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.show_resume_dialog(1, Vec::new());
+    dashboard.handle_key(key(KeyCode::Tab));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    let chosen = dialog.focused();
+    assert_ne!(chosen, ResumeFocus::Sessions);
+    apply_ready_rows(&mut dashboard, Vec::new());
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.focused(), chosen);
+}
+
 /// A row is archived only when nothing on this machine still holds the
 /// session: no Mjolnir record and no native file an import could adopt.
 #[test]
@@ -856,6 +890,9 @@ fn search_arrows_edit_the_cursor_and_tabs_have_their_own_focus() {
         )])],
     );
     apply_ready_rows(&mut dashboard, Vec::new());
+    // The ready answer focuses the box; `/` is the way back to it from the
+    // list, so start from there.
+    dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Char('/')));
     dashboard.handle_paste("nat");
     dashboard.handle_key(key(KeyCode::Left));

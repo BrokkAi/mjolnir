@@ -315,20 +315,16 @@ fn preferred_size(draft: &Value) -> SetupSize {
     let mut max_width = 0usize;
     let mut max_height = 20;
     walk(&[], draft, draft, &mut max_width, &mut max_height);
-    // Actions stack in a column at the page's right edge, so the dialog is as
-    // wide as the widest page body plus that column, rather than the whole
-    // action set laid out in a row. Every label any page can show has to fit,
-    // rewrites included.
+    // The page's own actions stack in a column at its right edge, so the
+    // dialog is as wide as the widest page body plus that column. Back and the
+    // commit sit in the footer row instead and take no width here.
     let column = [
-        "Back",
         "Add",
         "Create",
         "Remove",
         "Detect machine",
         "Use default",
         "Apply",
-        "Save and Close",
-        "Saving…",
     ]
     .iter()
     .map(|label| Line::raw(*label).width() + 4)
@@ -341,7 +337,8 @@ fn preferred_size(draft: &Value) -> SetupSize {
         width: u16::try_from(max_width.saturating_add(4))
             .unwrap_or(u16::MAX)
             .clamp(64, 96),
-        height: max_height.clamp(20, 32),
+        // One extra row over the page body for the footer action row.
+        height: max_height.saturating_add(1).clamp(21, 33),
     }
 }
 
@@ -461,6 +458,24 @@ impl SetupDialog {
             !self.saving,
         ));
         actions
+    }
+
+    /// The actions drawn in the dialog's footer row: the way back out of a
+    /// page and the commit that closes the dialog.
+    fn footer_actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
+        self.actions()
+            .into_iter()
+            .filter(|(id, _, _)| matches!(id, SetupControl::Back | SetupControl::Save))
+            .collect()
+    }
+
+    /// The actions that belong to the page itself, stacked in the column at
+    /// the dialog's right edge.
+    fn page_actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
+        self.actions()
+            .into_iter()
+            .filter(|(id, _, _)| !matches!(id, SetupControl::Back | SetupControl::Save))
+            .collect()
     }
 
     fn prepare(&mut self) {
@@ -1512,22 +1527,27 @@ pub(crate) fn render_setup(
         frame.render_widget(theme::modal().title(title), popup);
         let layout = mj_chat::components::DialogShell::layout(inner, 0);
         // Too short for the page body: keep only the way out and the commit.
-        let actions = dialog
-            .actions()
+        let footer = dialog.footer_actions();
+        let page_actions = dialog
+            .page_actions()
             .into_iter()
-            .filter(|(id, _, _)| matches!(id, Back | Apply | Save))
+            .filter(|(id, _, _)| matches!(id, Apply))
             .collect::<Vec<_>>();
         let ColumnSplit {
             body: message,
             actions: column,
-        } = form.split_actions(layout.body, &actions);
+        } = split_page(&form, layout.body, &page_actions);
         frame.render_widget(
             Paragraph::new("Enlarge the terminal to edit these settings.")
                 .wrap(Wrap { trim: false }),
             message,
         );
-        let initial = actions.first().map_or(Save, |(id, _, _)| *id);
-        Dialog::render_actions_stacked(frame, column, &actions, &mut form, ColumnAlign::Right);
+        let initial = footer
+            .first()
+            .or(page_actions.first())
+            .map_or(Save, |(id, _, _)| *id);
+        Dialog::render_actions_stacked(frame, column, &page_actions, &mut form, ColumnAlign::Right);
+        Dialog::render_actions(frame, layout.actions, &footer, &mut form);
         form.end_frame(initial);
         return;
     }
@@ -1569,17 +1589,23 @@ pub(crate) fn render_setup(
         inner.width,
         inner.height.saturating_sub(7 + u16::from(nested)).max(1),
     );
+    // Back and the commit share the dialog's bottom row; the page's own
+    // actions stack in a column beside the body.
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    // The actions form a column beside the page body rather than a footer row,
-    // so the body gives up exactly the width that column needs.
+    let footer = dialog.footer_actions();
+    let page_actions = dialog.page_actions();
+    // The body gives up exactly the width the column needs, and the whole
+    // width on a page that has no actions of its own.
     let ColumnSplit {
         body,
         actions: column,
-    } = form.split_actions(band, &dialog.actions());
+    } = split_page(&form, band, &page_actions);
     let notice = dialog.notice.as_ref();
     // A column taller than the body may also use the rows the notice would
-    // occupy, but only while no notice is showing in them.
+    // occupy, but only while no notice is showing in them, and never the
+    // footer's row.
     let column = if notice.is_some() {
         column
     } else {
@@ -1587,7 +1613,7 @@ pub(crate) fn render_setup(
             column.x,
             column.y,
             column.width,
-            inner.bottom().saturating_sub(column.y),
+            footer_row.y.saturating_sub(column.y),
         )
     };
     let title = dismissible_modal_title(
@@ -1680,23 +1706,20 @@ pub(crate) fn render_setup(
         initial = List;
     }
     if choice_editor {
-        // Inert copy of the column, built from the same list so it cannot
-        // drift from what the page shows when no popup covers it.
+        // Inert copies of the column and the footer, built from the same lists
+        // so they cannot drift from what the page shows when no popup covers
+        // them.
         Dialog::render_actions_stacked_inert(
             frame,
             column,
-            &dialog.actions(),
+            &page_actions,
             &form,
             ColumnAlign::Right,
         );
+        Dialog::render_actions_inert(frame, footer_row, &footer, &form);
     } else {
-        Dialog::render_actions_stacked(
-            frame,
-            column,
-            &dialog.actions(),
-            &mut form,
-            ColumnAlign::Right,
-        );
+        Dialog::render_actions_stacked(frame, column, &page_actions, &mut form, ColumnAlign::Right);
+        Dialog::render_actions(frame, footer_row, &footer, &mut form);
     }
     if choice_editor {
         let editor = dialog.editor.as_ref().expect("choice editor");
@@ -1746,6 +1769,24 @@ pub(crate) fn render_setup(
         );
     }
     form.end_frame(initial);
+}
+
+/// Splits a settings page into its body and the stacked column of `actions`.
+///
+/// A page with no actions of its own keeps the full width; splitting on an
+/// empty list would still surrender the body gap to an empty column.
+fn split_page(
+    form: &Dialog<SetupControl>,
+    area: Rect,
+    actions: &[(SetupControl, &'static str, bool)],
+) -> ColumnSplit {
+    if actions.is_empty() {
+        return ColumnSplit {
+            body: area,
+            actions: Rect::new(area.right(), area.y, 0, area.height),
+        };
+    }
+    form.split_actions(area, actions)
 }
 
 #[cfg(test)]

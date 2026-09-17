@@ -151,7 +151,8 @@ pub(crate) fn profile_headings() -> PickerChoice {
         PickerCell::blank(),
         PickerCell::styled("PROFILE", style),
         PickerCell::styled("HARNESS", style),
-        PickerCell::styled("QUOTA", style),
+        PickerCell::styled("WEEKLY", style),
+        PickerCell::styled("5H", style),
     ])
 }
 
