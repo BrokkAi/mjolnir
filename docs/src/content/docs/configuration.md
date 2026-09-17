@@ -193,6 +193,12 @@ archive_after_days = 30
 An `enabled` key written by an earlier build is still read and then ignored;
 indexing is no longer optional.
 
+Because indexing is always on and Resume searches the index and nothing else,
+the first upgrade to this build builds the index before Resume can be searched.
+The search box says **Indexing…** until that first build finishes, which on a
+large corpus of other tools' sessions can take several minutes. The list and the
+tabs work throughout, and the box opens by itself when the build ends.
+
 The index is the user's own SessionWiki index, in SessionWiki's default
 location. There is no index path setting; set `SESSIONWIKI_DATA` if you move it.
 A daemon running against an overridden `MJ_DATA_DIR` indexes into

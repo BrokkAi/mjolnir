@@ -40,6 +40,9 @@ The viewer can:
 - search the SessionWiki index, list archived sessions, read one's briefing, and
   restore it into a new session, matching the terminal's Archived tab (see
   [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions));
+  the Resume search box searches that index and nothing else, so it lists the
+  sessions the index returned in the order it ranked them, and it is closed and
+  reads **Indexing…** until the first index build finishes;
 - prepare and confirm a move to another compatible target or profile while
   keeping the same logical session; and
 - refresh target capacity and profile quota; and
