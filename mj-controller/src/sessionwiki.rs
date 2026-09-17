@@ -578,7 +578,7 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
     // store for many minutes, and a just-closed session should not wait on it.
     let mut adapters: Vec<Box<dyn sessionwiki::adapters::Adapter>> =
         vec![Box::new(MjolnirAdapter::reloading(&controller.state))];
-    adapters.extend(sessionwiki::adapters::all());
+    adapters.extend(native_adapters(&controller.config));
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
     sessionwiki::index::sync_with(&mut connection, &adapters, since)
         .context("sync the SessionWiki index")?;
@@ -589,6 +589,50 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
         record_first_build();
     }
     Ok(true)
+}
+
+/// The non-Mjolnir adapters this install indexes.
+///
+/// Mjolnir's configured harness profiles decide which Codex and Claude homes
+/// are indexed, not the stock `~/.codex` and `~/.claude` locations. A user who
+/// runs several profile homes expects every session Mjolnir can start to be
+/// searchable, and a home no profile names is not Mjolnir's to walk. So the
+/// stock Codex and Claude adapters are dropped and one adapter per enabled
+/// profile home takes their place; every other built-in adapter is kept as is.
+///
+/// Each per-home adapter reports a reconcile scope covering only its own root,
+/// so a sync of one install never archives the rows of another.
+fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
+    let mut seen: BTreeSet<&Path> = BTreeSet::new();
+    let mut adapters: Vec<Box<dyn Adapter>> = Vec::new();
+    for (_, profile) in config.enabled_profiles() {
+        if !matches!(
+            profile.kind,
+            mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude
+        ) {
+            continue;
+        }
+        // Two profiles may share one home; a second adapter for the same root
+        // would only walk it twice.
+        if !seen.insert(profile.home.as_path()) {
+            continue;
+        }
+        if profile.kind == mj_core::config::HarnessKind::Codex {
+            adapters.push(Box::new(sessionwiki::adapters::Codex::in_home(
+                profile.home.clone(),
+            )));
+        } else {
+            adapters.push(Box::new(sessionwiki::adapters::ClaudeCode::in_home(
+                profile.home.clone(),
+            )));
+        }
+    }
+    adapters.extend(
+        sessionwiki::adapters::all()
+            .into_iter()
+            .filter(|adapter| !matches!(adapter.name(), "codex" | "claude-code")),
+    );
+    adapters
 }
 
 // ---------------------------------------------------------------------------
@@ -1973,5 +2017,82 @@ mod tests {
             vec![child("child", "parent"), child("grandchild", "child")],
         );
         assert_eq!(selected, vec!["grandchild", "child", "parent"]);
+    }
+
+    #[test]
+    fn native_adapters_cover_every_enabled_codex_and_claude_profile_home() {
+        use mj_core::config::{Config, HarnessKind, HarnessProfile};
+
+        fn profile(kind: HarnessKind, home: &str, enabled: bool) -> HarnessProfile {
+            HarnessProfile {
+                enabled,
+                kind,
+                home: PathBuf::from(home),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            }
+        }
+
+        let mut config = Config::default();
+        for (id, built) in [
+            ("codex", profile(HarnessKind::Codex, "/home/dev/.codex3", true)),
+            ("codex-ds", profile(HarnessKind::Codex, "/home/dev/.codex-ds", true)),
+            // A second profile on one home must not add a second adapter.
+            ("codex-alt", profile(HarnessKind::Codex, "/home/dev/.codex3", true)),
+            ("codex-off", profile(HarnessKind::Codex, "/home/dev/.codex-off", false)),
+            ("claude", profile(HarnessKind::Claude, "/home/dev/.claude4", true)),
+        ] {
+            config.profiles.insert(id.into(), built);
+        }
+
+        let adapters = native_adapters(&config);
+        let roots: Vec<(&str, Option<PathBuf>)> = adapters
+            .iter()
+            .map(|adapter| (adapter.name(), adapter.root()))
+            .collect();
+
+        let codex: Vec<&Option<PathBuf>> = roots
+            .iter()
+            .filter(|(name, _)| *name == "codex")
+            .map(|(_, root)| root)
+            .collect();
+        assert_eq!(
+            codex,
+            vec![
+                &Some(PathBuf::from("/home/dev/.codex3/sessions")),
+                &Some(PathBuf::from("/home/dev/.codex-ds/sessions")),
+            ],
+            "one adapter per enabled Codex home, deduplicated: {roots:?}"
+        );
+
+        let claude: Vec<&Option<PathBuf>> = roots
+            .iter()
+            .filter(|(name, _)| *name == "claude-code")
+            .map(|(_, root)| root)
+            .collect();
+        assert_eq!(
+            claude,
+            vec![&Some(PathBuf::from("/home/dev/.claude4/projects"))],
+            "one adapter for the enabled Claude home: {roots:?}"
+        );
+
+        for (_, root) in &roots {
+            let Some(root) = root else { continue };
+            let text = root.to_string_lossy();
+            assert!(
+                !text.contains(".codex-off"),
+                "a disabled profile must not be indexed: {roots:?}"
+            );
+            assert!(
+                !text.ends_with("/.codex/sessions") && !text.ends_with("/.claude/projects"),
+                "the stock homes are not indexed unless a profile names them: {roots:?}"
+            );
+        }
+
+        assert!(
+            roots.iter().any(|(name, _)| *name == "gemini"),
+            "the other built-in adapters are kept: {roots:?}"
+        );
     }
 }
