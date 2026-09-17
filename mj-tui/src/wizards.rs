@@ -2672,7 +2672,7 @@ fn apply_mount_completions(wizard: &mut MountWizard, prefix: &str, candidates: V
 mod dashboard;
 mod draft;
 
-pub(crate) use draft::WizardDraft;
+pub(crate) use draft::{DraftChange, WizardDraft};
 
 #[cfg(test)]
 mod tests;

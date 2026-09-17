@@ -14,6 +14,7 @@
 // trait carries accessors whose first caller arrives in a later step.
 #![allow(dead_code)]
 
+use super::dashboard::invalidate_move_preparation;
 use super::*;
 
 /// A draft edit that may invalidate an answer a background task already owes
@@ -78,6 +79,13 @@ pub(crate) trait WizardDraft: Sized {
     /// Puts the draft back on the review step. A move re-requests its
     /// preparation, because the draft it was prepared for has changed.
     fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction;
+    /// The step Back leaves the review for.
+    fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep;
+    /// Records a draft edit, cancelling whatever background answer it makes
+    /// stale.
+    fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange);
+    /// Acts on the review's primary button.
+    fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction;
 }
 
 impl WizardDraft for NewWizard {
@@ -159,6 +167,37 @@ impl WizardDraft for NewWizard {
     /// review only puts the draft back.
     fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction {
         dashboard.keep(self)
+    }
+
+    /// A bare project target reviews a directory; every other target reviews
+    /// a bundle.
+    fn review_back_step(&self, dashboard: &DashboardState) -> WizardStep {
+        let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
+        if is_bare_project_target(target) {
+            WizardStep::ProjectDirectory
+        } else {
+            WizardStep::Bundle
+        }
+    }
+
+    /// Anything that changes what would be created invalidates the remote
+    /// creation preflight. Removing an attachment, adjusting sizes, opening a
+    /// fresh attachment editor and editing a field do not, because none of
+    /// them changes the sources the preflight resolved.
+    fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange) {
+        if matches!(
+            change,
+            DraftChange::BundleSelected
+                | DraftChange::TargetSelected
+                | DraftChange::AttachmentOpened
+                | DraftChange::ReviewLeft
+        ) {
+            dashboard.invalidate_new_remote_preflight(self);
+        }
+    }
+
+    fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+        dashboard.preflight_create_session_action(self)
     }
 }
 
@@ -245,12 +284,38 @@ impl WizardDraft for ResumeWizard {
         if !self.moving {
             return dashboard.keep(self);
         }
-        let profile_id = dashboard
+        let profile_id = self.destination_profile(dashboard);
+        dashboard.request_move_preparation_for_review(self, profile_id)
+    }
+
+    /// Resume has no bundle or project step, so Back always returns to the
+    /// target picker.
+    fn review_back_step(&self, _dashboard: &DashboardState) -> WizardStep {
+        WizardStep::Target
+    }
+
+    /// A move preparation describes one exact destination draft, so every
+    /// edit but a bundle choice (which resume has no step for) discards it.
+    fn note_draft_change(&mut self, _dashboard: &mut DashboardState, change: DraftChange) {
+        if change != DraftChange::BundleSelected {
+            invalidate_move_preparation(self);
+        }
+    }
+
+    fn submit_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+        let profile_id = self.destination_profile(dashboard);
+        dashboard.preflight_resume_session_action(self, profile_id)
+    }
+}
+
+impl ResumeWizard {
+    /// The profile this resume or move lands on.
+    fn destination_profile(&self, dashboard: &DashboardState) -> String {
+        dashboard
             .compatible_profiles(&self.session_id)
             .get(self.profile)
             .map(|(id, _)| (*id).clone())
-            .expect("move wizard is only opened with a compatible profile");
-        dashboard.request_move_preparation_for_review(self, profile_id)
+            .expect("resume wizard is only opened with a compatible profile")
     }
 }
 

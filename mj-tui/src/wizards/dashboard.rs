@@ -154,7 +154,7 @@ fn declare_new_controls(dashboard: &DashboardState, wizard: &NewWizard) {
     form.end_frame(initial);
 }
 
-fn invalidate_move_preparation(wizard: &mut ResumeWizard) {
+pub(super) fn invalidate_move_preparation(wizard: &mut ResumeWizard) {
     if wizard.moving {
         wizard.preparation = None;
         wizard.preparing = false;
@@ -869,7 +869,7 @@ impl DashboardState {
             return self.activate_wizard_mount(id, wizard);
         }
         if wizard.step == WizardStep::Review {
-            return self.activate_new_review(id, wizard);
+            return self.activate_wizard_review(id, wizard);
         }
         if wizard.step == WizardStep::NewBundle {
             return self.activate_new_bundle_control(wizard, id);
@@ -998,7 +998,7 @@ impl DashboardState {
             return self.activate_wizard_mount(id, wizard);
         }
         if wizard.step == WizardStep::Review {
-            return self.activate_resume_review(id, wizard);
+            return self.activate_wizard_review(id, wizard);
         }
 
         if id == WizardControl::Back {
@@ -1205,13 +1205,18 @@ impl DashboardState {
         }
     }
 
-    fn activate_new_review(&mut self, id: WizardControl, mut wizard: NewWizard) -> DashboardAction {
-        let can_attach =
-            mount_history_host(&self.config.targets[&nth_key(&self.config.targets, wizard.target)])
-                .is_some();
+    fn activate_wizard_review<W: WizardDraft>(
+        &mut self,
+        id: WizardControl,
+        mut wizard: W,
+    ) -> DashboardAction {
+        let can_attach = mount_history_host(
+            &self.config.targets[&nth_key(&self.config.targets, wizard.target())],
+        )
+        .is_some();
         match id {
             WizardControl::ReviewAttachments => {
-                self.invalidate_new_remote_preflight(&mut wizard);
+                wizard.note_draft_change(self, DraftChange::AttachmentOpened);
                 edit_selected_mount(&mut wizard);
             }
             WizardControl::Cancel => {
@@ -1219,23 +1224,21 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             WizardControl::Back => {
-                self.invalidate_new_remote_preflight(&mut wizard);
-                let target = &self.config.targets[&nth_key(&self.config.targets, wizard.target)];
-                wizard.step = if is_bare_project_target(target) {
-                    WizardStep::ProjectDirectory
-                } else {
-                    WizardStep::Bundle
-                };
-                wizard.form.get_mut().focus(step_initial(wizard.step));
+                wizard.note_draft_change(self, DraftChange::ReviewLeft);
+                let step = wizard.review_back_step(self);
+                wizard.set_step(step);
+                wizard.form_mut().focus(step_initial(step));
             }
-            WizardControl::Add if can_attach => begin_mount_editor(&mut wizard),
+            WizardControl::Add if can_attach => {
+                wizard.note_draft_change(self, DraftChange::AttachmentEditorOpened);
+                begin_mount_editor(&mut wizard);
+            }
             WizardControl::Add => {}
-            WizardControl::Submit => return self.preflight_create_session_action(wizard),
+            WizardControl::Submit => return wizard.submit_review(self),
 
             _ => {}
         }
-        self.mode = Mode::New(wizard);
-        DashboardAction::None
+        self.keep(wizard)
     }
 
     fn activate_wizard_mount<W: WizardDraft>(
@@ -1344,7 +1347,7 @@ impl DashboardState {
         action
     }
 
-    fn invalidate_new_remote_preflight(&mut self, wizard: &mut NewWizard) {
+    pub(super) fn invalidate_new_remote_preflight(&mut self, wizard: &mut NewWizard) {
         self.invalidate_session_preflight();
         wizard.remote_repositories = None;
         wizard.remote_preflight_in_flight = false;
@@ -1354,7 +1357,10 @@ impl DashboardState {
     /// Create launches an isolated session only from a completed prerequisite
     /// check. Retry clears the failure so [`Self::take_prerequisite_check`]
     /// starts the check again.
-    fn preflight_create_session_action(&mut self, mut wizard: NewWizard) -> DashboardAction {
+    pub(super) fn preflight_create_session_action(
+        &mut self,
+        mut wizard: NewWizard,
+    ) -> DashboardAction {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         if !is_bare_project_target(&self.config.targets[&target_template_id]) {
             if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
@@ -2105,48 +2111,6 @@ impl DashboardState {
         }
     }
 
-    fn activate_resume_review(
-        &mut self,
-        id: WizardControl,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        let can_attach =
-            mount_history_host(&self.config.targets[&nth_key(&self.config.targets, wizard.target)])
-                .is_some();
-        match id {
-            WizardControl::ReviewAttachments => {
-                invalidate_move_preparation(&mut wizard);
-                edit_selected_mount(&mut wizard);
-            }
-            WizardControl::Cancel => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            WizardControl::Back => {
-                invalidate_move_preparation(&mut wizard);
-                wizard.step = WizardStep::Target;
-                wizard.form.get_mut().focus(step_initial(wizard.step));
-            }
-            WizardControl::Add if can_attach => {
-                invalidate_move_preparation(&mut wizard);
-                begin_mount_editor(&mut wizard);
-            }
-            WizardControl::Add => {}
-            WizardControl::Submit => {
-                let profile_id = self
-                    .compatible_profiles(&wizard.session_id)
-                    .get(wizard.profile)
-                    .map(|(id, _)| (*id).clone())
-                    .expect("resume wizard is only opened with a compatible profile");
-                return self.preflight_resume_session_action(wizard, profile_id);
-            }
-
-            _ => {}
-        }
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::None
-    }
-
     fn start_move_preparation(
         &mut self,
         mut wizard: ResumeWizard,
@@ -2194,7 +2158,7 @@ impl DashboardState {
         self.start_move_preparation(wizard, profile_id)
     }
 
-    fn preflight_resume_session_action(
+    pub(super) fn preflight_resume_session_action(
         &mut self,
         wizard: ResumeWizard,
         profile_id: String,
