@@ -39,8 +39,9 @@ Enter still delivers the prompt.
       per-session startup queue with a supervised drain task, draft
       restoration on failure, WikiRestore hand-off moved onto the queue,
       shutdown drain, tests.
-- [ ] Milestone 2: standby composer Enter queues and previews; dashboard
-      action and io update; failure restores the draft; tests updated.
+- [x] (2026-09-17) Milestone 2: standby composer Enter queues and previews;
+      dashboard action and io update; failure restores the draft; tests
+      updated.
 - [ ] Milestone 3: launch standby that captures typing before the session is
       registered and adopts into the session's standby on registration.
 - [ ] Workspace `cargo clippy --all-targets -- -D warnings` and `cargo test`
@@ -66,6 +67,13 @@ Enter still delivers the prompt.
 - Milestone 1: a failed `InstallHandoff` aborts the whole queue, so a prompt
   behind it returns to the draft rather than being sent without the context it
   was meant to read. Both notices are posted.
+- Milestone 2: the composer band already draws previews straight from
+  `ChatState::queued_prompts` (`render_composer_band`, and
+  `desired_prompt_height` counts them), so the standby band needed no
+  rendering change; appending the preview was enough.
+- Milestone 2: the standby branch also refuses an empty prompt with the
+  command notice. Images cannot reach a standby composer, but that guard keeps
+  an image-only submit from queueing empty text.
 - Observation: the SessionWiki restore hand-off (`restore_wiki_session` in
   `mj-controller/src/daemon/state.rs`) spawns an unsupervised task that waits
   for the same readiness condition a first prompt would wait for, then builds

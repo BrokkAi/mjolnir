@@ -113,6 +113,13 @@ pub(crate) enum DashboardIoUpdate {
         title: String,
         result: std::result::Result<String, String>,
     },
+    /// A prompt typed into a standby composer and handed to the daemon for
+    /// delivery once the session is live.
+    StartupPromptQueued {
+        session_id: String,
+        text: String,
+        result: std::result::Result<(), String>,
+    },
     ContainerSettings {
         session_id: String,
         result: std::result::Result<Controller, String>,
@@ -723,6 +730,21 @@ impl DashboardContext {
                         }
                         self.dashboard.show_launch_failure(error, Some(*retry));
                     }
+                }
+            }
+            DashboardIoUpdate::StartupPromptQueued {
+                session_id,
+                text,
+                result,
+            } => {
+                // A queued prompt shows as a preview already, so success needs
+                // no notice. A refusal puts the text back in the composer.
+                if let Err(error) = result {
+                    self.dashboard.restore_standby_prompt(&session_id, &text);
+                    self.dashboard.set_failure_notice(format!(
+                        "Could not queue the prompt for session {}: {error}",
+                        short_id(&session_id)
+                    ));
                 }
             }
             DashboardIoUpdate::RenameSession {

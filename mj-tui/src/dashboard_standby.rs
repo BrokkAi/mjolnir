@@ -155,6 +155,21 @@ impl DashboardState {
         self.standby_prompt_mut(session_id).set_draft(text);
     }
 
+    /// Puts a queued prompt back into the standby composer after the daemon
+    /// refused it: the preview goes away and the text returns in front of
+    /// whatever has since been typed.
+    pub fn restore_standby_prompt(&mut self, session_id: &str, text: &str) {
+        let standby = self.standby_prompt_mut(session_id);
+        standby.remove_queued_prompt_text(text);
+        let draft = standby.draft();
+        let restored = if draft.is_empty() {
+            text.to_owned()
+        } else {
+            format!("{text}\n{draft}")
+        };
+        standby.set_draft(restored);
+    }
+
     /// Removes a session's standby composer and returns its draft, for the
     /// chat open that adopts it as the composer's starting input.
     pub fn take_standby_prompt_draft(&mut self, session_id: &str) -> Option<String> {
@@ -167,9 +182,10 @@ impl DashboardState {
     /// transition or an in-flight attach owns the selected session. It is the
     /// real composer, so the whole readline chord set edits the draft; only
     /// the dashboard's own chords are reserved, which keeps, say, Alt-X
-    /// cancel working while typing. `Enter` never sends while the session is
-    /// offline: the standby keeps the draft and explains. `Some` means the
-    /// key was consumed, including as a no-op.
+    /// cancel working while typing. `Enter` on a plain prompt returns
+    /// `QueueStartupPrompt` so the host can have the daemon deliver it when
+    /// the session is live; a command keeps the draft and explains. `Some`
+    /// means the key was consumed, including as a no-op.
     pub(crate) fn handle_standby_prompt_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != Focus::Prompt {
             return None;
@@ -189,6 +205,10 @@ impl DashboardState {
         match action {
             ChatAction::CycleFocus { reverse } => {
                 self.cycle_focus(reverse);
+            }
+            ChatAction::Prompt(text) => {
+                self.record_event_handled();
+                return Some(DashboardAction::QueueStartupPrompt { session_id, text });
             }
             ChatAction::PasteFromClipboard => {
                 // Clipboard reads and image attachments belong to the attached

@@ -115,6 +115,13 @@ pub enum DashboardAction {
     RestartSession {
         session_id: String,
     },
+    /// A prompt typed into a standby composer while its session was still
+    /// starting. The host asks the daemon to deliver it once the session is
+    /// live; the dashboard only shows it as a queued preview.
+    QueueStartupPrompt {
+        session_id: String,
+        text: String,
+    },
     CreateSession {
         create_managed_worktree: Option<bool>,
         mjolnir_subagents: Option<bool>,

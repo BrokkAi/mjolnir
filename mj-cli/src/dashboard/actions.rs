@@ -24,8 +24,8 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
     spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
-    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_startup_prompt, spawn_workspace_create, spawn_workspace_delete,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -520,6 +520,24 @@ pub(crate) async fn apply_dashboard_action(
                     .dashboard
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
+        }
+        DashboardAction::QueueStartupPrompt { session_id, text } => {
+            // The daemon clears the saved draft only when it still holds the
+            // text this prompt was typed from; anything else stays put.
+            let inherited_draft = context
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .filter(|session| session.draft_input == text)
+                .map(|session| session.draft_input.clone());
+            spawn_startup_prompt(
+                session_id,
+                text,
+                inherited_draft,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
         }
         DashboardAction::RenameSession { session_id, title } => {
             context.dashboard.set_notice("Renaming session…");
