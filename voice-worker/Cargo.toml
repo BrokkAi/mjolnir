@@ -3,7 +3,6 @@ name = "brokk-mj-voice-worker"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Codex OAuth dictation sidecar for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"

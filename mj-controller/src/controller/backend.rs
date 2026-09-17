@@ -59,10 +59,18 @@ impl Controller {
                 branch.trim().to_owned()
             }
         } else {
-            format!(
-                "unavailable: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not a git repository") {
+                // A plain folder opened through `mj go` has no branch. Say so
+                // briefly rather than echoing multi-line git stderr, which wraps
+                // the banner.
+                "not a git checkout".to_owned()
+            } else {
+                format!(
+                    "unavailable: {}",
+                    stderr.lines().next().unwrap_or("").trim()
+                )
+            }
         };
         Ok((launch.cwd, branch))
     }
@@ -697,6 +705,7 @@ fn backend_container(
         pull_policy: container.pull_policy,
         extra_run_args,
         workspace_storage: targets::PodmanWorkspaceStorage::ContainerLayer,
+        build_cache: container.build_cache.clone(),
     }
 }
 
@@ -784,6 +793,7 @@ pub(super) fn locator_after_provision(
                 bail!("session locator/template mismatch")
             };
             TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: generated,
                 workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
                     container, session_id,
@@ -791,9 +801,11 @@ pub(super) fn locator_after_provision(
             }
         }
         TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: generated,
         },
         TargetTemplate::AppleContainer { .. } => TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: generated,
         },
         TargetTemplate::SshBare { ssh, .. } => TargetLocator::SshBare {
@@ -806,6 +818,7 @@ pub(super) fn locator_after_provision(
                 bail!("session locator/template mismatch")
             };
             TargetLocator::SshPodman {
+                borrowed_from: None,
                 host: ssh.host.clone(),
                 container_id: generated,
                 workspace_storage: PodmanWorkspaceLocator::from(targets::podman_workspace_locator(
@@ -814,6 +827,7 @@ pub(super) fn locator_after_provision(
             }
         }
         TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+            borrowed_from: None,
             host: ssh.host.clone(),
             container_id: generated,
         },

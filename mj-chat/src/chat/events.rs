@@ -63,7 +63,6 @@ impl ChatState {
     pub(super) fn set_anchor(&mut self, anchor: TranscriptAnchor) {
         if self.anchor != anchor {
             self.anchor = anchor;
-            self.mark_visible_changed();
         }
     }
 
@@ -88,24 +87,14 @@ impl ChatState {
                     ChatEntry::plain(event.seq, ChatRole::User, text)
                         .with_recorded_at(event.recorded_at_ms),
                 );
-                self.mark_visible_changed();
             }
             WorkerEvent::TurnCompleted => {
-                let changed = self.phase != WorkerPhase::Idle
-                    || self.prompt_in_flight
-                    || self.session_activity.prompt_in_flight
-                    || self.session_activity.harness_turn_started_at_ms.is_some()
-                    || self.goal_prompt_active
-                    || self.turn_started_at_epoch_seconds.is_some();
                 self.phase = WorkerPhase::Idle;
                 self.prompt_in_flight = false;
                 self.session_activity.prompt_in_flight = false;
                 self.session_activity.harness_turn_started_at_ms = None;
                 self.goal_prompt_active = false;
                 self.turn_started_at_epoch_seconds = None;
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             // The durable worker records cancellation acceptance before the
             // ACP prompt future resolves. Keep the chat busy until the later
@@ -113,22 +102,16 @@ impl ChatState {
             WorkerEvent::Cancelled => {
                 if self.phase != WorkerPhase::Running {
                     self.phase = WorkerPhase::Running;
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::Closing => {
                 if self.phase != WorkerPhase::Closing {
                     self.phase = WorkerPhase::Closing;
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::Closed => {
-                let changed = self.phase != WorkerPhase::Closed || self.prompt_in_flight;
                 self.phase = WorkerPhase::Closed;
                 self.prompt_in_flight = false;
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::Checkpointed { .. } => {}
             WorkerEvent::Adapter { payload, .. } => {
@@ -146,17 +129,12 @@ impl ChatState {
                         images: Vec::new(),
                         attachments_unsupported: false,
                     });
-                    self.mark_visible_changed();
                 }
             }
             WorkerEvent::QueuedPromptRemoved { queue_id } => {
-                let before = self.queued_prompts.len();
                 self.queued_prompts.retain(|prompt| prompt.id != *queue_id);
                 self.pending_queue_removals.remove(queue_id);
                 self.pending_queue_images.remove(queue_id);
-                if self.queued_prompts.len() != before {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::QueuedPromptPromoted { prompt, .. } => {
                 self.queued_prompts.retain(|queued| queued.id != prompt.id);
@@ -169,15 +147,10 @@ impl ChatState {
                     ChatEntry::plain(event.seq, ChatRole::User, &prompt.text)
                         .with_recorded_at(event.recorded_at_ms),
                 );
-                self.mark_visible_changed();
             }
             WorkerEvent::QueuedPromptsCleared => {
-                let changed = !self.queued_prompts.is_empty();
                 self.queued_prompts.clear();
                 self.pending_queue_removals.clear();
-                if changed {
-                    self.mark_visible_changed();
-                }
             }
             WorkerEvent::ConfigChanged { .. } => {}
         }
@@ -205,7 +178,6 @@ impl ChatState {
         else {
             return;
         };
-        self.mark_visible_changed();
         match runtime {
             RuntimeEvent::SessionUpdate { update } => {
                 self.apply_session_update_at(seq, recorded_at_ms, &update)
@@ -249,7 +221,6 @@ impl ChatState {
         else {
             return;
         };
-        self.mark_visible_changed();
         match parsed {
             SessionUpdate::AvailableCommandsUpdate(update) => {
                 self.acp_surface

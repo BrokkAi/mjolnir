@@ -690,6 +690,7 @@ fn build_config_with_runtimes(
             SshTargetKind::Podman { image } => TargetTemplate::SshPodman {
                 ssh: connection,
                 container: ContainerTemplate {
+                    build_cache: None,
                     image: image.clone(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -702,6 +703,7 @@ fn build_config_with_runtimes(
             SshTargetKind::Docker { image } => TargetTemplate::SshDocker {
                 ssh: connection,
                 container: ContainerTemplate {
+                    build_cache: None,
                     image: image.clone(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -725,6 +727,7 @@ fn build_config_with_runtimes(
 /// The shared setup/startup template for a locally available container engine.
 pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str, TargetTemplate) {
     let container = ContainerTemplate {
+        build_cache: None,
         image: image.trim().to_owned(),
         pull_policy: Default::default(),
         platform: None,
@@ -1412,6 +1415,7 @@ fn write_summary(
 
 fn smoke_target(runtime: RuntimeKind, image: &str) -> RuntimeTargetTemplate {
     let container = RuntimeContainerTemplate {
+        build_cache: None,
         image: image.to_owned(),
         pull_policy: Default::default(),
         extra_run_args: vec![],

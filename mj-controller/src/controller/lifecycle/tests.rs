@@ -110,6 +110,7 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
     session.target_template_id = "podman".into();
     session.state = SessionState::Stopped;
     session.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id,
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume { name: volume },
     });
@@ -118,6 +119,7 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -450,6 +452,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     session.target_template_id = "podman".into();
     session.state = SessionState::Closing;
     session.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id,
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: volume.clone(),
@@ -461,6 +464,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -781,6 +785,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     session.target_template_id = "apple".into();
     session.state = SessionState::Destroying;
     session.target = Some(TargetLocator::AppleContainer {
+        borrowed_from: None,
         container_id: targets::resource_name(session_id).unwrap(),
     });
     session.checkpoint = Some(checkpoint.clone());
@@ -789,6 +794,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         "apple".into(),
         TargetTemplate::AppleContainer {
             container: ConfigContainer {
+                build_cache: None,
                 image: "test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,

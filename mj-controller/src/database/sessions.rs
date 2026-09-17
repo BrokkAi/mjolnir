@@ -428,23 +428,7 @@ pub(super) fn set_session_container_settings_to(
     if changed != 1 {
         bail!("unknown session {session_id}");
     }
-    tx.execute(
-        "DELETE FROM session_mounts WHERE session_id = ?1",
-        [session_id],
-    )?;
-    for (ordinal, mount) in mounts.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                session_id,
-                ordinal as i64,
-                path_to_blob(&mount.source),
-                path_to_blob(&mount.destination),
-                mount.read_only
-            ],
-        )?;
-    }
+    replace_mounts(&tx, session_id, mounts)?;
     tx.commit()?;
     Ok(())
 }

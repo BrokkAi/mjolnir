@@ -30,7 +30,6 @@ impl ChatState {
         self.transcript_scrollbar.clear();
         if self.notices.current().is_some() {
             self.notices.clear();
-            self.mark_visible_changed();
         }
         self.voice_active = false;
         self.submitting_images.clear();
@@ -59,12 +58,6 @@ impl ChatState {
                 .unwrap_or(1),
         );
         let next_cursor = payload.text.len();
-        let changed = self.input != payload.text
-            || self.input_images != payload.images
-            || self.input_cursor != next_cursor
-            || self.history_index.is_some()
-            || !self.history_draft.is_empty()
-            || !self.history_draft_images.is_empty();
         self.input = payload.text;
         self.input_images = payload.images;
         self.input_cursor = next_cursor;
@@ -72,9 +65,6 @@ impl ChatState {
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
-        if changed {
-            self.mark_visible_changed();
-        }
     }
 
     pub(crate) fn clear_input(&mut self) {
@@ -156,7 +146,6 @@ impl ChatState {
                 self.preferred_column = None;
                 self.update_autocomplete();
                 self.set_notice("Image pasted · Backspace removes its marker");
-                self.mark_visible_changed();
             }
         }
     }
@@ -178,7 +167,6 @@ impl ChatState {
         self.pending_attachment_markers.insert(sequence, number);
         self.input_generation = self.input_generation.wrapping_add(1);
         self.set_notice("Processing image attachment…");
-        self.mark_visible_changed();
         true
     }
 
@@ -205,7 +193,6 @@ impl ChatState {
                 self.input_images[index].image = ready;
                 self.input_generation = self.input_generation.wrapping_add(1);
                 self.set_notice("Image attached · Backspace removes its marker");
-                self.mark_visible_changed();
             }
             Err(error) => {
                 if let Some(command) = command {
@@ -222,7 +209,6 @@ impl ChatState {
                     self.input_generation = self.input_generation.wrapping_add(1);
                 }
                 self.set_notice(format!("Attachment failed: {error}"));
-                self.mark_visible_changed();
             }
         }
     }
@@ -324,7 +310,6 @@ impl ChatState {
         images: Vec<PromptImage>,
         error: String,
     ) {
-        let before_len = self.unsent_prompts.len();
         self.unsent_prompts.retain(|unsent| {
             unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
         });
@@ -334,9 +319,6 @@ impl ChatState {
             error,
             recorded_at_ms: mj_core::clock::epoch_millis(),
         });
-        if self.unsent_prompts.len() != before_len || before_len > 0 {
-            self.mark_visible_changed();
-        }
     }
 
     /// Drop the record for a submit the relay has now accepted. Nothing else
@@ -348,13 +330,9 @@ impl ChatState {
         text: &str,
         images: &[PromptImage],
     ) {
-        let before = self.unsent_prompts.len();
         self.unsent_prompts.retain(|unsent| {
             unsent.kind != kind || unsent.payload.text != text || unsent.payload.images != images
         });
-        if self.unsent_prompts.len() != before {
-            self.mark_visible_changed();
-        }
     }
 
     pub(crate) fn fail_queued_prompt_removal(
@@ -373,7 +351,6 @@ impl ChatState {
                 images,
                 attachments_unsupported: false,
             });
-            self.mark_visible_changed();
         }
     }
 

@@ -155,6 +155,169 @@ pub(in crate::controller) fn container_upload_ownership_args(
     args
 }
 
+/// Shell that writes the host's mbx configuration into the container user's
+/// own home, where the container's mbx reads it.
+const MBX_CONFIG_SCRIPT: &str =
+    r#"set -eu; mkdir -p "$HOME/.config/mbx"; cat > "$HOME/.config/mbx/config.toml""#;
+
+/// Install `bin/mbx` and its `bin/cargo` shim beside the worker, and hand the
+/// container the host's mbx configuration when the host has one.
+///
+/// `bin` is the directory the worker later writes its `gh` wrapper into and
+/// prepends to `PATH`; it creates that directory without clearing it, so these
+/// two files survive and the shim is found before the image's own Cargo.
+pub(super) fn install_mbx_files(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_root: &str,
+    binary: &Path,
+    configuration: Option<&str>,
+) -> Result<()> {
+    let bin = format!("{worker_root}/bin");
+    let mbx = format!("{bin}/mbx");
+    let cargo = format!("{bin}/cargo");
+    // A hard link keeps one copy of a 30 MB binary; a copy is the fallback for
+    // images whose layer cannot link.
+    let shim_script = format!(r#"ln -f "{mbx}" "{cargo}" 2>/dev/null || cp -f "{mbx}" "{cargo}""#);
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
+        }
+    };
+    // Remote hosts keep the binary in a content-addressed cache so it crosses
+    // the network once per unique mbx, exactly as the worker binary does.
+    let source = match ssh {
+        None => binary.to_string_lossy().into_owned(),
+        Some(ssh) => {
+            let digest = mj_core::worker_launch::worker_executable_digest(binary)?;
+            let cache_dir = format!(".cache/mjolnir/mbx/{digest}");
+            let cached = format!("{cache_dir}/mbx");
+            let present = matches!(
+                executor.execute(
+                    &crate::targets::ssh_command(ssh, ["test", "-f", &cached])
+                        .purpose("probe the cached remote mbx binary"),
+                ),
+                Ok(output) if output.status == 0
+            );
+            if !present {
+                execute_checked(
+                    executor,
+                    crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
+                        .purpose("create the remote mbx cache"),
+                )?;
+                let partial = format!("{cache_dir}/mbx.partial-{session_id}");
+                execute_checked(
+                    executor,
+                    crate::targets::scp_upload(ssh, binary, &partial, false)
+                        .purpose("upload the remote mbx binary"),
+                )?;
+                execute_checked(
+                    executor,
+                    crate::targets::ssh_command(ssh, ["mv", &partial, &cached])
+                        .purpose("publish the cached remote mbx binary"),
+                )?;
+            }
+            cached
+        }
+    };
+    let steps: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "mkdir".into(),
+                "-p".into(),
+                bin.clone(),
+            ],
+            "create the session binary directory",
+        ),
+        (
+            vec![
+                engine.into(),
+                "cp".into(),
+                source,
+                format!("{container_id}:{mbx}"),
+            ],
+            "upload the mbx build cache binary",
+        ),
+        (
+            std::iter::once(engine.to_owned())
+                .chain(container_upload_ownership_args(
+                    container_id,
+                    worker_root,
+                    &[&bin],
+                ))
+                .collect(),
+            "assign the mbx binary to the worker user",
+        ),
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "sh".into(),
+                "-c".into(),
+                shim_script,
+            ],
+            "install the mbx Cargo shim",
+        ),
+        (
+            vec![
+                engine.into(),
+                "exec".into(),
+                container_id.clone(),
+                "chmod".into(),
+                "755".into(),
+                mbx.clone(),
+                cargo.clone(),
+            ],
+            "make the mbx build cache executable",
+        ),
+    ];
+    for (args, purpose) in steps {
+        let command = match ssh {
+            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+            Some(ssh) => crate::targets::ssh_command(ssh, args),
+        }
+        .purpose(purpose)
+        .stage(ProvisionStage::Syncing);
+        execute_checked(executor, command)?;
+    }
+    if let Some(configuration) = configuration {
+        let args = vec![
+            engine.to_owned(),
+            "exec".into(),
+            "-i".into(),
+            container_id.clone(),
+            "sh".into(),
+            "-c".into(),
+            MBX_CONFIG_SCRIPT.to_owned(),
+        ];
+        let command = match ssh {
+            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+            Some(ssh) => crate::targets::ssh_command(ssh, args),
+        }
+        .purpose("install the host mbx configuration")
+        .stage(ProvisionStage::Syncing)
+        .with_sensitive_stdin(configuration.as_bytes().to_vec());
+        execute_checked(executor, command)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn install_worker_files(
     executor: &impl CommandExecutor,
@@ -213,8 +376,8 @@ pub(super) fn install_worker_files(
             }
         }
         targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id }
-        | targets::TargetLocator::AppleContainer { container_id } => {
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. } => {
             let engine = match locator {
                 targets::TargetLocator::LocalPodman { .. } => "podman",
                 targets::TargetLocator::LocalDocker { .. } => "docker",
@@ -327,7 +490,9 @@ pub(super) fn install_worker_files(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",

@@ -27,7 +27,7 @@ use mj_chat::text_input::TextInput;
 
 use crate::actions::{Availability, COMMANDS, CommandId, Scope, hidden_from_palette, spec};
 use crate::render::render_session_scrollbar;
-use crate::widgets::{centered_modal, dismissible_modal_title};
+use crate::widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells};
 use crate::{DashboardAction, DashboardState, Focus, Mode};
 
 /// One row of the palette: a command and whether it can be run.
@@ -204,7 +204,6 @@ impl DashboardState {
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
-        self.mark_render_changed();
     }
 
     pub(crate) fn begin_session_palette(&mut self) {
@@ -240,7 +239,6 @@ impl DashboardState {
         palette.form.get_mut().cancel_pointer();
         palette.entries = entries;
         palette.prepare();
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
@@ -271,43 +269,22 @@ impl DashboardState {
             form.focus(PaletteControl::Commands);
             let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             form.focus(PaletteControl::Query);
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                &result,
-            );
+            self.last_event_consumed.set(result.consumed);
             result.action
         } else {
             let result = palette.form.get_mut().handle(&event);
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                &result,
-            );
+            self.last_event_consumed.set(result.consumed);
             result.action
         };
         match interaction {
             Some(Interaction::Cancel) => self.cancel_modal(),
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
-                if TextField::apply(&mut palette.query, edit)
-                    == mj_chat::components::Outcome::Changed
-                {
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                }
+                TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
             }
             Some(Interaction::Select(PaletteControl::Commands, index)) => {
                 if palette.selected != index {
                     palette.selected = index;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Activate(
@@ -339,11 +316,9 @@ impl DashboardState {
                     };
                     if self.selected_session_id.as_deref() != Some(id.as_str()) {
                         self.selected_session_id = Some(id);
-                        self.mark_render_changed();
                     }
                 }
                 self.mode = Mode::Dashboard;
-                self.mark_render_changed();
                 return self.run_available_command(entry.id);
             }
             _ => {}
@@ -372,18 +347,6 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         lines.push(PaletteLine::Command(index));
     }
     lines
-}
-
-/// Cuts `text` to `width` cells without touching the spaces inside it, so a
-/// padded column stays a column.
-fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    text.chars()
-        .take(width.saturating_sub(1))
-        .chain(['…'])
-        .collect()
 }
 
 pub(crate) fn render_palette(
@@ -465,7 +428,7 @@ pub(crate) fn render_palette(
             PaletteLine::Heading(heading) => {
                 row_map.push(None);
                 enabled.push(true);
-                let heading = clip(heading, width.saturating_sub(4));
+                let heading = truncate_to_cells(heading, width.saturating_sub(4), Truncate::PLAIN);
                 let rule_width = width.saturating_sub(heading.chars().count() + 4);
                 Line::from(vec![
                     Span::styled(format!("  {heading}  "), theme::title(true)),
@@ -491,10 +454,14 @@ pub(crate) fn render_palette(
                 let ready = entry.availability == Availability::Ready;
                 // Keep command labels aligned and reserve a visible gap before
                 // right-aligned shortcuts, even when a chord has several keys.
-                let keys = clip(&keys, width.saturating_sub(4) / 2);
+                let keys = truncate_to_cells(&keys, width.saturating_sub(4) / 2, Truncate::PLAIN);
                 let key_width = Line::raw(keys.as_str()).width();
                 let label_width = width.saturating_sub(key_width + 4);
-                let text = clip(&format!("{}{reason}", spec.label), label_width);
+                let text = truncate_to_cells(
+                    &format!("{}{reason}", spec.label),
+                    label_width,
+                    Truncate::PLAIN,
+                );
                 let style = if !ready {
                     theme::muted()
                 } else if selected {

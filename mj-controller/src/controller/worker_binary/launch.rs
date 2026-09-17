@@ -51,17 +51,26 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let subagent = crate::database::load_subagent(session_id)?;
-        let workspace_session_id = subagent.as_ref().map_or_else(
-            || session_id.to_owned(),
-            |child| child.parent_session_id.clone(),
-        );
+        // A sub-agent child shares its parent's container, so it works in the
+        // parent's workspace. The parent record is authoritative for that path.
+        let (workspace_session_id, workspace_container) = match subagent.as_ref() {
+            Some(child) => {
+                let parent = self
+                    .state
+                    .sessions
+                    .get(&child.parent_session_id)
+                    .context("sub-agent parent session is missing")?;
+                (parent.id.clone(), parent.container_workspace.clone())
+            }
+            None => (session_id.to_owned(), session.container_workspace.clone()),
+        };
         let (mut launch, project_memory, target_profile_home) = worker_launch_config(
             session,
             profile,
             bundle,
             backend,
-            session_id,
             &workspace_session_id,
+            workspace_container.as_deref(),
             target,
         )?;
         launch.subagent_tools =
@@ -98,7 +107,7 @@ impl Controller {
                 parent_bundle,
                 &parent_backend,
                 &parent.id,
-                &parent.id,
+                parent.container_workspace.as_deref(),
                 parent_target,
             )?;
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
@@ -125,6 +134,7 @@ impl Controller {
             profile_id: session.last_profile.clone(),
             bundle_id: session.bundle_id.clone(),
             target_template_id: session.target_template_id.clone(),
+            instance_id: Some(mj_core::config::instance_identity()),
         }
         .write(&ownership_path)?;
         let profile_stage = staging.path().join("profile");
@@ -179,7 +189,73 @@ impl Controller {
             &ownership_path,
             &profile_stage,
         )?;
+        // The build cache is an optimization: a failure here leaves the
+        // session running the image's own Cargo.
+        if session.build_cache.is_some()
+            && let Err(error) = self.install_build_cache_shim(session, backend, executor)
+        {
+            tracing::warn!(
+                session_id,
+                "installing the mbx build cache failed: {error:#}"
+            );
+        }
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)
+    }
+
+    /// Put the pinned mbx binary and its `cargo` shim in the session's `bin`
+    /// directory, which the worker prepends to `PATH` for the harness, its
+    /// terminals, and `bash -lc` shells. mbx invoked as `cargo` removes that
+    /// directory from `PATH` and runs the image's real Cargo underneath.
+    fn install_build_cache_shim(
+        &self,
+        session: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let worker_root = targets::worker_root(backend, &session.id)?;
+        // The download is the one build-cache failure worth telling the user
+        // about: it is fixable, and it is the only step that reaches the
+        // network.
+        let binary =
+            crate::controller::mbx::binary_for(backend, executor).inspect_err(|error| {
+                executor.notify_notice(&format!(
+                    "The Rust build cache is unavailable: {error:#}; this session builds without it."
+                ));
+            })?;
+        let configuration = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .map(|template| {
+                crate::controller::backend::backend_target(
+                    template,
+                    session.resource_allocation.as_ref(),
+                    crate::controller::backend::ContainerOverrides::for_session(session),
+                )
+            })
+            .transpose()?
+            .and_then(|target| {
+                crate::controller::mbx::host_configuration(
+                    &target,
+                    &self.config.build_cache,
+                    executor,
+                )
+            });
+        install_mbx_files(
+            executor,
+            backend,
+            &session.id,
+            &worker_root,
+            &binary,
+            configuration.as_deref(),
+        )
+    }
+
+    /// Probe the installed binary and collect the dead worker's exit record
+    /// and log tail after a session becomes unreachable. Best-effort; returns
+    /// `None` when the target no longer exists or has no diagnostics.
+    pub fn diagnose_worker(&self, session_id: &str) -> Option<String> {
+        self.diagnose_worker_controlled(session_id, &crate::targets::ProcessExecutor)
     }
 
     pub fn diagnose_worker_controlled(
@@ -276,7 +352,13 @@ impl Controller {
             .get(&session.target_template_id)
             .context("session target template is missing")?;
         let (mut launch, _, _) = worker_launch_config(
-            session, profile, bundle, backend, session_id, session_id, target,
+            session,
+            profile,
+            bundle,
+            backend,
+            session_id,
+            session.container_workspace.as_deref(),
+            target,
         )?;
         if crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
             operation.source_checkpoint_only
@@ -331,6 +413,7 @@ impl Controller {
                 &backend,
                 bundle.context("session bundle is missing")?,
                 session_id,
+                session.container_workspace.as_deref(),
             )?
         };
         let target_home = target_profile_home(&backend, session_id, profile);
@@ -387,10 +470,11 @@ pub(super) fn worker_launch_config(
     profile: &mj_core::config::HarnessProfile,
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
-    session_id: &str,
     workspace_session_id: &str,
+    workspace_container: Option<&Path>,
     target: &mj_core::config::TargetTemplate,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    let session_id = session.id.as_str();
     let execution_policy = profile
         .kind
         .effective_execution_policy(target.execution_policy());
@@ -402,6 +486,7 @@ pub(super) fn worker_launch_config(
             backend,
             bundle.context("session bundle is missing")?,
             workspace_session_id,
+            workspace_container,
         )?
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -427,6 +512,18 @@ pub(super) fn worker_launch_config(
         | TargetTemplate::SshDocker { container, .. } => container.environment.clone(),
         _ => Default::default(),
     };
+    let mut target_environment = target_environment;
+    // The build cache reaches the harness, its terminals, and the reviewer
+    // sidecar, all of which run Cargo through the mbx shim.
+    if let Some(build_cache) = &session.build_cache {
+        target_environment.insert(
+            "MBX_CACHE_DIR".into(),
+            build_cache.directory.to_string_lossy().into_owned(),
+        );
+        if let Some(max_size) = &build_cache.max_size {
+            target_environment.insert("MBX_GC_MAX_SIZE".into(), max_size.clone());
+        }
+    }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.clone());
     profile
@@ -453,6 +550,7 @@ pub(super) fn worker_launch_config(
         WorkerLaunchConfig {
             goal_resume_request: None,
             target_environment,
+            seed_image_environment: backend.container_engine().is_some(),
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagent_tools: false,

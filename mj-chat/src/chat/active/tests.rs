@@ -19,7 +19,7 @@ use ratatui::layout::{Position, Rect};
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn handle_event_result_reports_only_real_chat_repaints() {
+async fn handle_event_result_reports_which_events_the_chat_consumed() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-event-result", 72);
     let mut chat = ActiveChat::open(
         fixture.stopped,
@@ -30,7 +30,6 @@ async fn handle_event_result_reports_only_real_chat_repaints() {
         String::new(),
         Notices::default(),
     );
-    chat.acknowledge_render();
 
     let moved = chat.handle_event_result(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Moved,
@@ -38,35 +37,30 @@ async fn handle_event_result_reports_only_real_chat_repaints() {
         row: 0,
         modifiers: KeyModifiers::NONE,
     }));
-    assert_ne!(moved.outcome, Outcome::Changed);
-    assert!(!chat.take_render_changed());
-
-    let unchanged = chat.handle_event_result(Event::Key(KeyEvent::new(
-        KeyCode::Backspace,
-        KeyModifiers::NONE,
-    )));
-    assert_eq!(unchanged.outcome, Outcome::Unchanged);
+    assert!(!moved.consumed);
 
     let ignored = chat.handle_event_result(Event::Key(KeyEvent::new(
         KeyCode::F(12),
         KeyModifiers::NONE,
     )));
-    assert_eq!(ignored.outcome, Outcome::Continue);
+    assert!(!ignored.consumed);
 
-    let changed = chat.handle_event_result(Event::Key(KeyEvent::new(
+    let typed = chat.handle_event_result(Event::Key(KeyEvent::new(
         KeyCode::Char('x'),
         KeyModifiers::NONE,
     )));
-    assert_eq!(changed.outcome, Outcome::Changed);
+    assert!(typed.consumed);
     assert_eq!(chat.draft(), "x");
 
-    let cursor_changed =
+    // A cursor move and a cursor move that is already clamped are both the
+    // composer's to answer, so neither reaches the dashboard behind it.
+    let moved_cursor =
         chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-    assert_eq!(cursor_changed.outcome, Outcome::Changed);
+    assert!(moved_cursor.consumed);
 
     let clamped =
         chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-    assert_eq!(clamped.outcome, Outcome::Unchanged);
+    assert!(clamped.consumed);
 }
 
 #[test]
@@ -975,6 +969,8 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         id: id.to_owned(),
@@ -1977,7 +1973,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
 }
 
 #[test]
-fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
+fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let mut terminal =
         Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
@@ -2003,6 +1999,16 @@ fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
         .expect("the command hint is rendered")
         + enter_byte;
     let slash_column = usize::from(buffer.area.x) + prompt_text[..slash_byte].chars().count() + 1;
+    let send_byte = prompt_text[enter_byte..]
+        .find("send")
+        .expect("the send description is rendered")
+        + enter_byte;
+    let send_column = usize::from(buffer.area.x) + prompt_text[..send_byte].chars().count();
+    let commands_byte = prompt_text[slash_byte..]
+        .find("commands")
+        .expect("the commands description is rendered")
+        + slash_byte;
+    let commands_column = usize::from(buffer.area.x) + prompt_text[..commands_byte].chars().count();
 
     for column in enter_column..enter_column + "Enter".len() {
         let cell = &buffer[(column as u16, prompt_y)];
@@ -2012,6 +2018,12 @@ fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
     let slash = &buffer[(slash_column as u16, prompt_y)];
     assert!(slash.modifier.contains(ratatui::style::Modifier::BOLD));
     assert_ne!(slash.bg, theme::palette().selection);
+    for (start, word) in [(send_column, "send"), (commands_column, "commands")] {
+        for column in start..start + word.len() {
+            let cell = &buffer[(column as u16, prompt_y)];
+            assert!(!cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        }
+    }
 }
 
 #[test]

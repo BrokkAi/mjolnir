@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -26,7 +26,9 @@ pub const PODMAN_DOCUMENTATION: &str = include_str!("../docs/PODMAN.md");
 /// The Docker postconditions page, verbatim.
 pub const DOCKER_DOCUMENTATION: &str = include_str!("../docs/DOCKER.md");
 
-const PODMAN_MINIMUM_MAJOR_VERSION: u32 = 4;
+/// `--userns=keep-id:uid=,gid=`, which maps a session container's image user
+/// onto the host user, landed in Podman 4.3.0.
+const PODMAN_MINIMUM_VERSION: (u32, u32) = (4, 3);
 
 mod preflight;
 pub use preflight::*;

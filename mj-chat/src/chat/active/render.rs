@@ -471,15 +471,15 @@ pub(crate) fn render_composer_band(
         if chat.standby {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" keeps the draft ", theme::muted()),
+                Span::styled(" keeps the draft ", theme::hint_description()),
             ])
             .right_aligned()
         } else {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" send  ", theme::muted()),
+                Span::styled(" send  ", theme::hint_description()),
                 Span::styled(" / ", theme::key_hint()),
-                Span::styled(" commands ", theme::muted()),
+                Span::styled(" commands ", theme::hint_description()),
             ])
             .right_aligned()
         }

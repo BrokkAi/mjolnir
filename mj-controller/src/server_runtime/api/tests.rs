@@ -311,6 +311,8 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         mjolnir_subagents: None,
         create_managed_worktree: None,
+        container_workspace: None,
+        build_cache: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
         container_cpus: None,

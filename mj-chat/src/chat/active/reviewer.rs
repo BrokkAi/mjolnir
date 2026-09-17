@@ -49,10 +49,8 @@ impl ActiveChat {
         self.state
             .open_second_opinion(CapturedProposal { request, proposal }, setup);
         if let Some(selection) = remembered {
-            if let Some(view) = self.state.second_opinion_mut()
-                && view.set_status("resuming the reviewer…")
-            {
-                self.state.mark_visible_changed();
+            if let Some(view) = self.state.second_opinion_mut() {
+                view.set_status("resuming the reviewer…");
             }
             self.probe_reviewer(
                 0,
@@ -601,12 +599,8 @@ impl ActiveChat {
         let events = match result {
             Ok(events) => events,
             Err(error) => {
-                let changed = self
-                    .state
-                    .second_opinion_mut()
-                    .is_some_and(|view| view.report_failure(error));
-                if changed {
-                    self.state.mark_visible_changed();
+                if let Some(view) = self.state.second_opinion_mut() {
+                    view.report_failure(error);
                 }
                 return;
             }
@@ -619,28 +613,21 @@ impl ActiveChat {
         } else {
             false
         };
-        if reviewer_changed {
-            if let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
-                && let Some(answer) = review.reviewer.latest_answer()
-                && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
-                    review.workflow.stage().clone()
-            {
-                review.workflow.reviewer_turn_completed(&command_id, answer);
-            }
-            self.state.mark_visible_changed();
+        if reviewer_changed
+            && let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
+            && let Some(answer) = review.reviewer.latest_answer()
+            && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
+                review.workflow.stage().clone()
+        {
+            review.workflow.reviewer_turn_completed(&command_id, answer);
         }
         let finished = self.state.second_opinion().is_some_and(
             |view| matches!(view, SecondOpinion::Review(review) if review.workflow.finished()),
         );
-        let status_changed = if let Some(view) = self.state.second_opinion_mut()
+        if let Some(view) = self.state.second_opinion_mut()
             && view.reviewer().is_some_and(|reviewer| !reviewer.is_empty())
         {
-            view.set_status("Enter to act · Tab to choose")
-        } else {
-            false
-        };
-        if status_changed {
-            self.state.mark_visible_changed();
+            view.set_status("Enter to act · Tab to choose");
         }
         self.persist_review();
         self.surface_reviewer_elicitations();

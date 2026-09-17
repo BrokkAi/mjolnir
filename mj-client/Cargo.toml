@@ -3,7 +3,6 @@ name = "brokk-mj-client"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Client-facing contracts and shared presentation helpers for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"

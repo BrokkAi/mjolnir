@@ -103,7 +103,7 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
                 .purpose("sample local Podman container writable disk"),
             ),
         ),
-        TargetLocator::LocalDocker { container_id } => (
+        TargetLocator::LocalDocker { container_id, .. } => (
             container_exec(
                 "docker",
                 container_id,
@@ -128,7 +128,9 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
         TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | TargetLocator::SshDocker { ssh, container_id } => (
+        | TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => (
             ssh_command(
                 ssh,
                 [
@@ -180,7 +182,7 @@ pub fn resource_probe(locator: &TargetLocator, session_id: &str) -> Result<Sessi
                 ),
             )
         }
-        TargetLocator::AppleContainer { container_id } => (
+        TargetLocator::AppleContainer { container_id, .. } => (
             container_exec(
                 "container",
                 container_id,

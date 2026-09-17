@@ -3,7 +3,6 @@ name = "brokk-mj-transcript"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Transcript projection and presentation for Mjolnir"
 repository.workspace = true

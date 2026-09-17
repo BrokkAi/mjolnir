@@ -18,7 +18,10 @@ impl DashboardContext {
 
     /// Takes every message queued behind the one that woke the loop, feed by
     /// feed, in the order the UI depends on.
-    pub(crate) fn drain_feeds(&mut self) {
+    /// Applies whatever the background feeds have queued, and reports whether
+    /// any message arrived. The report is what lets a timer wakeup that had
+    /// nothing of its own to show still draw the message that rode with it.
+    pub(crate) fn drain_feeds(&mut self) -> bool {
         self.cancel_stale_path_input();
         self.drain_quota_updates();
         self.drain_runtime_state();
@@ -40,6 +43,37 @@ impl DashboardContext {
         self.drain_lifecycle_updates();
         self.drain_dashboard_io();
         self.refresh_open_review();
+        // Collected rather than short-circuited: every feed's flag has to be
+        // cleared for the next drain.
+        [
+            self.quota.take_delivered(),
+            self.worker.take_delivered(),
+            self.runtime_state.take_delivered(),
+            self.runtime_reviews.take_delivered(),
+            self.runtime_notices.take_delivered(),
+            self.runtime_config.take_delivered(),
+            self.lifecycle.take_delivered(),
+            self.credential_sync.take_delivered(),
+            self.resource.take_delivered(),
+            self.capacity.take_delivered(),
+            self.aws_options.take_delivered(),
+            self.import_profiles.take_delivered(),
+            self.import_tasks.take_delivered(),
+            self.dashboard_io.take_delivered(),
+        ]
+        .into_iter()
+        .any(|delivered| delivered)
+    }
+
+    /// Whether the once-a-second clock has anything new to put on screen.
+    ///
+    /// A notice is the only report several background failures get, and any
+    /// task can write it through the shared slot without waking this loop, so
+    /// the slot is compared with what the frame on screen was drawn from.
+    pub(super) fn clock_tick_redraws(&mut self) -> bool {
+        self.dashboard.clock_changed()
+            || self.notices.generation() != self.drawn_notice_generation
+            || self.visible_chat().is_some_and(|chat| chat.clock_changed())
     }
 
     /// Hands the open chat whatever turn review the daemon is running for it.

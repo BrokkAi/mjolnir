@@ -98,6 +98,10 @@ pub struct Feed<S: FeedSource> {
     pub(super) source: S,
     pub(super) pending: Option<S::Item>,
     pub(super) open: bool,
+    /// Whether the drain has taken a message since it was last asked. A loop
+    /// that gates a frame on a timer still has to draw when a message rode
+    /// along with that timer.
+    pub(super) delivered: bool,
 }
 
 impl<S: FeedSource> Feed<S> {
@@ -106,6 +110,7 @@ impl<S: FeedSource> Feed<S> {
             source,
             pending: None,
             open: true,
+            delivered: false,
         }
     }
 
@@ -135,6 +140,13 @@ impl<S: FeedSource> Feed<S> {
     /// The next message for the batch drain: the one that won the select
     /// first, then whatever queued behind it.
     pub fn next_ready(&mut self) -> Option<S::Item> {
-        self.pending.take().or_else(|| self.source.poll_now())
+        let message = self.pending.take().or_else(|| self.source.poll_now());
+        self.delivered |= message.is_some();
+        message
+    }
+
+    /// Whether [`Self::next_ready`] produced a message since the last call.
+    pub fn take_delivered(&mut self) -> bool {
+        std::mem::take(&mut self.delivered)
     }
 }

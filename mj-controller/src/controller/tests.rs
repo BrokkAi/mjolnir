@@ -43,6 +43,7 @@ fn registration_config() -> Config {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "example.invalid/hel-test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -716,7 +717,7 @@ fn a_failed_mount_history_write_does_not_fail_the_registered_session() {
             launch_options(vec![AdditionalMount {
                 source: PathBuf::from("/host/models"),
                 destination: PathBuf::from("/mnt/models"),
-                read_only: false,
+                access: crate::targets::MountAccess::Cow,
             }]),
         )
         .expect("a suggestion list that cannot be written must not fail a registration");
@@ -791,6 +792,7 @@ fn local_mount_source_must_be_an_existing_directory() {
         "local".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,

@@ -2,13 +2,21 @@ use super::*;
 
 /// Create the initial resource. AWS address discovery and all SSH bootstrap
 /// happen after parsing the `run-instances` response and constructing a locator.
+///
+/// `container_workspace` is the session record's recorded container workspace.
+/// Container targets clone into it and mount their workspace storage there;
+/// a session that predates per-session workspaces records none and keeps the
+/// shared `/workspace`.
 pub fn provision_plan(
     template: &TargetTemplate,
     session_id: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
+    image_user: Option<ImageUser>,
+    container_workspace: Option<&Path>,
 ) -> Result<CommandPlan> {
     bundle.validate()?;
+    let workspace = container_workspace_root(container_workspace);
     if !additional_mounts.is_empty()
         && !matches!(
             template,
@@ -28,6 +36,8 @@ pub fn provision_plan(
             session_id,
             bundle,
             additional_mounts,
+            image_user,
+            container_workspace,
         )?;
         plan.commands = plan
             .commands
@@ -49,7 +59,9 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                image_user,
                 None,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -58,7 +70,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("podman", &name, args)
             }));
         }
@@ -69,6 +81,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -77,7 +90,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("docker", &name, args)
             }));
         }
@@ -95,6 +108,7 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::Container {
@@ -103,7 +117,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 container_exec("container", &name, args)
             }));
         }
@@ -170,7 +184,9 @@ pub fn provision_plan(
                 &name,
                 session_id,
                 additional_mounts,
+                image_user,
                 Some(ssh),
+                &workspace,
             )?);
             commands.extend(
                 install_git_plan(ExecutionBoundary::SshContainer {
@@ -180,7 +196,7 @@ pub fn provision_plan(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, CONTAINER_WORKSPACE, |args| {
+            commands.extend(clone_commands(bundle, &workspace, |args| {
                 let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.clone()];
                 remote.extend(args);
                 ssh_command_owned(ssh, remote)
@@ -250,6 +266,8 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         smoke_id,
         &[],
         None,
+        None,
+        CONTAINER_WORKSPACE,
     )?);
     let exec = vec![
         engine.to_owned(),
@@ -327,11 +345,11 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
     let mount = AdditionalMount {
         source: PathBuf::from(lower),
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
-        read_only: false,
+        access: MountAccess::Cow,
     };
     let result = (|| {
         let create = command_over_ssh(
-            docker_container_run(container, &name, smoke_id, &[mount])?,
+            docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?,
             ssh,
         );
         execute_checked(executor, &create)?;
@@ -348,6 +366,7 @@ pub(super) fn run_ssh_docker_overlay_smoke_test(
     let cleanup = (|| {
         let plan = close_plan(
             &TargetLocator::SshDocker {
+                borrowed_from: None,
                 ssh: ssh.clone(),
                 container_id: name,
             },
@@ -409,17 +428,23 @@ pub(super) fn run_docker_overlay_smoke_test(
     let mount = AdditionalMount {
         source: lower.path().to_path_buf(),
         destination: PathBuf::from("/mnt/hel-overlay-smoke"),
-        read_only: false,
+        access: MountAccess::Cow,
     };
-    let create = docker_container_run(container, &name, smoke_id, &[mount])?
+    let create = docker_container_run(container, &name, smoke_id, &[mount], CONTAINER_WORKSPACE)?
         .purpose("create disposable Docker OverlayFS smoke container");
     let probe = container_exec("docker", &name, ["sh", "-c", DOCKER_OVERLAY_SMOKE_PROBE])
         .purpose("verify Docker OverlayFS copy-on-write attachment");
-    let cleanup = close_plan(&TargetLocator::LocalDocker { container_id: name }, smoke_id)?
-        .commands
-        .into_iter()
-        .next()
-        .context("Docker OverlayFS smoke cleanup plan is empty")?;
+    let cleanup = close_plan(
+        &TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name,
+        },
+        smoke_id,
+    )?
+    .commands
+    .into_iter()
+    .next()
+    .context("Docker OverlayFS smoke cleanup plan is empty")?;
 
     let smoke_result =
         execute_checked(executor, &create).and_then(|()| execute_checked(executor, &probe));

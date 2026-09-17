@@ -8,12 +8,9 @@ impl ActiveChat {
             .unwrap_or(ChatEventOutcome::None)
     }
 
-    /// Applies one terminal event while preserving both dispatch and repaint
-    /// information.  The action is intentionally separate from `Outcome`:
-    /// editing the composer may need a redraw without asking the host to do
-    /// anything, while a remote command can be consumed with no visual delta.
+    /// Applies one terminal event, reporting whether the conversation consumed
+    /// it and whatever action it asks the host to take.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
-        let before = self.state.visible_revision();
         let action = match &event {
             Event::Key(key) => self.state.handle_key(*key),
             Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),
@@ -24,16 +21,9 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
-        let changed = self.state.visible_revision() != before;
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
-            outcome: if changed {
-                Outcome::Changed
-            } else if consumed || action.is_some() {
-                Outcome::Unchanged
-            } else {
-                Outcome::Continue
-            },
+            consumed: consumed || action.is_some(),
             action,
         }
     }
@@ -265,7 +255,6 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state.mark_visible_changed();
                     self.state.set_notice(
                         "Starting microphone… click again or press Alt-V to transcribe",
                     );
@@ -281,11 +270,6 @@ impl ActiveChat {
             ChatAction::QuitDetach => return self.detach(),
         }
         ChatEventOutcome::Handled
-    }
-
-    /// Refreshes the parent session's direct-child count without reopening chat.
-    pub fn set_subagent_count(&mut self, count: usize) {
-        self.state.set_subagent_count(count);
     }
 
     /// Leaves the conversation: stops any dictation and reports how far the

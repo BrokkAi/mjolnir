@@ -231,8 +231,12 @@ impl SubagentConfig {
         {
             validate_id("sub-agent profile", profile_id)?;
             match profiles.get(profile_id) {
-                Some(profile) if profile.enabled => {}
-                Some(_) => bail!("[subagents] eligible profile {profile_id:?} is disabled"),
+                // A disabled profile is simply not offered for sub-agent use
+                // (see `profile_is_eligible` and the spawn gate), so it does not
+                // stop the daemon from starting; `mj doctor` warns about the
+                // contradiction instead. A profile that is not defined at all is
+                // a configuration mistake, so it still fails to load.
+                Some(_) => {}
                 None => bail!(
                     "[subagents] eligible profile {profile_id:?} is not defined in this config"
                 ),
@@ -250,6 +254,26 @@ impl SubagentConfig {
                     .get(candidate)
                     .copied()
                     .unwrap_or(false))
+    }
+}
+
+/// Global switch for the mbx build cache shared by Rust container sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildCacheConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Default for BuildCacheConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl BuildCacheConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -288,6 +312,8 @@ pub struct Config {
     pub review: ReviewConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
     pub subagents: SubagentConfig,
+    #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
+    pub build_cache: BuildCacheConfig,
     #[serde(
         default,
         rename = "startup",
@@ -315,6 +341,7 @@ impl Default for Config {
             phone: PhoneConfig::default(),
             review: ReviewConfig::default(),
             subagents: SubagentConfig::default(),
+            build_cache: BuildCacheConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
@@ -418,6 +445,7 @@ impl Config {
     /// Explicit entries with the same name override the standard defaults.
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
+            build_cache: None,
             image: DEFAULT_CONTAINER_IMAGE.into(),
             pull_policy: Default::default(),
             platform: None,

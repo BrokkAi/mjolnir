@@ -17,12 +17,8 @@ impl DashboardState {
     /// enough room to grow a pane to its maximum size.
     pub fn restore_pane_sizes(&mut self, sizes: PaneSizes) -> anyhow::Result<()> {
         sizes.validate()?;
-        let changed = self.pane_sizes != sizes;
         self.pane_sizes = sizes;
         self.clamp_selections();
-        if changed {
-            self.mark_render_changed();
-        }
         Ok(())
     }
 
@@ -61,12 +57,11 @@ impl DashboardState {
         }
         *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
         self.clamp_selections();
-        if self.pane_sizes != previous {
-            if let Some(workspace_id) = &self.active_workspace_id {
-                self.workspace_pane_sizes_modified
-                    .insert(workspace_id.clone());
-            }
-            self.mark_render_changed();
+        if self.pane_sizes != previous
+            && let Some(workspace_id) = &self.active_workspace_id
+        {
+            self.workspace_pane_sizes_modified
+                .insert(workspace_id.clone());
         }
     }
 
@@ -87,7 +82,6 @@ impl DashboardState {
     /// Alt-G's stable global preset: restore any custom arrangement to all
     /// Standard; from all Standard, minimize every support pane for the conversation.
     pub fn toggle_pane_preset(&mut self) {
-        let previous = self.pane_sizes;
         if self.pane_sizes.all_standard() {
             self.pane_sizes = PaneSizes {
                 sessions: PaneSize::Minimized,
@@ -98,9 +92,6 @@ impl DashboardState {
             self.pane_sizes = PaneSizes::default();
         }
         self.clamp_selections();
-        if self.pane_sizes != previous {
-            self.mark_render_changed();
-        }
     }
 
     #[must_use]

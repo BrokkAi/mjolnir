@@ -105,11 +105,11 @@ pub(super) fn start_worker_command(
             "podman",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
-        targets::TargetLocator::LocalDocker { container_id } => CommandSpec::new(
+        targets::TargetLocator::LocalDocker { container_id, .. } => CommandSpec::new(
             "docker",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
-        targets::TargetLocator::AppleContainer { container_id } => CommandSpec::new(
+        targets::TargetLocator::AppleContainer { container_id, .. } => CommandSpec::new(
             "container",
             ["exec", "--detach", container_id, "sh", "-c", &exec_script],
         ),
@@ -131,7 +131,9 @@ pub(super) fn start_worker_command(
                 &exec_script,
             ],
         ),
-        targets::TargetLocator::SshDocker { ssh, container_id } => crate::targets::ssh_command(
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => crate::targets::ssh_command(
             ssh,
             [
                 "docker",

@@ -46,37 +46,6 @@ fn changed_config_preserves_a_new_palette_and_its_query() {
 }
 
 #[test]
-fn duplicate_visible_activity_update_does_not_request_a_frame() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let activity = mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        activity_turn_started_at_ms: Some(1_000),
-        ..Default::default()
-    };
-
-    dashboard.set_session_activity("session-1", activity.clone());
-    assert!(dashboard.take_render_changed());
-    dashboard.set_session_activity("session-1", activity);
-    assert!(!dashboard.take_render_changed());
-}
-
-#[test]
-fn state_updates_in_hidden_workspaces_do_not_request_a_frame() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.take_render_changed();
-    let mut hidden = stopped_session();
-    hidden.id = "hidden-session".into();
-    hidden.workspace_id = "other-workspace".into();
-    hidden.title = "changed in another tab".into();
-    let mut state = dashboard.state.clone();
-    state.sessions.insert(hidden.id.clone(), hidden);
-
-    dashboard.set_state(state);
-
-    assert!(!dashboard.take_render_changed());
-}
-
-#[test]
 fn resume_is_projected_into_active_while_background_work_runs() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);

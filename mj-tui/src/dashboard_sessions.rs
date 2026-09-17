@@ -171,16 +171,8 @@ impl DashboardState {
 
     pub fn set_project_source(&mut self, session_id: &str, source: ProjectSourceIdentity) {
         if self.state.sessions.contains_key(session_id) {
-            let visible = self
-                .ordered_sessions()
-                .iter()
-                .any(|session| session.id == session_id);
-            let changed = self.project_sources.get(session_id) != Some(&source);
             self.project_sources.insert(session_id.to_owned(), source);
             self.clamp_selections();
-            if visible && changed {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -209,7 +201,6 @@ impl DashboardState {
         if !self.collapsed_project_keys.remove(project_key) {
             self.collapsed_project_keys.insert(project_key.to_owned());
         }
-        self.mark_render_changed();
     }
 
     pub(crate) fn toggle_selected_project(&mut self) {
@@ -320,7 +311,6 @@ impl DashboardState {
     }
 
     pub fn cancel_modal(&mut self) {
-        let was_modal = !matches!(self.mode, Mode::Dashboard);
         if self.review_settings_discovery_active() {
             self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         }
@@ -331,9 +321,6 @@ impl DashboardState {
         }
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
-        if was_modal {
-            self.mark_render_changed();
-        }
     }
 
     pub(crate) fn focus_len_for(&self, focus: Focus) -> usize {
@@ -352,7 +339,7 @@ impl DashboardState {
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
         }
-        let changed = match focus {
+        match focus {
             Focus::Sessions => {
                 let sessions = self.ordered_sessions();
                 let next = self
@@ -384,11 +371,7 @@ impl DashboardState {
                 }
             }
             Focus::Workspaces | Focus::Prompt => false,
-        };
-        if changed {
-            self.mark_render_changed();
         }
-        changed
     }
 
     pub(crate) fn selection_for(&self, focus: Focus) -> usize {
@@ -427,10 +410,6 @@ impl DashboardState {
     }
 
     pub(crate) fn clamp_selections(&mut self) {
-        let previous_selected = self.selected_session_id.clone();
-        let previous_collapsed_len = self.collapsed_project_keys.len();
-        let previous_quota = self.quota_index;
-        let previous_capacity = self.capacity_index;
         // The selection is anchored by id, so it survives the list changing
         // under it; it only moves when the session it named stopped being on
         // screen.
@@ -456,12 +435,5 @@ impl DashboardState {
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
-        if previous_selected != self.selected_session_id
-            || previous_collapsed_len != self.collapsed_project_keys.len()
-            || previous_quota != self.quota_index
-            || previous_capacity != self.capacity_index
-        {
-            self.mark_render_changed();
-        }
     }
 }

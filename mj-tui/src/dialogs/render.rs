@@ -113,7 +113,7 @@ pub(crate) fn render_import_progress(
     let status = import_progress_status(progress);
     let paragraph = Paragraph::new(vec![
         Line::styled(
-            truncate_text(&progress.session_title, 60),
+            truncate_to_cells(&progress.session_title, 60, Truncate::SUMMARY),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -295,12 +295,16 @@ pub(crate) fn render_import_bundle_confirmation(
     form.end_frame(DialogControl::ImportContinue);
 }
 
-/// Editable per-session container provisioning inputs: the size overrides and
-/// the attached host directories. Nothing here is written to config.toml.
-pub(crate) fn render_rename_editor(
+/// Draws a one-field modal: a header line naming what is being renamed, the
+/// field itself, and a Cancel/Save footer. The rename editors are the two
+/// dialogs shaped this way.
+fn render_text_prompt(
     frame: &mut Frame,
     area: Rect,
-    editor: &RenameEditor,
+    form: &RefCell<Dialog<DialogControl>>,
+    value: &TextInput,
+    header: &str,
+    title: &str,
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
@@ -309,21 +313,20 @@ pub(crate) fn render_rename_editor(
         vertical: 1,
     });
     if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
+        clear_dialog_form_geometry(&mut form.borrow_mut());
         return;
     }
     frame.render_widget(
-        Paragraph::new(format!("Session: {}", editor.session_id)),
+        Paragraph::new(header),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
+    let mut form = form.borrow_mut();
     form.begin_frame();
-    let title =
-        dismissible_modal_title(&mut form, popup, "Rename session", theme::title(true), true);
+    let title = dismissible_modal_title(&mut form, popup, title, theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
+    TextField::render(frame, field, value, &mut form, DialogControl::Field);
     Dialog::render_actions(
         frame,
         footer,
@@ -336,52 +339,38 @@ pub(crate) fn render_rename_editor(
     form.end_frame(DialogControl::Field);
 }
 
+pub(crate) fn render_rename_editor(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &RenameEditor,
+    surfaces: &mut FrameSurfaces,
+) {
+    render_text_prompt(
+        frame,
+        area,
+        &editor.form,
+        &editor.title,
+        &format!("Session: {}", editor.session_id),
+        "Rename session",
+        surfaces,
+    );
+}
+
 pub(crate) fn render_config_id_editor(
     frame: &mut Frame,
     area: Rect,
     editor: &ConfigIdEditor,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 60, 8, area);
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Current {} ID: {}",
-            editor.kind.label(),
-            editor.old_id
-        )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
-    form.begin_frame();
-    let title = dismissible_modal_title(
-        &mut form,
-        popup,
-        format!("Rename {} ID", editor.kind.label()),
-        theme::title(true),
-        true,
-    );
-    frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
-    Dialog::render_actions(
+    render_text_prompt(
         frame,
-        footer,
-        &[
-            (DialogControl::Cancel, "Cancel", true),
-            (DialogControl::Save, "Save", true),
-        ],
-        &mut form,
+        area,
+        &editor.form,
+        &editor.value,
+        &format!("Current {} ID: {}", editor.kind.label(), editor.old_id),
+        &format!("Rename {} ID", editor.kind.label()),
+        surfaces,
     );
-    form.end_frame(DialogControl::Field);
 }
 
 pub(crate) fn render_target_actions(

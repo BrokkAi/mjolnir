@@ -156,7 +156,7 @@ fn focus_wraps_and_skips_disabled_controls() {
     form.register(3, ControlKind::Button, Rect::new(0, 2, 5, 1), true);
     form.end_frame(1);
     assert_eq!(form.focused(), Some(1));
-    assert!(form.handle(&key(KeyCode::Tab)).outcome.is_consumed());
+    assert!(form.handle(&key(KeyCode::Tab)).consumed);
     assert_eq!(form.focused(), Some(3));
     form.handle(&key(KeyCode::Tab));
     assert_eq!(form.focused(), Some(1));
@@ -199,7 +199,7 @@ fn field_space_is_editing_and_unicode_cursor_is_applied_by_editor() {
     let mut input = TextInput::from_value("a👩‍💻b");
     assert_eq!(
         apply_field_edit(&mut input, FieldEdit::Cursor(2)),
-        Outcome::Changed
+        EditOutcome::Changed
     );
     assert_eq!(input.cursor(), 1);
 }
@@ -360,7 +360,7 @@ fn disabled_click_is_consumed_without_changing_focus() {
     form.declare_with_enabled(2, ControlKind::Button, false);
     form.end_frame(1);
     let result = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
-    assert!(result.is_consumed());
+    assert!(result.consumed);
     assert_eq!(result.action, None);
     assert_eq!(form.focused(), Some(1));
 }
@@ -395,18 +395,18 @@ fn activation_ignores_repeat_release_and_modified_space() {
 }
 
 #[test]
-fn activation_keeps_its_action_when_the_form_does_not_repaint() {
+fn activation_keeps_its_action_when_the_form_state_does_not_move() {
     let mut form = form();
     form.focus(2);
 
     let result = form.handle(&key(KeyCode::Enter));
 
-    assert_eq!(result.outcome, Outcome::Unchanged);
+    assert!(result.consumed);
     assert_eq!(result.action, Some(Interaction::Activate(2)));
 }
 
 #[test]
-fn clamped_navigation_and_repeated_focus_are_consumed_without_changed() {
+fn clamped_navigation_and_repeated_focus_stay_consumed() {
     let mut form = Form::new();
     form.register(
         1,
@@ -420,11 +420,11 @@ fn clamped_navigation_and_repeated_focus_are_consumed_without_changed() {
     form.end_frame(1);
 
     let result = form.handle(&key(KeyCode::Down));
-    assert_eq!(result.outcome, Outcome::Unchanged);
+    assert!(result.consumed);
     assert_eq!(result.action, Some(Interaction::Select(1, 1)));
 
     let result = form.handle(&key(KeyCode::Up));
-    assert_eq!(result.outcome, Outcome::Changed);
+    assert!(result.consumed);
     assert_eq!(result.action, Some(Interaction::Select(1, 0)));
     assert_eq!(form.selected(1), Some(0));
 
@@ -432,34 +432,34 @@ fn clamped_navigation_and_repeated_focus_are_consumed_without_changed() {
     only.register(1, ControlKind::Button, Rect::new(0, 0, 5, 1), true);
     only.end_frame(1);
     let result = only.handle(&key(KeyCode::Tab));
-    assert_eq!(result.outcome, Outcome::Unchanged);
+    assert!(result.consumed);
     assert_eq!(only.focused(), Some(1));
 }
 
 #[test]
-fn pointer_press_and_release_report_only_the_visible_armed_change() {
+fn a_press_captures_the_pointer_and_a_release_outside_lets_it_go() {
     let mut form = form();
     let down = mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);
     let up = mouse(MouseEventKind::Up(MouseButton::Left), 20, 20);
 
-    assert_eq!(form.handle(&down).outcome, Outcome::Changed);
+    assert!(form.handle(&down).consumed);
     assert!(form.captures_pointer());
     let result = form.handle(&up);
-    assert_eq!(result.outcome, Outcome::Changed);
+    assert!(result.consumed);
     assert_eq!(result.action, None);
     assert!(!form.captures_pointer());
 }
 
 #[test]
-fn disabled_click_and_noop_editing_remain_consumed_without_repaint() {
+fn disabled_click_and_noop_editing_remain_consumed() {
     let mut form = form();
     form.declare_with_enabled(2, ControlKind::Button, false);
     form.end_frame(1);
     let disabled = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
-    assert_eq!(disabled.outcome, Outcome::Unchanged);
+    assert!(disabled.consumed);
 
     let edit = form.handle(&key(KeyCode::Left));
-    assert_eq!(edit.outcome, Outcome::Unchanged);
+    assert!(edit.consumed);
     assert_eq!(
         edit.action,
         Some(Interaction::Edit(

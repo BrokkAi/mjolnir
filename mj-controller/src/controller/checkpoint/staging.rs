@@ -188,7 +188,7 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        targets::TargetLocator::LocalDocker { container_id } => execute_checked(
+        targets::TargetLocator::LocalDocker { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "docker",
@@ -201,7 +201,7 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             .purpose("upload checkpoint specification"),
         )
         .map(|_| ()),
-        targets::TargetLocator::AppleContainer { container_id } => execute_checked(
+        targets::TargetLocator::AppleContainer { container_id, .. } => execute_checked(
             executor,
             CommandSpec::new(
                 "container",
@@ -224,7 +224,9 @@ pub(in crate::controller) fn upload_checkpoint_spec(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",

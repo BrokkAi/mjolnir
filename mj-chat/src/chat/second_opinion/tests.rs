@@ -416,9 +416,9 @@ fn the_reviewer_pane_scrolls_and_copies_from_its_own_rows() {
 
     // Scrolling stops at the last full screen rather than running past it.
     pane.scroll_by(1_000, 10);
-    assert_eq!(pane.top_row, total - 10);
+    assert_eq!(pane.viewport.top_row, total - 10);
     pane.scroll_by(-1_000, 10);
-    assert_eq!(pane.top_row, 0);
+    assert_eq!(pane.viewport.top_row, 0);
 
     let text = pane
         .selection_text(&SelectionRange {

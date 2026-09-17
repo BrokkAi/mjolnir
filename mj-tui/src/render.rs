@@ -36,7 +36,7 @@ use crate::dialogs::{
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
-use crate::widgets::format_resource_bytes;
+use crate::widgets::{Truncate, format_resource_bytes, truncate_to_cells};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::workspaces::render_workspace_manager;
 use crate::{

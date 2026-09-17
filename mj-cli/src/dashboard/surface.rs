@@ -1,28 +1,14 @@
 use super::*;
 
 impl DashboardContext {
-    /// Redraws the view on screen, if anything asked for a redraw.
+    /// Rebuilds the view on screen.
     ///
-    /// A notice is the only report several background failures get, and it can
-    /// be written from any task through the shared slot. Comparing the slot
-    /// with what the last frame drew is what makes a notice reach the screen
-    /// even when nothing else marked the view dirty; without it a notice could
-    /// be replaced or dismissed having rendered zero frames.
+    /// `ratatui` compares this frame with the previous one and writes only the
+    /// cells that differ, so drawing when nothing moved costs CPU time and no
+    /// terminal output. That is why the loop draws once per wakeup instead of
+    /// tracking which mutations were visible.
     pub(crate) fn draw(&mut self) -> Result<()> {
-        let notice_generation = self.notices.generation();
-        self.dirty |= notice_generation != self.drawn_notice_generation;
-        self.dirty |= self.dashboard.take_render_changed();
-        let chat_visible = self.visible_chat().is_some();
-        let chat_changed = self
-            .active_chat
-            .as_mut()
-            .is_some_and(|chat| chat.take_render_changed());
-        self.dirty |= chat_visible && chat_changed;
-        if !self.dirty {
-            return Ok(());
-        }
-        self.dirty = false;
-        self.drawn_notice_generation = notice_generation;
+        self.drawn_notice_generation = self.notices.generation();
         let Self {
             terminal,
             dashboard,
@@ -30,7 +16,6 @@ impl DashboardContext {
             opening_chat_session,
             selection,
             selection_text,
-            drawn_size,
             ..
         } = self;
         let opening = opening_chat_session.as_deref();
@@ -40,7 +25,6 @@ impl DashboardContext {
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
         terminal.terminal.draw(|frame| {
-            *drawn_size = Some((frame.area().width, frame.area().height));
             render_combined(
                 frame,
                 dashboard,
@@ -67,10 +51,9 @@ impl DashboardContext {
         // to avoid.
         let invalidated = self
             .visible_chat()
-            .is_some_and(mj_chat::chat::ActiveChat::transcript_selection_invalidated);
+            .is_some_and(|chat| chat.transcript_selection_invalidated());
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
-            self.dirty = true;
         }
         Ok(())
     }
@@ -107,16 +90,13 @@ impl DashboardContext {
             dashboard,
             ..
         } = self;
-        let before = selection.visual_state();
         selection.retrack(dashboard.frame_surfaces());
-        self.dirty |= before != selection.visual_state();
         Ok(())
     }
 
     /// Routes one terminal event through the selection engine, hit-testing
     /// against the surfaces the view on screen registered.
     pub(super) fn route_selection(&mut self, event: Event) -> SelectionRouting {
-        let before_selection = self.selection.visual_state();
         let chat_owns_pointer = !self.dashboard.modal_open()
             && match &event {
                 Event::Mouse(mouse) => self
@@ -133,12 +113,9 @@ impl DashboardContext {
             && (dashboard.component_handles_mouse(*mouse) || chat_owns_pointer)
         {
             selection.clear();
-            self.dirty |= before_selection != selection.visual_state();
             return SelectionRouting::Forward(event);
         }
-        let routed = route_prompt_selection(selection, dashboard, event);
-        self.dirty |= before_selection != selection.visual_state();
-        routed
+        route_prompt_selection(selection, dashboard, event)
     }
 
     /// Copies the finished selection to the system and terminal clipboards.
@@ -214,7 +191,6 @@ impl DashboardContext {
                 .send_replace(capacity_targets.clone());
             self.dashboard
                 .set_deployment_capacity_targets(capacity_targets);
-            self.dirty = true;
         }
     }
 
@@ -278,7 +254,6 @@ impl DashboardContext {
             }
             self.active_chat = None;
             self.selection.clear();
-            self.dirty = true;
         }
     }
 }

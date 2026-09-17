@@ -11,17 +11,20 @@ pub(super) fn managed_resource_identity_args(
     kind: ManagedResourceKind,
     session_id: &str,
 ) -> Vec<String> {
+    let instance = mj_core::config::instance_identity();
     match kind {
         ManagedResourceKind::Container => vec![
             "--label".to_owned(),
             format!("{SESSION_LABEL}={session_id}"),
             "--label".to_owned(),
             format!("{MANAGED_LABEL}=true"),
+            "--label".to_owned(),
+            format!("{INSTANCE_LABEL}={instance}"),
         ],
         ManagedResourceKind::Ec2Instance => vec![
             "--tag-specifications".to_owned(),
             format!(
-                "ResourceType=instance,Tags=[{{Key={SESSION_TAG},Value={session_id}}},{{Key={MANAGED_TAG},Value=true}}]"
+                "ResourceType=instance,Tags=[{{Key={SESSION_TAG},Value={session_id}}},{{Key={MANAGED_TAG},Value=true}},{{Key={INSTANCE_TAG},Value={instance}}}]"
             ),
         ],
     }
@@ -266,7 +269,7 @@ impl PodmanProbe {
 
     pub(super) fn postcondition(self) -> &'static str {
         match self {
-            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
+            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.3.0 or newer",
             Self::Rootless => {
                 "Postcondition `podman info --format '{{.Host.Security.Rootless}}'` prints `true`"
             }
@@ -628,27 +631,27 @@ pub(super) fn parse_podman_version(host: PodmanHost<'_>, stdout: &[u8]) -> Resul
         return Err(probe_failure(
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
             ),
         ));
     };
-    let Some(major) = candidate
-        .split('.')
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-    else {
+    let mut numbers = candidate.split('.').map(|part| part.parse::<u32>().ok());
+    let Some(Some(major)) = numbers.next() else {
         return Err(probe_failure(
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer returned {version:?}. {scope}Install or upgrade Podman: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
             ),
         ));
     };
-    if major < PODMAN_MINIMUM_MAJOR_VERSION {
+    // A version with no minor component, such as `podman version 4`, names
+    // the earliest release of that series.
+    let minor = numbers.next().flatten().unwrap_or(0);
+    if (major, minor) < PODMAN_MINIMUM_VERSION {
         return Err(probe_failure(
             PodmanProbe::Version,
             format!(
-                "{failure}: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.0.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
+                "{failure}: Postcondition `podman --version` succeeds with Podman 4.3.0 or newer was not met (found {candidate}). {scope}Upgrade Podman to 4.3.0 or newer: Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See {PODMAN_DOCUMENTATION_PATH}."
             ),
         ));
     }
@@ -674,6 +677,58 @@ pub(super) fn valid_rootless_uid_map(stdout: &[u8]) -> bool {
                 .is_some_and(|end| *inside <= container_id && container_id < end)
         })
     })
+}
+
+/// The uid and gid of the container image's configured user, read on the host
+/// that runs the container engine. `ssh` names that host for a remote Podman
+/// target; `None` reads it on this machine.
+///
+/// The image is asked rather than assumed, because `--userns=keep-id` has to
+/// name the ids the container will actually run as. The probe carries the
+/// template's own pull policy, so it reads the same image the launch will run
+/// and never pulls one the launch would not. The entrypoint is cleared so the
+/// answer comes from an image whose entrypoint is a long-running program.
+pub fn probe_image_user(
+    ssh: Option<&SshTarget>,
+    template: &ContainerTemplate,
+    executor: &impl CommandExecutor,
+) -> Result<ImageUser> {
+    let host = match ssh {
+        Some(ssh) => PodmanHost::Ssh(ssh),
+        None => PodmanHost::Local,
+    };
+    let mut args = vec!["podman".to_owned(), "run".to_owned(), "--rm".to_owned()];
+    args.extend(podman_pull_argument(template));
+    args.extend([
+        "--entrypoint".to_owned(),
+        String::new(),
+        template.image.clone(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "id -u; id -g".to_owned(),
+    ]);
+    let output = executor.execute(&host.command_owned(args, "read the container image user"))?;
+    if output.status != 0 {
+        bail!(
+            "image user probe failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ids = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let mut next = |field: &str| -> Result<u32> {
+        ids.next()
+            .with_context(|| format!("image user probe reported no {field}"))?
+            .parse()
+            .with_context(|| format!("image user probe reported an unreadable {field}"))
+    };
+    let uid = next("uid")?;
+    let gid = next("gid")?;
+    Ok(ImageUser { uid, gid })
 }
 
 /// Filesystem type of each directory, probed on the host that runs the

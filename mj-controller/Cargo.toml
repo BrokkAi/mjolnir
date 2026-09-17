@@ -3,7 +3,6 @@ name = "brokk-mj-controller"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Daemon-side controller, session manager, and web server for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"

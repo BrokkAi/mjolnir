@@ -5,29 +5,17 @@ impl ChatState {
         self.phase
     }
 
-    pub(crate) fn visible_revision(&self) -> u64 {
-        self.visible_revision
-    }
-
-    pub fn take_render_changed(&mut self) -> bool {
-        std::mem::take(&mut self.render_changed)
-    }
-
-    pub(crate) fn acknowledge_render(&mut self) {
-        self.render_changed = false;
+    /// Records the time-dependent cells represented by the frame just drawn.
+    /// The next clock or animation tick can then request a redraw only after
+    /// its displayed value actually moves.
+    pub fn acknowledge_render(&mut self) {
         self.last_clock_text = Some(self.clock_text(epoch_seconds()));
         self.last_animation_frame = self.needs_animation().then(|| self.activity_spinner());
-    }
-
-    pub(crate) fn mark_visible_changed(&mut self) {
-        self.visible_revision = self.visible_revision.wrapping_add(1);
-        self.render_changed = true;
     }
 
     pub(crate) fn set_transcript_loading(&mut self, loading: bool) {
         if self.transcript_loading != loading {
             self.transcript_loading = loading;
-            self.mark_visible_changed();
         }
     }
 
@@ -35,35 +23,17 @@ impl ChatState {
         let bundle_id = bundle_id.into();
         if self.bundle_id.as_deref() != Some(bundle_id.as_str()) {
             self.bundle_id = Some(bundle_id);
-            self.mark_visible_changed();
         }
     }
 
     pub fn set_session_modes(&mut self, modes: Option<SessionModeState>) {
-        let before = (
-            self.fast_mode_active(),
-            self.plan_mode_active(),
-            self.acp_surface.current_mode().map(str::to_owned),
-        );
         self.acp_surface.set_session_modes(modes);
         self.rebuild_command_choices();
-        let after = (
-            self.fast_mode_active(),
-            self.plan_mode_active(),
-            self.acp_surface.current_mode().map(str::to_owned),
-        );
-        if before != after {
-            self.mark_visible_changed();
-        }
     }
 
     pub fn set_harness_kind(&mut self, harness_kind: HarnessKind) {
-        let before = (self.supports_plan_mode(), self.supports_fast_mode());
         self.acp_surface.set_harness_kind(harness_kind);
         self.rebuild_command_choices();
-        if before != (self.supports_plan_mode(), self.supports_fast_mode()) {
-            self.mark_visible_changed();
-        }
     }
 
     pub(crate) fn supports_plan_mode(&self) -> bool {
@@ -89,19 +59,11 @@ impl ChatState {
     }
 
     pub(crate) fn begin_plan_mode_change(&mut self, active: bool) {
-        let before = self.plan_mode_active();
         self.acp_surface.begin_plan_mode_change(active);
-        if before != self.plan_mode_active() {
-            self.mark_visible_changed();
-        }
     }
 
     pub(crate) fn finish_plan_mode_change(&mut self, active: bool) {
-        let before = self.plan_mode_active();
         self.acp_surface.finish_plan_mode_change(active);
-        if before != self.plan_mode_active() {
-            self.mark_visible_changed();
-        }
     }
 
     #[cfg(test)]
@@ -187,7 +149,6 @@ impl ChatState {
             self.header_target = target;
             self.header_profile = profile;
             self.header_title = title;
-            self.mark_visible_changed();
         }
     }
 
@@ -196,11 +157,9 @@ impl ChatState {
     pub(crate) fn set_prompt_in_flight(&mut self, in_flight: bool) {
         if self.prompt_in_flight != in_flight {
             self.prompt_in_flight = in_flight;
-            self.mark_visible_changed();
         }
         if self.session_activity.prompt_in_flight != in_flight {
             self.session_activity.prompt_in_flight = in_flight;
-            self.mark_visible_changed();
         }
     }
 
@@ -240,19 +199,13 @@ impl ChatState {
             .iter()
             .map(|command| command.id.as_str())
             .collect::<BTreeSet<_>>();
-        let pending_before = self.pending_background_stops.len();
         self.pending_background_stops
             .retain(|id| live_ids.contains(id.as_str()));
         if self.session_activity != activity {
             self.session_activity = activity;
-            self.mark_visible_changed();
-        }
-        if self.pending_background_stops.len() != pending_before {
-            self.mark_visible_changed();
         }
         if self.background_task_count() == 0 && self.task_control_focused {
             self.task_control_focused = false;
-            self.mark_visible_changed();
         }
     }
 
@@ -271,13 +224,12 @@ impl ChatState {
         self.subagent_count
     }
 
-    pub(crate) fn set_subagent_count(&mut self, count: usize) {
+    pub fn set_subagent_count(&mut self, count: usize) {
         if self.subagent_count != count {
             self.subagent_count = count;
             if count == 0 {
                 self.subagent_control_focused = false;
             }
-            self.mark_visible_changed();
         }
     }
 
@@ -290,7 +242,6 @@ impl ChatState {
         if self.subagent_count > 0 && !self.subagent_control_focused {
             self.task_control_focused = false;
             self.subagent_control_focused = true;
-            self.mark_visible_changed();
         }
     }
 
@@ -309,7 +260,6 @@ impl ChatState {
             .iter()
             .any(|command| command.id == id && command.can_stop);
         if stoppable && self.pending_background_stops.insert(id.clone()) {
-            self.mark_visible_changed();
             ChatAction::StopBackgroundTask { id }
         } else {
             ChatAction::None
@@ -321,7 +271,6 @@ impl ChatState {
     /// the next activity snapshot owns removal and keeps the row honest.
     pub(crate) fn fail_background_stop(&mut self, id: &str, error: &str) {
         if self.pending_background_stops.remove(id) {
-            self.mark_visible_changed();
             self.set_notice(format!("Background task could not be stopped: {error}"));
         }
     }
@@ -329,7 +278,6 @@ impl ChatState {
     pub(crate) fn fail_all_background_stops(&mut self) -> bool {
         if !self.pending_background_stops.is_empty() {
             self.pending_background_stops.clear();
-            self.mark_visible_changed();
             true
         } else {
             false
@@ -355,14 +303,12 @@ impl ChatState {
             self.task_dialog_area = None;
             self.task_dialog_control_ids.clear();
             self.task_dialog_form.clear();
-            self.mark_visible_changed();
         }
     }
 
     pub(crate) fn focus_task_control(&mut self) {
         if self.background_task_count() > 0 && !self.task_control_focused {
             self.task_control_focused = true;
-            self.mark_visible_changed();
         }
     }
 
@@ -372,7 +318,6 @@ impl ChatState {
             self.task_control_focused = false;
             self.task_dialog_scroll = 0;
             self.task_dialog_max_scroll = 0;
-            self.mark_visible_changed();
         }
     }
 
@@ -380,7 +325,6 @@ impl ChatState {
         let scroll = scroll.min(self.task_dialog_max_scroll);
         if self.task_dialog_scroll != scroll {
             self.task_dialog_scroll = scroll;
-            self.mark_visible_changed();
         }
     }
 
@@ -404,7 +348,6 @@ impl ChatState {
         let timestamp_ms = timestamp_ms.and_then(|value| u64::try_from(value).ok());
         if self.current_step_started_at_ms != timestamp_ms {
             self.current_step_started_at_ms = timestamp_ms;
-            self.mark_visible_changed();
         }
     }
 
@@ -432,14 +375,12 @@ impl ChatState {
     pub fn set_spinner_style(&mut self, style: mj_core::config::SpinnerStyle) {
         if self.spinner_style != style {
             self.spinner_style = style;
-            self.mark_visible_changed();
         }
     }
 
     pub fn set_detailed_activity_clocks(&mut self, detailed: bool) {
         if self.detailed_activity_clocks != detailed {
             self.detailed_activity_clocks = detailed;
-            self.mark_visible_changed();
         }
     }
 
@@ -463,7 +404,8 @@ impl ChatState {
                 .is_some_and(|review| review.view.is_working())
     }
 
-    pub(crate) fn clock_changed(&self) -> bool {
+    /// Whether the transcript or task clocks differ from the last drawn frame.
+    pub fn clock_changed(&self) -> bool {
         self.last_clock_text.as_deref() != Some(self.clock_text(epoch_seconds()).as_str())
     }
 
@@ -501,7 +443,8 @@ impl ChatState {
         text
     }
 
-    pub(crate) fn animation_changed(&self) -> bool {
+    /// An animation tick changes the activity spinner while work is visible.
+    pub fn animation_changed(&self) -> bool {
         let frame = self.needs_animation().then(|| self.activity_spinner());
         self.last_animation_frame != frame
     }
@@ -519,7 +462,6 @@ impl ChatState {
     pub fn set_review_config(&mut self, review: mj_core::config::ReviewConfig) {
         if self.review_config != review {
             self.review_config = review;
-            self.mark_visible_changed();
         }
     }
 
@@ -536,7 +478,6 @@ impl ChatState {
         // Local echo: start the clock now so the header moves with the send.
         // The next materialized update replaces this with the recorded start.
         self.turn_started_at_epoch_seconds = Some(epoch_seconds());
-        self.mark_visible_changed();
     }
 
     /// Starts the header clock for a turn the event log just reported. An
@@ -549,7 +490,6 @@ impl ChatState {
             .or_else(|| Some(epoch_seconds()));
         if self.turn_started_at_epoch_seconds != started {
             self.turn_started_at_epoch_seconds = started;
-            self.mark_visible_changed();
         }
     }
 
@@ -614,17 +554,12 @@ impl ChatState {
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
-        let before = self.notices.current();
         self.notices.set(notice);
-        if self.notices.current() != before {
-            self.mark_visible_changed();
-        }
     }
 
     pub(crate) fn clear_notice(&mut self) {
         if self.notices.current().is_some() {
             self.notices.clear();
-            self.mark_visible_changed();
         }
     }
 
@@ -634,7 +569,6 @@ impl ChatState {
     pub(crate) fn set_voice_available(&mut self, available: bool) {
         if self.voice_available != available {
             self.voice_available = available;
-            self.mark_visible_changed();
         }
     }
 

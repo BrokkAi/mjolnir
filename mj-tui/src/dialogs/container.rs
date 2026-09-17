@@ -6,7 +6,8 @@ use std::cell::{Cell, RefCell};
 use crate::widgets::dismissible_modal_title;
 use crossterm::event::{Event, KeyEventKind};
 use mj_chat::components::{
-    Checkbox, ChoiceList, ControlKind, Dialog, FormViewport, Interaction, Outcome, TextField,
+    ChoiceList, ComboBoxState, ControlKind, Dialog, EditOutcome, FormViewport, Interaction,
+    TextField,
 };
 use ratatui::layout::Margin;
 
@@ -21,11 +22,15 @@ pub(crate) struct ContainerEditor {
     pub(crate) suggestions: Vec<PathBuf>,
     pub(crate) source: PathInput,
     pub(crate) destination: PathInput,
-    pub(crate) read_only: bool,
+    pub(crate) access: MountAccess,
+    pub(crate) access_combo: ComboBoxState<ContainerEditFocus>,
     pub(crate) form: RefCell<Dialog<ContainerEditFocus>>,
     pub(crate) mount_index: usize,
     pub(crate) suggestion_index: usize,
     pub(crate) error: Option<String>,
+    /// The listed attachment the editor fields are editing, when they were
+    /// loaded from one. Adding then replaces that entry instead of appending.
+    pub(crate) editing_mount: Option<usize>,
     scroll: Cell<u16>,
 }
 
@@ -35,7 +40,7 @@ pub(crate) enum ContainerEditFocus {
     Memory,
     Source,
     Destination,
-    ReadOnly,
+    Access,
     Mounts,
     Suggestions,
     Cancel,
@@ -47,7 +52,7 @@ pub(crate) const CONTAINER_EDIT_SCOPE: &str = "Applies when the container is nex
 enum Row<'a> {
     Text(Line<'a>),
     Field(ContainerEditFocus, &'static str, &'a TextInput),
-    Check,
+    Access(ControlKind),
     List(ContainerEditFocus, Vec<Line<'static>>, usize),
 }
 
@@ -62,7 +67,7 @@ impl Row<'_> {
     fn control(&self) -> Option<(ContainerEditFocus, ControlKind)> {
         match self {
             Self::Field(id, ..) => Some((*id, ControlKind::TextField)),
-            Self::Check => Some((ContainerEditFocus::ReadOnly, ControlKind::Checkbox)),
+            Self::Access(kind) => Some((ContainerEditFocus::Access, *kind)),
             Self::List(id, rows, selected) => Some((
                 *id,
                 ControlKind::ChoiceList {
@@ -83,7 +88,7 @@ impl ContainerEditor {
             self.source.to_string(),
             self.destination.to_string(),
             format!("{:?}", self.mounts),
-            self.read_only.to_string(),
+            format!("{:?}", self.access),
         ];
         let form = self.form.get_mut();
         form.track_draft(values);
@@ -153,7 +158,7 @@ impl ContainerEditor {
                             "{} -> {}{}",
                             mount.source.display(),
                             mount.destination.display(),
-                            read_only_marker(mount.read_only)
+                            access_marker(mount.access)
                         ))
                     })
                     .collect(),
@@ -164,7 +169,12 @@ impl ContainerEditor {
             Row::Text(Line::raw("")),
             Row::Field(Source, "Attach host directory", &self.source),
             Row::Field(Destination, "Container destination", &self.destination),
-            Row::Check,
+            Row::Access(crate::wizards::access_combo_kind(
+                &self.access_combo,
+                &crate::wizards::access_choices(false),
+                self.access,
+                ContainerEditFocus::Access,
+            )),
         ]);
         if !self.suggestions.is_empty() {
             rows.push(Row::Text(Line::raw("")));
@@ -210,8 +220,9 @@ impl ContainerEditor {
         );
         form.end_frame(ContainerEditFocus::Cpus);
     }
-    /// Add the typed mount, filling in a default destination. Returns the
-    /// reason it was rejected, if it was.
+    /// Add the typed mount, filling in a default destination, or replace the
+    /// listed one the fields were loaded from. Returns the reason it was
+    /// rejected, if it was.
     fn add_mount(&mut self) -> Option<String> {
         let source = PathBuf::from(self.source.trim());
         if source.as_os_str().is_empty() {
@@ -225,32 +236,44 @@ impl ContainerEditor {
         let mount = AdditionalMount {
             source,
             destination,
-            read_only: self.read_only,
+            access: self.access,
         };
         let mut mounts = self.mounts.clone();
-        mounts.push(mount);
+        let index = match self.editing_mount {
+            Some(index) if index < mounts.len() => {
+                mounts[index] = mount;
+                index
+            }
+            _ => {
+                mounts.push(mount);
+                mounts.len() - 1
+            }
+        };
         if let Err(error) = validate_additional_mounts(&mounts) {
             return Some(error.to_string());
         }
         self.mounts = mounts;
         self.source.clear();
         self.destination.clear();
-        self.read_only = false;
-        self.mount_index = self.mounts.len() - 1;
+        self.access = MountAccess::Ro;
+        self.editing_mount = None;
+        self.mount_index = index;
         None
     }
 
-    /// Toggle read-only for the entry being typed, or for the selected row.
-    fn toggle_read_only(&mut self) {
-        match self.focused() {
-            ContainerEditFocus::ReadOnly => self.read_only = !self.read_only,
-            ContainerEditFocus::Mounts => {
-                if let Some(mount) = self.mounts.get_mut(self.mount_index) {
-                    mount.read_only = !mount.read_only;
-                }
-            }
-            _ => {}
-        }
+    /// Load the selected attached directory into the editor fields, so its
+    /// source, destination, and access mode are all edited the same way a new
+    /// attachment is entered.
+    fn edit_selected_mount(&mut self) {
+        let Some(mount) = self.mounts.get(self.mount_index) else {
+            return;
+        };
+        self.source = mount.source.to_string_lossy().into_owned().into();
+        self.destination = mount.destination.to_string_lossy().into_owned().into();
+        self.access = mount.access;
+        self.editing_mount = Some(self.mount_index);
+        self.error = None;
+        self.form.get_mut().focus(ContainerEditFocus::Source);
     }
 
     fn take_suggestion(&mut self) {
@@ -269,6 +292,8 @@ impl ContainerEditor {
         match self.focused() {
             ContainerEditFocus::Mounts if !self.mounts.is_empty() => {
                 self.mounts.remove(self.mount_index);
+                // The remembered index no longer names the same entry.
+                self.editing_mount = None;
                 self.mount_index = self.mount_index.min(self.mounts.len().saturating_sub(1));
                 if self.mounts.is_empty() {
                     self.form.get_mut().focus(ContainerEditFocus::Source);
@@ -350,6 +375,8 @@ pub(crate) fn render_container_editor(
     );
     frame.render_widget(theme::modal().title(title), popup);
     row_y = 0;
+    let access_choices = crate::wizards::access_choices(false);
+    let mut access_field = None;
     for row in rows {
         let height = row.height();
         let rect = viewport.row(row_y, height);
@@ -394,15 +421,35 @@ pub(crate) fn render_container_editor(
                     _ => TextField::render(frame, field_area, input, &mut form, id),
                 }
             }
-            Row::Check => Checkbox::render(
-                frame,
-                rect,
-                "Read-only",
-                editor.read_only,
-                true,
-                &mut form,
-                ContainerEditFocus::ReadOnly,
-            ),
+            Row::Access(_) => {
+                let label = "Access: ";
+                let label_width =
+                    (Line::raw(label).width() as u16).min(rect.width.saturating_sub(1));
+                if visible_height > 0 {
+                    frame.render_widget(
+                        Line::raw(label),
+                        Rect::new(rect.x, rect.y, label_width, rect.height),
+                    );
+                }
+                let field = Rect::new(
+                    rect.x.saturating_add(label_width),
+                    rect.y,
+                    rect.width.saturating_sub(label_width),
+                    rect.height,
+                );
+                render_access_combo(
+                    frame,
+                    inner,
+                    field,
+                    editor.access,
+                    &access_choices,
+                    &editor.access_combo,
+                    false,
+                    &mut form,
+                    ContainerEditFocus::Access,
+                );
+                access_field = Some(field);
+            }
             Row::List(id, lines, selected) => {
                 // ChoiceList keeps the selected row visible within the supplied viewport.
                 ChoiceList::render(frame, rect, &lines, selected, &mut form, id);
@@ -413,7 +460,7 @@ pub(crate) fn render_container_editor(
     if inner.height > 1 {
         frame.render_widget(
             Line::styled(
-                "Enter attaches/accepts · Space toggles · d removes · Tab moves",
+                "Enter attaches/accepts · Space edits · d removes · Tab moves",
                 Style::default().fg(theme::palette().muted),
             ),
             Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
@@ -434,6 +481,21 @@ pub(crate) fn render_container_editor(
         ],
         &mut form,
     );
+    if let Some(field) = access_field
+        && editor.access_combo.is_open(ContainerEditFocus::Access)
+    {
+        render_access_combo(
+            frame,
+            inner,
+            field,
+            editor.access,
+            &access_choices,
+            &editor.access_combo,
+            true,
+            &mut form,
+            ContainerEditFocus::Access,
+        );
+    }
     form.end_frame(ContainerEditFocus::Cpus);
 }
 
@@ -460,11 +522,13 @@ impl DashboardState {
             suggestions,
             source: PathInput::new(),
             destination: PathInput::new(),
-            read_only: false,
+            access: MountAccess::Ro,
+            access_combo: ComboBoxState::default(),
             form: RefCell::new(Dialog::default()),
             mount_index: 0,
             suggestion_index: 0,
             error: None,
+            editing_mount: None,
             scroll: Cell::new(0),
         };
         editor.prepare();
@@ -490,7 +554,6 @@ impl DashboardState {
             }
             Err(error) => editor.error = Some(error),
         }
-        self.mark_render_changed();
     }
 
     pub(crate) fn handle_container_edit_event(
@@ -507,17 +570,11 @@ impl DashboardState {
             editor.remove_selected();
             editor.prepare();
             self.mode = Mode::EditContainer(editor);
-            crate::mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
             return DashboardAction::None;
         }
         let result = editor.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
-        let interaction = result.action;
+        self.last_event_consumed.set(result.consumed);
+        let interaction = editor.access_combo.route(result.action);
         let mut changed_structure = false;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
@@ -527,18 +584,32 @@ impl DashboardState {
             Some(Interaction::Edit(id, edit)) => {
                 if editor
                     .field_mut(id)
-                    .is_some_and(|field| TextField::apply(field, edit) == Outcome::Changed)
+                    .is_some_and(|field| TextField::apply(field, edit) == EditOutcome::Changed)
                 {
                     editor.error = None;
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
                 }
             }
             Some(Interaction::Select(Mounts, index)) => editor.mount_index = index,
             Some(Interaction::Select(Suggestions, index)) => editor.suggestion_index = index,
-            Some(Interaction::Toggle(ReadOnly | Mounts)) => editor.toggle_read_only(),
+            Some(Interaction::Toggle(Mounts)) => {
+                editor.edit_selected_mount();
+                changed_structure = true;
+            }
+            Some(Interaction::Activate(Access)) => {
+                let selected = crate::wizards::access_index(
+                    &crate::wizards::access_choices(false),
+                    editor.access,
+                );
+                editor.access_combo.open(Access, selected);
+                changed_structure = true;
+            }
+            Some(Interaction::ComboBoxCommit(Access, index)) => {
+                if let Some(access) = crate::wizards::access_choices(false).get(index) {
+                    editor.access = *access;
+                }
+                changed_structure = true;
+            }
+            Some(Interaction::ComboBoxDismiss(Access)) => changed_structure = true,
             Some(Interaction::Activate(Suggestions)) => {
                 editor.take_suggestion();
                 editor.error = None;
@@ -552,13 +623,11 @@ impl DashboardState {
                         };
                         editor.error = Some("Resolving attached directory…".into());
                         self.mode = Mode::EditContainer(editor);
-                        self.mark_render_changed();
                         return action;
                     }
                     Err(error) => {
                         editor.error = Some(error.to_string());
                         self.mode = Mode::EditContainer(editor);
-                        self.mark_render_changed();
                         return DashboardAction::None;
                     }
                     Ok(false) => {}
@@ -575,7 +644,9 @@ impl DashboardState {
             },
             _ => {}
         }
-        if changed_structure {
+        // An open combobox's cursor lives in the declared control kind, so it
+        // is refreshed on every event while the list is open.
+        if changed_structure || editor.access_combo.open_id().is_some() {
             editor.prepare();
         }
         self.mode = Mode::EditContainer(editor);

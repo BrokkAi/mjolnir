@@ -612,7 +612,6 @@ dependencies = [
  "crossterm",
  "png",
  "pulldown-cmark",
- "rat-event",
  "rat-focus",
  "ratatui",
  "serde",

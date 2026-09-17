@@ -75,7 +75,6 @@ impl DashboardState {
             remote_preflight_error: None,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
-        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -133,7 +132,6 @@ impl DashboardState {
             discard_queue: false,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
-        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -192,7 +190,6 @@ impl DashboardState {
             discard_queue: true,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
-        self.mark_render_changed();
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -268,10 +265,9 @@ impl DashboardState {
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
-        self.mark_render_changed();
     }
 
-    pub(crate) fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {
+    fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {
         let target_template_ids = self
             .config
             .targets

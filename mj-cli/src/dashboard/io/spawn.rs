@@ -1,26 +1,51 @@
 use super::*;
 
+/// Hands one finished answer to the dashboard. A closed channel means the
+/// dashboard has already shut down, which is not a failure, so every helper
+/// reports through here instead of deciding that for itself.
+pub(crate) fn report<T>(operation: &str, updates: &UnboundedSender<T>, update: T) {
+    if let Err(error) = updates.send(update) {
+        tracing::debug!(operation, %error, "dashboard background result dropped after shutdown");
+    }
+}
+
+/// Turns a finished blocking job into the answer the dashboard shows. A panic
+/// in the job arrives here as a join error and becomes a reported failure, so
+/// the screen never waits forever on work that died.
+fn blocking_result<T>(
+    operation: &str,
+    joined: std::result::Result<Result<T>, JoinError>,
+) -> std::result::Result<T, String> {
+    match joined {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            let error = format!("{error:#}");
+            tracing::warn!(operation, %error, "dashboard background operation failed");
+            Err(error)
+        }
+        Err(error) => {
+            let error = format!("{operation} task failed: {error}");
+            tracing::warn!(operation, %error, "dashboard background operation panicked");
+            Err(error)
+        }
+    }
+}
+
 /// Runs one blocking job off the loop and reports its outcome on the
-/// dashboard's I/O channel. Errors are formatted once, here, so no caller can
-/// quietly drop one.
+/// dashboard's I/O channel. Errors and panics are formatted once, here, so no
+/// caller can quietly drop one.
 pub(crate) fn spawn_io<T>(
     operation: &'static str,
     updates: UnboundedSender<DashboardIoUpdate>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()>
 where
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let result = work().map_err(|error| {
-            let error = format!("{error:#}");
-            tracing::warn!(operation, %error, "dashboard background operation failed");
-            error
-        });
-        if let Err(error) = updates.send(report(result)) {
-            tracing::debug!(operation, %error, "dashboard background result dropped after shutdown");
-        }
+    tokio::spawn(async move {
+        let result = blocking_result(operation, tokio::task::spawn_blocking(work).await);
+        report(operation, &updates, to_update(result));
     })
 }
 
@@ -31,22 +56,16 @@ pub(crate) fn spawn_critical_io<T>(
     label: impl Into<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     work: impl FnOnce() -> Result<T> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()>
 where
     T: Send + 'static,
 {
     let label = label.into();
     let guard = tracker.begin(label.clone());
-    tokio::task::spawn_blocking(move || {
-        let result = work().map_err(|error| {
-            let error = format!("{error:#}");
-            tracing::warn!(operation = %label, %error, "critical dashboard operation failed");
-            error
-        });
-        if let Err(error) = updates.send(report(result)) {
-            tracing::debug!(operation = %label, %error, "critical dashboard result dropped after shutdown");
-        }
+    tokio::spawn(async move {
+        let result = blocking_result(&label, tokio::task::spawn_blocking(work).await);
+        report(&label, &updates, to_update(result));
         drop(guard);
     })
 }
@@ -60,7 +79,7 @@ pub(crate) fn spawn_async_job<T: Send + 'static>(
     updates: UnboundedSender<DashboardIoUpdate>,
     timeout: Duration,
     work: impl std::future::Future<Output = Result<T>> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()> {
     let label = label.into();
     let guard = tracker.map(|tracker| tracker.begin(label.clone()));
@@ -77,9 +96,7 @@ pub(crate) fn spawn_async_job<T: Send + 'static>(
         if let Err(error) = &result {
             tracing::error!(operation = %label, %error, "dashboard save was not confirmed");
         }
-        if let Err(error) = updates.send(report(result)) {
-            tracing::debug!(operation = %label, %error, "dashboard save result dropped after shutdown");
-        }
+        report(&label, &updates, to_update(result));
         drop(guard);
     })
 }
@@ -90,9 +107,9 @@ pub(crate) fn spawn_critical_async<T: Send + 'static>(
     updates: UnboundedSender<DashboardIoUpdate>,
     timeout: Duration,
     work: impl std::future::Future<Output = Result<T>> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()> {
-    spawn_async_job(Some(tracker), label, updates, timeout, work, report)
+    spawn_async_job(Some(tracker), label, updates, timeout, work, to_update)
 }
 
 pub(crate) fn spawn_background_async<T: Send + 'static>(
@@ -100,9 +117,9 @@ pub(crate) fn spawn_background_async<T: Send + 'static>(
     updates: UnboundedSender<DashboardIoUpdate>,
     timeout: Duration,
     work: impl std::future::Future<Output = Result<T>> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()> {
-    spawn_async_job(None, label, updates, timeout, work, report)
+    spawn_async_job(None, label, updates, timeout, work, to_update)
 }
 
 /// Loads the manager's complete view from the daemon. Workspace listings and
@@ -324,12 +341,12 @@ pub(crate) fn spawn_cancellable_io<T>(
     label: impl Into<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> JoinHandle<()>
 where
     T: Send + 'static,
 {
-    spawn_cancellable_io_with_token(tracker, label, updates, work, report).1
+    spawn_cancellable_io_with_token(tracker, label, updates, work, to_update).1
 }
 
 pub(crate) fn spawn_cancellable_io_with_token<T>(
@@ -337,7 +354,7 @@ pub(crate) fn spawn_cancellable_io_with_token<T>(
     label: impl Into<String>,
     updates: UnboundedSender<DashboardIoUpdate>,
     work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
-    report: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
+    to_update: impl FnOnce(std::result::Result<T, String>) -> DashboardIoUpdate + Send + 'static,
 ) -> (Arc<AtomicBool>, JoinHandle<()>)
 where
     T: Send + 'static,
@@ -346,15 +363,10 @@ where
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable(label.clone(), cancelled.clone());
     let worker_cancelled = cancelled.clone();
-    let worker = tokio::task::spawn_blocking(move || {
-        let result = work(worker_cancelled).map_err(|error| {
-            let error = format!("{error:#}");
-            tracing::warn!(operation = %label, %error, "cancellable dashboard operation failed");
-            error
-        });
-        if let Err(error) = updates.send(report(result)) {
-            tracing::debug!(operation = %label, %error, "cancellable dashboard result dropped after shutdown");
-        }
+    let worker = tokio::spawn(async move {
+        let joined = tokio::task::spawn_blocking(move || work(worker_cancelled)).await;
+        let result = blocking_result(&label, joined);
+        report(&label, &updates, to_update(result));
         drop(guard);
     });
     (cancelled, worker)
@@ -389,14 +401,16 @@ pub(crate) fn spawn_review_settings_discovery(
                 // event can never arrive after the final discovery result.
                 biased;
                 Some(choices) = progress_rx.recv() => {
-                    if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsChoices {
-                        generation,
-                        profile_id: profile_id.clone(),
-                        model: model.clone(),
-                        choices,
-                    }) {
-                        tracing::debug!(%error, "review choices dropped after dashboard shutdown");
-                    }
+                    report(
+                        "loading review choices",
+                        &updates,
+                        DashboardIoUpdate::ReviewSettingsChoices {
+                            generation,
+                            profile_id: profile_id.clone(),
+                            model: model.clone(),
+                            choices,
+                        },
+                    );
                 }
                 result = &mut discovery => break result,
             }
@@ -414,14 +428,16 @@ pub(crate) fn spawn_review_settings_discovery(
             }
         })
         .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(DashboardIoUpdate::ReviewSettingsDiscovered {
-            generation,
-            profile_id,
-            model,
-            result,
-        }) {
-            tracing::debug!(%error, "review settings discovery result dropped after dashboard shutdown");
-        }
+        report(
+            "loading review choices",
+            &updates,
+            DashboardIoUpdate::ReviewSettingsDiscovered {
+                generation,
+                profile_id,
+                model,
+                result,
+            },
+        );
         drop(guard);
     });
     cancelled
@@ -605,25 +621,20 @@ pub(crate) fn spawn_project_source_resolution(
         },
     };
     let reported_session_id = session_id.clone();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let guard = tracker.begin_cancellable(
+    spawn_cancellable_io(
+        tracker,
         format!("resolving project for {}", short_id(&session_id)),
-        cancelled.clone(),
-    );
-    tokio::task::spawn_blocking(move || {
-        let executor =
-            CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(8));
-        let result = source_controller
-            .resolve_session_project_source(&session_id, &executor)
-            .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(DashboardIoUpdate::ProjectSource {
+        updates,
+        move |cancelled| {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(8));
+            source_controller.resolve_session_project_source(&session_id, &executor)
+        },
+        move |result| DashboardIoUpdate::ProjectSource {
             session_id: reported_session_id,
             result,
-        }) {
-            tracing::debug!(%error, "project source result dropped after dashboard shutdown");
-        }
-        drop(guard);
-    })
+        },
+    )
 }
 
 /// A controller that answers target questions from configuration alone.
@@ -667,13 +678,15 @@ pub(crate) fn spawn_lifecycle_operation(
             work(&mut controller, cancelled)
         })()
         .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send(LifecycleUpdate {
-            session_id,
-            result,
-            deferred_cleanup: false,
-        }) {
-            tracing::debug!(%error, "lifecycle result dropped after dashboard shutdown");
-        }
+        report(
+            "session lifecycle operation",
+            &updates,
+            LifecycleUpdate {
+                session_id,
+                result,
+                deferred_cleanup: false,
+            },
+        );
         drop(guard);
     });
 }
@@ -704,11 +717,11 @@ pub(crate) fn spawn_materialized_session_projection(
             }
             Err(error) => Err(format!("session projection worker stopped: {error}")),
         };
-        if let Err(error) =
-            updates.send(DashboardIoUpdate::MaterializedSessionProjection { session_id, result })
-        {
-            tracing::debug!(%error, "session projection result dropped after dashboard shutdown");
-        }
+        report(
+            "session projection",
+            &updates,
+            DashboardIoUpdate::MaterializedSessionProjection { session_id, result },
+        );
     });
 }
 
@@ -809,9 +822,12 @@ pub(crate) fn spawn_config_rename(
         workspace_id,
         client_id,
     } = request;
-    let guard = tracker.begin(format!("renaming {what}"));
-    tokio::spawn(async move {
-        let result = async {
+    spawn_critical_async(
+        tracker,
+        format!("renaming {what}"),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
             let mut daemon = daemon::connect_existing().await?;
             if profile {
                 daemon.rename_profile(old_id, new_id).await?;
@@ -829,14 +845,9 @@ pub(crate) fn spawn_config_rename(
             })
             .await
             .context("configuration reload task panicked")?
-        }
-        .await
-        .map_err(|error: anyhow::Error| format!("{error:#}"));
-        drop(guard);
-        if let Err(error) = updates.send(DashboardIoUpdate::ConfigRename { what, result }) {
-            tracing::debug!(%error, "config rename result dropped after dashboard shutdown");
-        }
-    });
+        },
+        move |result| DashboardIoUpdate::ConfigRename { what, result },
+    );
 }
 
 /// What the container editor asks the controller to persist.
@@ -1091,11 +1102,11 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
                 (session_id, size)
             })
             .collect();
-        if let Err(error) =
-            updates.send(DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes })
-        {
-            tracing::debug!(generation, %error, "checkpoint archive size result dropped after dashboard shutdown");
-        }
+        report(
+            "checkpoint archive sizes",
+            &updates,
+            DashboardIoUpdate::CheckpointArchiveSizes { generation, sizes },
+        );
     });
 }
 
@@ -1208,25 +1219,29 @@ pub(crate) fn spawn_dashboard_create_session(
         let Some(registered) = (match registered {
             Ok(registered) => registered,
             Err(error) => {
-                if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-                    DashboardCreateSessionUpdate::Failed {
-                        retry_launch: Box::new(retry_launch),
-                        error: format!("{error:#}"),
-                    },
-                ))) {
-                    tracing::debug!(%error, "session creation failure dropped after dashboard shutdown");
-                }
+                report(
+                    "creating session",
+                    &updates,
+                    DashboardIoUpdate::CreateSession(Box::new(
+                        DashboardCreateSessionUpdate::Failed {
+                            retry_launch: Box::new(retry_launch),
+                            error: format!("{error:#}"),
+                        },
+                    )),
+                );
                 None
             }
         }) else {
             return;
         };
         let session_id = registered.session.id.clone();
-        if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
-            DashboardCreateSessionUpdate::Registered(Box::new(registered)),
-        ))) {
-            tracing::debug!(%error, "registered session result dropped after dashboard shutdown");
-        }
+        report(
+            "creating session",
+            &updates,
+            DashboardIoUpdate::CreateSession(Box::new(DashboardCreateSessionUpdate::Registered(
+                Box::new(registered),
+            ))),
+        );
         let result = runtime
             .block_on(async {
                 let mut daemon = daemon::connect_or_start().await?;
@@ -1234,13 +1249,15 @@ pub(crate) fn spawn_dashboard_create_session(
                 Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
             })
             .map_err(|error| format!("{error:#}"));
-        if let Err(error) = lifecycle_updates.send(LifecycleUpdate {
-            session_id,
-            result,
-            deferred_cleanup: false,
-        }) {
-            tracing::debug!(%error, "session creation lifecycle result dropped after dashboard shutdown");
-        }
+        report(
+            "creating session",
+            &lifecycle_updates,
+            LifecycleUpdate {
+                session_id,
+                result,
+                deferred_cleanup: false,
+            },
+        );
         drop(guard);
     });
 }

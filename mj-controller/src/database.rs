@@ -25,13 +25,13 @@ use mj_core::state::{
 };
 use mj_core::subagent::SubagentRecord;
 
-use crate::targets::AdditionalMount;
+use crate::targets::{AdditionalMount, MountAccess};
 use mj_core::workspace::{
     DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
     normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 37;
 
 mod session_move;
 pub use session_move::*;

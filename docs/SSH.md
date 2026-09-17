@@ -86,7 +86,7 @@ a host that refuses sharing falls back to one connection per command.
   clean, including staged, unstaged, and untracked files.
 - For `ssh-podman`: **rootless Podman on the remote host**, meeting the same
   postconditions Mjolnir expects locally. See [Podman for Mjolnir](PODMAN.md) — the
-  remote host needs Podman 4.0 or newer and the same rootless
+  remote host needs Podman 4.3 or newer and the same rootless
   user-namespace setup as a local `local-podman` host.
 
 ## Target configuration

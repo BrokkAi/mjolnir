@@ -201,14 +201,16 @@ pub(super) fn point_config_at_catalog(path: &Path) -> Result<()> {
 /// Fetch a provider's catalog over HTTPS. Mirrors the bounded client the Coding
 /// Plan quota reader uses: a short timeout and no redirects.
 pub(in crate::controller) fn fetch_catalog_over_https(url: &str, api_key: &str) -> Result<Vec<u8>> {
-    let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?
-        .get(url)
-        .bearer_auth(api_key)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()?
-        .error_for_status()?;
-    Ok(response.bytes()?.to_vec())
+    on_dedicated_thread(|| {
+        let response = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?
+            .get(url)
+            .bearer_auth(api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()?
+            .error_for_status()?;
+        Ok(response.bytes()?.to_vec())
+    })
 }

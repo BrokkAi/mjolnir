@@ -706,6 +706,7 @@ fn start_begins_at_the_worker_launch_not_at_the_transfers_before_it() {
     };
     let syncing = StagedExecutor::new(&executor, ProvisionStage::Syncing);
     let backend = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "abcdef0123456789".into(),
         workspace_storage: Default::default(),
     };
@@ -926,6 +927,7 @@ fn local_bare_restore_reuses_verified_absolute_archive_without_upload() {
         worker_root: "/var/lib/hel/workers/session".into(),
     };
     let container = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "container".into(),
         workspace_storage: Default::default(),
     };
@@ -976,6 +978,8 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1006,6 +1010,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         checkpoint: None,
     };
     let partial_target = TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "partial-container".into(),
         workspace_storage: Default::default(),
     };
@@ -1155,13 +1160,13 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     session.additional_mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/old"),
         destination: PathBuf::from("/mnt/old"),
-        read_only: false,
+        access: crate::targets::MountAccess::Cow,
     }];
     let previous = session.clone();
     let resumed_mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/new"),
         destination: PathBuf::from("/mnt/new"),
-        read_only: false,
+        access: crate::targets::MountAccess::Cow,
     }];
     let profile_home = data_directory.join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
@@ -1194,6 +1199,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "example.invalid/hel-test:latest".into(),
                 pull_policy: Default::default(),
                 platform: None,

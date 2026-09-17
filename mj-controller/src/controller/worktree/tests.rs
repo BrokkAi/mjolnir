@@ -915,7 +915,9 @@ fn a_conversion_preview_counts_unpushed_commits_and_dirty_files() {
     );
     assert_eq!(
         preview.destination,
-        PathBuf::from("/workspace").join(checkout.path().file_name().unwrap())
+        mj_core::targets::new_container_workspace(&session.id)
+            .unwrap()
+            .join(checkout.path().file_name().unwrap())
     );
 }
 
@@ -940,7 +942,9 @@ fn a_conversion_preview_reports_a_managed_worktree_as_not_retained() {
     assert_eq!(preview.unstaged_files, 0);
     assert_eq!(
         preview.destination,
-        PathBuf::from("/workspace").join(session_id)
+        mj_core::targets::new_container_workspace(session_id)
+            .unwrap()
+            .join(session_id)
     );
 }
 

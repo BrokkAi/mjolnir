@@ -3,7 +3,6 @@
 
 use crate::theme;
 use crossterm::event::{Event, KeyCode, KeyEvent};
-use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -15,9 +14,7 @@ use mj_core::relay::WorkerPhase;
 
 use super::autocomplete::{config_value_row, matching_indices};
 use super::{ChatAction, ChatState};
-use crate::components::{
-    ButtonRow, ChoiceList, ControlKind, Form, Interaction, Outcome, TextField,
-};
+use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction, TextField};
 use crate::text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +115,6 @@ impl ChatState {
             return false;
         }
         self.config_picker = Some(ConfigPicker::new(key, choices, current));
-        self.mark_visible_changed();
         true
     }
 
@@ -156,11 +152,7 @@ impl ChatState {
 
     pub(super) fn cancel_config_picker_pointer(&mut self) {
         if let Some(picker) = self.config_picker.as_mut() {
-            let captured = picker.form.captures_pointer();
             picker.form.cancel_pointer();
-            if captured {
-                self.mark_visible_changed();
-            }
         }
     }
 
@@ -179,33 +171,17 @@ impl ChatState {
             Some(picker) => picker.form.handle(&event),
             None => return (false, ChatAction::None),
         };
-        if result.outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         match result.action {
             Some(Interaction::Edit(ConfigControl::Filter, edit)) => {
-                let mut changed = false;
                 if let Some(picker) = self.config_picker.as_mut() {
-                    let before_filter = picker.filter.value().to_owned();
-                    let before_selected = picker.selected;
                     TextField::apply(&mut picker.filter, edit);
                     picker.refilter();
-                    changed = before_filter != picker.filter.value()
-                        || before_selected != picker.selected;
-                }
-                if changed {
-                    self.mark_visible_changed();
                 }
                 (true, ChatAction::None)
             }
             Some(Interaction::Select(ConfigControl::Values, selected)) => {
-                let mut changed = false;
                 if let Some(picker) = self.config_picker.as_mut() {
-                    changed = picker.selected != selected;
                     picker.selected = selected;
-                }
-                if changed {
-                    self.mark_visible_changed();
                 }
                 (true, ChatAction::None)
             }
@@ -214,15 +190,14 @@ impl ChatState {
             }
             Some(Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel) => {
                 self.config_picker = None;
-                self.mark_visible_changed();
                 (true, ChatAction::None)
             }
-            _ => (result.outcome.is_consumed(), ChatAction::None),
+            _ => (result.consumed, ChatAction::None),
         }
     }
 
     pub(super) fn handle_config_picker_event(&mut self, key: KeyEvent) -> ChatAction {
-        let (outcome, action) = {
+        let action = {
             let Some(picker) = self.config_picker.as_mut() else {
                 return ChatAction::None;
             };
@@ -233,36 +208,19 @@ impl ChatState {
                 picker.form.focus(ConfigControl::Values);
             }
             let event = Event::Key(key);
-            let result = picker.form.handle(&event);
-            (result.outcome, result.action)
+            picker.form.handle(&event).action
         };
-        if outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         if let Some(action) = action {
             match action {
                 Interaction::Edit(ConfigControl::Filter, edit) => {
-                    let mut changed = false;
                     if let Some(picker) = self.config_picker.as_mut() {
-                        let before_filter = picker.filter.value().to_owned();
-                        let before_selected = picker.selected;
                         TextField::apply(&mut picker.filter, edit);
                         picker.refilter();
-                        changed = before_filter != picker.filter.value()
-                            || before_selected != picker.selected;
-                    }
-                    if changed {
-                        self.mark_visible_changed();
                     }
                 }
                 Interaction::Select(ConfigControl::Values, selected) => {
-                    let mut changed = false;
                     if let Some(picker) = self.config_picker.as_mut() {
-                        changed = picker.selected != selected;
                         picker.selected = selected;
-                    }
-                    if changed {
-                        self.mark_visible_changed();
                     }
                 }
                 Interaction::Activate(ConfigControl::Values | ConfigControl::Apply) => {
@@ -273,14 +231,9 @@ impl ChatState {
                 }
                 Interaction::Activate(ConfigControl::Cancel) | Interaction::Cancel => {
                     self.config_picker = None;
-                    self.mark_visible_changed();
                 }
                 _ => {}
             }
-            return ChatAction::None;
-        }
-        if outcome.is_consumed() {
-            return ChatAction::None;
         }
         ChatAction::None
     }
@@ -295,7 +248,6 @@ impl ChatState {
         let key = picker.key;
         let value = choice.value.clone();
         self.config_picker = None;
-        self.mark_visible_changed();
         if matches!(self.phase, WorkerPhase::Closing | WorkerPhase::Closed) {
             self.set_notice("The worker is closing; this configuration change was not sent");
             return ChatAction::None;
@@ -320,7 +272,14 @@ pub(super) fn render_config_picker(
     let title = crate::modal::dismissible_modal_title(
         &mut picker.form,
         rect,
-        format!("Choose a {}", picker.key),
+        {
+            let article = if picker.key.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("Choose {article} {}", picker.key)
+        },
         theme::title(true),
         true,
     );

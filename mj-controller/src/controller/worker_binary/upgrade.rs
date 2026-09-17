@@ -200,8 +200,8 @@ pub(super) fn installed_worker_binary_replacement_plan(
                 .purpose("make replaced Mjolnir worker executable"),
         ],
         targets::TargetLocator::LocalPodman { container_id, .. }
-        | targets::TargetLocator::LocalDocker { container_id }
-        | targets::TargetLocator::AppleContainer { container_id } => {
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. } => {
             let engine = match locator {
                 targets::TargetLocator::LocalPodman { .. } => "podman",
                 targets::TargetLocator::LocalDocker { .. } => "docker",
@@ -260,7 +260,9 @@ pub(super) fn installed_worker_binary_replacement_plan(
         targets::TargetLocator::SshPodman {
             ssh, container_id, ..
         }
-        | targets::TargetLocator::SshDocker { ssh, container_id } => {
+        | targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => {
             let engine = match locator {
                 targets::TargetLocator::SshPodman { .. } => "podman",
                 targets::TargetLocator::SshDocker { .. } => "docker",

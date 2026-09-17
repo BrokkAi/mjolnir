@@ -6,13 +6,10 @@ use crate::{DashboardAction, DashboardState, Mode};
 
 impl DashboardState {
     pub(crate) fn dialog_layer_key(&self) -> String {
-        let detail = match &self.mode {
-            Mode::New(wizard) => format!("{:?}", wizard.step),
-            Mode::Resume(wizard) => format!("{:?}", wizard.step),
-            Mode::WorkspaceManager(dialog) => format!("{:?}", dialog.view),
-            Mode::Setup(dialog) => dialog.layer_key(),
-            _ => String::new(),
-        };
+        let detail = self
+            .active_modal()
+            .map(|modal| modal.layer_detail())
+            .unwrap_or_default();
         format!(
             "{:?}/{detail}/{}",
             std::mem::discriminant(&self.mode),
@@ -21,57 +18,14 @@ impl DashboardState {
     }
 
     pub(crate) fn prepare_dialog_state(&mut self) {
-        use crate::dialogs::DialogControl;
-        match &mut self.mode {
-            Mode::Rename(editor) => {
-                let form = editor.form.get_mut();
-                form.track_draft(vec![editor.title.to_string()]);
-                form.set_dismiss_actions(&[DialogControl::Cancel]);
-                form.set_submit(DialogControl::Field, DialogControl::Save);
-                form.set_default_action(DialogControl::Save);
-            }
-            Mode::ConfigId(editor) => {
-                let form = editor.form.get_mut();
-                form.track_draft(vec![editor.value.to_string()]);
-                form.set_dismiss_actions(&[DialogControl::Cancel]);
-                form.set_submit(DialogControl::Field, DialogControl::Save);
-                form.set_default_action(DialogControl::Save);
-            }
-            Mode::RepositoryOrigin(editor) => {
-                let form = editor.form.get_mut();
-                form.track_draft(vec![editor.replacement.to_string()]);
-                form.set_dismiss_actions(&[DialogControl::Cancel]);
-                form.set_submit(DialogControl::Field, DialogControl::Primary);
-                form.set_default_action(DialogControl::Primary);
-            }
-            Mode::Setup(dialog) => dialog.prepare_dialog_state(),
-            Mode::EditContainer(editor) => editor.prepare_dialog_state(),
-            Mode::WorkspaceManager(dialog) => dialog.prepare_dialog_state(),
-            Mode::New(wizard) => wizard.prepare_dialog_state(),
-            Mode::Resume(wizard) => wizard.prepare_dialog_state(),
-            _ => {}
+        if let Some(modal) = self.active_modal_mut() {
+            modal.prepare_dialog_state();
         }
     }
 
     pub(crate) fn dialog_confirmation_open(&self) -> bool {
-        match &self.mode {
-            Mode::Rename(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::ConfigId(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::RepositoryOrigin(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::EditContainer(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::WorkspaceManager(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::New(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Resume(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::ResumeDialog(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::TargetActions(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Web(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Importing(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::ConfirmImportBundle(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Confirm(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Palette(dialog) => dialog.form.borrow().confirmation_open(),
-            Mode::Setup(dialog) => dialog.confirmation_open(),
-            _ => false,
-        }
+        self.active_modal()
+            .is_some_and(|modal| modal.confirmation_open())
     }
 
     pub(crate) fn render_dialog_confirmation(
@@ -80,87 +34,16 @@ impl DashboardState {
         area: ratatui::layout::Rect,
         surfaces: &mut mj_chat::selection::FrameSurfaces,
     ) {
-        match &self.mode {
-            Mode::Rename(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::ConfigId(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::RepositoryOrigin(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::EditContainer(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::WorkspaceManager(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::New(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Resume(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::ResumeDialog(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::TargetActions(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Web(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Importing(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::ConfirmImportBundle(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Confirm(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Palette(dialog) => dialog
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces),
-            Mode::Setup(dialog) => dialog.render_confirmation(frame, area, surfaces),
-            _ => {}
+        if let Some(modal) = self.active_modal() {
+            modal.render_confirmation(frame, area, surfaces);
         }
     }
 
+    /// Whether the open mode routes events away from the dashboard. Help is a
+    /// pointer surface but not an event-routing modal: it draws over the mode
+    /// it opened on and keeps that mode's key handling.
     pub(crate) fn component_modal_open(&self) -> bool {
-        matches!(
-            self.mode,
-            Mode::EditContainer(_)
-                | Mode::Setup(_)
-                | Mode::Palette(_)
-                | Mode::ResumeDialog(_)
-                | Mode::Rename(_)
-                | Mode::ConfigId(_)
-                | Mode::RepositoryOrigin(_)
-                | Mode::TargetActions(_)
-                | Mode::Web(_)
-                | Mode::WorkspaceManager(_)
-                | Mode::Importing(_)
-                | Mode::ConfirmImportBundle(_)
-                | Mode::Confirm(_)
-                | Mode::New(_)
-                | Mode::Resume(_)
-        )
+        !matches!(self.mode, Mode::Dashboard | Mode::Help(_))
     }
 
     /// Whether a form owns this pointer event, ahead of selectable body text.
@@ -168,81 +51,16 @@ impl DashboardState {
         if self.dialog_confirmation_open() || matches!(self.mode, Mode::Palette(_)) {
             return true;
         }
-        match &self.mode {
-            Mode::Dashboard => {
-                let form = self.surface_form.borrow();
-                form.captures_pointer()
-                    || form.contains(mouse.column, mouse.row)
-                    || self
-                        .workspace_pane_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
-            }
-            Mode::Help(overlay) => {
-                let form = overlay.form.borrow();
-                form.captures_pointer()
-                    || overlay
-                        .area
-                        .get()
-                        .contains((mouse.column, mouse.row).into())
-            }
-            Mode::EditContainer(editor) => {
-                let form = editor.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Setup(dialog) => dialog.handles_mouse(mouse.column, mouse.row),
-            Mode::Palette(palette) => {
-                let form = palette.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::ResumeDialog(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Rename(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::ConfigId(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::RepositoryOrigin(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::TargetActions(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Web(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::WorkspaceManager(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Importing(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::ConfirmImportBundle(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Confirm(dialog) => {
-                let form = dialog.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::New(wizard) => {
-                let form = wizard.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
-            Mode::Resume(wizard) => {
-                let form = wizard.form.borrow();
-                form.captures_pointer() || form.contains(mouse.column, mouse.row)
-            }
+        if matches!(self.mode, Mode::Dashboard) {
+            let form = self.surface_form.borrow();
+            return form.captures_pointer()
+                || form.contains(mouse.column, mouse.row)
+                || self
+                    .workspace_pane_area
+                    .is_some_and(|area| area.contains((mouse.column, mouse.row).into()));
         }
+        self.active_modal()
+            .is_some_and(|modal| modal.handles_mouse(mouse.column, mouse.row))
     }
 
     /// Releases any pressed dashboard control. Global shortcuts use this when
@@ -255,114 +73,16 @@ impl DashboardState {
             form.cancel_pointer();
             changed
         };
-        match &mut self.mode {
-            Mode::Help(overlay) => {
-                let form = overlay.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::EditContainer(editor) => {
-                let form = editor.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Setup(dialog) => changed |= dialog.cancel_pointer(),
-            Mode::Palette(palette) => {
-                let form = palette.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::ResumeDialog(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Rename(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::ConfigId(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::RepositoryOrigin(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::TargetActions(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Web(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::WorkspaceManager(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Importing(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::ConfirmImportBundle(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Confirm(dialog) => {
-                let form = dialog.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::New(wizard) => {
-                let form = wizard.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            Mode::Resume(wizard) => {
-                let form = wizard.form.get_mut();
-                changed |= form.captures_pointer();
-                form.cancel_pointer();
-            }
-            _ => {}
-        }
-        if changed {
-            self.mark_render_changed();
+        if let Some(modal) = self.active_modal_mut() {
+            changed |= modal.cancel_pointer();
         }
         changed
     }
 
     pub(crate) fn reset_component_geometry(&mut self) {
         self.surface_form.get_mut().reset_geometry();
-        match &mut self.mode {
-            Mode::Help(overlay) => {
-                overlay.form.get_mut().reset_geometry();
-                overlay.area.set(Default::default());
-            }
-            Mode::EditContainer(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Setup(dialog) => dialog.reset_geometry(),
-            Mode::Palette(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::ResumeDialog(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Rename(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::ConfigId(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::RepositoryOrigin(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::TargetActions(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Web(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::WorkspaceManager(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Importing(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::ConfirmImportBundle(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Confirm(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::New(dialog) => dialog.form.get_mut().reset_geometry(),
-            Mode::Resume(dialog) => dialog.form.get_mut().reset_geometry(),
-            _ => {}
+        if let Some(modal) = self.active_modal_mut() {
+            modal.reset_geometry();
         }
     }
 
@@ -377,8 +97,7 @@ impl DashboardState {
         if matches!(self.mode, Mode::WorkspaceManager(_)) {
             return self.handle_workspace_manager_event(event);
         }
-        let was_modal = !matches!(self.mode, Mode::Dashboard);
-        let action = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
@@ -389,20 +108,13 @@ impl DashboardState {
             Mode::Importing(dialog) => self.handle_import_progress_event(event, dialog),
             Mode::ConfirmImportBundle(dialog) => self.handle_import_bundle_event(event, dialog),
             Mode::Confirm(dialog) => self.handle_confirmation_event(event, dialog),
-            Mode::New(wizard) => self.handle_new_event(event, wizard),
-            Mode::Resume(wizard) => self.handle_resume_event(event, wizard),
+            Mode::New(wizard) => self.handle_wizard_event(event, wizard),
+            Mode::Resume(wizard) => self.handle_wizard_event(event, wizard),
             mode => {
                 self.mode = mode;
                 DashboardAction::None
             }
-        };
-        // Most component handlers receive an extracted modal so that they can
-        // decide whether to restore it. `cancel_modal` cannot observe that
-        // original mode, so account for a real close at this boundary.
-        if was_modal && matches!(self.mode, Mode::Dashboard) {
-            self.mark_render_changed();
         }
-        action
     }
 }
 
@@ -473,6 +185,31 @@ mod tests {
         assert!(
             matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == crate::wizards::WizardStep::Target)
         );
+    }
+
+    #[test]
+    fn help_over_a_dialog_reports_no_confirmation_and_no_text_focus() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_container_edit();
+        // The container editor counts as text-focused on its first field.
+        assert!(dashboard.text_input_focused());
+
+        dashboard.begin_help();
+        draw(&mut dashboard);
+        assert!(!dashboard.dialog_confirmation_open());
+        assert!(!dashboard.text_input_focused());
+
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("help overlay");
+        };
+        let area = overlay.area.get();
+        assert!(area.width > 0 && area.height > 0, "help drew nothing");
+        assert!(dashboard.component_handles_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: area.x + area.width / 2,
+            row: area.y + area.height / 2,
+            modifiers: KeyModifiers::NONE,
+        }));
     }
 
     #[test]

@@ -1,95 +1,10 @@
 use super::*;
 
 impl DashboardState {
-    pub(crate) fn handle_resume_shortcut(
+    pub(in crate::wizards) fn advance_resume_wizard(
         &mut self,
-        key: KeyEvent,
         mut wizard: ResumeWizard,
     ) -> DashboardAction {
-        let focused = wizard.form.borrow().focused();
-        if !key.modifiers.is_empty() {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if key.code == KeyCode::Backspace
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
-            )
-        {
-            return self.activate_resume_control(wizard, WizardControl::Back);
-        }
-        if matches!(key.code, KeyCode::Char('j' | 'k'))
-            && matches!(
-                focused,
-                Some(
-                    WizardControl::ProfileList
-                        | WizardControl::TargetList
-                        | WizardControl::BundleList
-                )
-            )
-        {
-            let code = if key.code == KeyCode::Char('j') {
-                KeyCode::Down
-            } else {
-                KeyCode::Up
-            };
-            let result = wizard
-                .form
-                .get_mut()
-                .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-            if let Some(interaction) = result.action {
-                return self.apply_resume_interaction(wizard, interaction);
-            }
-        }
-        if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
-            invalidate_move_preparation(&mut wizard);
-            remove_selected_mount(&mut wizard.mounts);
-            if wizard.mounts.mounts.is_empty() {
-                wizard.form.get_mut().focus(WizardControl::Submit);
-            }
-            if wizard.moving {
-                let profile_id = self.compatible_profiles(&wizard.session_id)[wizard.profile]
-                    .0
-                    .clone();
-                return self.request_move_preparation_for_review(wizard, profile_id);
-            }
-        }
-        if wizard.step == WizardStep::Target && key.code == KeyCode::F(5) {
-            self.target_readiness.clear();
-            self.mark_render_changed();
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if wizard.step == WizardStep::Target
-            && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
-        {
-            invalidate_move_preparation(&mut wizard);
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
-            self.adjust_resume_resources(&mut wizard, key.code);
-            wizard.form.get_mut().track_draft_part(
-                "resources",
-                vec![format!("{:?}", wizard.resource_allocation)],
-            );
-        }
-        if key.code == KeyCode::Char('q')
-            && wizard.step == WizardStep::Review
-            && wizard.has_queued_work(self)
-        {
-            wizard.discard_queue = !wizard.discard_queue;
-        }
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::None
-    }
-
-    pub(crate) fn advance_resume_wizard(&mut self, mut wizard: ResumeWizard) -> DashboardAction {
         let profiles = self.compatible_profiles(&wizard.session_id);
         match wizard.step {
             WizardStep::Profile => {
@@ -98,7 +13,7 @@ impl DashboardState {
                 let action = if wizard.resource_allocation.is_some() {
                     DashboardAction::None
                 } else {
-                    self.prepare_resume_target(&mut wizard)
+                    self.prepare_wizard_target(&mut wizard)
                 };
                 self.mode = Mode::Resume(wizard);
                 action
@@ -151,167 +66,7 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn activate_resume_review(
-        &mut self,
-        id: WizardControl,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        let can_attach =
-            mount_history_host(&self.config.targets[&nth_key(&self.config.targets, wizard.target)])
-                .is_some();
-        match id {
-            WizardControl::ReviewAttachments => {
-                invalidate_move_preparation(&mut wizard);
-                edit_selected_resume_mount(&mut wizard);
-            }
-            WizardControl::Cancel => {
-                self.cancel_modal();
-                return DashboardAction::None;
-            }
-            WizardControl::Back => {
-                invalidate_move_preparation(&mut wizard);
-                wizard.step = WizardStep::Target;
-                wizard.form.get_mut().focus(step_initial(wizard.step));
-            }
-            WizardControl::Add if can_attach => {
-                invalidate_move_preparation(&mut wizard);
-                begin_resume_mount_editor(&mut wizard);
-            }
-            WizardControl::Add => {}
-            WizardControl::Submit => {
-                let profile_id = self
-                    .compatible_profiles(&wizard.session_id)
-                    .get(wizard.profile)
-                    .map(|(id, _)| (*id).clone())
-                    .expect("resume wizard is only opened with a compatible profile");
-                return self.preflight_resume_session_action(wizard, profile_id);
-            }
-
-            _ => {}
-        }
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::None
-    }
-
-    pub(crate) fn activate_resume_mount(
-        &mut self,
-        id: WizardControl,
-        mut wizard: ResumeWizard,
-    ) -> DashboardAction {
-        let target_template_id = nth_key(&self.config.targets, wizard.target);
-        match id {
-            WizardControl::MountSource if !wizard.mounts.completion_candidates.is_empty() => {
-                wizard.mounts.source = wizard.mounts.completion_candidates
-                    [wizard.mounts.completion_index]
-                    .clone()
-                    .into();
-                wizard.mounts.completion_candidates.clear();
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountSource if wizard.mounts.source.is_empty() => {
-                wizard.mounts.error = Some("Choose or type a directory on the controller.".into());
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountSource => {
-                if wizard.mounts.destination.is_empty() {
-                    wizard.mounts.destination = default_resource_destination(
-                        &self.config.targets[&target_template_id],
-                        std::path::Path::new(&wizard.mounts.source),
-                        &wizard.mounts.mounts,
-                    )
-                    .to_string_lossy()
-                    .into_owned()
-                    .into();
-                }
-                wizard.form.get_mut().focus(WizardControl::MountDestination);
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountReadOnly => {
-                wizard.mounts.toggle_read_only();
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            WizardControl::MountDestination | WizardControl::Add => {
-                self.validate_resume_mount(wizard, target_template_id)
-            }
-            WizardControl::Cancel => {
-                self.cancel_modal();
-                DashboardAction::None
-            }
-            WizardControl::Back => {
-                wizard.mounts.source.clear();
-                wizard.mounts.destination.clear();
-                wizard.mounts.error = None;
-                wizard.mounts.completion_candidates.clear();
-                wizard.form.get_mut().forget_draft_part("attachment editor");
-                wizard.step = WizardStep::Review;
-                wizard.form.get_mut().focus(WizardControl::Add);
-                if wizard.moving {
-                    let profile_id = self
-                        .compatible_profiles(&wizard.session_id)
-                        .get(wizard.profile)
-                        .map(|(id, _)| (*id).clone())
-                        .expect("move wizard is only opened with a compatible profile");
-                    return self.request_move_preparation_for_review(wizard, profile_id);
-                }
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-
-            _ => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-        }
-    }
-
-    pub(crate) fn complete_resume_mount_source(
-        &mut self,
-        mut wizard: ResumeWizard,
-        target_template_id: String,
-    ) -> DashboardAction {
-        let prefix = wizard.mounts.source.to_string();
-        if prefix.is_empty() {
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        if let Some(candidates) = wizard.mounts.completion_cache.get(&prefix).cloned() {
-            apply_mount_completions(&mut wizard.mounts, &prefix, candidates);
-            self.mode = Mode::Resume(wizard);
-            DashboardAction::None
-        } else {
-            self.mode = Mode::Resume(wizard);
-            DashboardAction::CompleteMountSource {
-                target_template_id,
-                prefix,
-            }
-        }
-    }
-
-    pub(crate) fn validate_resume_mount(
-        &mut self,
-        mut wizard: ResumeWizard,
-        target_template_id: String,
-    ) -> DashboardAction {
-        if let Some(error) = validate_mount_entry(&wizard.mounts) {
-            wizard.mounts.error = Some(error);
-            wizard.form.get_mut().focus(WizardControl::MountSource);
-            self.mode = Mode::Resume(wizard);
-            return DashboardAction::None;
-        }
-        let source = wizard.mounts.source.to_string();
-        wizard.form.get_mut().set_submission_pending(true);
-        self.mode = Mode::Resume(wizard);
-        DashboardAction::ValidateMountSource {
-            target_template_id,
-            source,
-        }
-    }
-
-    pub(crate) fn start_move_preparation(
+    fn start_move_preparation(
         &mut self,
         mut wizard: ResumeWizard,
         profile_id: String,
@@ -346,7 +101,7 @@ impl DashboardState {
         action
     }
 
-    pub(crate) fn request_move_preparation_for_review(
+    pub(in crate::wizards) fn request_move_preparation_for_review(
         &mut self,
         wizard: ResumeWizard,
         profile_id: String,
@@ -358,7 +113,7 @@ impl DashboardState {
         self.start_move_preparation(wizard, profile_id)
     }
 
-    pub(crate) fn preflight_resume_session_action(
+    pub(in crate::wizards) fn preflight_resume_session_action(
         &mut self,
         wizard: ResumeWizard,
         profile_id: String,
@@ -439,7 +194,6 @@ impl DashboardState {
         wizard.preparation = Some(preparation);
         wizard.preparing = false;
         wizard.preparation_error = None;
-        self.mark_render_changed();
         true
     }
 
@@ -464,7 +218,6 @@ impl DashboardState {
         wizard.preparation = None;
         wizard.preparation_request_id = None;
         wizard.preparation_error = Some(error);
-        self.mark_render_changed();
         true
     }
 
@@ -485,7 +238,6 @@ impl DashboardState {
     }
 
     pub fn apply_session_mount_preflight_failure(&mut self, source: &str, error: String) {
-        let mut changed = false;
         match &mut self.mode {
             Mode::New(wizard) => {
                 if let Some(index) = wizard
@@ -494,17 +246,15 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    changed |= wizard.mounts.history_index != index;
                     wizard.mounts.history_index = index;
-                    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+                    if prepare_selected_mount_editor(&mut wizard.mounts) {
+                        wizard.step = WizardStep::Mounts;
+                    }
                 }
                 // The check has ended. Keeping its failure on the review means
                 // leaving the editor does not start the same failing check again.
-                changed |= wizard.remote_preflight_in_flight
-                    || wizard.remote_preflight_error.as_deref() != Some(error.as_str());
                 wizard.remote_preflight_in_flight = false;
                 wizard.remote_preflight_error = Some(error.clone());
-                changed |= wizard.mounts.error.as_deref() != Some(error.as_str());
                 wizard.mounts.error = Some(error);
             }
             Mode::Resume(wizard) => {
@@ -514,17 +264,14 @@ impl DashboardState {
                     .iter()
                     .position(|mount| mount.source == std::path::Path::new(source))
                 {
-                    changed |= wizard.mounts.history_index != index;
                     wizard.mounts.history_index = index;
-                    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
+                    if prepare_selected_mount_editor(&mut wizard.mounts) {
+                        wizard.step = WizardStep::Mounts;
+                    }
                 }
-                changed |= wizard.mounts.error.as_deref() != Some(error.as_str());
                 wizard.mounts.error = Some(error);
             }
             _ => {}
-        }
-        if changed {
-            self.mark_render_changed();
         }
     }
 
@@ -539,15 +286,9 @@ impl DashboardState {
             return;
         }
         if let Mode::New(wizard) = &mut self.mode {
-            let changed = !wizard.remote_preflight_in_flight
-                || wizard.remote_preflight_error.is_some()
-                || wizard.remote_repositories.is_some();
             wizard.remote_preflight_in_flight = true;
             wizard.remote_preflight_error = None;
             wizard.remote_repositories = None;
-            if changed {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -564,33 +305,17 @@ impl DashboardState {
         let Mode::New(wizard) = &mut self.mode else {
             return;
         };
-        let old_in_flight = wizard.remote_preflight_in_flight;
-        let old_error = wizard.remote_preflight_error.clone();
         wizard.remote_preflight_in_flight = false;
         match result {
             Ok(repositories) => {
-                let changed = !old_in_flight
-                    || wizard.remote_repositories.as_ref() != Some(&repositories)
-                    || old_error.is_some()
-                    || wizard.form.borrow().focused() != Some(WizardControl::Submit);
                 wizard.remote_repositories = Some(repositories);
                 wizard.remote_preflight_error = None;
                 wizard.form.get_mut().focus(WizardControl::Submit);
-                if changed {
-                    self.mark_render_changed();
-                }
             }
             Err(error) => {
-                let changed = !old_in_flight
-                    || wizard.remote_repositories.is_some()
-                    || old_error.as_deref() != Some(error.as_str())
-                    || wizard.form.borrow().focused() != Some(WizardControl::Submit);
                 wizard.remote_repositories = None;
                 wizard.remote_preflight_error = Some(error);
                 wizard.form.get_mut().focus(WizardControl::Submit);
-                if changed {
-                    self.mark_render_changed();
-                }
             }
         }
     }

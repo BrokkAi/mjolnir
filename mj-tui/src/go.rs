@@ -40,7 +40,6 @@ impl DashboardState {
         result: Result<(PathBuf, String), String>,
     ) {
         self.go_contexts.insert(session_id, result);
-        self.mark_render_changed();
     }
     pub fn begin_go(&mut self, mode: GoMode, setup: bool) -> DashboardAction {
         let needs_remote_path = mode.recipe.as_ref().is_some_and(|recipe| {

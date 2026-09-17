@@ -166,6 +166,9 @@ impl RuntimeState {
                     }
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
+                    if let Err(error) = &result {
+                        tracing::warn!(session_id = %operation_session_id, ?kind, %error, "lifecycle operation failed");
+                    }
                     result_tx.send_replace(Some(result));
                     // Completion must release transient mutation ownership even
                     // when every requesting client has disconnected. Durable

@@ -132,6 +132,91 @@ impl ProjectRepository {
     }
 }
 
+/// Per-target overrides for the mbx build cache. Every field is optional:
+/// an unset field keeps the resolved default for that target's host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetBuildCache {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Cache directory on the target's own host, not on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<PathBuf>,
+    /// An mbx size string such as `100GiB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+}
+
+impl TargetBuildCache {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn validate(&self, template_id: &str) -> Result<()> {
+        if let Some(directory) = &self.directory
+            && !directory.is_absolute()
+        {
+            bail!("target template {template_id:?} build cache directory must be absolute");
+        }
+        if let Some(max_size) = &self.max_size
+            && parse_build_cache_size(max_size).is_none()
+        {
+            bail!(
+                "target template {template_id:?} build cache size {max_size:?} is not a size such as 100GiB"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether a target carries no build cache overrides, so an unchanged target
+/// is not rewritten with an empty section.
+fn is_default_target_build_cache(value: &Option<TargetBuildCache>) -> bool {
+    value.as_ref().is_none_or(TargetBuildCache::is_default)
+}
+
+/// "No overrides" has one representation. A section with every field unset,
+/// which both a hand-written file and the setup editor can produce, reads back
+/// as no section at all.
+fn deserialize_target_build_cache<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<TargetBuildCache>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<TargetBuildCache>::deserialize(deserializer)?
+        .filter(|build_cache| !build_cache.is_default()))
+}
+
+/// Byte count of an mbx size string: digits and an optional unit, the same
+/// spellings mbx's own `bytesize` parser accepts. `20GB` and `20GiB` are
+/// different numbers, so the unit is kept exactly as written.
+#[must_use]
+pub fn parse_build_cache_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let digits = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    if digits == 0 {
+        return None;
+    }
+    let count: u64 = value[..digits].parse().ok()?;
+    let multiplier: u64 = match value[digits..].trim_start() {
+        "" | "B" => 1,
+        "KB" => 1_000,
+        "MB" => 1_000_000,
+        "GB" => 1_000_000_000,
+        "TB" => 1_000_000_000_000,
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        _ => return None,
+    };
+    count.checked_mul(multiplier)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
@@ -148,6 +233,13 @@ pub struct ContainerTemplate {
     pub environment: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "PodmanWorkspaceStorage::is_default")]
     pub workspace_storage: PodmanWorkspaceStorage,
+    /// Per-target mbx build cache overrides.
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_target_build_cache",
+        deserialize_with = "deserialize_target_build_cache"
+    )]
+    pub build_cache: Option<TargetBuildCache>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +298,9 @@ impl ContainerTemplate {
             bail!("target template {template_id:?} has an empty container image");
         }
         validate_environment(template_id, &self.environment)?;
+        if let Some(build_cache) = &self.build_cache {
+            build_cache.validate(template_id)?;
+        }
         Ok(())
     }
 }
@@ -413,6 +508,19 @@ pub fn is_bare_project_target(template: &TargetTemplate) -> bool {
     matches!(
         template,
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
+    )
+}
+
+/// Whether sessions on `template` run inside a container Hel creates, and so
+/// work in a container workspace rather than a host or instance directory.
+pub fn is_container_target(template: &TargetTemplate) -> bool {
+    matches!(
+        template,
+        TargetTemplate::LocalPodman { .. }
+            | TargetTemplate::LocalDocker { .. }
+            | TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. }
     )
 }
 

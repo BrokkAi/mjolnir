@@ -2,16 +2,15 @@ use super::*;
 
 impl ActiveChat {
     /// Waits for the next background message, applies it, and drains whatever
-    /// queued behind it, reporting whether their visible state changed.
+    /// queued behind it.
     ///
     /// `None` means no chat is warm, and the feed never wakes the caller. Cancel
     /// safe: every arm is a cancel-safe receive, and a message is applied only
     /// once its arm has won.
-    pub async fn pump(chat: Option<&mut Self>) -> Outcome {
+    pub async fn pump(chat: Option<&mut Self>) {
         let Some(chat) = chat else {
             return std::future::pending().await;
         };
-        let before = chat.state.visible_revision();
         enum Wakeup {
             Remote(Option<ChatRemoteResult>),
             Io(ChatIoUpdate),
@@ -37,12 +36,6 @@ impl ActiveChat {
         }
         chat.drain().await;
         chat.report_worker_death().await;
-        let changed = chat.state.visible_revision() != before;
-        if changed {
-            Outcome::Changed
-        } else {
-            Outcome::Unchanged
-        }
     }
 
     pub(crate) async fn drain(&mut self) {
@@ -97,10 +90,8 @@ impl ActiveChat {
         else {
             return;
         };
-        if let Some(view) = self.state.second_opinion_mut()
-            && view.set_status("the reviewer is reading the plan…")
-        {
-            self.state.mark_visible_changed();
+        if let Some(view) = self.state.second_opinion_mut() {
+            view.set_status("the reviewer is reading the plan…");
         }
         self.persist_review();
         self.run_workflow_request(request);
@@ -138,11 +129,6 @@ impl ActiveChat {
             }
         }
         self.surface_reviewer_elicitations();
-    }
-
-    /// Mirrors `[review]` into the view, from the config the dashboard drains.
-    pub fn set_review_config(&mut self, review: mj_core::config::ReviewConfig) {
-        self.state.set_review_config(review);
     }
 
     /// Asks the daemon to review the turn that just finished.
@@ -205,9 +191,7 @@ impl ActiveChat {
     pub fn report_review_refusal(&mut self, message: String) {
         match self.state.turn_review_mut() {
             Some(review) => {
-                if review.report_failure(message) {
-                    self.state.mark_visible_changed();
-                }
+                review.report_failure(message);
             }
             None => self.state.set_notice(message),
         }
@@ -426,10 +410,7 @@ impl ActiveChat {
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
             VoiceUpdate::Finished(result) => {
-                if self.state.voice_active {
-                    self.state.voice_active = false;
-                    self.state.mark_visible_changed();
-                }
+                self.state.voice_active = false;
                 self.voice_cancel = None;
                 self.voice_finishing = false;
                 match result {

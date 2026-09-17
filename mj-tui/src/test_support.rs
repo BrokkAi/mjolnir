@@ -122,6 +122,7 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 
 pub(crate) fn config() -> Config {
     Config {
+        build_cache: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -184,6 +185,7 @@ pub(crate) fn config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -199,6 +201,8 @@ pub(crate) fn config() -> Config {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

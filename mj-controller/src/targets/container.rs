@@ -6,10 +6,20 @@ pub(super) fn container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     Ok(CommandSpec::new(
         engine,
-        container_run_args(engine, template, name, session_id, additional_mounts, None)?,
+        container_run_args(
+            engine,
+            template,
+            name,
+            session_id,
+            additional_mounts,
+            None,
+            None,
+            workspace_root,
+        )?,
     )
     .purpose("start session container")
     .stage(ProvisionStage::Provisioning)
@@ -94,7 +104,9 @@ pub(super) fn podman_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    image_user: Option<ImageUser>,
     ssh: Option<&SshTarget>,
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let workspace = podman_workspace_locator(template, session_id)?;
     let run_args = container_run_args(
@@ -104,6 +116,8 @@ pub(super) fn podman_container_run(
         session_id,
         additional_mounts,
         Some(&workspace),
+        image_user,
+        workspace_root,
     )?;
     let mut wrapped = match &workspace {
         PodmanWorkspaceLocator::ContainerLayer => {
@@ -290,6 +304,7 @@ pub(super) fn docker_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
+    workspace_root: &str,
 ) -> Result<CommandSpec> {
     let run_args = container_run_args(
         "docker",
@@ -298,14 +313,23 @@ pub(super) fn docker_container_run(
         session_id,
         additional_mounts,
         None,
+        None,
+        workspace_root,
     )?;
-    let writable = additional_mounts
+    let overlaid = additional_mounts
         .iter()
         .enumerate()
-        .filter(|(_, mount)| !mount.read_only)
+        .filter(|(_, mount)| mount.access == MountAccess::Cow)
         .collect::<Vec<_>>();
-    if writable.is_empty() {
-        return container_run("docker", template, name, session_id, additional_mounts);
+    if overlaid.is_empty() {
+        return container_run(
+            "docker",
+            template,
+            name,
+            session_id,
+            additional_mounts,
+            workspace_root,
+        );
     }
     let mut args = vec![
         "-c".to_owned(),
@@ -316,7 +340,7 @@ pub(super) fn docker_container_run(
         template.image.clone(),
         docker_pull_policy(template).to_owned(),
     ];
-    for (ordinal, mount) in writable {
+    for (ordinal, mount) in overlaid {
         args.extend([
             ordinal.to_string(),
             mount.source.to_string_lossy().into_owned(),
@@ -331,6 +355,19 @@ pub(super) fn docker_container_run(
         .creates_target())
 }
 
+/// Podman's `--pull` flag for this template, or `None` when the resolved
+/// policy is Podman's own default. Every `podman run` Hel issues for a
+/// template — the session container and the image-user probe alike — uses this
+/// one answer, so a probe never pulls an image the launch would not.
+pub(super) fn podman_pull_argument(template: &ContainerTemplate) -> Option<String> {
+    let pull_policy = template.pull_policy.at_launch(&template.image);
+    (pull_policy != ImagePullPolicy::Missing)
+        .then(|| format!("--pull={}", pull_policy.podman_value()))
+}
+
+// Every argument is an independent input the engine needs: the template, the
+// resource identity, the mounts, and the workspace the session runs in.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn container_run_args(
     engine: &str,
     template: &ContainerTemplate,
@@ -338,18 +375,23 @@ pub(super) fn container_run_args(
     session_id: &str,
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
+    image_user: Option<ImageUser>,
+    workspace_root: &str,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
     let mut args = vec!["run".to_owned()];
     if engine == "podman" {
-        let pull_policy = template.pull_policy.at_launch(&template.image);
-        if pull_policy != ImagePullPolicy::Missing {
-            args.push(format!("--pull={}", pull_policy.podman_value()));
-        }
+        args.extend(podman_pull_argument(template));
         // PID 1 is `sleep infinity`, which reaps nothing, so every exec that
         // outlives its parent leaves a zombie behind. Apple's `container`
         // engine is left alone: its support for the flag is unverified.
         args.push("--init".to_owned());
+        // Rootless Podman otherwise runs the container's user as a
+        // subordinate id, which cannot write to anything the host user owns
+        // and leaves unreadable files behind where it can. Every container
+        // whose image user is known maps that user back to the host user,
+        // whatever its mounts are.
+        args.extend(podman_userns_option(image_user));
     } else if engine == "docker" {
         let pull = docker_pull_policy(template);
         args.push(format!("--pull={pull}"));
@@ -364,14 +406,17 @@ pub(super) fn container_run_args(
     if engine == "podman" {
         match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
             PodmanWorkspaceLocator::ContainerLayer => {}
+            // `:U` chowns the volume to the container user, so the session's
+            // workspace is writable wherever it is mounted.
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
-                format!("{name}:{CONTAINER_WORKSPACE}:rw,U"),
+                format!("{name}:{workspace_root}:rw,U"),
             ]),
-            PodmanWorkspaceLocator::HostPath { path, .. } => args.extend([
-                "--volume".to_owned(),
-                format!("{path}:{CONTAINER_WORKSPACE}:rw"),
-            ]),
+            // The host directory belongs to the host user, which
+            // `--userns=keep-id` maps to the container user.
+            PodmanWorkspaceLocator::HostPath { path, .. } => {
+                args.extend(["--volume".to_owned(), format!("{path}:{workspace_root}:rw")])
+            }
         }
     }
     for (ordinal, mount) in additional_mounts.iter().enumerate() {
@@ -379,27 +424,41 @@ pub(super) fn container_run_args(
         let destination = mount.destination.to_string_lossy();
         match engine {
             "podman" => {
-                let mode = if mount.read_only { "ro" } else { "O" };
+                let mode = match mount.access {
+                    MountAccess::Ro => "ro",
+                    MountAccess::Cow => "O",
+                    MountAccess::Rw => "rw",
+                };
                 args.extend([
                     "--volume".to_owned(),
                     format!("{source}:{destination}:{mode}"),
                 ]);
             }
             "docker" => {
-                let source = if mount.read_only {
-                    source.into_owned()
-                } else {
+                let source = if mount.access == MountAccess::Cow {
                     docker_overlay_volume_name(name, ordinal)
+                } else {
+                    source.into_owned()
                 };
-                let suffix = if mount.read_only { ":ro" } else { "" };
+                let suffix = if mount.access == MountAccess::Ro {
+                    ":ro"
+                } else {
+                    ""
+                };
                 args.extend([
                     "--volume".to_owned(),
                     format!("{source}:{destination}{suffix}"),
                 ]);
             }
+            // Apple's runtime has no copy-on-write overlay, so those mounts
+            // stay read-only rather than silently writing through.
             "container" => args.extend([
                 "--mount".to_owned(),
-                format!("type=bind,source={source},target={destination},readonly"),
+                if mount.access == MountAccess::Rw {
+                    format!("type=bind,source={source},target={destination}")
+                } else {
+                    format!("type=bind,source={source},target={destination},readonly")
+                },
             ]),
             _ => bail!("additional mounts are unsupported for container engine {engine:?}"),
         }

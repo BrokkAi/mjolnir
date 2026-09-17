@@ -47,13 +47,8 @@ impl ChatState {
             }
             let request = dialog.request().clone();
             let response = dialog.handle_key_event(key);
-            let dialog_changed = dialog.take_changed();
-            if dialog_changed {
-                self.mark_visible_changed();
-            }
             if let Some(response) = response {
                 self.elicitation = None;
-                self.mark_visible_changed();
                 if std::mem::take(&mut self.elicitation_is_reviewers) {
                     return ChatAction::RespondReviewerElicitation {
                         role: self.elicitation_role.take(),
@@ -88,7 +83,7 @@ impl ChatState {
                 self.close_task_dialog();
                 return ChatAction::None;
             }
-            if result.outcome.is_consumed() {
+            if result.consumed {
                 return ChatAction::None;
             }
             match code {
@@ -115,7 +110,6 @@ impl ChatState {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
                     self.task_control_focused = false;
-                    self.mark_visible_changed();
                 }
                 KeyCode::Enter => {
                     self.open_task_dialog();
@@ -128,7 +122,6 @@ impl ChatState {
                 KeyCode::Down => return ChatAction::None,
                 _ => {
                     self.task_control_focused = false;
-                    self.mark_visible_changed();
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
@@ -140,7 +133,6 @@ impl ChatState {
             match code {
                 KeyCode::Esc | KeyCode::Up => {
                     self.subagent_control_focused = false;
-                    self.mark_visible_changed();
                 }
                 KeyCode::Enter => return ChatAction::OpenSubagents,
                 KeyCode::Left if self.background_task_count() > 0 => {
@@ -151,7 +143,6 @@ impl ChatState {
                 KeyCode::Down => return ChatAction::None,
                 _ => {
                     self.subagent_control_focused = false;
-                    self.mark_visible_changed();
                 }
             }
             if code == KeyCode::Esc || code == KeyCode::Up {
@@ -242,7 +233,7 @@ impl ChatState {
                     self.chain_kill = true;
                 }
                 KeyCode::Char('w') => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Char('c') => {
@@ -274,11 +265,11 @@ impl ChatState {
                 KeyCode::Left => self.move_word(-1),
                 KeyCode::Right => self.move_word(1),
                 KeyCode::Backspace => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Delete => {
-                    let end = self.next_word_end();
+                    let end = text_input::next_word_end(&self.input, self.input_cursor);
                     self.kill_range(self.input_cursor..end);
                 }
                 KeyCode::Home => {
@@ -298,11 +289,11 @@ impl ChatState {
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
                 KeyCode::Char('d') | KeyCode::Delete => {
-                    let end = self.next_word_end();
+                    let end = text_input::next_word_end(&self.input, self.input_cursor);
                     self.kill_range(self.input_cursor..end);
                 }
                 KeyCode::Backspace => {
-                    let start = self.previous_word_start();
+                    let start = text_input::previous_word_start(&self.input, self.input_cursor);
                     self.kill_range(start..self.input_cursor);
                 }
                 KeyCode::Enter => self.insert_character('\n'),

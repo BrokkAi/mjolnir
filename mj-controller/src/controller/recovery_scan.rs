@@ -21,8 +21,19 @@ impl Controller {
     /// Find managed resources which are not represented by the controller's
     /// current state. Labels/tags establish Hel ownership; the worker marker
     /// supplies profile and bundle metadata when it is available.
-    pub fn scan_orphan_workers(&self, executor: &impl CommandExecutor) -> RecoveryScan {
-        let mut scan = RecoveryScan::default();
+    ///
+    /// Unless `all_instances` is set, only workers stamped with this
+    /// instance's identity are listed: a QA instance sharing a host with a
+    /// production instance must never see the production workers as its own.
+    pub fn scan_orphan_workers(
+        &self,
+        executor: &impl CommandExecutor,
+        all_instances: bool,
+    ) -> RecoveryScan {
+        let mut scan = RecoveryScan {
+            instance_id: mj_core::config::instance_identity(),
+            ..RecoveryScan::default()
+        };
         for (target_id, template) in &self.config.targets {
             match scan_target_workers(target_id, template, executor) {
                 Ok(candidates) => {
@@ -42,6 +53,9 @@ impl Controller {
             left.session_id == right.session_id
                 && left.target_template_id == right.target_template_id
         });
+        if !all_instances {
+            restrict_to_instance(&mut scan);
+        }
         scan
     }
 
@@ -51,6 +65,7 @@ impl Controller {
         target_id: &str,
         profile_override: Option<&str>,
         bundle_override: Option<&str>,
+        all_instances: bool,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let (record, newly_adopted) = match self.state.sessions.get(session_id).cloned() {
@@ -74,8 +89,8 @@ impl Controller {
             }
             Some(_) => bail!("session {session_id} is already tracked"),
             None => {
-                let candidate = self
-                    .scan_orphan_workers(executor)
+                let scan = self.scan_orphan_workers(executor, true);
+                let candidate = scan
                     .candidates
                     .into_iter()
                     .find(|candidate| {
@@ -85,6 +100,7 @@ impl Controller {
                     .with_context(|| {
                         format!("no managed orphan {session_id} was found on target {target_id:?}")
                     })?;
+                require_instance_access(&candidate, &scan.instance_id, all_instances)?;
                 let profile_id = profile_override
                     .map(str::to_owned)
                     .or_else(|| {
@@ -119,7 +135,17 @@ impl Controller {
                         .map(|ownership| ownership.workspace_id.as_str())
                         .unwrap_or(mj_core::workspace::DEFAULT_WORKSPACE_ID),
                 )?;
-                let record = adopted_session_record(
+                let container_workspace = self
+                    .config
+                    .targets
+                    .get(target_id)
+                    .and_then(|template| {
+                        recovery_backend_locator(template, &candidate.locator, session_id).ok()
+                    })
+                    .and_then(|backend| {
+                        adopted_container_workspace(&backend, session_id, executor)
+                    });
+                let mut record = adopted_session_record(
                     session_id,
                     target_id,
                     profile_id,
@@ -128,6 +154,7 @@ impl Controller {
                     workspace_id,
                     candidate.locator,
                 );
+                record.container_workspace = container_workspace;
                 (record, true)
             }
         };
@@ -210,13 +237,14 @@ impl Controller {
         session_id: &str,
         target_id: &str,
         confirmation: &str,
+        all_instances: bool,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         if confirmation != session_id {
             bail!("refusing destructive recovery: --confirm must exactly match the session ID");
         }
-        let candidate = self
-            .scan_orphan_workers(executor)
+        let scan = self.scan_orphan_workers(executor, true);
+        let candidate = scan
             .candidates
             .into_iter()
             .find(|candidate| {
@@ -225,11 +253,44 @@ impl Controller {
             .with_context(|| {
                 format!("no managed orphan {session_id} was found on target {target_id:?}")
             })?;
+        require_instance_access(&candidate, &scan.instance_id, all_instances)?;
         let template = self.config.targets.get(target_id).unwrap();
         let backend = recovery_backend_locator(template, &candidate.locator, session_id)?;
         targets::close_plan(&backend, session_id)?
             .execute(executor)
             .map(|_| ())
+    }
+}
+
+/// Drop candidates another or an unknown instance created, counting them so
+/// the user learns that `--all-instances` would show more.
+fn restrict_to_instance(scan: &mut RecoveryScan) {
+    let before = scan.candidates.len();
+    scan.candidates
+        .retain(|candidate| candidate.instance_id.as_deref() == Some(scan.instance_id.as_str()));
+    scan.hidden_other_instances = before - scan.candidates.len();
+}
+
+/// Refuse to act on a worker that another instance created, or whose
+/// instance is unknown, unless the caller widened the scope explicitly.
+fn require_instance_access(
+    candidate: &RecoveryCandidate,
+    scan_instance: &str,
+    all_instances: bool,
+) -> Result<()> {
+    if all_instances {
+        return Ok(());
+    }
+    match candidate.instance_id.as_deref() {
+        Some(instance) if instance == scan_instance => Ok(()),
+        Some(other) => bail!(
+            "worker {} belongs to instance {other:?}, not this instance {scan_instance:?}; pass --all-instances to act on it",
+            candidate.session_id
+        ),
+        None => bail!(
+            "worker {} has no instance stamp (created by an older build); pass --all-instances to act on it",
+            candidate.session_id
+        ),
     }
 }
 
@@ -249,6 +310,51 @@ fn resolve_recovery_workspace_id(marked_workspace_id: &str) -> Result<String> {
     Ok(crate::database::create_or_get_workspace("Recovered")?.id)
 }
 
+/// The workspace a running container actually holds. A container created
+/// before per-session workspaces has only the shared `/workspace`, so an
+/// adoption that cannot see `/workspace/<session id>` keeps the legacy path
+/// rather than pointing the recovered harness at a directory that is not there.
+fn adopted_container_workspace(
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Option<PathBuf> {
+    if !matches!(
+        backend,
+        targets::TargetLocator::LocalPodman { .. }
+            | targets::TargetLocator::LocalDocker { .. }
+            | targets::TargetLocator::AppleContainer { .. }
+            | targets::TargetLocator::SshPodman { .. }
+            | targets::TargetLocator::SshDocker { .. }
+    ) {
+        return None;
+    }
+    let workspace = targets::new_container_workspace(session_id).ok()?;
+    let command = targets::command_on_locator(
+        backend,
+        session_id,
+        vec![
+            "test".to_owned(),
+            "-d".to_owned(),
+            workspace.to_string_lossy().into_owned(),
+        ],
+        "probe the adopted session workspace",
+    )
+    .ok()?;
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => Some(workspace),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(
+                session_id,
+                %error,
+                "could not probe the adopted session workspace; assuming the shared one"
+            );
+            None
+        }
+    }
+}
+
 /// The session record adoption commits before it tries the relay handshake.
 fn adopted_session_record(
     session_id: &str,
@@ -261,7 +367,10 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        build_cache: None,
         mjolnir_subagents: None,
+        // The adopting caller probes the running container for this.
+        container_workspace: None,
         create_managed_worktree: None,
         workspace_id,
         archived: false,
@@ -481,6 +590,7 @@ fn scan_target_workers(
                             worker_id: None,
                         },
                         ownership: None,
+                        instance_id: None,
                     })
                 })
                 .collect()
@@ -488,6 +598,14 @@ fn scan_target_workers(
     };
     for candidate in &mut candidates {
         candidate.ownership = read_recovery_ownership(template, candidate, executor);
+        // The label is authoritative; the marker only fills in when the
+        // resource carries no stamp (bare SSH workers have no labels at all).
+        if candidate.instance_id.is_none() {
+            candidate.instance_id = candidate
+                .ownership
+                .as_ref()
+                .and_then(|marker| marker.instance_id.clone());
+        }
     }
     Ok(candidates)
 }
@@ -515,7 +633,7 @@ fn candidates_from_container_json(
     let sessions = managed_sessions_from_container_json(stdout)?;
     Ok(sessions
         .into_iter()
-        .filter_map(|session_id| {
+        .filter_map(|(session_id, instance_id)| {
             let generated = match targets::resource_name(&session_id) {
                 Ok(generated) => generated,
                 Err(error) => {
@@ -525,21 +643,26 @@ fn candidates_from_container_json(
             };
             let locator = match template {
                 TargetTemplate::LocalPodman { .. } => TargetLocator::LocalPodman {
+                    borrowed_from: None,
                     container_id: generated,
                     workspace_storage: Default::default(),
                 },
                 TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
+                    borrowed_from: None,
                     container_id: generated,
                 },
                 TargetTemplate::AppleContainer { .. } => TargetLocator::AppleContainer {
+                    borrowed_from: None,
                     container_id: generated,
                 },
                 TargetTemplate::SshPodman { ssh, .. } => TargetLocator::SshPodman {
+                    borrowed_from: None,
                     host: ssh.host.clone(),
                     container_id: generated,
                     workspace_storage: Default::default(),
                 },
                 TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
+                    borrowed_from: None,
                     host: ssh.host.clone(),
                     container_id: generated,
                 },
@@ -550,12 +673,17 @@ fn candidates_from_container_json(
                 target_template_id: target_id.to_owned(),
                 locator,
                 ownership: None,
+                instance_id,
             })
         })
         .collect())
 }
 
-pub(super) fn managed_sessions_from_container_json(stdout: &[u8]) -> Result<Vec<String>> {
+/// Managed session IDs in a container listing, each with the instance label
+/// that created it when the container carries one.
+pub(super) fn managed_sessions_from_container_json(
+    stdout: &[u8],
+) -> Result<Vec<(String, Option<String>)>> {
     let values = serde_json::Deserializer::from_slice(stdout)
         .into_iter::<serde_json::Value>()
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -569,7 +697,10 @@ pub(super) fn managed_sessions_from_container_json(stdout: &[u8]) -> Result<Vec<
     Ok(sessions)
 }
 
-pub(super) fn collect_managed_sessions(value: &serde_json::Value, sessions: &mut Vec<String>) {
+pub(super) fn collect_managed_sessions(
+    value: &serde_json::Value,
+    sessions: &mut Vec<(String, Option<String>)>,
+) {
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
@@ -582,7 +713,7 @@ pub(super) fn collect_managed_sessions(value: &serde_json::Value, sessions: &mut
                     let managed = label_value(labels, targets::MANAGED_LABEL)
                         .is_some_and(|value| value == "true");
                     if managed && let Some(session) = label_value(labels, targets::SESSION_LABEL) {
-                        sessions.push(session);
+                        sessions.push((session, label_value(labels, targets::INSTANCE_LABEL)));
                     }
                 }
             }
@@ -664,6 +795,7 @@ fn candidates_from_aws_json(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+        let created_by = tag(targets::INSTANCE_TAG).map(str::to_owned);
         result.push(RecoveryCandidate {
             session_id,
             target_template_id: target_id.to_owned(),
@@ -672,6 +804,7 @@ fn candidates_from_aws_json(
                 address,
             },
             ownership: None,
+            instance_id: created_by,
         });
     }
     Ok(result)
@@ -804,22 +937,27 @@ fn recovery_backend_locator(
         }
         (TargetTemplate::LocalPodman { .. }, TargetLocator::LocalPodman { container_id, .. }) => {
             targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
             }
         }
-        (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id }) => {
+        (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id, .. }) => {
             targets::TargetLocator::LocalDocker {
+                borrowed_from: None,
                 container_id: container_id.clone(),
             }
         }
-        (TargetTemplate::AppleContainer { .. }, TargetLocator::AppleContainer { container_id }) => {
-            targets::TargetLocator::AppleContainer {
-                container_id: container_id.clone(),
-            }
-        }
+        (
+            TargetTemplate::AppleContainer { .. },
+            TargetLocator::AppleContainer { container_id, .. },
+        ) => targets::TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
         (TargetTemplate::SshPodman { ssh, .. }, TargetLocator::SshPodman { container_id, .. }) => {
             targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),
                 workspace_storage: Default::default(),
@@ -827,12 +965,15 @@ fn recovery_backend_locator(
         }
         (
             TargetTemplate::SshDocker { ssh, .. },
-            TargetLocator::SshDocker { host, container_id },
+            TargetLocator::SshDocker {
+                host, container_id, ..
+            },
         ) => {
             if host != &ssh.host {
                 bail!("recovery SSH Docker host does not match target template")
             }
             targets::TargetLocator::SshDocker {
+                borrowed_from: None,
                 ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),
             }
@@ -937,7 +1078,14 @@ mod tests {
         let mut controller = Controller { config, state };
 
         let failure = controller
-            .adopt_orphan_worker(session_id, "local-bare", None, None, &ProcessExecutor)
+            .adopt_orphan_worker(
+                session_id,
+                "local-bare",
+                None,
+                None,
+                false,
+                &ProcessExecutor,
+            )
             .await
             .expect_err("a worker root without a worker cannot complete the handshake");
         assert!(
@@ -964,7 +1112,14 @@ mod tests {
         );
 
         let retry = controller
-            .adopt_orphan_worker(session_id, "local-bare", None, None, &ProcessExecutor)
+            .adopt_orphan_worker(
+                session_id,
+                "local-bare",
+                None,
+                None,
+                false,
+                &ProcessExecutor,
+            )
             .await
             .expect_err("the worker is still unreachable");
         let retry = format!("{retry:#}");
@@ -1044,7 +1199,14 @@ mod tests {
             .insert("local-bare".into(), TargetTemplate::LocalBare);
         let mut controller = Controller { config, state };
         let failure = controller
-            .adopt_orphan_worker(session_id, "local-bare", None, None, &ProcessExecutor)
+            .adopt_orphan_worker(
+                session_id,
+                "local-bare",
+                None,
+                None,
+                false,
+                &ProcessExecutor,
+            )
             .await
             .expect_err("a worker root without a worker cannot complete the handshake");
         assert!(
@@ -1088,6 +1250,7 @@ mod tests {
     fn recovery_container_scan_requires_both_managed_and_session_labels() {
         let template = TargetTemplate::LocalPodman {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1098,7 +1261,7 @@ mod tests {
             },
         };
         let json = serde_json::json!([
-            {"Labels": {"dev.mj.managed": "true", "dev.mj.session": "0123456789abcdef0123456789abcdef"}},
+            {"Labels": {"dev.mj.managed": "true", "dev.mj.session": "0123456789abcdef0123456789abcdef", "dev.mj.instance": "qa0916"}},
             {"Labels": {"dev.mj.managed": "false", "dev.mj.session": "not-owned"}},
             {"configuration": {"labels": "dev.mj.managed=true,dev.mj.session=abcdef0123456789abcdef0123456789"}}
         ]);
@@ -1110,12 +1273,74 @@ mod tests {
         .unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].session_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(candidates[0].instance_id.as_deref(), Some("qa0916"));
+        assert_eq!(
+            candidates[1].instance_id, None,
+            "a container without an instance label is of unknown origin"
+        );
+    }
+
+    fn candidate(session_id: &str, instance_id: Option<&str>) -> RecoveryCandidate {
+        RecoveryCandidate {
+            session_id: session_id.to_owned(),
+            target_template_id: "local".to_owned(),
+            locator: TargetLocator::LocalDocker {
+                container_id: format!("mj-{session_id}"),
+                borrowed_from: None,
+            },
+            ownership: None,
+            instance_id: instance_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn default_scan_scope_hides_other_and_unknown_instances() {
+        let mut scan = RecoveryScan {
+            candidates: vec![
+                candidate("mine", Some("qa")),
+                candidate("theirs", Some("prod")),
+                candidate("legacy", None),
+            ],
+            instance_id: "qa".to_owned(),
+            ..RecoveryScan::default()
+        };
+        restrict_to_instance(&mut scan);
+        assert_eq!(
+            scan.candidates
+                .iter()
+                .map(|candidate| candidate.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["mine"]
+        );
+        assert_eq!(scan.hidden_other_instances, 2);
+    }
+
+    #[test]
+    fn acting_on_another_or_unknown_instance_requires_the_explicit_flag() {
+        require_instance_access(&candidate("mine", Some("qa")), "qa", false).unwrap();
+
+        let other = require_instance_access(&candidate("theirs", Some("prod")), "qa", false)
+            .expect_err("another instance's worker is refused by default");
+        assert!(
+            other.to_string().contains("belongs to instance \"prod\""),
+            "{other}"
+        );
+        require_instance_access(&candidate("theirs", Some("prod")), "qa", true).unwrap();
+
+        let unknown = require_instance_access(&candidate("legacy", None), "qa", false)
+            .expect_err("a worker without a stamp is refused by default");
+        assert!(
+            unknown.to_string().contains("no instance stamp"),
+            "{unknown}"
+        );
+        require_instance_access(&candidate("legacy", None), "qa", true).unwrap();
     }
 
     #[test]
     fn recovery_docker_scan_accepts_json_lines_and_builds_a_docker_locator() {
         let template = TargetTemplate::LocalDocker {
             container: ConfigContainer {
+                build_cache: None,
                 image: "ignored".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -1127,7 +1352,7 @@ mod tests {
         };
         let session = "0123456789abcdef0123456789abcdef";
         let output = format!(
-            "{{\"Labels\":\"dev.mj.managed=true,dev.mj.session={session}\"}}\n{{\"Labels\":\"dev.mj.managed=false,dev.mj.session=ignored\"}}\n"
+            "{{\"Labels\":\"dev.mj.managed=true,dev.mj.session={session},dev.mj.instance=abc123\"}}\n{{\"Labels\":\"dev.mj.managed=false,dev.mj.session=ignored\"}}\n"
         );
 
         let candidates =
@@ -1135,9 +1360,10 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].session_id, session);
+        assert_eq!(candidates[0].instance_id.as_deref(), Some("abc123"));
         assert!(matches!(
             &candidates[0].locator,
-            TargetLocator::LocalDocker { container_id }
+            TargetLocator::LocalDocker { container_id, .. }
                 if container_id == &targets::resource_name(session).unwrap()
         ));
     }
@@ -1149,7 +1375,8 @@ mod tests {
             "PrivateIpAddress": "10.0.0.7",
             "Tags": [
                 {"Key": "dev.mj.managed", "Value": "true"},
-                {"Key": "dev.mj.session", "Value": "0123456789abcdef0123456789abcdef"}
+                {"Key": "dev.mj.session", "Value": "0123456789abcdef0123456789abcdef"},
+                {"Key": "dev.mj.instance", "Value": "qa0916"}
             ]
         }]}]});
         let candidates = candidates_from_aws_json(
@@ -1158,6 +1385,7 @@ mod tests {
             serde_json::to_string(&json).unwrap().as_bytes(),
         )
         .unwrap();
+        assert_eq!(candidates[0].instance_id.as_deref(), Some("qa0916"));
         assert!(matches!(
             &candidates[0].locator,
             TargetLocator::AwsEc2 { instance_id, address }

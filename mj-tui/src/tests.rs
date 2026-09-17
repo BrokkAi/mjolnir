@@ -13,20 +13,12 @@ use crate::test_support::*;
 use crate::render::render;
 
 #[test]
-fn rendering_and_inert_pointer_motion_leave_the_frame_clean() {
+fn inert_pointer_motion_is_not_consumed() {
     let mut dashboard = dashboard_with_session(running_session());
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
-    dashboard.take_render_changed();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    assert!(
-        !dashboard.take_render_changed(),
-        "geometry registration is not a visible mutation"
-    );
 
     for column in 0..120 {
         let result = dashboard.handle_event_result(Event::Mouse(MouseEvent {
@@ -35,55 +27,49 @@ fn rendering_and_inert_pointer_motion_leave_the_frame_clean() {
             row: 1,
             modifiers: KeyModifiers::NONE,
         }));
-        assert_ne!(result.outcome, Outcome::Changed);
+        assert!(!result.consumed, "pointer motion belongs to the selection");
     }
-    assert!(!dashboard.take_render_changed());
 }
 
 #[test]
-fn event_result_distinguishes_selection_limit_from_movement() {
+fn a_clamped_selection_move_is_still_consumed() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.select_active_session("session-1");
-    dashboard.take_render_changed();
 
     let result = dashboard.handle_event_result(Event::Key(key(KeyCode::Down)));
 
-    assert_eq!(result.outcome, Outcome::Unchanged);
+    assert!(result.consumed);
     assert!(result.action.is_none());
-    assert!(!dashboard.take_render_changed());
 }
 
 #[test]
-fn activating_target_rename_repaints_the_new_modal() {
+fn activating_target_rename_opens_the_config_id_editor() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.begin_target_actions();
     dashboard.handle_event_result(Event::Key(key(KeyCode::Tab)));
-    dashboard.take_render_changed();
 
     let result = dashboard.handle_event_result(Event::Key(key(KeyCode::Enter)));
+
     assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
-    assert_eq!(result.outcome, Outcome::Changed);
-    assert!(dashboard.take_render_changed());
+    assert!(result.consumed);
 }
 
 #[test]
-fn event_result_repaints_for_a_cursor_only_text_edit() {
+fn a_cursor_only_text_edit_is_consumed_without_an_action() {
     let mut session = running_session();
     session.session_title_override = Some("rename me".into());
     let mut dashboard = dashboard_with_session(session);
     dashboard.select_active_session("session-1");
     dashboard.dispatch_command(CommandId::RenameSession);
     assert!(matches!(dashboard.mode, Mode::Rename(_)));
-    dashboard.take_render_changed();
 
     let result = dashboard.handle_event_result(Event::Key(crossterm::event::KeyEvent::new(
         KeyCode::Left,
         KeyModifiers::NONE,
     )));
 
-    assert_eq!(result.outcome, Outcome::Changed);
+    assert!(result.consumed);
     assert!(result.action.is_none());
-    assert!(dashboard.take_render_changed());
 }
 
 /// Opens the rename editor the way the surface offers it now: `F2`, type

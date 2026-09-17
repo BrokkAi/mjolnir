@@ -84,6 +84,7 @@ fn populated_dashboard() -> DashboardState {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -112,6 +113,8 @@ fn populated_dashboard() -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                build_cache: None,
+                container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -144,6 +147,68 @@ fn populated_dashboard() -> DashboardState {
         );
     }
     DashboardState::new(config, state, std::collections::BTreeMap::new())
+}
+
+/// The loop draws once per wakeup. The once-a-second clock is one of the
+/// two wakeups allowed to decline that frame, and it declines when none of
+/// the values it polls has moved.
+#[test]
+fn an_unchanged_clock_tick_does_not_redraw() {
+    let mut dashboard = populated_dashboard();
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .expect("draw the combined surface");
+    dashboard.acknowledge_render();
+    let drawn = terminal.backend().buffer().clone();
+
+    // This is the whole condition the clock arm evaluates for the
+    // dashboard. Nothing on this surface advances once a second.
+    assert!(!dashboard.clock_changed());
+
+    // And the frame it declines would have been the same one.
+    terminal
+        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .expect("draw the combined surface");
+    assert_eq!(terminal.backend().buffer(), &drawn);
+}
+
+/// Nothing asks for a frame any more. A background feed applies its update
+/// through `drain_feeds`, and the frame the loop draws for that wakeup
+/// carries it to the screen with no mutation having marked anything.
+#[test]
+fn a_feed_update_redraws_without_a_dirty_mark() {
+    let mut dashboard = populated_dashboard();
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    terminal
+        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .expect("draw the combined surface");
+    dashboard.acknowledge_render();
+    let before = terminal.backend().buffer().clone();
+
+    dashboard.apply_quota(mj_client::quota::ProfileQuota {
+        profile_id: "codex-1".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        windows: vec![mj_client::quota::QuotaWindow {
+            label: "weekly".into(),
+            remaining_percent: Some(42),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: None,
+        }],
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
+    });
+    terminal
+        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .expect("draw the combined surface");
+    assert_ne!(
+        terminal.backend().buffer(),
+        &before,
+        "the quota reached the screen without anything marking it dirty"
+    );
 }
 
 /// The transcript on screen must belong to the row the selection is on.
@@ -481,7 +546,6 @@ async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
     terminal
         .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
         .unwrap();
-    dashboard.take_render_changed();
     let prompt = dashboard
         .frame_surfaces()
         .surface(SurfaceId::PromptInput)
@@ -499,10 +563,6 @@ async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
     assert!(
         dashboard.prompt_has_focus(),
         "focus must change before mouse-up"
-    );
-    assert!(
-        dashboard.take_render_changed(),
-        "focus change requests a frame"
     );
     assert!(
         selection.range().is_none(),
@@ -989,6 +1049,8 @@ fn plain_x_no_longer_cancels_anything() {
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -1209,6 +1271,7 @@ fn only_a_fully_empty_config_triggers_automatic_setup() {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,

@@ -991,7 +991,25 @@ impl Controller {
             self.config = config;
         }
 
+        // A session that leaves a non-container target for a container one is
+        // built a container it never had, so it starts using the per-session
+        // workspace path here if it predates them. A session that already ran
+        // in a container keeps its path: the harness's recorded working
+        // directory has to survive the resume.
+        let moving_into_first_container = self
+            .config
+            .targets
+            .get(target_id)
+            .is_some_and(mj_core::config::is_container_target)
+            && !self
+                .config
+                .targets
+                .get(&previous.target_template_id)
+                .is_some_and(mj_core::config::is_container_target);
         let record = self.state.sessions.get_mut(session_id).unwrap();
+        if record.container_workspace.is_none() && moving_into_first_container {
+            record.container_workspace = Some(targets::new_container_workspace(session_id)?);
+        }
         record.harness_kind = profile.kind;
         record.last_profile = profile_id.to_string();
         record.target_template_id = target_id.to_string();
@@ -1013,6 +1031,7 @@ impl Controller {
             None => {}
         }
         let resumed_project_directory = record.project_directory.clone();
+        let resumed_container_workspace = record.container_workspace.clone();
         if let Some(host) = history_host {
             self.state.remember_mount_sources(host, &history_mounts);
             crate::database::remember_mount_sources(host, &history_mounts)?;
@@ -1185,16 +1204,7 @@ impl Controller {
                     .to_string_lossy()
                     .into_owned()
             } else {
-                match &backend {
-                    targets::TargetLocator::LocalPodman { .. }
-                    | targets::TargetLocator::LocalDocker { .. }
-                    | targets::TargetLocator::AppleContainer { .. }
-                    | targets::TargetLocator::SshPodman { .. }
-                    | targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
-                    targets::TargetLocator::AwsEc2 { workspace, .. }
-                    | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
-                    targets::TargetLocator::LocalBare { worker_root } => worker_root.clone(),
-                }
+                super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
             };
             let target_path = |path: &str| match &backend {
                 targets::TargetLocator::AwsEc2 { .. }

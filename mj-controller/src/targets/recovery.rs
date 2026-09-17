@@ -8,6 +8,10 @@ pub fn provision_on_locator_plan(
 ) -> Result<CommandPlan> {
     bundle.validate()?;
     verify_locator(locator, session_id)?;
+    ensure!(
+        !is_borrowed(locator),
+        "refusing to operate on a target borrowed from another session; act on the owning session instead"
+    );
     let TargetLocator::AwsEc2 { ssh, workspace, .. } = locator else {
         bail!("post-launch provisioning is only required for AWS");
     };
@@ -57,9 +61,19 @@ pub fn target_recovery_plan(
     session_id: &str,
 ) -> Result<Option<TargetRecoveryPlan>> {
     verify_locator(locator, session_id)?;
-    if let TargetLocator::SshDocker { ssh, container_id } = locator {
+    // Nothing to recover at the target level for a borrowed worker; the
+    // owning session recovers the target. Reporting no plan keeps the child's
+    // liveness probe and worker restart working.
+    if is_borrowed(locator) {
+        return Ok(None);
+    }
+    if let TargetLocator::SshDocker {
+        ssh, container_id, ..
+    } = locator
+    {
         let local = target_recovery_plan(
             &TargetLocator::LocalDocker {
+                borrowed_from: None,
                 container_id: container_id.clone(),
             },
             session_id,
@@ -82,7 +96,7 @@ pub fn target_recovery_plan(
                 .purpose("start stopped Mjolnir session container"),
         ),
         TargetLocator::SshDocker { .. } => unreachable!("handled above"),
-        TargetLocator::LocalDocker { container_id } => (
+        TargetLocator::LocalDocker { container_id, .. } => (
             CommandSpec::new(
                 "sh",
                 [

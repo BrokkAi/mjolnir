@@ -104,7 +104,6 @@ impl DashboardContext {
         {
             self.defer_chat_open();
             self.dashboard.set_current_session(None);
-            self.dirty = true;
             return;
         }
         if self
@@ -115,7 +114,6 @@ impl DashboardContext {
             self.cancel_chat_open();
             self.dashboard.set_current_session(Some(session_id));
             self.acknowledge_visible_chat();
-            self.dirty = true;
             return;
         }
         if self.opening_chat_session.as_deref() == Some(session_id) {
@@ -208,15 +206,15 @@ impl DashboardContext {
                     }
                 }
                 .await;
-                if let (Err(error), Some(session_id)) = (&result, refusal_session)
-                    && refusals
-                        .send(DashboardIoUpdate::ReviewRefused {
+                if let (Err(error), Some(session_id)) = (&result, refusal_session) {
+                    report(
+                        "persisting chat state",
+                        &refusals,
+                        DashboardIoUpdate::ReviewRefused {
                             session_id,
                             message: format!("{error:#}"),
-                        })
-                        .is_err()
-                {
-                    tracing::debug!("a review refusal was dropped because the dashboard closed");
+                        },
+                    );
                 }
                 if let Err(error) = result {
                     tracing::warn!(%error, "could not persist chat state through the daemon");
@@ -262,16 +260,17 @@ impl DashboardContext {
                 .map_err(|error| format!("chat preparation task failed: {error}"))
             },
             move |generation, result| {
-                if let Err(error) = updates.send(DashboardIoUpdate::ChatOpened {
-                    generation,
-                    session_id: reported_session_id.clone(),
-                    result: Box::new(result),
-                }) {
-                    tracing::debug!(%error, "chat-open result dropped after dashboard shutdown");
-                }
+                report(
+                    "opening a session",
+                    &updates,
+                    DashboardIoUpdate::ChatOpened {
+                        generation,
+                        session_id: reported_session_id.clone(),
+                        result: Box::new(result),
+                    },
+                );
             },
         );
-        self.dirty = true;
     }
 
     /// Tells every operation still in flight to stop. Cancellation is

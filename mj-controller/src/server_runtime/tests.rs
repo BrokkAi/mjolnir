@@ -136,7 +136,7 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
             additional_mounts: Some(vec![crate::targets::AdditionalMount {
                 source: "/destination/source".into(),
                 destination: "/destination/target".into(),
-                read_only: true,
+                access: crate::targets::MountAccess::Ro,
             }]),
             resource_allocation: None,
         },
@@ -147,7 +147,7 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_additional_mounts: vec![crate::targets::AdditionalMount {
             source: "/source/source".into(),
             destination: "/source/target".into(),
-            read_only: false,
+            access: crate::targets::MountAccess::Cow,
         }],
         source_resource_allocation: Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 2,
@@ -221,6 +221,7 @@ fn new_preflight_requires_network_sources_for_isolated_targets() {
         "podman".into(),
         TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                build_cache: None,
                 image: "test-image".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -529,6 +530,7 @@ fn tailscale_listener_preserves_the_configured_port() {
 fn controller_with_profiles(ids: &[&str]) -> Controller {
     Controller {
         config: Config {
+            build_cache: Default::default(),
             subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -775,6 +777,8 @@ fn new_action() -> ControllerAction {
 
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

@@ -38,6 +38,7 @@ fn minted_desktop_cookie_validates_and_names_a_viewer() {
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        build_cache: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -77,6 +78,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 "podman".into(),
                 TargetTemplate::LocalPodman {
                     container: ContainerTemplate {
+                        build_cache: None,
                         image: "secret.registry/image".into(),
                         pull_policy: Default::default(),
                         platform: None,
@@ -96,6 +98,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: BTreeMap::from([(
             "session-1".into(),
             SessionRecord {
+                build_cache: None,
+                container_workspace: None,
                 mjolnir_subagents: None,
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

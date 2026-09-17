@@ -114,7 +114,7 @@ pub(in crate::controller) fn worker_binary_for(
     }
 }
 
-pub(super) fn target_architecture(
+pub(in crate::controller) fn target_architecture(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,
 ) -> Result<&'static str> {
@@ -150,13 +150,15 @@ pub(super) fn download_worker(url: &str, expected_sha256: &str, triple: &str) ->
             expected_sha256
         );
     }
-    let bytes = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?
-        .get(url)
-        .send()?
-        .error_for_status()?
-        .bytes()?;
+    let bytes = on_dedicated_thread(|| {
+        Ok(reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?
+            .get(url)
+            .send()?
+            .error_for_status()?
+            .bytes()?)
+    })?;
     let actual = lower_hex(Sha256::digest(&bytes));
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         bail!("downloaded worker checksum mismatch: expected {expected_sha256}, got {actual}");

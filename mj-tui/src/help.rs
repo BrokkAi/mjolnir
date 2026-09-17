@@ -22,7 +22,6 @@ use ratatui::widgets::Paragraph;
 use mj_chat::selection::FrameSurfaces;
 
 use crate::actions::{Availability, COMMANDS, SCOPE_ORDER};
-use crate::mark_render_changed_cells;
 use crate::widgets::{centered_modal, dismissible_modal_title};
 use crate::{DashboardAction, DashboardState, Mode};
 
@@ -97,7 +96,6 @@ impl DashboardState {
             form: RefCell::new(Form::default()),
             area: Cell::new(Rect::default()),
         });
-        self.mark_render_changed();
     }
 
     /// Puts back the mode help opened over. Deliberately not `cancel_modal`,
@@ -105,7 +103,6 @@ impl DashboardState {
     pub(crate) fn close_help(&mut self) {
         if let Mode::Help(overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) {
             self.mode = *overlay.return_to;
-            self.mark_render_changed();
         }
     }
 
@@ -115,12 +112,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         let result = overlay.form.get_mut().handle(&Event::Mouse(mouse));
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         if matches!(result.action, Some(Interaction::Cancel)) {
             self.close_help();
         } else if overlay
@@ -130,24 +122,10 @@ impl DashboardState {
         {
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
-                    let next = overlay.scroll.saturating_add(3).min(last);
-                    if next != overlay.scroll {
-                        overlay.scroll = next;
-                        mark_render_changed_cells(
-                            &self.render_changed,
-                            &self.render_change_revision,
-                        );
-                    }
+                    overlay.scroll = overlay.scroll.saturating_add(3).min(last);
                 }
                 MouseEventKind::ScrollUp => {
-                    let next = overlay.scroll.saturating_sub(3);
-                    if next != overlay.scroll {
-                        overlay.scroll = next;
-                        mark_render_changed_cells(
-                            &self.render_changed,
-                            &self.render_change_revision,
-                        );
-                    }
+                    overlay.scroll = overlay.scroll.saturating_sub(3);
                 }
                 _ => {}
             }
@@ -163,46 +141,25 @@ impl DashboardState {
         match key.code {
             KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => {
                 self.mode = *overlay.return_to;
-                self.mark_render_changed();
                 return DashboardAction::None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                let next = overlay.scroll.saturating_sub(1);
-                if next != overlay.scroll {
-                    overlay.scroll = next;
-                    mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-                }
+                overlay.scroll = overlay.scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let next = overlay.scroll.saturating_add(1).min(last);
-                if next != overlay.scroll {
-                    overlay.scroll = next;
-                    mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-                }
+                overlay.scroll = overlay.scroll.saturating_add(1).min(last);
             }
             KeyCode::PageUp => {
-                let next = overlay.scroll.saturating_sub(PAGE);
-                if next != overlay.scroll {
-                    overlay.scroll = next;
-                    mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-                }
+                overlay.scroll = overlay.scroll.saturating_sub(PAGE);
             }
             KeyCode::PageDown => {
-                let next = overlay.scroll.saturating_add(PAGE).min(last);
-                if next != overlay.scroll {
-                    overlay.scroll = next;
-                    mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-                }
+                overlay.scroll = overlay.scroll.saturating_add(PAGE).min(last);
             }
             KeyCode::Home => {
-                if overlay.scroll != 0 {
-                    overlay.scroll = 0;
-                    mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-                }
+                overlay.scroll = 0;
             }
             KeyCode::End if overlay.scroll != last => {
                 overlay.scroll = last;
-                mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
             }
             _ => {}
         }

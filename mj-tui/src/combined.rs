@@ -1362,7 +1362,6 @@ mod tests {
                 PaneSize::Maximized,
             ] {
                 dashboard.set_pane_size(SupportPane::Sessions, size);
-                assert!(dashboard.take_render_changed());
                 terminal
                     .draw(|frame| render_combined(frame, &mut dashboard, None, false))
                     .unwrap();

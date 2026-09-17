@@ -72,6 +72,7 @@ fn podman_controller(state: SessionState) -> Controller {
         "podman".into(),
         mj_core::config::TargetTemplate::LocalPodman {
             container: mj_core::config::ContainerTemplate {
+                build_cache: None,
                 image: "ubuntu:24.04".into(),
                 pull_policy: Default::default(),
                 platform: None,
@@ -99,6 +100,8 @@ fn podman_controller(state: SessionState) -> Controller {
     app_state.sessions.insert(
         session_id.into(),
         mj_core::state::SessionRecord {
+            build_cache: None,
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
@@ -117,6 +120,7 @@ fn podman_controller(state: SessionState) -> Controller {
             additional_mounts: Vec::new(),
             state,
             target: Some(mj_core::state::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "a".repeat(64),
                 workspace_storage: Default::default(),
             }),
@@ -740,10 +744,12 @@ fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
 
     let remotes = [
         TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "podman".into(),
             workspace_storage: Default::default(),
         },
         TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: "apple".into(),
         },
         TargetLocator::AwsEc2 {
@@ -756,11 +762,13 @@ fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
             worker_id: None,
         },
         TargetLocator::SshPodman {
+            borrowed_from: None,
             host: "ssh.example".into(),
             container_id: "remote-podman".into(),
             workspace_storage: Default::default(),
         },
         TargetLocator::SshDocker {
+            borrowed_from: None,
             host: "ssh.example".into(),
             container_id: "remote-docker".into(),
         },

@@ -33,7 +33,7 @@ use mj_tui::{
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
@@ -562,7 +562,6 @@ impl DashboardContext {
                 {
                     self.dashboard.set_current_session(None);
                     self.defer_chat_open();
-                    self.dirty = true;
                     return;
                 }
                 match *result {
@@ -607,7 +606,6 @@ impl DashboardContext {
                         self.dashboard.set_notice(format!("Could not open session: {error}. Press Enter in Sessions to retry, or select another session. Alt-Q quits."));
                     }
                 }
-                self.dirty = true;
             }
             DashboardIoUpdate::GoSelectionSaved(result) => {
                 self.go_selection_in_flight = false;
@@ -1551,6 +1549,74 @@ mod tests {
         assert!(tracker.blockers().is_empty());
     }
 
+    /// A job that dies must still answer, or the screen waits forever on work
+    /// that is never coming back.
+    #[tokio::test]
+    async fn a_panicking_blocking_job_still_reports_its_failure() {
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_io(
+            "write clipboard",
+            updates,
+            || -> Result<()> { panic!("boom") },
+            DashboardIoUpdate::ClipboardWritten,
+        )
+        .await
+        .unwrap();
+        let Some(DashboardIoUpdate::ClipboardWritten(Err(error))) = results.recv().await else {
+            panic!("a panicking job reported nothing");
+        };
+        assert!(error.contains("write clipboard"), "{error}");
+        assert!(error.contains("boom"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_critical_job_reports_its_failure_and_releases_quit() {
+        let (tracker, _) = CriticalOperationTracker::new();
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_critical_io(
+            tracker.clone(),
+            "writing the clipboard",
+            updates,
+            || -> Result<()> { panic!("boom") },
+            DashboardIoUpdate::ClipboardWritten,
+        )
+        .await
+        .unwrap();
+        let Some(DashboardIoUpdate::ClipboardWritten(Err(error))) = results.recv().await else {
+            panic!("a panicking critical job reported nothing");
+        };
+        assert!(error.contains("writing the clipboard"), "{error}");
+        assert!(error.contains("boom"), "{error}");
+        assert!(
+            tracker.blockers().is_empty(),
+            "a panicking job must not block quit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_cancellable_job_reports_its_failure_and_releases_quit() {
+        let (tracker, _) = CriticalOperationTracker::new();
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_cancellable_io(
+            tracker.clone(),
+            "writing the clipboard",
+            updates,
+            |_cancelled| -> Result<()> { panic!("boom") },
+            DashboardIoUpdate::ClipboardWritten,
+        )
+        .await
+        .unwrap();
+        let Some(DashboardIoUpdate::ClipboardWritten(Err(error))) = results.recv().await else {
+            panic!("a panicking cancellable job reported nothing");
+        };
+        assert!(error.contains("writing the clipboard"), "{error}");
+        assert!(error.contains("boom"), "{error}");
+        assert!(
+            tracker.blockers().is_empty(),
+            "a panicking job must not block quit"
+        );
+    }
+
     #[test]
     fn quick_github_bundle_uses_collision_suffix_and_reuses_matching_source() {
         let mut config = Config::default();
@@ -1624,6 +1690,7 @@ mod tests {
             "podman".into(),
             mj_core::config::TargetTemplate::LocalPodman {
                 container: mj_core::config::ContainerTemplate {
+                    build_cache: None,
                     image: "example.invalid/hel-test:latest".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -1694,6 +1761,8 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            build_cache: None,
+            container_workspace: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),

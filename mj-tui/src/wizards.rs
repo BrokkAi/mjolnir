@@ -30,13 +30,15 @@ use mj_core::state::{
 
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    Checkbox, ChoiceList, ConsumedEvent, ControlKind, Dialog, FieldEdit, FormViewport, Interaction,
-    Outcome,
+    Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, EditOutcome, FieldEdit,
+    Form, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::selection::FrameSurfaces;
-use mj_core::targets::{AdditionalMount, default_mount_destination, path_completion};
+use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination, path_completion};
 
-use crate::widgets::{centered_modal, dismissible_modal_title, format_resource_bytes};
+use crate::widgets::{
+    Truncate, centered_modal, dismissible_modal_title, format_resource_bytes, truncate_to_cells,
+};
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
@@ -70,7 +72,7 @@ pub(crate) enum WizardControl {
     NewBundleRemove,
     MountSource,
     MountDestination,
-    MountReadOnly,
+    MountAccess,
     ReviewAttachments,
     CreateManagedWorktree,
     MjolnirSubagents,
@@ -191,7 +193,8 @@ pub(crate) struct MountWizard {
     pub(crate) source: PathInput,
     pub(crate) destination: PathInput,
 
-    pub(crate) read_only: bool,
+    pub(crate) access: MountAccess,
+    pub(crate) access_combo: ComboBoxState<WizardControl>,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
     history_index: usize,
@@ -211,7 +214,8 @@ impl MountWizard {
             source: PathInput::new(),
             destination: PathInput::new(),
 
-            read_only: false,
+            access: MountAccess::Ro,
+            access_combo: ComboBoxState::default(),
             mounts: Vec::new(),
             history,
             history_index: 0,
@@ -230,27 +234,29 @@ impl MountWizard {
         wizard
     }
 
-    /// Why the source under edit can only be attached read-only, if it can.
-    pub(crate) fn forced_read_only(&self) -> Option<&str> {
+    /// Why the source under edit cannot use the copy-on-write overlay, if it
+    /// cannot.
+    pub(crate) fn overlay_unavailable(&self) -> Option<&str> {
         self.forced_sources
             .get(self.source.trim())
             .map(String::as_str)
     }
 
-    /// Space and Enter toggle the checkbox, except where the host's filesystem
-    /// has already settled the answer.
-    fn toggle_read_only(&mut self) {
-        if self.forced_read_only().is_some() {
-            return;
-        }
-        self.read_only = !self.read_only;
+    /// The access modes the entry under edit may use.
+    pub(crate) fn access_choices(&self) -> Vec<MountAccess> {
+        access_choices(self.overlay_unavailable().is_some())
+    }
+
+    /// Settle the access mode after the host reported the overlay unusable.
+    pub(crate) fn forbid_overlay(&mut self) {
+        self.access = self.access.without_overlay();
     }
 
     fn add_validated_mount(&mut self) {
         let mount = AdditionalMount {
             source: self.source.to_string().into(),
             destination: self.destination.to_string().into(),
-            read_only: self.read_only,
+            access: self.access,
         };
         if let Some(index) = self.editing_mount.take() {
             self.mounts[index] = mount;
@@ -259,7 +265,7 @@ impl MountWizard {
         }
         self.source.clear();
         self.destination.clear();
-        self.read_only = false;
+        self.access = MountAccess::Ro;
         self.completion_candidates.clear();
         self.error = None;
     }
@@ -309,7 +315,7 @@ impl NewWizard {
                 vec![
                     self.mounts.source.to_string(),
                     self.mounts.destination.to_string(),
-                    self.mounts.read_only.to_string(),
+                    format!("{:?}", self.mounts.access),
                 ],
             );
         }
@@ -325,26 +331,6 @@ impl NewWizard {
                 ],
             );
         }
-    }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return match self.step {
-                WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
-                WizardStep::NewBundle => {
-                    id == WizardControl::NewBundleSource && !self.bundle_creation_in_flight
-                }
-                WizardStep::Mounts => matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                ),
-                _ => false,
-            };
-        }
-        matches!(
-            self.step,
-            WizardStep::ProjectDirectory | WizardStep::NewBundle | WizardStep::Mounts
-        )
     }
 }
 
@@ -365,7 +351,7 @@ impl ResumeWizard {
                 vec![
                     self.mounts.source.to_string(),
                     self.mounts.destination.to_string(),
-                    self.mounts.read_only.to_string(),
+                    format!("{:?}", self.mounts.access),
                 ],
             );
         }
@@ -381,29 +367,6 @@ impl ResumeWizard {
             },
             |preparation| !preparation.queued_commands.is_empty(),
         )
-    }
-
-    fn can_advance_target(&self, dashboard: &DashboardState) -> bool {
-        let target_id = nth_key(&dashboard.config.targets, self.target);
-        dashboard
-            .resume_target_rejection(&self.session_id, &target_id)
-            .is_none()
-            && (self.resource_allocation.is_some()
-                || !matches!(
-                    dashboard.config.targets.get(&target_id),
-                    Some(TargetTemplate::AwsEc2 { .. })
-                ))
-    }
-
-    pub(crate) fn text_input_focused(&self) -> bool {
-        if let Some(id) = self.form.borrow().focused() {
-            return self.step == WizardStep::Mounts
-                && matches!(
-                    id,
-                    WizardControl::MountSource | WizardControl::MountDestination
-                );
-        }
-        self.step == WizardStep::Mounts
     }
 }
 
@@ -469,53 +432,54 @@ fn remove_selected_mount(mounts: &mut MountWizard) {
         .min(mounts.mounts.len().saturating_sub(1));
 }
 
-fn prepare_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Empties the attachment editor for a new entry. The caller moves the
+/// wizard to [`WizardStep::Mounts`].
+fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.source.clear();
     mounts.destination.clear();
-    mounts.read_only = false;
+    mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
 }
 
-fn prepare_selected_mount_editor(step: &mut WizardStep, mounts: &mut MountWizard) {
+/// Loads the selected attachment into the editor. Answers false when there is
+/// nothing to edit, in which case the wizard must stay on its current step.
+fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     if mounts.mounts.is_empty() {
-        return;
+        return false;
     }
     let index = mounts.history_index;
     let mount = mounts.mounts[index].clone();
     mounts.source = mount.source.to_string_lossy().into_owned().into();
     mounts.destination = mount.destination.to_string_lossy().into_owned().into();
-    mounts.read_only = mount.read_only || mounts.forced_read_only().is_some();
+    mounts.access = mount.access;
+    if mounts.overlay_unavailable().is_some() {
+        mounts.forbid_overlay();
+    }
     mounts.error = None;
     mounts.editing_mount = Some(index);
     mounts.completion_candidates.clear();
-    *step = WizardStep::Mounts;
+    true
 }
 
-fn begin_mount_editor(wizard: &mut NewWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn begin_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    prepare_mount_editor(wizard.mounts_mut());
+    wizard.set_step(WizardStep::Mounts);
+    open_mount_editor(wizard);
 }
 
-fn edit_selected_mount(wizard: &mut NewWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn edit_selected_mount<W: WizardDraft>(wizard: &mut W) {
+    if prepare_selected_mount_editor(wizard.mounts_mut()) {
+        wizard.set_step(WizardStep::Mounts);
+    }
+    open_mount_editor(wizard);
 }
 
-fn begin_resume_mount_editor(wizard: &mut ResumeWizard) {
-    prepare_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
-}
-
-fn edit_selected_resume_mount(wizard: &mut ResumeWizard) {
-    prepare_selected_mount_editor(&mut wizard.step, &mut wizard.mounts);
-    wizard.form.get_mut().forget_draft_part("attachment editor");
-    wizard.form.get_mut().focus(WizardControl::MountSource);
+fn open_mount_editor<W: WizardDraft>(wizard: &mut W) {
+    let form = wizard.form_mut();
+    form.forget_draft_part("attachment editor");
+    form.focus(WizardControl::MountSource);
 }
 
 fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
@@ -527,7 +491,7 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
     let mount = AdditionalMount {
         source: mounts.source.to_string().into(),
         destination: mounts.destination.to_string().into(),
-        read_only: mounts.read_only,
+        access: mounts.access,
     };
     if let Err(error) = mj_core::targets::validate_mount_destination(&mount.destination) {
         return Some(error.to_string());
@@ -871,6 +835,9 @@ fn apply_mount_completions(wizard: &mut MountWizard, prefix: &str, candidates: V
 }
 
 mod dashboard;
+mod draft;
+
+pub(crate) use draft::{DraftChange, WizardDraft, target_advance_enabled};
 
 #[cfg(test)]
 mod tests;

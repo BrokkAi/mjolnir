@@ -1,9 +1,13 @@
 use super::*;
 
+/// The repository paths a worker opens. `session_id` and `container_workspace`
+/// identify the session whose workspace is used, which for a sub-agent child is
+/// its parent.
 pub(super) fn workspace_paths(
     locator: &targets::TargetLocator,
     bundle: &ProjectBundle,
     session_id: &str,
+    container_workspace: Option<&Path>,
 ) -> Result<(String, Vec<String>)> {
     let root = match locator {
         targets::TargetLocator::LocalBare { .. } => {
@@ -13,7 +17,9 @@ pub(super) fn workspace_paths(
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => "/workspace".to_string(),
+        | targets::TargetLocator::SshDocker { .. } => {
+            targets::container_workspace_root(container_workspace)
+        }
         targets::TargetLocator::AwsEc2 { workspace, .. }
         | targets::TargetLocator::SshBare { workspace, .. } => workspace.clone(),
     };

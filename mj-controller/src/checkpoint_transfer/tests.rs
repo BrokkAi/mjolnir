@@ -31,10 +31,12 @@ fn locators() -> Vec<TargetLocator> {
             worker_root: format!("/var/lib/hel/workers/{SESSION}"),
         },
         TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: name.clone(),
             workspace_storage: Default::default(),
         },
         TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: name.clone(),
         },
         TargetLocator::AwsEc2 {
@@ -50,6 +52,7 @@ fn locators() -> Vec<TargetLocator> {
             workspace: format!("~/hel/{SESSION}"),
         },
         TargetLocator::SshPodman {
+            borrowed_from: None,
             ssh: ssh(),
             container_id: name,
             workspace_storage: Default::default(),
@@ -265,6 +268,7 @@ impl CommandExecutor for SshDockerTransferExecutor {
 
 fn ssh_docker_locator() -> TargetLocator {
     TargetLocator::SshDocker {
+        borrowed_from: None,
         ssh: ssh(),
         container_id: mj_core::targets::resource_name(SESSION).unwrap(),
     }

@@ -2,9 +2,17 @@ use super::*;
 
 pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
-    if let TargetLocator::SshDocker { ssh, container_id } = locator {
+    ensure!(
+        !is_borrowed(locator),
+        "refusing to operate on a target borrowed from another session; act on the owning session instead"
+    );
+    if let TargetLocator::SshDocker {
+        ssh, container_id, ..
+    } = locator
+    {
         let local = close_plan(
             &TargetLocator::LocalDocker {
+                borrowed_from: None,
                 container_id: container_id.clone(),
             },
             session_id,
@@ -42,7 +50,7 @@ pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPl
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
         TargetLocator::SshDocker { .. } => unreachable!("handled above"),
-        TargetLocator::LocalDocker { container_id } => {
+        TargetLocator::LocalDocker { container_id, .. } => {
             let script = r#"status=0
 helper="$1-mount-init"
 if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.attachment-helper"}}|{{index .Config.Labels "dev.mj.session"}}' "$helper" 2>/dev/null); then
@@ -97,7 +105,7 @@ exit "$status""#;
             CommandSpec::new("sh", ["-c", script, "mj-close", container_id, session_id])
                 .purpose("remove local Docker session container, overlay volumes, and cache state")
         }
-        TargetLocator::AppleContainer { container_id } => {
+        TargetLocator::AppleContainer { container_id, .. } => {
             let script = "status=0; container rm --force \"$1\" || status=$?; rm -rf -- \"$HOME/.cache/mjolnir/git/sessions/$2\"; exit \"$status\"";
             CommandSpec::new("sh", ["-c", script, "mj-close", container_id, session_id])
                 .purpose("remove Apple session container and Git cache snapshot")
@@ -196,6 +204,10 @@ fi
 /// A successful return means the exact owned container is absent or not running.
 pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<CommandPlan>> {
     verify_locator(locator, session_id)?;
+    ensure!(
+        !is_borrowed(locator),
+        "refusing to operate on a target borrowed from another session; act on the owning session instead"
+    );
     let (ssh, container_id) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => (None, container_id),
         TargetLocator::SshPodman {
@@ -245,11 +257,13 @@ pub(super) fn podman_cleanup_plan(
         TargetLocator::LocalPodman {
             container_id,
             workspace_storage,
+            ..
         } => (None, container_id, workspace_storage),
         TargetLocator::SshPodman {
             ssh,
             container_id,
             workspace_storage,
+            ..
         } => (Some(ssh), container_id, workspace_storage),
         _ => unreachable!("Podman cleanup requires a Podman locator"),
     };
@@ -365,13 +379,17 @@ pub fn cleanup_target_is_confirmed_absent(
     executor: &impl CommandExecutor,
 ) -> Result<bool> {
     verify_locator(locator, session_id)?;
+    ensure!(
+        !is_borrowed(locator),
+        "refusing to operate on a target borrowed from another session; act on the owning session instead"
+    );
     let (command, status_is_answer) = match locator {
         TargetLocator::AppleContainer { .. } => (
             CommandSpec::new("container", ["list", "--all", "--quiet"])
                 .purpose("confirm exact Apple session container is absent"),
             false,
         ),
-        TargetLocator::LocalDocker { container_id } | TargetLocator::SshDocker { container_id, .. } => (
+        TargetLocator::LocalDocker { container_id, .. } | TargetLocator::SshDocker { container_id, .. } => (
             CommandSpec::new(
                 "sh",
                 [
@@ -388,6 +406,7 @@ pub fn cleanup_target_is_confirmed_absent(
         TargetLocator::LocalPodman {
             container_id,
             workspace_storage,
+            ..
         } => (
             podman_absence_command(None, container_id, workspace_storage, session_id),
             true,
@@ -396,6 +415,7 @@ pub fn cleanup_target_is_confirmed_absent(
             ssh,
             container_id,
             workspace_storage,
+            ..
         } => (
             podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
             true,
@@ -428,7 +448,7 @@ pub fn cleanup_target_is_confirmed_absent(
         );
     }
     let listed = String::from_utf8(output.stdout).context("decode Apple container list")?;
-    let TargetLocator::AppleContainer { container_id } = locator else {
+    let TargetLocator::AppleContainer { container_id, .. } = locator else {
         unreachable!("engine selected from locator")
     };
     Ok(!listed.lines().any(|id| id.trim() == container_id))

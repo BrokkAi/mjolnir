@@ -642,12 +642,27 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     LocalDocker {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AppleContainer {
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     AwsEc2 {
         instance_id: String,
@@ -665,10 +680,20 @@ pub enum TargetLocator {
         container_id: String,
         #[serde(default)]
         workspace_storage: PodmanWorkspaceLocator,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
     SshDocker {
         host: String,
         container_id: String,
+        /// The session that owns the container when this locator is a
+        /// sub-agent child borrowing its parent's container; `None` when the
+        /// session owns the container itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
     },
 }
 
@@ -816,8 +841,8 @@ impl TargetLocator {
                 }
             }
             Self::LocalPodman { container_id, .. }
-            | Self::LocalDocker { container_id }
-            | Self::AppleContainer { container_id }
+            | Self::LocalDocker { container_id, .. }
+            | Self::AppleContainer { container_id, .. }
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
                 if container_id.trim().is_empty() =>
@@ -884,6 +909,26 @@ impl CheckpointMetadata {
     }
 }
 
+/// The mbx build cache a container session was provisioned with. The
+/// directory is a host path that is mounted read-write at the same absolute
+/// path inside the container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBuildCache {
+    /// The container host this cache was resolved on. A session moved to a
+    /// different host cannot reuse it, so the decision is made again there.
+    pub host: String,
+    pub directory: PathBuf,
+    /// An mbx size string passed as `MBX_GC_MAX_SIZE`, or `None` when the
+    /// host's own mbx configuration file already carries the budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+    /// A `[target] root` the host's mbx configuration relocates outside the
+    /// cache directory, mounted read-write at the same path as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
@@ -924,6 +969,18 @@ pub struct SessionRecord {
     /// template's value. It is applied the next time the container is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_memory: Option<String>,
+    /// In-container workspace root this session's repositories live under.
+    /// `None` is a session whose container predates per-session workspaces and
+    /// therefore keeps the shared legacy `/workspace`; every session created
+    /// since records `/workspace/<session id>`, so two checkouts of one project
+    /// on a host never share an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_workspace: Option<PathBuf>,
+    /// The mbx build cache this session's container runs with, decided once at
+    /// provisioning. `None` means the session runs without a build cache;
+    /// resume, move, and sub-agent children reuse the recorded value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_cache: Option<SessionBuildCache>,
     pub state: SessionState,
     /// Legacy visibility preference, retained for record compatibility.
     /// Current surfaces do not hide sessions based on this flag.
@@ -1573,12 +1630,23 @@ pub struct RecoveryCandidate {
     pub target_template_id: String,
     pub locator: TargetLocator,
     pub ownership: Option<crate::worker_launch::WorkerOwnership>,
+    /// Instance that created the worker, from its label or tag, else from
+    /// the ownership marker. `None` means an older build left no stamp.
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryScan {
     pub candidates: Vec<RecoveryCandidate>,
     pub warnings: Vec<String>,
+    /// Identity of the instance that ran the scan.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Candidates left out because another or an unknown instance created
+    /// them and the scan was not widened to all instances.
+    #[serde(default)]
+    pub hidden_other_instances: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

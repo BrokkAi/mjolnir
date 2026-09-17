@@ -181,14 +181,24 @@ impl TryFrom<StoredTarget<'_>> for targets::TargetLocator {
             TargetLocator::LocalPodman {
                 container_id,
                 workspace_storage,
+                borrowed_from,
             } => Self::LocalPodman {
+                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
                 workspace_storage: workspace_storage.into(),
             },
-            TargetLocator::LocalDocker { container_id } => Self::LocalDocker {
+            TargetLocator::LocalDocker {
+                container_id,
+                borrowed_from,
+            } => Self::LocalDocker {
+                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
             },
-            TargetLocator::AppleContainer { container_id } => Self::AppleContainer {
+            TargetLocator::AppleContainer {
+                container_id,
+                borrowed_from,
+            } => Self::AppleContainer {
+                borrowed_from: borrowed_from.clone(),
                 container_id: container_id.clone(),
             },
             TargetLocator::SshBare {
@@ -208,18 +218,24 @@ impl TryFrom<StoredTarget<'_>> for targets::TargetLocator {
             TargetLocator::SshPodman {
                 container_id,
                 workspace_storage,
+                borrowed_from,
                 ..
             } => {
                 let TargetTemplate::SshPodman { ssh, .. } = template else {
                     return Err(mismatch());
                 };
                 Self::SshPodman {
+                    borrowed_from: borrowed_from.clone(),
                     ssh: ssh.into(),
                     container_id: container_id.clone(),
                     workspace_storage: workspace_storage.into(),
                 }
             }
-            TargetLocator::SshDocker { host, container_id } => {
+            TargetLocator::SshDocker {
+                host,
+                container_id,
+                borrowed_from,
+            } => {
                 let TargetTemplate::SshDocker { ssh, .. } = template else {
                     return Err(mismatch());
                 };
@@ -230,6 +246,7 @@ impl TryFrom<StoredTarget<'_>> for targets::TargetLocator {
                     });
                 }
                 Self::SshDocker {
+                    borrowed_from: borrowed_from.clone(),
                     ssh: ssh.into(),
                     container_id: container_id.clone(),
                 }

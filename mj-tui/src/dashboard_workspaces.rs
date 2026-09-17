@@ -24,7 +24,6 @@ impl DashboardState {
         self.current_session_id = None;
         self.focus = Focus::Sessions;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
     pub fn close_subagent_workspace(&mut self) {
@@ -34,40 +33,11 @@ impl DashboardState {
         self.selected_session_id = Some(parent_id);
         self.current_session_id = None;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
-    /// Records a visible mutation for the controller's dirty gate.
-    pub(crate) fn mark_render_changed(&self) {
-        mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-    }
-
-    /// Takes the accumulated visible-mutation flag. This is deliberately a
-    /// flag rather than a whole-state comparison: background feeds can report
-    /// one repaint even when the dashboard contains large transcript maps.
-    pub fn take_render_changed(&self) -> bool {
-        self.render_changed.replace(false)
-    }
-
-    pub(crate) fn render_change_revision(&self) -> u64 {
-        self.render_change_revision.get()
-    }
-
-    pub(crate) fn record_event_outcome(&self, outcome: Outcome) {
-        self.last_event_outcome.set(outcome);
-        if outcome == Outcome::Changed {
-            self.mark_render_changed();
-        }
-    }
-
-    pub(crate) fn record_visible_event_change(&self) {
-        self.record_event_outcome(Outcome::Changed);
-    }
-
+    /// Records that a handler took responsibility for the current event.
     pub(crate) fn record_event_handled(&self) {
-        if self.last_event_outcome.get() == Outcome::Continue {
-            self.last_event_outcome.set(Outcome::Unchanged);
-        }
+        self.last_event_consumed.set(true);
     }
 
     /// Workspace ids in stable tab order. Runtime snapshots may remove an id;
@@ -86,18 +56,11 @@ impl DashboardState {
     /// Select a tab locally. The caller should save any open chat draft before
     /// invoking this setter; the setter itself performs no external work.
     pub fn set_active_workspace(&mut self, workspace_id: Option<String>) {
-        let manager_marker_changed = if let Mode::WorkspaceManager(manager) = &mut self.mode {
-            let changed = manager.active_workspace_id != workspace_id;
+        if let Mode::WorkspaceManager(manager) = &mut self.mode {
             manager.active_workspace_id = workspace_id.clone();
-            changed
-        } else {
-            false
-        };
+        }
         if self.active_workspace_id == workspace_id {
             self.clamp_selections();
-            if manager_marker_changed {
-                self.mark_render_changed();
-            }
             return;
         }
         let workspace_focused = self.focus == Focus::Workspaces;
@@ -154,7 +117,6 @@ impl DashboardState {
         if workspace_focused {
             self.focus = Focus::Workspaces;
         }
-        self.mark_render_changed();
     }
 
     /// Applies a controller-provided pane-size cache unless this client has
@@ -164,12 +126,8 @@ impl DashboardState {
             return;
         }
         if self.active_workspace_id.as_deref() == Some(workspace_id) {
-            let changed = self.pane_sizes != sizes;
             self.pane_sizes = sizes;
             self.clamp_selections();
-            if changed {
-                self.mark_render_changed();
-            }
         }
         self.workspace_views
             .entry(workspace_id.to_owned())
@@ -211,7 +169,6 @@ impl DashboardState {
             && self.selected_session_id.as_deref() != Some(session_id)
         {
             self.selected_session_id = Some(session_id.to_owned());
-            self.mark_render_changed();
         }
     }
 
@@ -244,7 +201,6 @@ impl DashboardState {
     pub(crate) fn set_session_action_focus(&mut self, action: Option<CommandId>) {
         if self.session_action_focus != action {
             self.session_action_focus = action;
-            self.mark_render_changed();
         }
     }
 
@@ -255,7 +211,6 @@ impl DashboardState {
         self.focus = Focus::Prompt;
         self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
-        self.mark_render_changed();
         true
     }
 
@@ -266,11 +221,7 @@ impl DashboardState {
         self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
         self.clamp_selections();
-        let changed = before != self.focus;
-        if changed {
-            self.mark_render_changed();
-        }
-        changed
+        before != self.focus
     }
 
     /// Moves focus one stop along the Tab ring.
@@ -289,10 +240,6 @@ impl DashboardState {
             self.set_session_action_focus(None);
         }
         self.clamp_selections();
-        let changed = previous != self.focus;
-        if changed {
-            self.mark_render_changed();
-        }
-        changed
+        previous != self.focus
     }
 }

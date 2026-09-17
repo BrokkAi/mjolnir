@@ -39,6 +39,9 @@ pub struct TextInput {
     max_chars: Option<usize>,
     filter: InputFilter,
     multiline: bool,
+    /// The column a vertical motion aims for, so a short line in between does
+    /// not pull the caret left. Every other cursor change clears it.
+    preferred_column: Option<usize>,
     history: Option<Box<InputHistory>>,
 }
 
@@ -130,6 +133,7 @@ impl TextInput {
             max_chars: None,
             filter: InputFilter::Any,
             multiline: false,
+            preferred_column: None,
             history: None,
         }
     }
@@ -195,6 +199,7 @@ impl TextInput {
             .last()
             .unwrap_or(0);
         self.chain_kill = false;
+        self.preferred_column = None;
     }
 
     #[must_use]
@@ -214,6 +219,7 @@ impl TextInput {
     pub fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
+        self.preferred_column = None;
         self.leave_history();
     }
 
@@ -240,6 +246,7 @@ impl TextInput {
         }
         let character = self.value.pop()?;
         self.cursor = self.value.len();
+        self.preferred_column = None;
         Some(character)
     }
 
@@ -260,17 +267,17 @@ impl TextInput {
         let chained = std::mem::take(&mut self.chain_kill);
         if modifiers.contains(KeyModifiers::CONTROL) {
             let changed = match code {
-                KeyCode::Char('a') => return self.move_to(0),
-                KeyCode::Char('e') => return self.move_to(self.value.len()),
+                KeyCode::Char('a') => return self.handle_line_start(true),
+                KeyCode::Char('e') => return self.handle_line_end(true),
                 KeyCode::Char('b') => {
                     return self.move_to(previous_grapheme(&self.value, self.cursor));
                 }
                 KeyCode::Char('f') => return self.move_to(next_grapheme(&self.value, self.cursor)),
                 KeyCode::Char('h') => self.backspace(),
                 KeyCode::Char('d') => self.delete(),
-                KeyCode::Char('u') => self.kill(0..self.cursor, false),
+                KeyCode::Char('u') => self.kill_line_backward(),
                 KeyCode::Char('k') => {
-                    let changed = self.kill(self.cursor..self.value.len(), chained);
+                    let changed = self.kill_line_forward(chained);
                     self.chain_kill = true;
                     changed
                 }
@@ -281,8 +288,8 @@ impl TextInput {
                 KeyCode::Left => return self.move_to(self.previous_word_start()),
                 KeyCode::Right => return self.move_to(self.next_word_end()),
                 KeyCode::Delete => self.kill(self.cursor..self.next_word_end(), false),
-                KeyCode::Char('p') | KeyCode::Up => return self.move_history(-1),
-                KeyCode::Char('n') | KeyCode::Down => return self.move_history(1),
+                KeyCode::Char('p') | KeyCode::Up => return self.handle_vertical(-1),
+                KeyCode::Char('n') | KeyCode::Down => return self.handle_vertical(1),
                 _ => return EditOutcome::Unhandled,
             };
             return if changed {
@@ -307,12 +314,12 @@ impl TextInput {
         match code {
             KeyCode::Left => self.move_to(previous_grapheme(&self.value, self.cursor)),
             KeyCode::Right => self.move_to(next_grapheme(&self.value, self.cursor)),
-            KeyCode::Home => self.move_to(0),
-            KeyCode::End => self.move_to(self.value.len()),
+            KeyCode::Home => self.handle_line_start(false),
+            KeyCode::End => self.handle_line_end(false),
             KeyCode::Backspace => Self::changed(self.backspace()),
             KeyCode::Delete => Self::changed(self.delete()),
-            KeyCode::Up => self.move_history(-1),
-            KeyCode::Down => self.move_history(1),
+            KeyCode::Up => self.handle_vertical(-1),
+            KeyCode::Down => self.handle_vertical(1),
             KeyCode::Char(character)
                 if !modifiers.intersects(KeyModifiers::SUPER) && !character.is_control() =>
             {
@@ -320,6 +327,133 @@ impl TextInput {
             }
             _ => EditOutcome::Unhandled,
         }
+    }
+
+    /// Ctrl-A and Home. A single-line field has one line, so only a multiline
+    /// field distinguishes the line start from the start of the value.
+    fn handle_line_start(&mut self, cross_boundary: bool) -> EditOutcome {
+        if !self.multiline {
+            return self.move_to(0);
+        }
+        self.move_to_line_start(cross_boundary);
+        EditOutcome::Handled
+    }
+
+    /// Ctrl-E and End; the mirror of `handle_line_start`.
+    fn handle_line_end(&mut self, cross_boundary: bool) -> EditOutcome {
+        if !self.multiline {
+            return self.move_to(self.value.len());
+        }
+        self.move_to_line_end(cross_boundary);
+        EditOutcome::Handled
+    }
+
+    /// Up and Down. A multiline field walks its own lines; a field with a
+    /// history walks the history instead, because that is the only way to
+    /// reach it from the keyboard.
+    fn handle_vertical(&mut self, direction: isize) -> EditOutcome {
+        if !self.multiline || self.history.is_some() {
+            return self.move_history(direction);
+        }
+        self.move_vertical(direction);
+        EditOutcome::Handled
+    }
+
+    /// Ctrl-U: a single-line field kills back to offset zero, which is what
+    /// `kill_to_line_start` computes for a value without newlines anyway.
+    fn kill_line_backward(&mut self) -> bool {
+        if !self.multiline {
+            return self.kill(0..self.cursor, false);
+        }
+        self.kill_to_line_start()
+    }
+
+    /// Ctrl-K; the mirror of `kill_line_backward`.
+    fn kill_line_forward(&mut self, chained: bool) -> bool {
+        if !self.multiline {
+            return self.kill(self.cursor..self.value.len(), chained);
+        }
+        self.kill_to_line_end(chained)
+    }
+
+    /// Moves to the start of the current line. With `cross_boundary`, a press
+    /// that is already at the line start moves to the previous line's start.
+    pub fn move_to_line_start(&mut self, cross_boundary: bool) {
+        let start = line_start(&self.value, self.cursor);
+        self.cursor = if cross_boundary && self.cursor == start && start > 0 {
+            line_start(&self.value, start - 1)
+        } else {
+            start
+        };
+        self.preferred_column = None;
+    }
+
+    /// Moves to the end of the current line; the mirror of `move_to_line_start`.
+    pub fn move_to_line_end(&mut self, cross_boundary: bool) {
+        let end = line_end(&self.value, self.cursor);
+        self.cursor = if cross_boundary && self.cursor == end && end < self.value.len() {
+            line_end(&self.value, end + 1)
+        } else {
+            end
+        };
+        self.preferred_column = None;
+    }
+
+    /// Moves one line up (negative `direction`) or down, aiming for the column
+    /// the first vertical move started from so a short line in between does
+    /// not pull the caret permanently left.
+    pub fn move_vertical(&mut self, direction: isize) {
+        let start = line_start(&self.value, self.cursor);
+        let column = self
+            .preferred_column
+            .unwrap_or_else(|| self.value[start..self.cursor].graphemes(true).count());
+        let target_start = if direction.is_negative() {
+            if start == 0 {
+                self.cursor = 0;
+                self.preferred_column = None;
+                return;
+            }
+            line_start(&self.value, start - 1)
+        } else {
+            let end = line_end(&self.value, self.cursor);
+            if end == self.value.len() {
+                self.cursor = self.value.len();
+                self.preferred_column = None;
+                return;
+            }
+            end + 1
+        };
+        let target_end = line_end(&self.value, target_start);
+        self.cursor = self.value[target_start..target_end]
+            .grapheme_indices(true)
+            .nth(column)
+            .map_or(target_end, |(offset, _)| target_start + offset);
+        self.preferred_column = Some(column);
+    }
+
+    /// Kills back to the start of the line, or the preceding newline when the
+    /// caret already sits there. Reports whether anything was killed.
+    pub fn kill_to_line_start(&mut self) -> bool {
+        let start = line_start(&self.value, self.cursor);
+        let range = if start == self.cursor && start > 0 {
+            start - 1..start
+        } else {
+            start..self.cursor
+        };
+        self.kill(range, false)
+    }
+
+    /// Kills to the end of the line, or the newline itself when the caret
+    /// already sits there. A `chained` kill appends to the kill buffer, in
+    /// Emacs order, so a later yank restores the whole block.
+    pub fn kill_to_line_end(&mut self, chained: bool) -> bool {
+        let end = line_end(&self.value, self.cursor);
+        let range = if end == self.cursor && end < self.value.len() {
+            end..end + 1
+        } else {
+            self.cursor..end
+        };
+        self.kill(range, chained)
     }
 
     fn changed(changed: bool) -> EditOutcome {
@@ -332,6 +466,7 @@ impl TextInput {
 
     fn move_to(&mut self, cursor: usize) -> EditOutcome {
         self.cursor = cursor;
+        self.preferred_column = None;
         EditOutcome::Handled
     }
 
@@ -342,6 +477,7 @@ impl TextInput {
         let start = previous_grapheme(&self.value, self.cursor);
         self.value.replace_range(start..self.cursor, "");
         self.cursor = start;
+        self.preferred_column = None;
         self.leave_history();
         true
     }
@@ -352,6 +488,7 @@ impl TextInput {
         }
         let end = next_grapheme(&self.value, self.cursor);
         self.value.replace_range(self.cursor..end, "");
+        self.preferred_column = None;
         self.leave_history();
         true
     }
@@ -370,6 +507,7 @@ impl TextInput {
         }
         self.value.replace_range(range.clone(), "");
         self.cursor = range.start;
+        self.preferred_column = None;
         self.leave_history();
         true
     }
@@ -383,50 +521,11 @@ impl TextInput {
     }
 
     fn previous_word_start(&self) -> usize {
-        let prefix = &self.value[..self.cursor];
-        let trimmed = prefix.trim_end_matches(char::is_whitespace);
-        if trimmed.is_empty() {
-            return 0;
-        }
-        let run_start = trimmed
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        let run = &trimmed[run_start..];
-        let mut start = run_start + run.len();
-        let mut class = None;
-        for (index, character) in run.char_indices().rev() {
-            let next = word_class(character);
-            if class.is_some_and(|class| class != next) {
-                break;
-            }
-            class = Some(next);
-            start = run_start + index;
-        }
-        start
+        previous_word_start(&self.value, self.cursor)
     }
 
     fn next_word_end(&self) -> usize {
-        let suffix = &self.value[self.cursor..];
-        let Some(non_space) = suffix.find(|c: char| !c.is_whitespace()) else {
-            return self.value.len();
-        };
-        let run = &suffix[non_space..];
-        let mut end = 0;
-        let mut class = None;
-        for (index, character) in run.char_indices() {
-            if character.is_whitespace() {
-                break;
-            }
-            let next = word_class(character);
-            if class.is_some_and(|class| class != next) {
-                break;
-            }
-            class = Some(next);
-            end = index + character.len_utf8();
-        }
-        self.cursor + non_space + end
+        next_word_end(&self.value, self.cursor)
     }
 
     fn move_history(&mut self, delta: isize) -> EditOutcome {
@@ -461,6 +560,7 @@ impl TextInput {
     }
 
     fn insert_filtered(&mut self, text: &str) {
+        self.preferred_column = None;
         for mut character in text.chars() {
             if character.is_control() && !(self.multiline && matches!(character, '\n' | '\t')) {
                 continue;
@@ -499,6 +599,7 @@ impl TextInput {
             self.value.truncate(index);
         }
         self.cursor = self.cursor.min(self.value.len());
+        self.preferred_column = None;
     }
 }
 
@@ -541,6 +642,74 @@ pub fn next_grapheme(input: &str, cursor: usize) -> usize {
         .map_or(input.len(), |(index, _)| cursor + index)
 }
 
+/// The offset of the start of the word before `cursor`, readline style: a run
+/// of whitespace is skipped, then the run of same-class characters that follows
+/// it. "Class" is word characters versus the punctuation in `SEPARATORS`.
+#[must_use]
+pub fn previous_word_start(text: &str, cursor: usize) -> usize {
+    let prefix = &text[..cursor];
+    let trimmed = prefix.trim_end_matches(char::is_whitespace);
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let run_start = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let run = &trimmed[run_start..];
+    let mut start = run_start + run.len();
+    let mut class = None;
+    for (index, character) in run.char_indices().rev() {
+        let next = word_class(character);
+        if class.is_some_and(|class| class != next) {
+            break;
+        }
+        class = Some(next);
+        start = run_start + index;
+    }
+    start
+}
+
+/// The offset of the end of the word after `cursor`; the mirror of
+/// `previous_word_start`.
+#[must_use]
+pub fn next_word_end(text: &str, cursor: usize) -> usize {
+    let suffix = &text[cursor..];
+    let Some(non_space) = suffix.find(|character: char| !character.is_whitespace()) else {
+        return text.len();
+    };
+    let run = &suffix[non_space..];
+    let mut end = 0;
+    let mut class = None;
+    for (index, character) in run.char_indices() {
+        if character.is_whitespace() {
+            break;
+        }
+        let next = word_class(character);
+        if class.is_some_and(|class| class != next) {
+            break;
+        }
+        class = Some(next);
+        end = index + character.len_utf8();
+    }
+    cursor + non_space + end
+}
+
+/// The offset just after the newline that precedes `cursor`, or zero.
+#[must_use]
+pub fn line_start(text: &str, cursor: usize) -> usize {
+    text[..cursor].rfind('\n').map_or(0, |index| index + 1)
+}
+
+/// The offset of the newline that follows `cursor`, or the end of `text`.
+#[must_use]
+pub fn line_end(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |index| cursor + index)
+}
+
 fn word_class(character: char) -> bool {
     const SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
     SEPARATORS.contains(character)
@@ -572,6 +741,17 @@ mod tests {
         input.handle_key(key(KeyCode::Right));
         input.handle_key(key(KeyCode::Delete));
         assert_eq!(input.value(), "one  two");
+
+        // Word edits step over a whole grapheme cluster, not a char.
+        let mut input = TextInput::from_value("one two 👩‍💻");
+        input.handle_key(key(KeyCode::Left));
+        assert_eq!(&input.value()[input.cursor()..], "👩‍💻");
+        input.handle_key(ctrl('w'));
+        assert_eq!(input.value(), "one 👩‍💻");
+        input.handle_key(ctrl('y'));
+        assert_eq!(input.value(), "one two 👩‍💻");
+        input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(&input.value()[input.cursor()..], "two 👩‍💻");
     }
 
     #[test]
@@ -585,6 +765,85 @@ mod tests {
         input.handle_key(ctrl('k'));
         input.handle_key(ctrl('y'));
         assert_eq!(input.value(), "alpha beta");
+    }
+
+    #[test]
+    fn readline_line_movement_kill_and_yank_match_codex() {
+        let mut input = TextInput::multiline();
+        input.set_value("alpha beta\ngamma");
+        input.handle_key(ctrl('a'));
+        assert_eq!(&input.value()[input.cursor()..], "gamma");
+        input.handle_key(ctrl('a'));
+        assert_eq!(input.cursor(), 0);
+        input.handle_key(ctrl('e'));
+        assert_eq!(&input.value()[..input.cursor()], "alpha beta");
+        input.handle_key(ctrl('k'));
+        assert_eq!(input.value(), "alpha betagamma");
+        input.handle_key(ctrl('y'));
+        assert_eq!(input.value(), "alpha beta\ngamma");
+    }
+
+    #[test]
+    fn sequential_control_k_accumulates_one_yankable_block() {
+        let mut input = TextInput::multiline();
+        input.set_value("line1\nline2");
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('k'));
+        input.handle_key(ctrl('k'));
+        assert_eq!(input.value(), "line2");
+        input.handle_key(ctrl('y'));
+        assert_eq!(input.value(), "line1\nline2");
+    }
+
+    #[test]
+    fn any_key_between_control_k_presses_restarts_the_kill_buffer() {
+        let mut input = TextInput::multiline();
+        input.set_value("line1\nline2");
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('k'));
+        input.handle_key(key(KeyCode::Right));
+        input.handle_key(key(KeyCode::Left));
+        input.handle_key(ctrl('k'));
+        assert_eq!(&*input.kill_buffer, "\n");
+
+        input.set_value("line1\nline2");
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('k'));
+        input.handle_key(key(KeyCode::Char('x')));
+        input.handle_key(ctrl('a'));
+        input.handle_key(ctrl('k'));
+        assert_eq!(&*input.kill_buffer, "x");
+    }
+
+    #[test]
+    fn vertical_motion_keeps_the_preferred_column_across_a_short_line() {
+        let mut input = TextInput::multiline();
+        input.set_value("abcdef\nxy\nghijkl");
+        input.set_cursor(5);
+
+        input.handle_key(key(KeyCode::Down));
+        assert_eq!(input.cursor(), 9, "clamped to the end of the short line");
+        input.handle_key(key(KeyCode::Down));
+        assert_eq!(input.cursor(), 15, "back to the remembered column");
+
+        // Any other motion forgets the column, so the next Down starts over.
+        input.handle_key(key(KeyCode::Home));
+        input.handle_key(key(KeyCode::Up));
+        assert_eq!(input.cursor(), 7);
+    }
+
+    #[test]
+    fn single_line_fields_keep_their_whole_value_motions() {
+        let mut input = TextInput::from_value("alpha beta");
+        input.handle_key(ctrl('a'));
+        assert_eq!(input.cursor(), 0);
+        input.handle_key(ctrl('e'));
+        assert_eq!(input.cursor(), "alpha beta".len());
+        input.handle_key(ctrl('u'));
+        assert_eq!(input.value(), "");
     }
 
     #[test]

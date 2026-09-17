@@ -8,7 +8,6 @@ impl ChatState {
             .collect();
         if self.active_user_shells != next {
             self.active_user_shells = next;
-            self.mark_visible_changed();
         }
     }
 
@@ -47,7 +46,6 @@ impl ChatState {
         if previous_terminals != terminals || previous_claims != &claims {
             self.active_agent_terminals = terminals.to_vec();
             self.claimed_agent_terminals = claims;
-            self.mark_visible_changed();
         }
     }
 
@@ -61,7 +59,6 @@ impl ChatState {
             TranscriptRenderMode::Rich => "Rich transcript rendering enabled",
             TranscriptRenderMode::Raw => "Raw transcript source enabled",
         });
-        self.mark_visible_changed();
     }
 
     /// The surfaces the last frame registered, for the selection engine.
@@ -130,22 +127,11 @@ impl ChatState {
 
     /// Cancels any pointer gesture owned by a chat component.
     pub fn cancel_component_pointer(&mut self) {
-        let task_captured = self.task_dialog_form.captures_pointer();
         self.task_dialog_form.cancel_pointer();
-        if task_captured {
-            self.mark_visible_changed();
-        }
-        let voice_captured = self.voice_form.captures_pointer();
         self.voice_form.cancel_pointer();
-        if voice_captured {
-            self.mark_visible_changed();
-        }
         self.cancel_config_picker_pointer();
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.cancel_component_pointer();
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
         }
         self.cancel_second_opinion_pointer();
         self.cancel_turn_review_pointer();
@@ -175,9 +161,6 @@ impl ChatState {
     pub(crate) fn scroll_elicitation_message(&mut self, rows: isize) {
         if let Some(dialog) = self.elicitation.as_ref() {
             dialog.scroll_message(rows);
-            if dialog.take_changed() {
-                self.mark_visible_changed();
-            }
         }
     }
 
@@ -192,10 +175,8 @@ impl ChatState {
     /// scrollback repaints whole TUI frames and is unusably slow on long
     /// sessions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> ChatAction {
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.notices.dismiss(std::time::Instant::now())
-        {
-            self.mark_visible_changed();
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.notices.dismiss(std::time::Instant::now());
         }
         // The topmost form receives the gesture before selection, scrollbars,
         // or a review pane. This also lets reviewer elicitations stay above
@@ -209,13 +190,8 @@ impl ChatState {
             if over_form || over_message {
                 let request = dialog.request().clone();
                 let response = dialog.handle_mouse(mouse);
-                let dialog_changed = dialog.take_changed();
-                if dialog_changed {
-                    self.mark_visible_changed();
-                }
                 if let Some(response) = response {
                     self.elicitation = None;
-                    self.mark_visible_changed();
                     if std::mem::take(&mut self.elicitation_is_reviewers) {
                         return self.finish_reviewer_elicitation_response(request, response);
                     }
@@ -274,9 +250,6 @@ impl ChatState {
         }
         if self.task_dialog_open {
             let result = self.task_dialog_form.handle(&Event::Mouse(mouse));
-            if result.outcome == Outcome::Changed {
-                self.mark_visible_changed();
-            }
             if let Some(Interaction::Activate(control)) = result.action.as_ref() {
                 return self.activate_background_task_control(*control);
             }
@@ -284,7 +257,7 @@ impl ChatState {
                 self.close_task_dialog();
                 return ChatAction::None;
             }
-            if result.outcome.is_consumed() {
+            if result.consumed {
                 return ChatAction::None;
             }
             match mouse.kind {
@@ -410,7 +383,7 @@ impl ChatState {
                 ChatAction::None
             };
         }
-        if voice_result.outcome.is_consumed() {
+        if voice_result.consumed {
             return ChatAction::None;
         }
         // Keep the legacy hitbox usable for callers that have not rendered a

@@ -15,6 +15,27 @@ use std::collections::BTreeMap;
 
 use std::path::{Path, PathBuf};
 
+/// A `reqwest::blocking::Client` owns a private Tokio runtime that it drops
+/// with the client. The session-move lifecycle and the sub-agent spawn path
+/// drive catalog staging inside a Tokio context (`Handle::block_on` and a
+/// runtime worker respectively), where dropping that runtime panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed" and
+/// strands the session. The HTTP helper must run off that context and
+/// return an ordinary error instead of panicking.
+#[test]
+fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    // Port 1 refuses the connection at once, so no network is needed; the
+    // point is that the client's runtime is created and dropped without a
+    // panic while a Tokio context is entered on this thread.
+    let result = runtime
+        .block_on(async { fetch_catalog_over_https("http://127.0.0.1:1/models", "unused-key") });
+    assert!(
+        result.is_err(),
+        "expected a connection error, got {result:?}"
+    );
+}
+
 /// The session's stored choice decides, with the global setting as the
 /// fallback, and a child never gets the tools whatever either says.
 #[test]
@@ -378,6 +399,7 @@ fn replaced_dev_controller_never_selects_the_new_glibc_controller_as_its_worker(
 /// platform matters here; the rest is the smallest valid template.
 fn container_template(platform: Option<&str>) -> mj_core::config::ContainerTemplate {
     mj_core::config::ContainerTemplate {
+        build_cache: None,
         image: "example.invalid/mj-test:latest".into(),
         pull_policy: Default::default(),
         platform: platform.map(str::to_owned),
@@ -434,6 +456,7 @@ fn recovery_workspace_uses_the_launch_directory_for_bare_targets_only() {
     assert!(
         worker_workspace_for_recovery(
             &targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "container".into(),
                 workspace_storage: Default::default(),
             },
@@ -818,6 +841,7 @@ fn starting_a_worker_clears_stale_runtime_files_before_launching() {
             worker_root: "/worker/root".into(),
         },
         targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container-1".into(),
             workspace_storage: Default::default(),
         },
@@ -954,6 +978,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
         ]),
     };
     let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id,
         workspace_storage: Default::default(),
     };
@@ -1027,6 +1052,7 @@ fn podman_install_fixture() -> PodmanInstallFixture {
         ownership,
         profile_stage,
         locator: targets::TargetLocator::SshPodman {
+            borrowed_from: None,
             ssh: SshTarget {
                 destination: "user@example.test".into(),
                 ssh_args: Vec::new(),
@@ -1159,6 +1185,7 @@ fn ssh_podman_install_skips_the_worker_upload_on_a_cache_hit() {
 fn ssh_docker_install_uses_docker_for_remote_container_operations() {
     let mut fixture = podman_install_fixture();
     fixture.locator = targets::TargetLocator::SshDocker {
+        borrowed_from: None,
         ssh: SshTarget {
             destination: "user@example.test".into(),
             ssh_args: Vec::new(),
@@ -1204,6 +1231,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
     let session = mj_core::state::new_session_id().unwrap();
     let container_id = targets::resource_name(&session).unwrap();
     let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
         container_id: container_id.clone(),
     };
     execute_checked(
@@ -1288,6 +1316,7 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
     let session = "0123456789abcdef0123456789abcdef";
     let container_id = targets::resource_name(session).unwrap();
     let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: container_id.clone(),
         workspace_storage: Default::default(),
     };
@@ -1399,6 +1428,7 @@ fn bare_targets_use_managed_harnesses_but_containers_stay_ambient() {
         ),
         (
             targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
                 container_id: "container".into(),
                 workspace_storage: Default::default(),
             },
@@ -1526,6 +1556,7 @@ fn kimi_uses_runtime_aware_memory_delivery_only_on_staged_targets() {
         worker_root: "/worker".into(),
     };
     let podman = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "container".into(),
         workspace_storage: Default::default(),
     };
@@ -2090,6 +2121,208 @@ fn muse_settings_that_are_not_an_object_report_the_staged_file() {
 }
 
 #[test]
+fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = zai_profile(home.path());
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = targets::new_container_workspace(session_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(session_id).unwrap(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+    let template = mj_core::config::TargetTemplate::LocalPodman {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
+    session.harness_kind = HarnessKind::Codex;
+    session.last_profile = "glm".into();
+    session.project_directory = None;
+    session.container_workspace = Some(workspace.clone());
+
+    let without = worker_launch_config(
+        &session,
+        &profile,
+        Some(&bundle),
+        &locator,
+        session_id,
+        Some(&workspace),
+        &template,
+    )
+    .unwrap()
+    .0;
+    assert!(!without.target_environment.contains_key("MBX_CACHE_DIR"));
+    assert!(!without.environment.contains_key("MBX_CACHE_DIR"));
+
+    session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local-podman".into(),
+        directory: PathBuf::from("/mnt/fast/mbx-cache"),
+        max_size: Some("100000000000B".into()),
+        target_root: None,
+    });
+    let with = worker_launch_config(
+        &session,
+        &profile,
+        Some(&bundle),
+        &locator,
+        session_id,
+        Some(&workspace),
+        &template,
+    )
+    .unwrap()
+    .0;
+    // `target_environment` is what reaches the harness, its terminals, and
+    // the reviewer sidecar, not just the harness process.
+    assert_eq!(
+        with.target_environment
+            .get("MBX_CACHE_DIR")
+            .map(String::as_str),
+        Some("/mnt/fast/mbx-cache")
+    );
+    assert_eq!(
+        with.target_environment
+            .get("MBX_GC_MAX_SIZE")
+            .map(String::as_str),
+        Some("100000000000B")
+    );
+    assert_eq!(
+        with.environment.get("MBX_CACHE_DIR").map(String::as_str),
+        Some("/mnt/fast/mbx-cache")
+    );
+}
+
+#[test]
+fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path() {
+    #[derive(Default)]
+    struct RecordingExecutor {
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingExecutor {
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(format!(
+                "{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let binary = tempfile::NamedTempFile::new().unwrap();
+    let executor = RecordingExecutor::default();
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+
+    install_mbx_files(
+        &executor,
+        &locator,
+        "session-1",
+        "/home/hel/.hel/worker",
+        binary.path(),
+        Some("[gc]\nmax_size = \"500GiB\"\n"),
+    )
+    .unwrap();
+
+    let commands = executor.commands();
+    assert!(
+        commands.iter().any(|line| line
+            == &format!(
+                "podman cp {} hel-session:/home/hel/.hel/worker/bin/mbx",
+                binary.path().display()
+            )),
+        "{commands:#?}"
+    );
+    assert!(
+        commands.iter().any(|line| line.contains("ln -f")
+            && line.contains("/home/hel/.hel/worker/bin/mbx")
+            && line.contains("/home/hel/.hel/worker/bin/cargo")),
+        "{commands:#?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")),
+        "the host mbx configuration is written into the container: {commands:#?}"
+    );
+}
+
+#[test]
+fn a_child_opens_its_parents_container_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = zai_profile(home.path());
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "1123456789abcdef0123456789abcdef";
+    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
+    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: targets::resource_name(parent_id).unwrap(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+    let template = mj_core::config::TargetTemplate::LocalPodman {
+        container: mj_core::config::ContainerTemplate {
+            build_cache: None,
+            image: "ubuntu:24.04".to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    // The child record copies its parent's workspace when it is created,
+    // and `prepare_worker_files` reads the same value off the parent, so
+    // both point the child's harness at the parent's checkout rather than
+    // at a workspace named after the child.
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.harness_kind = HarnessKind::Codex;
+    child.last_profile = "glm".into();
+    child.project_directory = None;
+    child.container_workspace = Some(parent_workspace.clone());
+
+    let (launch, _, _) = worker_launch_config(
+        &child,
+        &profile,
+        Some(&bundle),
+        &locator,
+        parent_id,
+        Some(&parent_workspace),
+        &template,
+    )
+    .unwrap();
+
+    assert_eq!(
+        launch.cwd,
+        PathBuf::from(format!("/workspace/{parent_id}/project"))
+    );
+}
+
+#[test]
 fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -2111,7 +2344,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
             worker_root: "/home/me/.local/share/hel/worker".into(),
         },
         &session.id,
-        &session.id,
+        None,
         &mj_core::config::TargetTemplate::LocalBare,
     )
     .unwrap();
@@ -2166,7 +2399,7 @@ fn raw_local_muse_launches_unconstrained() {
             worker_root: "/home/me/.local/share/hel/worker".into(),
         },
         &session.id,
-        &session.id,
+        None,
         &mj_core::config::TargetTemplate::LocalBare,
     )
     .unwrap();
@@ -2301,6 +2534,7 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
 #[test]
 fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
     let target = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "container".into(),
         workspace_storage: Default::default(),
     };
@@ -2363,6 +2597,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         profile.kind,
         staged.path(),
         &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "container".into(),
             workspace_storage: Default::default(),
         },
@@ -2481,6 +2716,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         subagent_tools: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
+        seed_image_environment: false,
         run_mode: Default::default(),
         session_id: session.into(),
         harness: HarnessKind::Codex,
@@ -2579,6 +2815,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         subagent_tools: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
+        seed_image_environment: false,
         run_mode: Default::default(),
         session_id: "session-local".into(),
         harness: HarnessKind::Codex,
@@ -2662,6 +2899,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         subagent_tools: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
+        seed_image_environment: false,
         run_mode: Default::default(),
         session_id: session.into(),
         harness: HarnessKind::Kimi,

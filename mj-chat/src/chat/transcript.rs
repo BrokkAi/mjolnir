@@ -496,7 +496,7 @@ impl TranscriptRenderCache {
 impl ChatState {
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
-    pub(super) fn transcript_scrollbar_dragging(&self) -> bool {
+    pub fn transcript_scrollbar_dragging(&self) -> bool {
         self.transcript_scrollbar.dragging && !self.transcript_scrollbar_modal_blocked()
     }
 
@@ -1027,11 +1027,7 @@ impl ChatState {
             }
         }
         self.anchor = TranscriptAnchor::Row { entry, row };
-        let changed = self.anchor != before;
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        self.anchor != before
     }
 
     pub(super) fn scroll_history_down(&mut self, rows: usize) -> bool {
@@ -1051,9 +1047,6 @@ impl ChatState {
                 if entry + 1 >= self.entries.len() {
                     self.anchor = TranscriptAnchor::Bottom;
                     let changed = self.anchor != before;
-                    if changed {
-                        self.mark_visible_changed();
-                    }
                     return changed;
                 }
                 entry += 1;
@@ -1068,9 +1061,6 @@ impl ChatState {
             if entry + 1 >= self.entries.len() {
                 self.anchor = TranscriptAnchor::Bottom;
                 let changed = self.anchor != before;
-                if changed {
-                    self.mark_visible_changed();
-                }
                 return changed;
             }
             remaining -= below + 1;
@@ -1087,11 +1077,7 @@ impl ChatState {
         } else {
             anchor.anchor()
         };
-        let changed = self.anchor != before;
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        self.anchor != before
     }
 
     /// What the current rendered rows depend on wholesale.
@@ -1271,7 +1257,6 @@ impl ChatState {
         self.transcript_selection = None;
         self.transcript_selection_invalid = true;
         self.transcript_tool_click_targets.clear();
-        self.mark_visible_changed();
         true
     }
 

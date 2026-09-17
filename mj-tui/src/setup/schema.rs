@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "subagents":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -18,6 +18,9 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         }
         "subagents" if path.len() == 1 => {
             json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
+        }
+        "build_cache" if path.len() == 1 => {
+            json!({"enabled": true})
         }
         "profiles" if path.len() == 2 => {
             json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
@@ -50,7 +53,8 @@ fn target_defaults(kind: &str) -> Value {
     ) {
         fields.as_object_mut().unwrap().extend(json!({
             "image":mj_client::target::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
-            "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
+            "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"},
+            "build_cache":{"enabled":null,"directory":null,"max_size":null}
         }).as_object().unwrap().clone());
     }
     if kind.starts_with("ssh-") {
@@ -108,6 +112,9 @@ pub(super) fn label(key: &str) -> String {
         "phone" => "Web Access",
         "review" => "Code Review",
         "subagents" => "Sub-agents",
+        "build_cache" => "Build cache (mbx)",
+        "directory" => "Cache directory",
+        "max_size" => "Cache size limit",
         "max_concurrent" => "Maximum concurrent children",
         "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
@@ -283,6 +290,15 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "eligible_profiles" => {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
+        "build_cache" => {
+            "Share one mbx build cache between the Rust container sessions on each host. Leave the target settings blank to use that host's defaults."
+        }
+        "directory" => {
+            "Cache directory on the target's own host. Blank uses that host's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
+        }
+        "max_size" => {
+            "Largest the cache may grow, such as 100GiB. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
+        }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "context_window_bytes" => {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
@@ -310,9 +326,9 @@ pub(super) fn path_kind(path: &[String]) -> Option<PathKind> {
         | ["phone", "tls_cert" | "tls_key"]
         | ["targets", _, "identity_file"]
         | ["bundles", _, "repositories", _, "local"] => Some(Local),
-        ["targets", _, "workspace_prefix"] | ["targets", _, "workspace_storage", "root"] => {
-            Some(Target)
-        }
+        ["targets", _, "workspace_prefix"]
+        | ["targets", _, "workspace_storage", "root"]
+        | ["targets", _, "build_cache", "directory"] => Some(Target),
         ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
         _ => None,
     }

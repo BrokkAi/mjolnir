@@ -3,7 +3,6 @@ name = "brokk-mj-chat"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Conversation view state and input surfaces for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"
@@ -32,7 +31,6 @@ crossterm.workspace = true
 pulldown-cmark = { version = "0.10", default-features = false }
 png = "0.18"
 ratatui.workspace = true
-rat-event = "2.1.0"
 rat-focus = "2.1.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

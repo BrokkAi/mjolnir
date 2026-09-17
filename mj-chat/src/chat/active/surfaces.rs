@@ -11,22 +11,6 @@ impl ActiveChat {
         }
     }
 
-    /// The surfaces the last frame registered, for the selection engine.
-    pub fn frame_surfaces(&self) -> &FrameSurfaces {
-        self.state.frame_surfaces()
-    }
-
-    /// Keep a scrollbar gesture routed here even outside the chat pane.
-    pub fn transcript_scrollbar_dragging(&self) -> bool {
-        self.state.transcript_scrollbar_dragging()
-    }
-
-    /// Rows the composer wants at `width`: the wrapped input, up to three
-    /// queued-prompt previews, and the block's own border rows.
-    pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        self.state.desired_prompt_height(width)
-    }
-
     /// Draws the transcript and the composer into `regions`, for a host that
     /// owns the rest of the frame.
     ///
@@ -53,56 +37,6 @@ impl ActiveChat {
     /// Visible host footer commands, indexed through the supplied chords then functions.
     pub fn footer_command_areas(&self) -> Vec<(usize, Rect)> {
         self.state.footer_command_areas.borrow().clone()
-    }
-
-    /// Whether the last frame's surfaces stand alone, because a modal owned
-    /// the frame.
-    pub fn frame_surfaces_exclusive(&self) -> bool {
-        self.state.frame_surfaces_exclusive()
-    }
-
-    /// Clears the screen geometry retained by chat components before a host
-    /// redraw. Focus and an in-flight pointer gesture remain owned by chat.
-    pub fn reset_component_geometry(&mut self) {
-        self.state.reset_component_geometry();
-    }
-
-    /// Whether a chat component owns this pointer event before host selection.
-    pub fn component_handles_mouse(&self, mouse: crossterm::event::MouseEvent) -> bool {
-        self.state.component_handles_mouse(mouse)
-    }
-
-    /// Whether a chat modal currently owns the frame.
-    pub fn component_modal_open(&self) -> bool {
-        self.state.component_modal_open()
-    }
-
-    /// Releases any pointer gesture held by a chat component.
-    pub fn cancel_component_pointer(&mut self) {
-        self.state.cancel_component_pointer();
-    }
-
-    /// The transcript text a finished selection covers.
-    pub fn transcript_selection_text(&mut self, range: &SelectionRange) -> Option<String> {
-        self.state.transcript_selection_text(range)
-    }
-
-    /// The message text a selection in the elicitation pane covers.
-    pub fn elicitation_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.elicitation_selection_text(range)
-    }
-
-    /// The text a selection in the reviewer pane covers. It is resolved
-    /// against that pane's own rows, so a drag there can never pick up the
-    /// primary transcript's text.
-    pub fn reviewer_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.reviewer_selection_text(range)
-    }
-
-    /// Whether the transcript's selection row space stopped describing the
-    /// rows on screen since the last call.
-    pub fn transcript_selection_invalidated(&mut self) -> bool {
-        self.state.transcript_selection_invalidated()
     }
 
     /// Scrolls the surface a drag is holding against one of its edges.

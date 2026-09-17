@@ -85,6 +85,7 @@ fn passing_podman_probes() -> Vec<Result<CommandOutput>> {
 
 fn container(image: &str) -> ContainerTemplate {
     ContainerTemplate {
+        build_cache: None,
         image: image.to_owned(),
         pull_policy: Default::default(),
         platform: None,
@@ -783,7 +784,10 @@ fn ssh_bare_check_host_key_failure_recommends_keyscan_with_a_fingerprint_caution
 
 #[test]
 fn ssh_bare_check_without_an_ssh_client_recommends_installing_openssh() {
-    let executor = FakeExecutor::new([Err(anyhow!("No such file or directory (os error 2)"))]);
+    let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
+        std::io::ErrorKind::NotFound,
+    ))
+    .context("run ssh for verify SSH connectivity"))]);
 
     let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
 
@@ -795,7 +799,33 @@ fn ssh_bare_check_without_an_ssh_client_recommends_installing_openssh() {
 }
 
 #[test]
-fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
+fn ssh_bare_check_probe_timeout_recommends_checking_the_host_is_reachable() {
+    let executor = FakeExecutor::new([Err(anyhow::Error::new(CommandTimedOut {
+        program: "ssh".into(),
+        purpose: "verify SSH connectivity".into(),
+        timeout: std::time::Duration::from_secs(15),
+    }))]);
+
+    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("example.test is up and reachable"),
+        "{remediation}"
+    );
+    assert!(!remediation.contains("openssh-client"), "{remediation}");
+    assert!(
+        checks[0]
+            .detail
+            .contains("did not answer within 15 seconds"),
+        "{}",
+        checks[0].detail
+    );
+}
+
+#[test]
+fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
     let executor = FakeExecutor::new([Ok(failed(
         b"ssh: connect to host example.test port 22: Connection timed out",
     ))]);
@@ -804,13 +834,45 @@ fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
 
     let remediation = checks[0].remediation.as_deref().unwrap();
     assert!(
-        remediation.contains("Connection timed out"),
+        remediation.contains("example.test is up and reachable"),
+        "{remediation}"
+    );
+}
+
+#[test]
+fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
+    let executor = FakeExecutor::new([Ok(failed(
+        b"kex_exchange_identification: read: Connection reset by peer",
+    ))]);
+
+    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("Connection reset by peer"),
         "{remediation}"
     );
     assert!(
         remediation.contains("Run `ssh dev@example.test true` by hand"),
         "{remediation}"
     );
+}
+
+#[test]
+fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
+    let executor = FakeExecutor::new([Err(anyhow!(
+        "operation cancelled while verify SSH connectivity"
+    ))]);
+
+    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("Run `ssh dev@example.test true` by hand"),
+        "{remediation}"
+    );
+    assert!(!remediation.contains("openssh-client"), "{remediation}");
 }
 
 #[test]
@@ -1249,7 +1311,7 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     assert!(instructions.contains("mj doctor --json"));
     assert!(instructions.contains("mj doctor --json --smoke"));
     assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
-    assert!(instructions.contains("Podman **4.0.0 or newer**"));
+    assert!(instructions.contains("Podman **4.3.0 or newer**"));
     assert!(instructions.contains("kind = \"local-docker\""));
     assert!(instructions.contains("--opt type=overlay"));
 }

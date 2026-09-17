@@ -201,6 +201,8 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             (
                 (*session_id).to_owned(),
                 SessionRecord {
+                    build_cache: None,
+                    container_workspace: None,
                     mjolnir_subagents: None,
                     create_managed_worktree: None,
                     id: (*session_id).to_owned(),

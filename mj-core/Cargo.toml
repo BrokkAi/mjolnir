@@ -3,7 +3,6 @@ name = "brokk-mj-core"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Session control plane for ACP coding agents"
 repository = "https://github.com/BrokkAi/mjolnir"

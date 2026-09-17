@@ -224,14 +224,85 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     if version == 0 {
         create_baseline_schema(connection)?;
     } else if version < BASELINE_SCHEMA_VERSION {
+        // Every release from 2.7.2 through 2.9.x still carries the migration
+        // chain below the baseline; every later release refuses, as this one
+        // does. That range is closed, so the advice never goes stale.
         bail!(
             "Mjolnir database schema {version} was written by a Mjolnir release older than 2.7.2, \
-             which this build cannot upgrade; upgrade through Mjolnir 2.7.2 or 2.9 first, or start \
-             with a fresh data directory (--instance NAME or MJ_DATA_DIR)"
+             which this build cannot upgrade; upgrade through any Mjolnir release from 2.7.2 \
+             through 2.9.x first, or start with a fresh data directory (--instance NAME or \
+             MJ_DATA_DIR)"
         );
     }
-    // Later revisions are applied here as numbered steps, each classified as
-    // compatible or breaking.
+    // Compatible: adds one table. Older readers ignore it and treat read-write
+    // mounts as copy-on-write, a behaviour difference rather than lost data.
+    // Older writers rewrite `session_mounts` but never touch this table, so its
+    // rows survive their updates; a row only applies while a mount with the same
+    // source and destination is still not read-only, so an older build that
+    // makes the mount read-only or removes it keeps that choice. The
+    // compatibility floor stays where it is.
+    if version < 34 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS session_mount_access (
+                 session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 source BLOB NOT NULL,
+                 destination BLOB NOT NULL,
+                 access TEXT NOT NULL CHECK(access IN ('rw')),
+                 PRIMARY KEY(session_id, destination)
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (34, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 34;
+             COMMIT;",
+        )?;
+    }
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable launching such a session uses the shared
+    // `/workspace` instead of the recorded per-session path, which is a
+    // behaviour difference, not data loss. The compatibility floor stays where
+    // it is.
+    if version < 35 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN container_workspace TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (35, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 35;
+             COMMIT;",
+        )?;
+    }
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable launching such a session runs it without
+    // the mbx build cache, which is a behaviour difference, not data loss. The
+    // compatibility floor stays where it is.
+    if version < 36 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN build_cache_json TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (36, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 36;
+             COMMIT;",
+        )?;
+    }
+    // Compatible: adds one nullable column to `session_targets`. Only a
+    // container sub-agent child row ever carries a value, and older builds
+    // could never start such a child, so an older update that rewrites the row
+    // without the column loses nothing usable. Older readers ignore it. The
+    // compatibility floor stays where it is.
+    if version < 37 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_targets ADD COLUMN borrowed_from TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (37, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 37;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -487,9 +558,11 @@ mod reader_tests {
 
         let error = open_writer(&path).unwrap_err();
 
+        let message = format!("{error:#}");
+        assert!(message.contains("older than 2.7.2"), "{message}");
         assert!(
-            format!("{error:#}").contains("older than 2.7.2"),
-            "{error:#}"
+            message.contains("from 2.7.2 through 2.9.x"),
+            "advice must name the closed range of releases that can migrate: {message}"
         );
     }
 

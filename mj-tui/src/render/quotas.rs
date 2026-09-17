@@ -568,7 +568,11 @@ pub(crate) fn render_quotas(
         },
     );
     let status_budget = usize::from(title_budget).saturating_sub(label.chars().count());
-    let status = crate::widgets::truncate_text(&format!("({refresh_status}) "), status_budget);
+    let status = truncate_to_cells(
+        &format!("({refresh_status}) "),
+        status_budget,
+        Truncate::SUMMARY,
+    );
     let title = Line::from(vec![
         Span::raw(label),
         Span::styled(status, Style::default().fg(theme::palette().muted)),

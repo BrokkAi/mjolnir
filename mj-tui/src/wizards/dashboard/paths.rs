@@ -5,42 +5,26 @@ impl DashboardState {
     /// since the request left the UI. Typed input always outranks suggestions.
     pub fn apply_mount_source_completions(&mut self, prefix: &str, candidates: Vec<String>) {
         match self.mode.clone() {
-            Mode::New(mut wizard)
-                if wizard.step == WizardStep::Mounts
-                    && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-                    && wizard.mounts.source == prefix =>
-            {
-                let old_source = wizard.mounts.source.to_string();
-                let old_candidates = wizard.mounts.completion_candidates.clone();
-                let old_index = wizard.mounts.completion_index;
-                apply_mount_completions(&mut wizard.mounts, prefix, candidates);
-                let changed = old_source != wizard.mounts.source.to_string()
-                    || old_candidates != wizard.mounts.completion_candidates
-                    || old_index != wizard.mounts.completion_index;
-                self.mode = Mode::New(wizard);
-                if changed {
-                    self.mark_render_changed();
-                }
-            }
-            Mode::Resume(mut wizard)
-                if wizard.step == WizardStep::Mounts
-                    && wizard.form.borrow().focused() == Some(WizardControl::MountSource)
-                    && wizard.mounts.source == prefix =>
-            {
-                let old_source = wizard.mounts.source.to_string();
-                let old_candidates = wizard.mounts.completion_candidates.clone();
-                let old_index = wizard.mounts.completion_index;
-                apply_mount_completions(&mut wizard.mounts, prefix, candidates);
-                let changed = old_source != wizard.mounts.source.to_string()
-                    || old_candidates != wizard.mounts.completion_candidates
-                    || old_index != wizard.mounts.completion_index;
-                self.mode = Mode::Resume(wizard);
-                if changed {
-                    self.mark_render_changed();
-                }
-            }
+            Mode::New(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
+            Mode::Resume(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
             _ => {}
         }
+    }
+
+    fn apply_wizard_mount_completions<W: WizardDraft>(
+        &mut self,
+        mut wizard: W,
+        prefix: &str,
+        candidates: Vec<String>,
+    ) {
+        if wizard.step() != WizardStep::Mounts
+            || wizard.form().borrow().focused() != Some(WizardControl::MountSource)
+            || wizard.mounts().source != prefix
+        {
+            return;
+        }
+        apply_mount_completions(wizard.mounts_mut(), prefix, candidates);
+        self.mode = wizard.into_mode();
     }
 
     /// Apply the host's answer about one mount source. A source whose
@@ -54,7 +38,6 @@ impl DashboardState {
         let mut entered_move_review = false;
         let mut entered_new_review = false;
         let new_session = matches!(self.mode, Mode::New(_));
-        let visible_changed;
         let (mounts, form, step, moving) = match &mut self.mode {
             Mode::New(wizard)
                 if wizard.step == WizardStep::Mounts && wizard.mounts.source == source =>
@@ -85,7 +68,7 @@ impl DashboardState {
                     mounts
                         .forced_sources
                         .insert(source.trim().to_owned(), reason);
-                    mounts.read_only = true;
+                    mounts.forbid_overlay();
                 }
                 mounts.add_validated_mount();
                 form.forget_draft_part("attachment editor");
@@ -94,17 +77,11 @@ impl DashboardState {
                 *step = WizardStep::Review;
                 entered_move_review = moving;
                 entered_new_review = new_session;
-                visible_changed = true;
             }
             Err(error) => {
-                visible_changed = mounts.error.as_deref() != Some(error.as_str())
-                    || form.focused() != Some(WizardControl::MountSource);
                 mounts.error = Some(error);
                 form.focus(WizardControl::MountSource);
             }
-        }
-        if visible_changed {
-            self.mark_render_changed();
         }
         // A changed directory list needs a new prerequisite check, and a
         // corrected directory must not leave its earlier failure on the review.
@@ -165,7 +142,6 @@ impl DashboardState {
                     wizard.project_directory.set_value(&value);
                 }
                 self.apply_project_directory_validation(&value, Ok(()));
-                self.mark_render_changed();
             }
             Err(error) => {
                 if let Mode::New(wizard) = &mut self.mode {
@@ -175,7 +151,6 @@ impl DashboardState {
                     }
                 }
                 self.apply_project_directory_validation(directory, Err(error));
-                self.mark_render_changed();
             }
         }
     }
@@ -207,26 +182,26 @@ impl DashboardState {
     pub fn path_input_context(&self) -> String {
         let draft = match &self.mode {
             Mode::New(w) => format!(
-                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
+                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.project_directory.value(),
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
-                w.mounts.read_only
+                w.mounts.access
             ),
             Mode::Resume(w) => format!(
-                "resume:{}:{:?}:{:?}:{:?}:{:?}:{}",
+                "resume:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
                 w.session_id,
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
-                w.mounts.read_only
+                w.mounts.access
             ),
             Mode::Setup(dialog) => dialog.path_input_context(),
             Mode::EditContainer(e) => format!(
-                "container:{}:{:?}:{:?}:{:?}:{}",
+                "container:{}:{:?}:{:?}:{:?}:{:?}",
                 e.session_id,
                 self.state
                     .sessions
@@ -234,7 +209,7 @@ impl DashboardState {
                     .and_then(|session| self.config.targets.get(&session.target_template_id)),
                 e.source.value(),
                 e.destination.value(),
-                e.read_only
+                e.access
             ),
             _ => String::new(),
         };
@@ -259,20 +234,13 @@ impl DashboardState {
         wizard.form.get_mut().set_submission_pending(false);
         match result {
             Ok(()) => {
-                let changed = wizard.project_directory_error.is_some()
-                    || wizard.step != WizardStep::Review
-                    || wizard.form.borrow().focused() != Some(WizardControl::Submit);
                 wizard.project_directory_error = None;
                 wizard.step = WizardStep::Review;
                 wizard.form.get_mut().focus(WizardControl::Submit);
-                if changed {
-                    self.mark_render_changed();
-                }
             }
             Err(error) => {
                 if wizard.project_directory_error.as_deref() != Some(error.as_str()) {
                     wizard.project_directory_error = Some(error);
-                    self.mark_render_changed();
                 }
             }
         }

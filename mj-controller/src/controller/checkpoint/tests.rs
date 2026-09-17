@@ -67,6 +67,7 @@ fn the_export_layout_places_each_session_kind_in_its_workspace() {
     let mut session = checkpoint_test_session(session_id);
     session.bundle_id = "app-bundle".into();
     session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "hel-session".into(),
         workspace_storage: Default::default(),
     });
@@ -531,6 +532,7 @@ fn docker_checkpoint_fallback_upload_uses_docker_cp() {
         commands: RefCell::new(Vec::new()),
     };
     let locator = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
         container_id: "hel-session-12345678".to_owned(),
     };
     upload_checkpoint_spec(
@@ -558,6 +560,7 @@ fn docker_checkpoint_fallback_upload_uses_docker_cp() {
 #[test]
 fn checkpoint_export_streams_its_spec_instead_of_uploading_it() {
     let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
         workspace_storage: Default::default(),
     };
@@ -588,6 +591,7 @@ fn checkpoint_export_streams_its_spec_instead_of_uploading_it() {
 #[test]
 fn a_failing_export_is_not_retried_as_an_old_worker() {
     let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
         workspace_storage: Default::default(),
     };
@@ -618,6 +622,7 @@ fn a_failing_export_is_not_retried_as_an_old_worker() {
 #[test]
 fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
     let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
         workspace_storage: Default::default(),
     };

@@ -20,8 +20,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::{Button, ControlKind};
-use crate::components::{EventResult, Outcome, render_scrollbar, scrollbar_geometry};
-use crate::selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
+use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
+use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
 use mj_core::storage::{HistoryScope, PromptHistoryEntry};
@@ -346,7 +346,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             // down around a stopped manager.
             if state.activity_reachable {
                 state.activity_reachable = false;
-                state.mark_visible_changed();
             }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
             state.set_notice(format!("connection lost: {error:#}"));
@@ -359,7 +358,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if state.activity_reachable != activity_reachable {
         state.activity_reachable = activity_reachable;
-        state.mark_visible_changed();
     }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
@@ -380,7 +378,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
         if state.steering_supported != snapshot.operational.steering_supported {
             state.steering_supported = snapshot.operational.steering_supported;
-            state.mark_visible_changed();
         }
         state.set_session_activity(mj_client::usage_format::SessionActivity::of(
             &snapshot.operational,
@@ -389,7 +386,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     if let Some(error) = view.error {
         if state.activity_reachable {
             state.activity_reachable = false;
-            state.mark_visible_changed();
         }
         match error {
             ViewError::Unreachable(detail) => {
@@ -983,42 +979,24 @@ impl ActiveChat {
         );
     }
 
-    /// The composer's current draft. Image-bearing drafts use a versioned
-    /// envelope so detach and session switching preserve the embedded bytes.
-    pub fn draft(&self) -> String {
-        self.state.encoded_draft()
-    }
-
     pub fn latest_event_ordinal(&self) -> u64 {
         self.state.latest_seq()
     }
+}
 
-    /// Whether visible background activity needs animation frames.
-    pub fn needs_animation(&self) -> bool {
-        self.state.needs_animation()
+/// A live chat is its [`ChatState`] plus the session plumbing around it, so
+/// every read and edit of the conversation reaches the state directly instead
+/// of through a wrapper per method. Methods that consult the session handle or
+/// the feed flags stay inherent on `ActiveChat` and take precedence.
+impl std::ops::Deref for ActiveChat {
+    type Target = ChatState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
     }
-
-    /// Whether the transcript or task clocks differ from the last drawn frame.
-    pub fn clock_changed(&self) -> bool {
-        self.state.clock_changed()
-    }
-
-    /// An animation tick changes the activity spinner while work is visible.
-    pub fn animation_changed(&self) -> bool {
-        self.state.animation_changed()
-    }
-
-    /// Consumes a visible mutation performed by an external host callback,
-    /// such as review projection or refreshed session context.
-    pub fn take_render_changed(&mut self) -> bool {
-        self.state.take_render_changed()
-    }
-
-    /// Records the time-dependent cells represented by the frame just drawn.
-    /// The next clock or animation tick can then request a redraw only after
-    /// its displayed value actually moves.
-    pub fn acknowledge_render(&mut self) {
-        self.state.acknowledge_render();
+}
+impl std::ops::DerefMut for ActiveChat {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 

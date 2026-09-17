@@ -12,7 +12,7 @@ use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
 use crate::targets::{
-    BoundedProcessExecutor, CommandExecutor, CommandSpec,
+    BoundedProcessExecutor, CommandExecutor, CommandSpec, CommandTimedOut,
     ContainerTemplate as RuntimeContainerTemplate, PodmanProbe, ProcessExecutor,
     SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate, failed_podman_probe,
     run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_validation_command,
@@ -188,6 +188,7 @@ pub fn run_with_config_path(
     let (config, mut checks) = configuration_checks(config_path);
     checks.push(harness_discovery_check(config.as_ref(), executor));
     checks.extend(harness_checks(config.as_ref(), executor));
+    checks.extend(subagent_eligibility_checks(config.as_ref()));
     checks.extend(podman_checks(config.as_ref(), executor, options.smoke));
     checks.extend(docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(ssh_bare_checks(config.as_ref(), executor));
@@ -458,6 +459,40 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
         .collect()
 }
 
+/// Warn about a profile that is both listed for sub-agent use and disabled.
+///
+/// The daemon keeps running and simply does not offer such a profile to a
+/// parent, because the delegation candidates and the spawn gate both require an
+/// enabled profile. This surfaces the contradiction so the eligible list and
+/// the profile's `enabled` flag can be reconciled, rather than leaving a profile
+/// the user meant to use silently unavailable.
+fn subagent_eligibility_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    config
+        .subagents
+        .eligible_profiles
+        .iter()
+        .filter(|(_, eligible)| **eligible)
+        .filter_map(|(id, _)| {
+            let profile = config.profiles.get(id)?;
+            (!profile.enabled).then(|| {
+                DoctorCheck::warning(
+                    format!("subagents.{id}"),
+                    format!("Sub-agent profile {id}"),
+                    format!(
+                        "Profile {id:?} is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use."
+                    ),
+                    format!(
+                        "Re-enable profile {id:?}, or remove it from [subagents.eligible_profiles]."
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
 /// Point an unauthenticated profile at `mj login`, which already knows how to
 /// sign each harness in.
 ///
@@ -575,6 +610,7 @@ fn podman_image_check(
     let title = format!("Podman image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalPodman(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -702,6 +738,7 @@ fn docker_image_check(
     let title = format!("Docker image for target {id}");
     if smoke {
         let target = RuntimeTargetTemplate::LocalDocker(RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -766,8 +803,8 @@ fn ssh_connectivity(ssh: &RuntimeSshTarget, executor: &impl CommandExecutor) -> 
     let command = ssh_connectivity_probe(ssh);
     match executor.execute(&command) {
         Err(error) => SshConnectivity::Failed {
-            detail: format!("Could not run `ssh {destination} true`: {error}"),
-            remediation: SSH_MISSING_REMEDIATION.to_owned(),
+            detail: format!("Could not run `ssh {destination} true`: {error:#}"),
+            remediation: ssh_launch_failure_remediation(&error, ssh),
         },
         Ok(output) if output.status != 0 => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -792,6 +829,8 @@ enum SshFailure {
     UntrustedHostKey,
     Unauthenticated,
     ClientMissing,
+    /// The host answered nothing at all.
+    Unreachable,
     Unrecognized,
 }
 
@@ -808,6 +847,11 @@ fn classify_ssh_stderr(stderr: &str) -> SshFailure {
         "Authentication failed",
     ];
     const CLIENT_MISSING: [&str; 2] = ["ssh: command not found", "No such file or directory"];
+    const UNREACHABLE: [&str; 3] = [
+        "Connection timed out",
+        "No route to host",
+        "Network is unreachable",
+    ];
 
     let reported = |signatures: &[&str]| signatures.iter().any(|text| stderr.contains(text));
     if reported(&UNTRUSTED_HOST_KEY) {
@@ -816,9 +860,41 @@ fn classify_ssh_stderr(stderr: &str) -> SshFailure {
         SshFailure::Unauthenticated
     } else if reported(&CLIENT_MISSING) {
         SshFailure::ClientMissing
+    } else if reported(&UNREACHABLE) {
+        SshFailure::Unreachable
     } else {
         SshFailure::Unrecognized
     }
+}
+
+/// Map a failure to run `ssh` at all (as opposed to `ssh` exiting nonzero)
+/// to the command that fixes it.
+fn ssh_launch_failure_remediation(error: &anyhow::Error, ssh: &RuntimeSshTarget) -> String {
+    if error.downcast_ref::<CommandTimedOut>().is_some() {
+        return ssh_unreachable_remediation(ssh);
+    }
+    let missing_binary = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if missing_binary {
+        return SSH_MISSING_REMEDIATION.to_owned();
+    }
+    format!(
+        "Run `ssh {} true` by hand and resolve the error it reports: {error:#}",
+        ssh.destination
+    )
+}
+
+/// The host answered nothing: it is asleep, behind a down VPN, or the cloud
+/// session that exposes it has expired.
+fn ssh_unreachable_remediation(ssh: &RuntimeSshTarget) -> String {
+    let host = ssh_host_only(&ssh.destination);
+    format!(
+        "Check that {host} is up and reachable from this machine: wake it, bring up the VPN, or refresh the cloud session that exposes it, then run `ssh {} true` by hand.",
+        ssh.destination
+    )
 }
 
 /// Map `ssh -o BatchMode=yes` stderr to the command that fixes it.
@@ -840,6 +916,7 @@ fn ssh_failure_remediation(stderr: &str, ssh: &RuntimeSshTarget) -> String {
             }
         },
         SshFailure::ClientMissing => SSH_MISSING_REMEDIATION.to_owned(),
+        SshFailure::Unreachable => ssh_unreachable_remediation(ssh),
         SshFailure::Unrecognized => {
             format!(
                 "Run `ssh {destination} true` by hand and resolve the error it reports: {stderr}"
@@ -1009,6 +1086,7 @@ fn ssh_podman_runtime_check(
     let target = RuntimeTargetTemplate::SshPodman {
         ssh: ssh.clone(),
         container: RuntimeContainerTemplate {
+            build_cache: None,
             image: image.to_owned(),
             pull_policy: Default::default(),
             extra_run_args: vec![],
@@ -1311,6 +1389,7 @@ fn ssh_docker_check(
         let target = RuntimeTargetTemplate::SshDocker {
             ssh: ssh.clone(),
             container: RuntimeContainerTemplate {
+                build_cache: None,
                 image: image.to_owned(),
                 pull_policy: Default::default(),
                 extra_run_args: vec![],
@@ -1732,6 +1811,7 @@ pub fn apple_container_check(
     }
 
     let target = RuntimeTargetTemplate::AppleContainer(RuntimeContainerTemplate {
+        build_cache: None,
         image,
         pull_policy: Default::default(),
         extra_run_args: vec![],

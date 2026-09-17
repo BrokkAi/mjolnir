@@ -3,7 +3,6 @@
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use rat_event::{ConsumedEvent, Outcome};
 use rat_focus::{Focus, FocusBuilder, FocusFlag, HasFocus, Navigation};
 use ratatui::layout::Rect;
 use std::fmt;
@@ -62,11 +61,13 @@ pub enum Interaction<K> {
     Cancel,
 }
 
-/// A small result which preserves both repaint information and a typed action.
+/// A small result which preserves both whether the event was consumed and a
+/// typed action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventResult<A> {
-    /// The state change caused by the event.
-    pub outcome: Outcome,
+    /// Whether this handler took responsibility for the event. An event that
+    /// was not consumed is offered to the next handler.
+    pub consumed: bool,
     /// The screen-level action, when one was produced.
     pub action: Option<A>,
 }
@@ -76,69 +77,36 @@ impl<A> EventResult<A> {
     #[must_use]
     pub const fn ignored() -> Self {
         Self {
-            outcome: Outcome::Continue,
+            consumed: false,
             action: None,
         }
     }
 
-    /// A consumed event which did not produce a visible state change.
+    /// A consumed event which produced no action.
     #[must_use]
     pub const fn handled() -> Self {
         Self {
-            outcome: Outcome::Unchanged,
+            consumed: true,
             action: None,
         }
     }
 
-    /// A consumed event which carries an action but does not itself repaint
-    /// the form. The action is deliberately retained even when the outcome is
-    /// unchanged; callers may need to apply a domain operation such as a
-    /// button activation or a no-op cursor request.
+    /// A consumed event which carries an action for the owner to apply.
     #[must_use]
-    pub const fn unchanged(action: Option<A>) -> Self {
+    pub const fn with_action(action: A) -> Self {
         Self {
-            outcome: Outcome::Unchanged,
-            action,
+            consumed: true,
+            action: Some(action),
         }
     }
 
-    /// A consumed event which should cause a repaint.
-    #[must_use]
-    pub const fn changed(action: Option<A>) -> Self {
-        Self {
-            outcome: Outcome::Changed,
-            action,
-        }
-    }
-
-    /// Replaces the action while preserving this result's repaint outcome.
+    /// Replaces the action while preserving whether the event was consumed.
     #[must_use]
     pub fn map_action<B>(self, map: impl FnOnce(A) -> B) -> EventResult<B> {
         EventResult {
-            outcome: self.outcome,
+            consumed: self.consumed,
             action: self.action.map(map),
         }
-    }
-
-    /// Replaces the outcome while preserving this result's action.
-    #[must_use]
-    pub const fn with_outcome(mut self, outcome: Outcome) -> Self {
-        self.outcome = outcome;
-        self
-    }
-
-    /// Combines a second repaint outcome with this result, retaining the
-    /// stronger of the two while preserving the action.
-    #[must_use]
-    pub fn merge_outcome(self, outcome: Outcome) -> Self {
-        let merged = self.outcome.max(outcome);
-        self.with_outcome(merged)
-    }
-}
-
-impl<A> ConsumedEvent for EventResult<A> {
-    fn is_consumed(&self) -> bool {
-        self.outcome.is_consumed()
     }
 }
 
@@ -244,14 +212,6 @@ enum PointerOwner<K> {
 enum PointerHit<K> {
     Control(K),
     Dismiss,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FormVisualState<K> {
-    focused: Option<K>,
-    focused_kind: Option<ControlKind>,
-    armed: Option<K>,
-    dismiss_armed: bool,
 }
 
 impl<K> Control<K> {
@@ -768,7 +728,6 @@ impl<K: Copy + Eq> Form<K> {
         {
             self.cancel_pointer();
         }
-        let before = self.visual_state();
         if matches!(event, Event::Key(key) if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press)
             && let Some(id) = self.blocked_activation
         {
@@ -782,8 +741,7 @@ impl<K: Copy + Eq> Form<K> {
         {
             self.blocked_activation = None;
         }
-        let result = self.handle_inner(event);
-        self.report_result(before, result)
+        self.handle_inner(event)
     }
 
     fn handle_inner(&mut self, event: &Event) -> EventResult<Interaction<K>> {
@@ -799,46 +757,9 @@ impl<K: Copy + Eq> Form<K> {
         if let Event::Paste(text) = event
             && let Some(id) = self.focused().filter(|id| self.kind(*id).is_field())
         {
-            return EventResult::changed(Some(Interaction::Edit(
-                id,
-                FieldEdit::Paste(text.clone()),
-            )));
+            return EventResult::with_action(Interaction::Edit(id, FieldEdit::Paste(text.clone())));
         }
         EventResult::ignored()
-    }
-
-    fn visual_state(&self) -> FormVisualState<K> {
-        let focused = self.focused();
-        FormVisualState {
-            focused,
-            focused_kind: focused.and_then(|id| self.control(id).map(|control| control.kind)),
-            armed: match self.pointer_owner {
-                Some(PointerOwner::Control(id)) => Some(id).filter(|id| {
-                    self.active_control(*id)
-                        .is_some_and(|control| control.enabled && !control.kind.is_field())
-                }),
-                Some(PointerOwner::Dismiss) | None => None,
-            },
-            dismiss_armed: self.dismiss_is_armed(),
-        }
-    }
-
-    fn report_result(
-        &self,
-        before: FormVisualState<K>,
-        mut result: EventResult<Interaction<K>>,
-    ) -> EventResult<Interaction<K>> {
-        let visible_changed = before != self.visual_state();
-        if visible_changed {
-            result.outcome = Outcome::Changed;
-        } else if result.outcome == Outcome::Changed {
-            // Form handlers also emit actions for domain operations whose
-            // result is not visible until the owner applies them (or which is
-            // intentionally a no-op). Keep those actions consumed, but do not
-            // force a repaint for the form itself.
-            result.outcome = Outcome::Unchanged;
-        }
-        result
     }
 
     /// Returns true while a mouse control owns a press/release gesture.
@@ -1008,28 +929,20 @@ impl<K: Copy + Eq> Form<K> {
                     ..
                 } = self.kind(id)
             {
-                return Some(EventResult::changed(Some(Interaction::ComboBoxCommit(
+                return Some(EventResult::with_action(Interaction::ComboBoxCommit(
                     id, selected,
-                ))));
+                )));
             }
-            let changed = if is_back_tab(*key) {
-                self.focus_pending_sibling(false)
-            } else {
-                self.focus_pending_sibling(true)
-            };
-            return Some(if changed {
-                EventResult::changed(None)
-            } else {
-                EventResult::handled()
-            });
+            self.focus_pending_sibling(!is_back_tab(*key));
+            return Some(EventResult::handled());
         }
         if is_press && ordinary && key.code == KeyCode::Esc {
             if let Some(id) = focused
                 && matches!(self.kind(id), ControlKind::ComboBox { expanded: true, .. })
             {
-                return Some(EventResult::changed(Some(Interaction::ComboBoxDismiss(id))));
+                return Some(EventResult::with_action(Interaction::ComboBoxDismiss(id)));
             }
-            return Some(EventResult::changed(Some(Interaction::Cancel)));
+            return Some(EventResult::with_action(Interaction::Cancel));
         }
 
         let id = focused?;
@@ -1047,33 +960,29 @@ impl<K: Copy + Eq> Form<K> {
                 && ordinary
                 && (key.code == KeyCode::Enter || key.code == KeyCode::Char(' '))
             {
-                return Some(EventResult::changed(Some(Interaction::Activate(id))));
+                return Some(EventResult::with_action(Interaction::Activate(id)));
             }
             if ordinary && (key.code == KeyCode::Left || key.code == KeyCode::Right) {
-                let changed = self.focus_sibling(id, key.code == KeyCode::Right, true);
-                return Some(if changed {
-                    EventResult::changed(None)
-                } else {
-                    EventResult::handled()
-                });
+                self.focus_sibling(id, key.code == KeyCode::Right, true);
+                return Some(EventResult::handled());
             }
             return None;
         }
         if kind.is_field() {
             if is_press && ordinary && key.code == KeyCode::Enter {
-                return Some(EventResult::changed(Some(Interaction::Activate(id))));
+                return Some(EventResult::with_action(Interaction::Activate(id)));
             }
-            return Some(EventResult::changed(Some(Interaction::Edit(
+            return Some(EventResult::with_action(Interaction::Edit(
                 id,
                 FieldEdit::Key(*key),
-            ))));
+            )));
         }
         if is_press
             && kind.is_checkbox()
             && ordinary
             && (key.code == KeyCode::Enter || key.code == KeyCode::Char(' '))
         {
-            return Some(EventResult::changed(Some(Interaction::Toggle(id))));
+            return Some(EventResult::with_action(Interaction::Toggle(id)));
         }
         if ordinary
             && let ControlKind::ComboBox {
@@ -1084,14 +993,14 @@ impl<K: Copy + Eq> Form<K> {
         {
             if is_press && matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
                 return Some(if expanded {
-                    EventResult::changed(Some(Interaction::ComboBoxCommit(id, selected)))
+                    EventResult::with_action(Interaction::ComboBoxCommit(id, selected))
                 } else {
-                    EventResult::changed(Some(Interaction::Activate(id)))
+                    EventResult::with_action(Interaction::Activate(id))
                 });
             }
             if expanded && let Some(next) = list_selection(key.code, selected, len) {
                 self.set_selected(id, next);
-                return Some(EventResult::changed(Some(Interaction::Select(id, next))));
+                return Some(EventResult::with_action(Interaction::Select(id, next)));
             }
         }
         if ordinary && let ControlKind::ChoiceList { len, selected } = kind {
@@ -1107,18 +1016,18 @@ impl<K: Copy + Eq> Form<K> {
                         .is_some_and(|row| control.row_enabled.get(row).copied().unwrap_or(true))
                 };
                 return Some(if allowed {
-                    EventResult::changed(Some(if key.code == KeyCode::Enter {
+                    EventResult::with_action(if key.code == KeyCode::Enter {
                         Interaction::Activate(id)
                     } else {
                         Interaction::Toggle(id)
-                    }))
+                    })
                 } else {
                     EventResult::handled()
                 });
             }
             if let Some(next) = self.list_selection(id, key.code, selected, len) {
                 self.set_selected(id, next);
-                return Some(EventResult::changed(Some(Interaction::Select(id, next))));
+                return Some(EventResult::with_action(Interaction::Select(id, next)));
             }
         }
         if ordinary
@@ -1126,14 +1035,14 @@ impl<K: Copy + Eq> Form<K> {
             && let Some(next) = tab_selection(key.code, selected, len)
         {
             self.set_selected(id, next);
-            return Some(EventResult::changed(Some(Interaction::Select(id, next))));
+            return Some(EventResult::with_action(Interaction::Select(id, next)));
         }
         if is_press
             && ordinary
             && matches!(kind, ControlKind::Tabs { .. })
             && key.code == KeyCode::Enter
         {
-            return Some(EventResult::changed(Some(Interaction::Activate(id))));
+            return Some(EventResult::with_action(Interaction::Activate(id)));
         }
         None
     }
@@ -1250,7 +1159,7 @@ impl<K: Copy + Eq> Form<K> {
                                 || matches!(owner, PointerOwner::Control(id) if self.pressed_target.as_ref() != self.click_target(id, x, y).as_ref())
                             {
                                 self.cancel_pointer();
-                                return Some(EventResult::changed(None));
+                                return Some(EventResult::handled());
                             }
                             return Some(EventResult::handled());
                         }
@@ -1258,20 +1167,20 @@ impl<K: Copy + Eq> Form<K> {
                             let owner = self.pointer_owner.take()?;
                             if !self.pointer_owner_contains(owner, x, y) {
                                 self.cancel_pointer();
-                                return Some(EventResult::changed(None));
+                                return Some(EventResult::handled());
                             }
                             if let PointerOwner::Control(id) = owner
                                 && self.pressed_target.take() != self.click_target(id, x, y)
                             {
                                 self.cancel_pointer();
-                                return Some(EventResult::changed(None));
+                                return Some(EventResult::handled());
                             }
                             let interaction = match owner {
                                 PointerOwner::Control(id) => self.pointer_interaction(id, x, y),
                                 PointerOwner::Dismiss => Some(Interaction::Cancel),
                             };
                             return Some(match interaction {
-                                Some(action) => EventResult::changed(Some(action)),
+                                Some(action) => EventResult::with_action(action),
                                 None => EventResult::handled(),
                             });
                         }
@@ -1306,7 +1215,7 @@ impl<K: Copy + Eq> Form<K> {
                     self.focus(id);
                     if let Some(next) = self.list_selection(id, code, selected, len) {
                         self.set_selected(id, next);
-                        return Some(EventResult::changed(Some(Interaction::Select(id, next))));
+                        return Some(EventResult::with_action(Interaction::Select(id, next)));
                     }
                     return Some(EventResult::handled());
                 }
@@ -1322,7 +1231,7 @@ impl<K: Copy + Eq> Form<K> {
                             }
                             self.last_click = None;
                             self.pointer_owner = Some(PointerOwner::Dismiss);
-                            return Some(EventResult::changed(None));
+                            return Some(EventResult::handled());
                         }
                         PointerHit::Control(id) => {
                             let control = self.control(id)?;
@@ -1367,10 +1276,10 @@ impl<K: Copy + Eq> Form<K> {
                             }
                             self.focus(id);
                             if kind.is_field() || editor {
-                                return Some(EventResult::changed(Some(Interaction::Edit(
+                                return Some(EventResult::with_action(Interaction::Edit(
                                     id,
                                     FieldEdit::Cursor(cursor),
-                                ))));
+                                )));
                             }
                             if kind.is_button()
                                 || kind.is_checkbox()
@@ -1380,7 +1289,7 @@ impl<K: Copy + Eq> Form<K> {
                             {
                                 self.pressed_target = target;
                                 self.pointer_owner = Some(PointerOwner::Control(id));
-                                return Some(EventResult::changed(None));
+                                return Some(EventResult::handled());
                             }
                         }
                     }
@@ -1684,31 +1593,34 @@ fn cursor_at<K>(control: &Control<K>, x: u16, y: u16) -> usize {
 }
 
 /// Applies a field edit to the existing readline editor.
-pub fn apply_field_edit(input: &mut TextInput, edit: FieldEdit) -> Outcome {
+///
+/// A cursor move counts as a change: callers such as the path fields recompute
+/// completions from the text under the cursor.
+pub fn apply_field_edit(input: &mut TextInput, edit: FieldEdit) -> EditOutcome {
     match edit {
         FieldEdit::Key(key) => {
             let cursor = input.cursor();
             let outcome = input.handle_key(key);
-            if input.cursor() != cursor {
-                Outcome::Changed
+            if input.cursor() == cursor {
+                outcome
             } else {
-                match outcome {
-                    EditOutcome::Unhandled => Outcome::Continue,
-                    EditOutcome::Handled => Outcome::Unchanged,
-                    EditOutcome::Changed => Outcome::Changed,
-                }
+                EditOutcome::Changed
             }
         }
-        FieldEdit::Paste(text) => input
-            .insert_str(&crate::text_input::single_line_paste(&text))
-            .into(),
+        FieldEdit::Paste(text) => {
+            if input.insert_str(&crate::text_input::single_line_paste(&text)) {
+                EditOutcome::Changed
+            } else {
+                EditOutcome::Handled
+            }
+        }
         FieldEdit::Cursor(offset) => {
             let before = input.cursor();
             input.set_cursor(offset);
             if before == input.cursor() {
-                Outcome::Unchanged
+                EditOutcome::Handled
             } else {
-                Outcome::Changed
+                EditOutcome::Changed
             }
         }
     }

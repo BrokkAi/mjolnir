@@ -24,7 +24,7 @@ use mj_core::state::{
 };
 
 use mj_chat::chat::{ChatAction, ChatState, Notices, SessionHeaderIdentity};
-use mj_chat::components::{EventResult, Outcome};
+use mj_chat::components::EventResult;
 use mj_chat::selection::FrameSurfaces;
 use mj_client::quota::ProfileQuota;
 use mj_client::review::RuntimeReviewView;
@@ -48,6 +48,7 @@ mod dialogs;
 mod go;
 mod help;
 mod ingest;
+mod modal_surface;
 mod palette;
 mod render;
 mod render_changes;
@@ -672,12 +673,8 @@ pub struct DashboardState {
     pub(crate) workspace_control_focus: WorkspaceControlFocus,
     workspace_management_generation: u64,
     pub(crate) render_change_snapshot: render_changes::RenderChangeSnapshot,
-    /// Set by visible mutations and consumed by the controller before its
-    /// next wait. A separate revision lets event handling distinguish a
-    /// mutation made during this event from a flag set by earlier work.
-    render_changed: Cell<bool>,
-    render_change_revision: Cell<u64>,
-    last_event_outcome: Cell<Outcome>,
+    /// Whether a handler took responsibility for the event being dispatched.
+    last_event_consumed: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -791,9 +788,7 @@ impl DashboardState {
             workspace_control_focus: WorkspaceControlFocus::Tabs,
             workspace_management_generation: 0,
             render_change_snapshot: render_changes::RenderChangeSnapshot::default(),
-            render_changed: Cell::new(false),
-            render_change_revision: Cell::new(0),
-            last_event_outcome: Cell::new(Outcome::Continue),
+            last_event_consumed: Cell::new(false),
         };
         dashboard.session_details = dashboard
             .state
@@ -803,23 +798,6 @@ impl DashboardState {
             .collect();
         dashboard.clamp_selections();
         dashboard
-    }
-}
-
-pub(crate) fn mark_render_changed_cells(changed: &Cell<bool>, revision: &Cell<u64>) {
-    changed.set(true);
-    revision.set(revision.get().wrapping_add(1));
-}
-
-pub(crate) fn record_form_outcome_cells<A>(
-    event_outcome: &Cell<Outcome>,
-    changed: &Cell<bool>,
-    revision: &Cell<u64>,
-    result: &EventResult<A>,
-) {
-    event_outcome.set(result.outcome);
-    if result.outcome == Outcome::Changed {
-        mark_render_changed_cells(changed, revision);
     }
 }
 

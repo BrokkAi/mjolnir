@@ -95,21 +95,38 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        let result = self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
-        let result = match result {
-            Ok(()) => {
-                self.connect_and_start_worker(session_id, executor, &backend, &worker_root, false)
-                    .await
+        // Placement failures must reach the same failure arm as startup
+        // failures; otherwise the child record stays `Provisioning` forever.
+        let placement = self.worker_placement(session_id);
+        let (result, placement) = match placement {
+            Ok((backend, worker_root)) => {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                let prepared =
+                    self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
+                let result = match prepared {
+                    Ok(()) => {
+                        self.connect_and_start_worker(
+                            session_id,
+                            executor,
+                            &backend,
+                            &worker_root,
+                            false,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                (result, Some((backend, worker_root)))
             }
-            Err(error) => Err(error),
+            Err(error) => (Err(error), None),
         };
         match result {
             Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
             Err(error) => {
-                if let Err(stop_error) =
-                    super::worker_binary::stop_worker(executor, &backend, &worker_root)
+                // Without placement there is no worker to stop.
+                if let Some((backend, worker_root)) = placement
+                    && let Err(stop_error) =
+                        super::worker_binary::stop_worker(executor, &backend, &worker_root)
                 {
                     tracing::warn!(
                         session_id,
@@ -117,6 +134,11 @@ impl Controller {
                         "failed sub-agent worker could not be stopped cleanly"
                     );
                 }
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "sub-agent startup failed"
+                );
                 let record = self
                     .state
                     .sessions
@@ -283,6 +305,10 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
+            // The image's user is a property of the host's copy of the image,
+            // so it is read here, once per image per daemon, and handed to the
+            // plan rather than stored on the session.
+            let image_user = podman_image_user(&target, executor);
             let mut bundle = if session.project_directory.is_some() {
                 None
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
@@ -314,6 +340,17 @@ impl Controller {
                     executor,
                 )
             });
+            // Mounts are fixed when the container is created, so the build
+            // cache is decided here, before the provisioning plan is built.
+            let build_cache = super::mbx::prepare(
+                &target,
+                &self.config.build_cache,
+                &session,
+                bundle.as_ref(),
+                prepared_cache.as_ref(),
+                &mut runtime_mounts,
+                executor,
+            );
             let provision = if let Some(project_directory) = &session.project_directory {
                 targets::provision_bare_project_plan(
                     &target,
@@ -325,7 +362,14 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
-                        targets::provision_plan(&target, session_id, bundle, &runtime_mounts)
+                        targets::provision_plan(
+                            &target,
+                            session_id,
+                            bundle,
+                            &runtime_mounts,
+                            image_user,
+                            session.container_workspace.as_deref(),
+                        )
                     })
             };
             let mut provision = match provision {
@@ -358,7 +402,7 @@ impl Controller {
                         executor,
                     )
                 })
-                .map(|(locator, remainder)| (locator, remainder, bundle));
+                .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
             if result.is_err()
                 && let Some(cache) = &prepared_cache
             {
@@ -405,8 +449,13 @@ impl Controller {
                     ))),
                 };
             }
-            Ok((locator, remainder, bundle)) => {
+            Ok((locator, remainder, bundle, build_cache)) => {
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
+                self.state
+                    .sessions
+                    .get_mut(session_id)
+                    .expect("session retained after provisioning")
+                    .build_cache = build_cache;
                 let session = &self.state.sessions[session_id];
                 let backend = backend_locator(
                     session
@@ -917,23 +966,28 @@ fn provisioned_locator(
         // nothing that a failure could leak.
         targets::TargetTemplate::LocalBare => return None,
         targets::TargetTemplate::LocalPodman(container) => targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: container_id()?,
             workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
         },
         targets::TargetTemplate::LocalDocker(_) => targets::TargetLocator::LocalDocker {
+            borrowed_from: None,
             container_id: container_id()?,
         },
         targets::TargetTemplate::AppleContainer(_) => targets::TargetLocator::AppleContainer {
+            borrowed_from: None,
             container_id: container_id()?,
         },
         targets::TargetTemplate::SshPodman { ssh, container } => {
             targets::TargetLocator::SshPodman {
+                borrowed_from: None,
                 ssh: ssh.clone(),
                 container_id: container_id()?,
                 workspace_storage: targets::podman_workspace_locator(container, session_id).ok()?,
             }
         }
         targets::TargetTemplate::SshDocker { ssh, .. } => targets::TargetLocator::SshDocker {
+            borrowed_from: None,
             ssh: ssh.clone(),
             container_id: container_id()?,
         },
@@ -979,7 +1033,7 @@ pub(super) fn enforce_overlay_capable_mounts(
     };
     let overlaid = mounts
         .iter()
-        .filter(|mount| !mount.read_only)
+        .filter(|mount| mount.access == targets::MountAccess::Cow)
         .map(|mount| mount.source.clone())
         .collect::<Vec<_>>();
     if overlaid.is_empty() {
@@ -1001,19 +1055,73 @@ pub(super) fn enforce_overlay_capable_mounts(
     let mut notices = Vec::new();
     for (mount, filesystem) in mounts
         .iter_mut()
-        .filter(|mount| !mount.read_only)
+        .filter(|mount| mount.access == targets::MountAccess::Cow)
         .zip(filesystems)
     {
         let Some(reason) = targets::overlay_unsupported_filesystem(&filesystem) else {
             continue;
         };
-        mount.read_only = true;
+        mount.access = mount.access.without_overlay();
         notices.push(format!(
             "Mounted {} read-only: the overlay is unreliable on {filesystem} ({reason}).",
             mount.source.display()
         ));
     }
     notices
+}
+
+/// The image users already probed, keyed by container host and image
+/// reference. An image's
+/// configured user does not change under a fixed reference, and reading it
+/// costs a container start, so each daemon asks a host once.
+static IMAGE_USERS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, targets::ImageUser>>> =
+    std::sync::LazyLock::new(std::sync::Mutex::default);
+
+/// The uid and gid a Podman session container maps onto the host user.
+///
+/// Only Podman is asked: Docker and Apple's `container` engine are left with
+/// their own defaults. A probe that cannot answer is not a launch failure —
+/// the container falls back to plain `--userns=keep-id`, which maps the
+/// image's default user, and the user is told what happened.
+pub(super) fn podman_image_user(
+    target: &targets::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Option<targets::ImageUser> {
+    let (ssh, container) = match target {
+        targets::TargetTemplate::LocalPodman(container) => (None, container),
+        targets::TargetTemplate::SshPodman { ssh, container } => (Some(ssh), container),
+        _ => return None,
+    };
+    let image = container.image.as_str();
+    let key = format!(
+        "{}|{image}",
+        ssh.map_or("local", |ssh| ssh.destination.as_str())
+    );
+    if let Some(cached) = IMAGE_USERS.lock().expect("image user cache").get(&key) {
+        return Some(*cached);
+    }
+    match targets::probe_image_user(ssh, container, executor) {
+        Ok(user) => {
+            IMAGE_USERS
+                .lock()
+                .expect("image user cache")
+                .insert(key, user);
+            Some(user)
+        }
+        Err(error) => {
+            tracing::warn!(
+                image,
+                error = format!("{error:#}"),
+                "could not read the container image user; keeping Podman's default user mapping"
+            );
+            executor.notify_notice(&format!(
+                "Could not read the user of image {image}, so the container runs with Podman's \
+                 default user mapping and may not be able to write to an attached directory: \
+                 {error:#}"
+            ));
+            None
+        }
+    }
 }
 
 /// Reports every command an installer issues as one launch stage, so progress

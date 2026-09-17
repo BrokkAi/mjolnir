@@ -42,9 +42,13 @@ impl DashboardContext {
                     return;
                 }
             };
-            let _ = updates.send(DashboardIoUpdate::TranscriptTailSeed {
-                materialized: Box::new(materialized),
-            });
+            report(
+                "seeding the transcript tail",
+                &updates,
+                DashboardIoUpdate::TranscriptTailSeed {
+                    materialized: Box::new(materialized),
+                },
+            );
         });
     }
 
@@ -249,9 +253,10 @@ impl DashboardContext {
 
     /// Opens the conversation the surface should start on, once the summaries
     /// it compares have arrived or the wait for them has run out.
-    pub(crate) fn maybe_open_startup_session(&mut self) {
+    /// Reports whether the pick ran, which happens at most once.
+    pub(crate) fn maybe_open_startup_session(&mut self) -> bool {
         if !self.startup.ready(std::time::Instant::now()) {
-            return;
+            return false;
         }
         let Some(session_id) = startup_session_choice(
             self.dashboard.active_workspace_id(),
@@ -265,10 +270,11 @@ impl DashboardContext {
             |session_id| self.dashboard.session_activity_at_ms(session_id),
         ) else {
             self.dashboard.focus_sessions();
-            return;
+            return true;
         };
         self.dashboard.focus_prompt();
         self.open_chat_session(&session_id);
+        true
     }
 
     pub(crate) fn resolve_project_sources(&mut self) {

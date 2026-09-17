@@ -1739,6 +1739,8 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 #[cfg(unix)]
 fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),

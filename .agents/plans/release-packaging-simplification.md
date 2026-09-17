@@ -47,3 +47,8 @@ Plan created 2026-09-16 following the user's request for dramatically simpler Ca
 Validation completed 2026-09-16: cargo-release 1.1.5 bumped an isolated project copy to 2.10.0, updated only Cargo.toml and Cargo.lock, and created one commit with no tag or push. All twelve source archives were assembled and their LICENSE contents compared against the shared root file; README and embedded guides matched canonical inputs, and the extracted core package built successfully. Full cargo tests, Clippy, cargo-deny, crate ownership checks, five workflow behavior tests, YAML parsing, changed-source formatting, and diff checks passed. Both release reports generated successfully under target/release-notices. The docs site built and checked 1,867 internal links across 25 pages.
 
 Cargo emits a manifest warning when both SPDX license and license-file metadata are present. Both are intentionally retained: the SPDX declaration preserves the existing GPL-3.0-only policy, while license-file makes Cargo include the shared text automatically. Removing SPDX caused the detector to infer GPL-3.0-or-later and fail existing policy; that experiment was reverted rather than broadening allowed licenses. Existing upstream license inputs remain tracked, while removed copies and reports are recoverable from Git.
+
+Follow-up 2026-09-16: the manifest warning is gone. `license-file` was removed
+and each published crate now carries a `LICENSE` symlink to the root file,
+which `cargo package` dereferences into the archive, so the SPDX declaration,
+the single source text, and a warning-free build all hold at once.

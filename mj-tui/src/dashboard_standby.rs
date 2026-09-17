@@ -10,7 +10,6 @@ impl DashboardState {
         }
         self.current_session_id = session_id;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
     /// When this session's materialized projection last changed, in
@@ -34,7 +33,6 @@ impl DashboardState {
             return;
         }
         self.opening_session = session_id;
-        self.mark_render_changed();
     }
 
     /// The session an attach is still running for, if any.
@@ -185,12 +183,7 @@ impl DashboardState {
         // CONTROL. Once the dashboard has declined the chord, keep that
         // platform convention from turning Ctrl-A/K/Y into inserted text.
         let key = standby_prompt_key(key);
-        let (action, changed) = {
-            let standby = self.standby_prompt_mut(&session_id);
-            let action = standby.handle_key(key);
-            let changed = standby.take_render_changed();
-            (action, changed)
-        };
+        let action = self.standby_prompt_mut(&session_id).handle_key(key);
         match action {
             ChatAction::CycleFocus { reverse } => {
                 self.cycle_focus(reverse);
@@ -204,9 +197,6 @@ impl DashboardState {
                 );
             }
             _ => {}
-        }
-        if changed {
-            self.mark_render_changed();
         }
         self.record_event_handled();
         Some(DashboardAction::None)

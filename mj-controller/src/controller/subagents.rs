@@ -117,6 +117,9 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            // A child shares its parent's container, so it shares the build
+            // cache that container was created with.
+            build_cache: parent.build_cache.clone(),
             // A child never receives the Mjolnir sub-agent tools, so it can
             // never spawn a grandchild.
             mjolnir_subagents: Some(false),
@@ -124,6 +127,9 @@ impl Controller {
             archived: false,
             container_cpus: None,
             container_memory: None,
+            // A child runs inside its parent's container, so it works in the
+            // parent's workspace, including the legacy shared one.
+            container_workspace: parent.container_workspace.clone(),
             id: child_id.clone(),
             workspace_id: parent.workspace_id.clone(),
             title: request.task_name.clone(),
@@ -244,7 +250,47 @@ fn borrowed_locator(
             workspace: workspace.clone(),
             worker_id: Some(child_id.to_owned()),
         },
-        other => other.clone(),
+        // A container child runs its own worker inside the parent's container
+        // and records the parent as the container's owner, so cleanup and
+        // whole-target operations stay with the parent.
+        TargetLocator::LocalPodman {
+            container_id,
+            workspace_storage,
+            ..
+        } => TargetLocator::LocalPodman {
+            container_id: container_id.clone(),
+            workspace_storage: workspace_storage.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
+        TargetLocator::LocalDocker { container_id, .. } => TargetLocator::LocalDocker {
+            container_id: container_id.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
+        TargetLocator::AppleContainer { container_id, .. } => TargetLocator::AppleContainer {
+            container_id: container_id.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
+        TargetLocator::SshPodman {
+            host,
+            container_id,
+            workspace_storage,
+            ..
+        } => TargetLocator::SshPodman {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            workspace_storage: workspace_storage.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
+        TargetLocator::SshDocker {
+            host, container_id, ..
+        } => TargetLocator::SshDocker {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            borrowed_from: Some(parent_id.to_owned()),
+        },
+        // EC2 children keep the parent's locator unchanged, as they did before
+        // container borrowing was recorded.
+        other @ TargetLocator::AwsEc2 { .. } => other.clone(),
     })
 }
 
@@ -263,6 +309,59 @@ fn ensure_parent_may_delegate(parent: &SessionRecord, global_enabled: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_container_child_borrows_its_parents_container() {
+        use mj_core::state::{PodmanWorkspaceLocator, TargetLocator};
+
+        let parent_id = "0123456789abcdef0123456789abcdef";
+        let child_id = "fedcba9876543210fedcba9876543210";
+        let container = mj_core::targets::resource_name(parent_id).unwrap();
+
+        let local = borrowed_locator(
+            &TargetLocator::LocalPodman {
+                container_id: container.clone(),
+                workspace_storage: PodmanWorkspaceLocator::Volume {
+                    name: "parent-volume".to_owned(),
+                },
+                borrowed_from: None,
+            },
+            parent_id,
+            child_id,
+        )
+        .unwrap();
+        assert_eq!(
+            local,
+            TargetLocator::LocalPodman {
+                container_id: container.clone(),
+                workspace_storage: PodmanWorkspaceLocator::Volume {
+                    name: "parent-volume".to_owned(),
+                },
+                borrowed_from: Some(parent_id.to_owned()),
+            }
+        );
+
+        let remote = borrowed_locator(
+            &TargetLocator::SshPodman {
+                host: "builder".to_owned(),
+                container_id: container.clone(),
+                workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+                borrowed_from: None,
+            },
+            parent_id,
+            child_id,
+        )
+        .unwrap();
+        assert_eq!(
+            remote,
+            TargetLocator::SshPodman {
+                host: "builder".to_owned(),
+                container_id: container,
+                workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
+                borrowed_from: Some(parent_id.to_owned()),
+            }
+        );
+    }
 
     #[test]
     fn a_parent_using_native_delegation_cannot_spawn_mjolnir_children() {

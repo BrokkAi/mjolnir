@@ -3,6 +3,7 @@ use crate::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate,
 };
+use crate::targets::MountAccess;
 
 fn user_item(position: u64, text: &str) -> Arc<TranscriptItem> {
     Arc::new(TranscriptItem {
@@ -124,12 +125,14 @@ fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        build_cache: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
         container_cpus: None,
         container_memory: None,
+        container_workspace: None,
         id: "0123456789abcdef".into(),
         title: "Build Hel".into(),
         harness_kind: HarnessKind::Codex,
@@ -142,10 +145,11 @@ fn sample_state() -> State {
         additional_mounts: vec![AdditionalMount {
             source: PathBuf::from("/home/test/cache"),
             destination: PathBuf::from("/mnt/cache"),
-            read_only: false,
+            access: MountAccess::Cow,
         }],
         state: SessionState::Running,
         target: Some(TargetLocator::LocalPodman {
+            borrowed_from: None,
             container_id: "afb67d".into(),
             workspace_storage: Default::default(),
         }),
@@ -176,6 +180,7 @@ fn sample_state() -> State {
 
 fn sample_config() -> Config {
     Config {
+        build_cache: Default::default(),
         advanced: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -214,6 +219,7 @@ fn sample_config() -> Config {
             "podman".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: Default::default(),
                     platform: None,
@@ -697,12 +703,12 @@ fn mount_history_keeps_unique_recent_sources_per_host() {
             AdditionalMount {
                 source: "/srv/first".into(),
                 destination: "/mnt/first".into(),
-                read_only: false,
+                access: MountAccess::Cow,
             },
             AdditionalMount {
                 source: "/srv/second".into(),
                 destination: "/mnt/second".into(),
-                read_only: false,
+                access: MountAccess::Cow,
             },
         ],
     );
@@ -711,7 +717,7 @@ fn mount_history_keeps_unique_recent_sources_per_host() {
         &[AdditionalMount {
             source: "/srv/first".into(),
             destination: "/mnt/again".into(),
-            read_only: false,
+            access: MountAccess::Cow,
         }],
     );
 

@@ -142,14 +142,14 @@ disconnecting a client does not cancel a detached move.
 ## Recover untracked resources
 
 ```text
-mj recover scan [--json]
-mj recover adopt --session <id> --target <id> [--profile <id>] [--bundle <id>]
-mj recover destroy --session <id> --target <id> --confirm <id>
+mj recover scan [--json] [--all-instances]
+mj recover adopt --session <id> --target <id> [--profile <id>] [--bundle <id>] [--all-instances]
+mj recover destroy --session <id> --target <id> --confirm <id> [--all-instances]
 ```
 
-- `scan` lists Mjolnir-managed workers that exist on a target but are absent from controller state.
-- `adopt` probes a worker and adds it back to state. `--profile` and `--bundle` are needed only for older current-v1 workers created before ownership markers were recorded.
-- `destroy` deletes an untracked managed resource. `--confirm` must repeat the exact session ID to make accidental deletion harder.
+- `scan` lists Mjolnir-managed workers that exist on a target but are absent from controller state. By default it lists only workers this Mjolnir instance created (the `--instance` name, or a fingerprint of the data directory). `--all-instances` also lists workers created by other instances and workers from older builds that carry no instance stamp; the plain output shows which instance created each one.
+- `adopt` probes a worker and adds it back to state. `--profile` and `--bundle` are needed only for older current-v1 workers created before ownership markers were recorded. Adopting a worker from another or an unknown instance requires `--all-instances`.
+- `destroy` deletes an untracked managed resource. `--confirm` must repeat the exact session ID to make accidental deletion harder, and a worker from another or an unknown instance is refused without `--all-instances`.
 
 Inspect `scan` output before adopting or destroying anything. See [session recovery](/sessions/#recover-an-orphaned-worker) and [durability](/durability/) for the surrounding guarantees.
 

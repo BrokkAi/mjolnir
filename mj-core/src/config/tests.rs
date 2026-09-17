@@ -385,6 +385,7 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         review: ReviewConfig::default(),
         subagents: SubagentConfig::default(),
+        build_cache: BuildCacheConfig::default(),
         legacy_startup: (),
         profiles: BTreeMap::from([(
             "codex-1".into(),
@@ -414,6 +415,7 @@ fn sample_config() -> Config {
             "podman-default".into(),
             TargetTemplate::LocalPodman {
                 container: ContainerTemplate {
+                    build_cache: None,
                     image: "ubuntu:24.04".into(),
                     pull_policy: ImagePullPolicy::Auto,
                     platform: None,
@@ -1315,12 +1317,28 @@ fn version_eight_enables_parent_only_subagents_by_default() {
 }
 
 #[test]
+fn build_cache_sizes_accept_the_spellings_mbx_accepts() {
+    for (text, bytes) in [
+        ("100", 100),
+        ("100B", 100),
+        ("20GB", 20_000_000_000),
+        ("20GiB", 20 * 1024 * 1024 * 1024),
+        ("1TiB", 1024_u64.pow(4)),
+        (" 4MiB ", 4 * 1024 * 1024),
+    ] {
+        assert_eq!(parse_build_cache_size(text), Some(bytes), "{text}");
+    }
+    for text in ["", "GiB", "-1", "20gib", "20 gigabytes", "1.5GiB"] {
+        assert_eq!(parse_build_cache_size(text), None, "{text}");
+    }
+}
+
+#[test]
 fn subagents_reject_invalid_limits_and_unavailable_profiles() {
     let profile = "[profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n";
     for section in [
         "[subagents]\nmax_concurrent = 0\n",
         "[subagents.eligible_profiles]\nmissing = true\n",
-        "[subagents.eligible_profiles]\nwork = true\n",
     ] {
         let error =
             toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{section}{profile}"))
@@ -1329,12 +1347,26 @@ fn subagents_reject_invalid_limits_and_unavailable_profiles() {
                 .unwrap_err()
                 .to_string();
         assert!(
-            error.contains("max_concurrent")
-                || error.contains("not defined")
-                || error.contains("disabled"),
+            error.contains("max_concurrent") || error.contains("not defined"),
             "{error}"
         );
     }
+}
+
+#[test]
+fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
+    // A profile that is both disabled and listed for sub-agent use must not
+    // stop the daemon from starting. `mj doctor` warns about it, and the
+    // consumers that offer profiles for delegation exclude it because it is
+    // disabled (they filter on `enabled`).
+    let config = toml::from_str::<Config>(&format!(
+        "version = {CONFIG_VERSION}\n\
+         [subagents.eligible_profiles]\nwork = true\n\
+         [profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n"
+    ))
+    .unwrap();
+    config.validate().unwrap();
+    assert!(!config.profiles["work"].enabled);
 }
 
 /// A profile that exists, so a `[review]` section has something to name.
@@ -1568,6 +1600,7 @@ fn profile_cannot_override_its_isolated_home() {
 #[test]
 fn container_size_hosts_group_local_runtimes_and_exact_ssh_hosts() {
     let container = ContainerTemplate {
+        build_cache: None,
         image: "agent:latest".into(),
         pull_policy: Default::default(),
         platform: None,
@@ -1664,6 +1697,32 @@ fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
             "unexpected error for {invalid:?}: {error:#}"
         );
     }
+}
+
+#[test]
+fn instance_identity_prefers_a_valid_instance_name() {
+    let dir = Path::new("/home/user/.local/share/mjolnir");
+    assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
+    assert_eq!(
+        instance_identity_for(Some("../escape"), dir),
+        instance_identity_for(None, dir),
+        "an invalid name falls back to the data-dir fingerprint"
+    );
+}
+
+#[test]
+fn instance_identity_fingerprints_the_data_dir_stably() {
+    let first = instance_identity_for(None, Path::new("/srv/mj/one"));
+    let same = instance_identity_for(None, Path::new("/srv/mj/one"));
+    let other = instance_identity_for(None, Path::new("/srv/mj/two"));
+    assert_eq!(first, same);
+    assert_ne!(first, other);
+    assert_eq!(first.len(), 16);
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
 }
 
 #[test]

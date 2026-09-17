@@ -1,17 +1,7 @@
 use super::*;
 
 impl DashboardState {
-    pub(crate) fn prepare_new_target(&self, wizard: &mut NewWizard) -> DashboardAction {
-        self.prepare_target(
-            wizard.target,
-            &wizard.aws_options,
-            &mut wizard.resource_allocation,
-            &mut wizard.sizing_error,
-            None,
-        )
-    }
-
-    pub(crate) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
+    pub(in crate::wizards) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
         let template = self.config.targets.get(target_id)?;
         // A raw local target runs in this controller process's host; there is
         // no external service or connection whose readiness needs a probe.
@@ -46,11 +36,10 @@ impl DashboardState {
         }
         check.result = Some(result);
         check.recorded_at = Instant::now();
-        self.mark_render_changed();
     }
 
     /// Why this session cannot resume on `target_id`, or `None` when it can.
-    pub(crate) fn resume_target_rejection(
+    pub(in crate::wizards) fn resume_target_rejection(
         &self,
         session_id: &str,
         target_id: &str,
@@ -62,22 +51,20 @@ impl DashboardState {
         mj_client::target::resume_compatibility(session, &self.config, target_id).err()
     }
 
-    pub(crate) fn prepare_resume_target(&self, wizard: &mut ResumeWizard) -> DashboardAction {
-        let previous = self
-            .state
-            .sessions
-            .get(&wizard.session_id)
-            .and_then(|session| session.resource_allocation.as_ref());
+    pub(super) fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {
+        let previous = wizard.previous_allocation(self);
+        let target_index = wizard.target();
+        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
         self.prepare_target(
-            wizard.target,
-            &wizard.aws_options,
-            &mut wizard.resource_allocation,
-            &mut wizard.sizing_error,
+            target_index,
+            aws_options,
+            allocation,
+            sizing_error,
             previous,
         )
     }
 
-    pub(crate) fn prepare_target(
+    fn prepare_target(
         &self,
         target_index: usize,
         aws_options: &BTreeMap<String, Vec<SessionResourceAllocation>>,
@@ -135,7 +122,7 @@ impl DashboardState {
         }
     }
 
-    pub(crate) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
+    fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
         self.capacity_details
             .values()
             .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))
@@ -143,23 +130,10 @@ impl DashboardState {
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 
-    pub(crate) fn adjust_new_resources(&self, wizard: &mut NewWizard, code: KeyCode) {
-        let target_id = nth_key(&self.config.targets, wizard.target);
-        adjust_resources(
-            &mut wizard.resource_allocation,
-            wizard.aws_options.get(&target_id),
-            self.host_limits(&target_id),
-            code,
-        );
-    }
-
-    pub(crate) fn adjust_resume_resources(&self, wizard: &mut ResumeWizard, code: KeyCode) {
-        let target_id = nth_key(&self.config.targets, wizard.target);
-        adjust_resources(
-            &mut wizard.resource_allocation,
-            wizard.aws_options.get(&target_id),
-            self.host_limits(&target_id),
-            code,
-        );
+    pub(super) fn adjust_wizard_resources<W: WizardDraft>(&self, wizard: &mut W, code: KeyCode) {
+        let target_id = nth_key(&self.config.targets, wizard.target());
+        let limits = self.host_limits(&target_id);
+        let (aws_options, allocation, _) = wizard.sizing_mut();
+        adjust_resources(allocation, aws_options.get(&target_id), limits, code);
     }
 }

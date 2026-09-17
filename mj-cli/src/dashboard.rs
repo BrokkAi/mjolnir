@@ -32,7 +32,6 @@ use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocati
 use mj_core::subagent::SubagentRecord;
 
 use mj_chat::chat::ChatElicitationDraft;
-use mj_chat::components::Outcome;
 use mj_chat::selection::{
     FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
 };
@@ -54,8 +53,8 @@ use tokio_stream::StreamExt as _;
 use crate::dashboard::composer_drafts::ComposerDraftCache;
 use crate::dashboard::io::{
     ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, checkpoint_archive_targets,
-    spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io, spawn_lifecycle_reload,
-    spawn_materialized_session_projection, spawn_project_source_resolution,
+    report, spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io,
+    spawn_lifecycle_reload, spawn_materialized_session_projection, spawn_project_source_resolution,
     spawn_stored_session_summary,
 };
 use crate::import::{
@@ -255,13 +254,9 @@ pub(crate) struct DashboardContext {
     go_context_in_flight: bool,
     go_selection_requested: Option<String>,
     go_selection_in_flight: bool,
-    /// The first pass always draws; subsequent frames require a visible change.
-    pub(crate) dirty: bool,
-    drawn_size: Option<(u16, u16)>,
     /// The notice generation the frame on screen was drawn from. Background
-    /// work writes the shared slot without touching `dirty`, so the draw
-    /// compares against this rather than trusting every setter to ask for a
-    /// frame.
+    /// work writes the shared notice slot without waking the loop, so the
+    /// once-a-second clock compares against this to notice one.
     drawn_notice_generation: u64,
     /// The poll targets are recomputed only after the controller may have
     /// changed.
@@ -461,11 +456,20 @@ pub(crate) async fn run_dashboard_for_workspace(
     let mut autoscroll_tick = tokio::time::interval(SELECTION_AUTOSCROLL_TICK);
     autoscroll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // One wakeup is one frame. `ratatui` writes only the cells that differ
+    // from the previous frame, so an unconditional rebuild costs CPU time and
+    // never terminal output. The two timer arms below are the only wakeups
+    // that can decline a frame, because they fire whether or not anything they
+    // display has moved.
+    let mut redraw = true;
     loop {
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
         }
-        context.draw()?;
+        if redraw {
+            context.draw()?;
+        }
+        redraw = true;
         let mut action = DashboardAction::None;
         let mut chat_outcome = mj_chat::chat::ChatEventOutcome::None;
         // The winning arm takes the message that woke the loop; the drains
@@ -487,28 +491,29 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if matches!(event, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
                     context.cancel_startup_session();
                 }
-                // Key repeats and pastes arrive as several ready events. The
-                // buffered ones are handled before drawing, but the first event
-                // that asks for work ends the batch so that dispatch still
-                // follows input order.
+                // Key repeats and pastes arrive as several ready events, and
+                // they coalesce into one frame; the first event that asks for
+                // work ends the batch so that dispatch still follows input
+                // order. Within the batch, only an event that is resolved
+                // against the frame needs that frame rebuilt first: a pointer
+                // is hit-tested against the controls the last frame registered,
+                // and a modal opened by the previous key registers its controls
+                // on the frame after it opens. An event that changed nothing
+                // leaves the frame current, so it needs no rebuild.
+                let mut previous_consumed = false;
                 loop {
-                    // Earlier input can change the controls under this pointer.
-                    // A clean view makes this a no-op; dirty geometry is drawn
-                    // before hit-testing, without delaying terminal input.
-                    if matches!(event, Event::Mouse(_)) {
+                    if previous_consumed
+                        && (matches!(event, Event::Mouse(_)) || context.dashboard.modal_open())
+                    {
                         context.draw()?;
-                    }
-                    if let Event::Resize(width, height) = &event {
-                        context.dirty |= context.drawn_size != Some((*width, *height));
                     }
                     if opening_cancel_event(&event, context.opening_chat_session.is_some(), context.dashboard.modal_open()) {
                         context.cancel_chat_open();
                         context.dashboard.focus_sessions();
                         context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
-                        context.dirty = true;
                         break;
                     }
-                    let batched = if let Some(command) =
+                    let (consumed, batched) = if let Some(command) =
                         global_chord_event(&context.dashboard, &event).filter(|command| {
                             !context.visible_chat().is_some_and(|chat| chat.component_modal_open())
                                 || matches!(command, CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh)
@@ -528,16 +533,16 @@ pub(crate) async fn run_dashboard_for_workspace(
                         } else {
                             action = context.dashboard.dispatch_command(command);
                         }
-                        false
+                        (true, false)
                     } else {
                         // Selection sees mouse and Esc first: a drag inside a
                         // pane belongs to the engine, and everything else
                         // comes back out for the view.
                         match context.route_selection(event) {
-                            SelectionRouting::Consumed => true,
+                            SelectionRouting::Consumed => (true, true),
                             SelectionRouting::Copy { surface, range } => {
                                 context.copy_selection(surface, range)?;
-                                true
+                                (true, true)
                             }
                             SelectionRouting::Forward(event) => dispatch_event(
                                 &mut context,
@@ -547,6 +552,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                             ),
                         }
                     };
+                    previous_consumed = consumed;
                     if !batched {
                         break;
                     }
@@ -568,10 +574,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            outcome = mj_chat::chat::ActiveChat::pump(context.active_chat.as_mut()) => {
+            () = mj_chat::chat::ActiveChat::pump(context.active_chat.as_mut()) => {
                 // A warm chat may be hidden by another tab or selection.
                 // Only visible conversation updates advance its read receipt.
-                context.dirty |= outcome == Outcome::Changed && context.visible_chat().is_some();
                 context.acknowledge_visible_chat();
             }
             update = context.quota.wait(), if context.quota.is_open() => {
@@ -624,15 +629,16 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // Resume search covers the moving "Last active" text, so the
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
-                context.dirty |= context.dashboard.clock_changed();
-                context.dirty |= context.visible_chat().is_some_and(|chat| chat.clock_changed());
-                context.maybe_open_startup_session();
+                redraw = context.clock_tick_redraws();
+                // The startup pick fires at most once, and opening the
+                // conversation it chooses has to reach the screen.
+                redraw |= context.maybe_open_startup_session();
             }
             // Input redraws never advance animations. Only visible activity
             // arms this timer; settled conversations keep the slow clock.
             _ = animation_tick.tick(), if context.needs_animation() => {
-                context.dirty |= context.dashboard.animation_changed();
-                context.dirty |= context.visible_chat().is_some_and(|chat| chat.animation_changed());
+                redraw = context.dashboard.animation_changed()
+                    || context.visible_chat().is_some_and(|chat| chat.animation_changed());
             }
             // A drag held past a scrollable surface's edge keeps scrolling it
             // and keeps extending the selection, the way a held pointer does
@@ -641,7 +647,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                 context.apply_autoscroll()?;
             }
         }
-        context.drain_feeds();
+        // A background message can be queued behind a timer that won the
+        // select, and the drain applies it here. Its result has to reach the
+        // screen even when the timer itself had nothing to show.
+        redraw |= context.drain_feeds();
         if let Some(workspace_id) = context.dashboard.active_workspace_id()
             && context.known_workspace_layouts.contains(workspace_id)
             && context
@@ -737,7 +746,6 @@ impl DashboardContext {
         self.go_selection_requested = None;
         self.dashboard.set_current_session(None);
         self.follow_selected_session();
-        self.dirty = true;
     }
 
     pub(crate) fn session_in_active_workspace(&self, session_id: &str) -> bool {
@@ -770,7 +778,6 @@ impl DashboardContext {
         self.quit_detached = detached;
         self.cancel_background_work();
         self.refresh_shutdown_notice();
-        self.dirty = true;
     }
 
     /// Returns true once every user-authored mutation has reached a durable
@@ -987,8 +994,6 @@ impl DashboardContext {
             go_context_in_flight: false,
             go_selection_requested: None,
             go_selection_in_flight: false,
-            dirty: true,
-            drawn_size: None,
             drawn_notice_generation: 0,
             controller_changed: true,
             quit_detached: false,
@@ -1230,14 +1235,16 @@ fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
 /// focus, and a click there hands the keyboard back to the composer. Keys go
 /// to the modal if one is open, then to the composer if it has focus, and
 /// otherwise to the panes.
+///
+/// Reports whether the event was consumed, and whether the input batch may
+/// continue: an event that produced work for the loop to run ends the batch so
+/// dispatch still follows input order.
 fn dispatch_event(
     context: &mut DashboardContext,
     event: Event,
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
-) -> bool {
-    let dashboard_modal = context.dashboard.modal_open();
-    let geometry_event = matches!(&event, Event::Resize(..) | Event::Mouse(_));
+) -> (bool, bool) {
     let chat_modal = !context.dashboard.modal_open()
         && context
             .visible_chat()
@@ -1271,27 +1278,23 @@ fn dispatch_event(
     match context.visible_chat().filter(|_| to_chat) {
         Some(chat) => {
             let result = chat.handle_event_result(event);
-            let changed = result.outcome == Outcome::Changed;
             *chat_outcome = result
                 .action
                 .unwrap_or(mj_chat::chat::ChatEventOutcome::None);
-            context.dirty |= changed;
-            matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None)
-                && !(changed && (geometry_event || chat_modal))
+            (
+                result.consumed,
+                matches!(*chat_outcome, mj_chat::chat::ChatEventOutcome::None),
+            )
         }
         None => {
             let preflight_generation = context.dashboard.session_preflight_generation();
             let result = context.dashboard.handle_event_result(event);
-            let changed = result.outcome == Outcome::Changed;
             *action = result.action.unwrap_or(DashboardAction::None);
-            context.dirty |= changed;
             if context.dashboard.session_preflight_generation() != preflight_generation {
                 context.cancel_session_preflight();
             }
             context.controller_changed |= !matches!(*action, DashboardAction::None);
-            matches!(*action, DashboardAction::None)
-                && !(changed
-                    && (geometry_event || dashboard_modal || context.dashboard.modal_open()))
+            (result.consumed, matches!(*action, DashboardAction::None))
         }
     }
 }

@@ -75,6 +75,7 @@ fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
 #[test]
 fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     let target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "a".repeat(64),
         workspace_storage: Default::default(),
     });
@@ -565,6 +566,8 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
 
 fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
     SessionRecord {
+        build_cache: None,
+        container_workspace: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         id: id.into(),
@@ -1860,6 +1863,7 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     let state = test_runtime_state();
     let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
     session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
         container_id: "a".repeat(64),
         workspace_storage: Default::default(),
     });

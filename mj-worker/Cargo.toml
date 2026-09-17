@@ -3,7 +3,6 @@ name = "brokk-mj-worker"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-license-file.workspace = true
 license.workspace = true
 description = "Target-side worker runtime for Mjolnir sessions"
 repository = "https://github.com/BrokkAi/mjolnir"

@@ -1,5 +1,6 @@
 //! Markdown and width-aware transcript rendering.
 
+use crate::components::text_layout::trim_before_ellipsis;
 use crate::theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::layout::Rect;
@@ -733,15 +734,6 @@ fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) {
 
 pub(super) fn display_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
-}
-
-fn trim_before_ellipsis(character: char) -> bool {
-    character.is_whitespace()
-        || character.is_ascii_punctuation()
-        || matches!(
-            character,
-            '…' | '–' | '—' | '‘' | '’' | '“' | '”' | '•' | '·'
-        )
 }
 
 fn trim_spans_before_ellipsis(spans: &mut Vec<Span<'static>>, preserved_spans: usize) {

@@ -3,6 +3,7 @@ mod schema;
 
 use crate::{
     DashboardAction, DashboardState, Mode,
+    modal_surface::ModalSurface,
     review_settings::{
         ReviewSettingsDialog, ReviewSettingsOutcome, ReviewSettingsValidation,
         render_review_settings,
@@ -328,66 +329,6 @@ fn changed_profile_ids(draft: &Config, current: &Config) -> std::collections::BT
 }
 
 impl SetupDialog {
-    pub(crate) fn layer_key(&self) -> String {
-        format!(
-            "{:?}/{:?}/{}",
-            self.path,
-            self.editor.as_ref().map(|editor| &editor.path),
-            self.review_editor.is_some()
-        )
-    }
-
-    pub(crate) fn prepare_dialog_state(&mut self) {
-        self.form.get_mut().set_action_role(
-            SetupControl::Cancel,
-            mj_chat::components::ActionRole::Cancel,
-        );
-        self.form
-            .get_mut()
-            .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
-        if let Some(review) = &mut self.review_editor {
-            review.prepare_dialog_state();
-        } else if let Some(editor) = &self.editor {
-            self.form
-                .get_mut()
-                .track_draft(vec![editor.input.to_string()]);
-            self.form
-                .get_mut()
-                .set_dismiss_actions(&[SetupControl::Back]);
-            self.form.get_mut().set_default_action(SetupControl::Apply);
-        } else {
-            // The outer setup draft uses its normalized saved-config comparison.
-            self.form.get_mut().set_dirty(false);
-            self.form.get_mut().set_dismiss_actions(&[]);
-            self.form.get_mut().set_default_action(SetupControl::Save);
-        }
-    }
-
-    pub(crate) fn confirmation_open(&self) -> bool {
-        self.review_editor.as_ref().map_or_else(
-            || self.form.borrow().confirmation_open(),
-            |review| review.form.borrow().confirmation_open(),
-        )
-    }
-
-    pub(crate) fn render_confirmation(
-        &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        surfaces: &mut FrameSurfaces,
-    ) {
-        if let Some(review) = &self.review_editor {
-            review
-                .form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces);
-        } else {
-            self.form
-                .borrow_mut()
-                .render_confirmation(frame, area, surfaces);
-        }
-    }
-
     fn new(config: &Config) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
@@ -903,8 +844,33 @@ impl SetupDialog {
             self.review_validation = None;
         }
     }
+}
 
-    pub(crate) fn handles_mouse(&self, column: u16, row: u16) -> bool {
+/// Setup answers the dashboard's modal questions through whichever of its two
+/// forms is on top: the review-settings editor when it is open, the setup form
+/// otherwise.
+impl ModalSurface for SetupDialog {
+    fn confirmation_open(&self) -> bool {
+        self.review_editor.as_ref().map_or_else(
+            || self.form.borrow().confirmation_open(),
+            |review| review.form.borrow().confirmation_open(),
+        )
+    }
+
+    fn render_confirmation(&self, frame: &mut Frame<'_>, area: Rect, surfaces: &mut FrameSurfaces) {
+        if let Some(review) = &self.review_editor {
+            review
+                .form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        } else {
+            self.form
+                .borrow_mut()
+                .render_confirmation(frame, area, surfaces);
+        }
+    }
+
+    fn handles_mouse(&self, column: u16, row: u16) -> bool {
         if let Some(dialog) = &self.review_editor {
             let form = dialog.form.borrow();
             return form.captures_pointer() || form.contains(column, row);
@@ -913,7 +879,7 @@ impl SetupDialog {
         form.captures_pointer() || form.contains(column, row)
     }
 
-    pub(crate) fn cancel_pointer(&mut self) -> bool {
+    fn cancel_pointer(&mut self) -> bool {
         if let Some(review) = &mut self.review_editor {
             let form = review.form.get_mut();
             let changed = form.captures_pointer();
@@ -927,12 +893,54 @@ impl SetupDialog {
         }
     }
 
-    pub(crate) fn reset_geometry(&mut self) {
+    fn reset_geometry(&mut self) {
         if let Some(review) = &mut self.review_editor {
             review.form.get_mut().reset_geometry();
         } else {
             self.form.get_mut().reset_geometry();
         }
+    }
+
+    /// Only the setup form's own field counts. The review-settings editor on
+    /// top of it has text fields too, but routing has never consulted them and
+    /// this milestone does not change that.
+    fn text_input_focused(&self) -> bool {
+        self.form.borrow().is_focused(SetupControl::Field)
+    }
+
+    fn prepare_dialog_state(&mut self) {
+        self.form.get_mut().set_action_role(
+            SetupControl::Cancel,
+            mj_chat::components::ActionRole::Cancel,
+        );
+        self.form
+            .get_mut()
+            .set_action_role(SetupControl::Back, mj_chat::components::ActionRole::Back);
+        if let Some(review) = &mut self.review_editor {
+            review.prepare_dialog_state();
+        } else if let Some(editor) = &self.editor {
+            self.form
+                .get_mut()
+                .track_draft(vec![editor.input.to_string()]);
+            self.form
+                .get_mut()
+                .set_dismiss_actions(&[SetupControl::Back]);
+            self.form.get_mut().set_default_action(SetupControl::Apply);
+        } else {
+            // The outer setup draft uses its normalized saved-config comparison.
+            self.form.get_mut().set_dirty(false);
+            self.form.get_mut().set_dismiss_actions(&[]);
+            self.form.get_mut().set_default_action(SetupControl::Save);
+        }
+    }
+
+    fn layer_detail(&self) -> String {
+        format!(
+            "{:?}/{:?}/{}",
+            self.path,
+            self.editor.as_ref().map(|editor| &editor.path),
+            self.review_editor.is_some()
+        )
     }
 }
 
@@ -947,12 +955,10 @@ impl DashboardState {
         }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
-        self.mark_render_changed();
     }
 
     pub fn begin_setup(&mut self) {
         self.mode = Mode::Setup(SetupDialog::new(&self.config));
-        self.mark_render_changed();
     }
 
     fn dismiss_setup(&mut self, dialog: SetupDialog) -> DashboardAction {
@@ -967,7 +973,6 @@ impl DashboardState {
                     intent: crate::dialogs::DismissalIntent::DiscardSetup,
                 },
             ));
-            self.mark_render_changed();
         } else {
             self.cancel_modal();
         }
@@ -1083,12 +1088,7 @@ impl DashboardState {
             .is_none()
             .then(|| dialog.form.get_mut().handle(&event));
         if let Some(result) = &form_result {
-            crate::record_form_outcome_cells(
-                &self.last_event_outcome,
-                &self.render_changed,
-                &self.render_change_revision,
-                result,
-            );
+            self.last_event_consumed.set(result.consumed);
         }
         let interaction = shortcut.or_else(|| form_result.and_then(|result| result.action));
         let interaction = if choice_editor {
@@ -1117,12 +1117,10 @@ impl DashboardState {
             Some(Interaction::Select(List, index)) => {
                 if dialog.selected != index {
                     dialog.selected = index;
-                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Toggle(List)) => {
                 dialog.open_selected();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(List)) => {
                 if dialog.selected_is_review() {
@@ -1130,14 +1128,13 @@ impl DashboardState {
                 } else {
                     dialog.open_selected();
                 }
-                self.mark_render_changed();
             }
             Some(Interaction::Edit(Field, edit)) => {
                 if let Some(editor) = &mut dialog.editor
                     && TextField::apply(&mut editor.input, edit)
-                        == mj_chat::components::Outcome::Changed
+                        == mj_chat::components::EditOutcome::Changed
                 {
-                    self.record_visible_event_change();
+                    self.record_event_handled();
                 }
             }
             Some(Interaction::ComboBoxCommit(Choices, index)) => {
@@ -1145,28 +1142,21 @@ impl DashboardState {
                     editor.selected = index;
                 }
                 dialog.notice = dialog.apply_editor(false).err();
-                self.mark_render_changed();
             }
             Some(Interaction::ComboBoxDismiss(Choices)) => {
                 dialog.editor = None;
                 dialog.form = RefCell::new(Dialog::default());
-                self.mark_render_changed();
             }
-            Some(Interaction::Activate(Field | Apply)) => {
-                match dialog.resolve_path_action() {
-                    Ok(Some(resolve)) => action = resolve,
-                    Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
-                    Err(error) => dialog.notice = Some(error),
-                }
-                self.mark_render_changed();
-            }
+            Some(Interaction::Activate(Field | Apply)) => match dialog.resolve_path_action() {
+                Ok(Some(resolve)) => action = resolve,
+                Ok(None) => dialog.notice = dialog.apply_editor(false).err(),
+                Err(error) => dialog.notice = Some(error),
+            },
             Some(Interaction::Activate(Clear)) => {
                 dialog.notice = dialog.apply_editor(true).err();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Add)) => {
                 dialog.add();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
@@ -1183,17 +1173,14 @@ impl DashboardState {
                         let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
                         dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
-                    self.mark_render_changed();
                 }
             }
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
                 action = dialog.save();
-                self.mark_render_changed();
             }
             Some(Interaction::Activate(Detect)) if !dialog.discovering => {
                 dialog.discovering = true;
                 dialog.notice = Some("Detecting agent profiles and usable local runtimes…".into());
-                self.mark_render_changed();
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
                 };
@@ -1234,7 +1221,6 @@ impl DashboardState {
             }
             Err(error) => dialog.notice = Some(error),
         }
-        self.mark_render_changed();
     }
 
     pub fn setup_saved(&mut self, generation: u64, result: Result<Config, String>) {
@@ -1258,7 +1244,6 @@ impl DashboardState {
                     dialog.saving = false;
                     dialog.notice = Some(format!("Could not save: {error}"));
                     dialog.prepare();
-                    self.mark_render_changed();
                 } else {
                     self.set_failure_notice(error);
                 }
@@ -1285,7 +1270,6 @@ impl DashboardState {
                             "Review the settings draft before detecting entries: {error}"
                         ));
                         dialog.prepare();
-                        self.mark_render_changed();
                         return;
                     }
                 };
@@ -1314,7 +1298,6 @@ impl DashboardState {
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
         dialog.prepare();
-        self.mark_render_changed();
     }
 }
 

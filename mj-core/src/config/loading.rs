@@ -157,6 +157,28 @@ pub fn data_dir() -> PathBuf {
     )
 }
 
+/// Identity stamped on every worker this Mjolnir instance creates, so a
+/// recovery scan from another instance can tell the worker is not its own.
+/// A named `--instance` uses its name; otherwise the data directory path is
+/// fingerprinted so an explicit `MJ_DATA_DIR` override also gets its own
+/// identity.
+pub fn instance_identity() -> String {
+    instance_identity_for(instance_name().as_deref(), &data_dir())
+}
+
+/// Pure form of [`instance_identity`] for callers that already resolved the
+/// instance name and data directory.
+pub fn instance_identity_for(instance: Option<&str>, data_dir: &Path) -> String {
+    if let Some(name) = instance
+        && is_valid_instance_name(name)
+    {
+        return name.to_owned();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(data_dir.to_string_lossy().as_bytes());
+    crate::hex::lower_hex(digest)[..16].to_owned()
+}
+
 pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }

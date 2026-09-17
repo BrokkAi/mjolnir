@@ -19,6 +19,7 @@ mod rendering;
 mod second_opinion;
 mod transcript;
 mod turn_review;
+mod viewport;
 
 #[cfg(test)]
 mod test_support;
@@ -35,7 +36,6 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use rat_event::{ConsumedEvent, Outcome};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
@@ -44,6 +44,7 @@ use ratatui::text::Line;
 use crate::clipboard::{ClipboardContent, ClipboardImage};
 use crate::components::{ControlKind, Form, Interaction};
 use crate::selection::{FrameSurfaces, SelectionRange};
+use crate::text_input;
 pub use mj_core::acp::PlanControl;
 use mj_core::acp::SessionConfigChoice;
 use mj_core::acp::surface::{AcpSessionSurface, PlanControlError};
@@ -665,11 +666,6 @@ pub struct ChatState {
     /// Bumped whenever the cached rows are dropped wholesale, so a frozen row
     /// space can tell that the rows it was pinned against are gone.
     render_cache_generation: u64,
-    /// Monotonic identity for visible chat state.  Mutations bump this only
-    /// when they can affect the next frame; it lets hosts consume redraws
-    /// without copying transcripts or application state.
-    visible_revision: u64,
-    render_changed: bool,
     last_clock_text: Option<String>,
     last_animation_frame: Option<Line<'static>>,
 }
@@ -798,8 +794,6 @@ impl ChatState {
             transcript_selection: None,
             transcript_selection_invalid: false,
             render_cache_generation: 0,
-            visible_revision: 0,
-            render_changed: false,
             last_clock_text: None,
             last_animation_frame: None,
         };
@@ -959,12 +953,10 @@ impl ChatState {
         };
         if self.phase != phase {
             self.phase = phase;
-            self.mark_visible_changed();
         }
         let turn_started_at = turn_started_at_epoch_seconds(session.execution);
         if self.turn_started_at_epoch_seconds != turn_started_at {
             self.turn_started_at_epoch_seconds = turn_started_at;
-            self.mark_visible_changed();
         }
         self.latest_seq = session.applied_event_ordinal;
         self.sync_elicitation(&session.pending_elicitations);
@@ -985,7 +977,6 @@ impl ChatState {
                 self.unconverted_prefix,
                 std::mem::take(&mut self.entries),
             );
-            self.mark_visible_changed();
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.
@@ -1038,13 +1029,11 @@ impl ChatState {
             .collect();
         if self.queued_prompts != queued_prompts {
             self.queued_prompts = queued_prompts;
-            self.mark_visible_changed();
         }
         match mj_core::goal::GoalState::from_configuration(&session.configuration) {
             Ok(goal) => {
                 if self.goal_state != goal {
                     self.goal_state = goal;
-                    self.mark_visible_changed();
                 }
             }
             Err(error) => {
@@ -1108,7 +1097,6 @@ impl ChatState {
     fn sync_elicitation(&mut self, pending: &[ElicitationRequest]) {
         if self.pending_elicitations != pending {
             self.pending_elicitations = pending.to_vec();
-            self.mark_visible_changed();
         }
         // A reviewer's form is not in the primary's pending list, so the
         // primary's projection must not take it down.
@@ -1122,12 +1110,10 @@ impl ChatState {
             // An answer or cancellation removed the request. Drop the local
             // form immediately so no later relay snapshot can resurrect it.
             self.elicitation = None;
-            self.mark_visible_changed();
         }
         let next = pending.first().cloned().map(ElicitationDialog::new);
         if next.is_some() != self.elicitation.is_some() {
             self.elicitation = next;
-            self.mark_visible_changed();
         }
     }
 
@@ -1155,7 +1141,6 @@ impl ChatState {
                 .first()
                 .cloned()
                 .map(ElicitationDialog::new);
-            self.mark_visible_changed();
         }
     }
 
@@ -1180,7 +1165,6 @@ impl ChatState {
         self.elicitation_is_reviewers = true;
         self.elicitation_role = role;
         self.elicitation = Some(ElicitationDialog::new(request));
-        self.mark_visible_changed();
         true
     }
 
@@ -1252,14 +1236,12 @@ impl ChatState {
         self.elicitation = Some(dialog);
         self.elicitation_is_reviewers = draft.reviewer;
         self.elicitation_role = draft.reviewer_role;
-        self.mark_visible_changed();
         true
     }
 
     fn restore_elicitation(&mut self, request: ElicitationRequest) {
         if self.elicitation.is_none() {
             self.elicitation = Some(ElicitationDialog::new(request));
-            self.mark_visible_changed();
         }
     }
 
