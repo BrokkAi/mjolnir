@@ -559,6 +559,99 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// The archive job
+// ---------------------------------------------------------------------------
+
+/// The stopped sessions that `archive_after_days = older_than_days` has caught,
+/// children before their parents.
+///
+/// A session qualifies when its record is `Stopped`, its last update is at
+/// least that many days old, and every sub-agent child it still has is being
+/// archived in the same pass. The child rule is what keeps the pass from
+/// destroying a session it did not choose: archiving a parent tears its
+/// children down with it, so a child that is still running, or stopped but not
+/// yet old enough, holds its parent back until the next pass.
+///
+/// Pure over controller state, so the rule can be tested without a daemon.
+pub fn sessions_ready_to_archive(
+    sessions: &BTreeMap<String, SessionRecord>,
+    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+    now: DateTime<Utc>,
+    older_than_days: u32,
+) -> Vec<String> {
+    let cutoff = now - chrono::Duration::days(i64::from(older_than_days));
+    let aged = |session_id: &String| {
+        sessions.get(session_id).is_some_and(|record| {
+            record.state == mj_core::state::SessionState::Stopped
+                && parse_time(&record.updated_at).is_some_and(|updated| updated <= cutoff)
+        })
+    };
+    let selected: BTreeSet<String> = sessions
+        .keys()
+        .filter(|session_id| aged(session_id))
+        .filter(|session_id| {
+            subagents
+                .values()
+                .filter(|child| &&child.parent_session_id == session_id)
+                // A child whose record is already gone holds nothing open.
+                .filter(|child| sessions.contains_key(&child.child_session_id))
+                .all(|child| aged(&child.child_session_id))
+        })
+        .cloned()
+        .collect();
+    let mut ordered: Vec<String> = selected.iter().cloned().collect();
+    ordered.sort_by_key(|session_id| std::cmp::Reverse(ancestor_depth(session_id, subagents)));
+    ordered
+}
+
+/// How many sub-agent parents a session has above it. Deeper sessions are
+/// archived first so a parent never tears down a child the pass still has to
+/// visit.
+fn ancestor_depth(
+    session_id: &str,
+    subagents: &BTreeMap<String, mj_core::subagent::SubagentRecord>,
+) -> usize {
+    let mut depth = 0;
+    let mut current = session_id;
+    // Bounded by the map: a cycle cannot outlive one pass over every entry.
+    while let Some(parent) = subagents
+        .get(current)
+        .map(|child| child.parent_session_id.as_str())
+    {
+        depth += 1;
+        if depth > subagents.len() {
+            break;
+        }
+        current = parent;
+    }
+    depth
+}
+
+/// Which of `session_ids` the index holds under this instance's own key, with
+/// at least one message and not already archived.
+///
+/// This is the gate the archive job will not cross: Mjolnir only deletes its
+/// own copy of a conversation SessionWiki has actually stored. Runs SQLite
+/// work, so callers on the async runtime wrap it in `spawn_blocking`.
+pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>> {
+    let connection = open_readonly()?;
+    let sessions_dir = mj_core::config::sessions_dir();
+    let mut indexed = BTreeSet::new();
+    for session_id in session_ids {
+        let key = format!("{}/{session_id}", sessions_dir.display());
+        let rows = sessionwiki::index::resolve(&connection, session_id)
+            .context("look up a stopped session in the SessionWiki index")?;
+        if rows
+            .iter()
+            .any(|row| row.tool == TOOL && row.path == key && row.msg_count > 0 && !row.archived)
+        {
+            indexed.insert(session_id.clone());
+        }
+    }
+    Ok(indexed)
+}
+
 fn open_readonly() -> Result<rusqlite::Connection> {
     sessionwiki::index::open_readonly().context("open the SessionWiki index")
 }
@@ -841,6 +934,21 @@ mod tests {
 
     fn adapter(directory: &Path, session_id: &str) -> MjolnirAdapter {
         let record = SessionRecord {
+            id: session_id.into(),
+            ..record_template()
+        };
+        MjolnirAdapter {
+            sessions_dir: directory.to_path_buf(),
+            sessions: std::sync::Mutex::new(Sessions {
+                records: BTreeMap::from([(session_id.to_owned(), record)]),
+                subagent_ids: BTreeSet::new(),
+            }),
+            reload: false,
+        }
+    }
+
+    fn record_template() -> SessionRecord {
+        SessionRecord {
             build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,
@@ -849,7 +957,7 @@ mod tests {
             archived: false,
             container_cpus: None,
             container_memory: None,
-            id: session_id.into(),
+            id: "0123456789abcdef0123456789abcdef".into(),
             title: "indexed session".into(),
             harness_kind: mj_core::config::HarnessKind::Codex,
             last_profile: "codex".into(),
@@ -871,14 +979,6 @@ mod tests {
             last_error: None,
             last_checkpoint_error: None,
             checkpoint: None,
-        };
-        MjolnirAdapter {
-            sessions_dir: directory.to_path_buf(),
-            sessions: std::sync::Mutex::new(Sessions {
-                records: BTreeMap::from([(session_id.to_owned(), record)]),
-                subagent_ids: BTreeSet::new(),
-            }),
-            reload: false,
         }
     }
 
@@ -1030,5 +1130,126 @@ mod tests {
             error.to_string().contains("no prompt"),
             "a session with no prompt cannot be restored: {error}"
         );
+    }
+
+    fn record(
+        session_id: &str,
+        state: mj_core::state::SessionState,
+        updated_at: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: session_id.into(),
+            state,
+            updated_at: updated_at.into(),
+            ..record_template()
+        }
+    }
+
+    fn child(child_session_id: &str, parent_session_id: &str) -> mj_core::subagent::SubagentRecord {
+        mj_core::subagent::SubagentRecord {
+            child_session_id: child_session_id.into(),
+            parent_session_id: parent_session_id.into(),
+            task_name: "task".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "do the thing".into(),
+            request_key: "key".into(),
+            created_at: "2026-09-01T00:00:00Z".into(),
+            noticed_turn: None,
+        }
+    }
+
+    fn ready(
+        sessions: Vec<SessionRecord>,
+        children: Vec<mj_core::subagent::SubagentRecord>,
+    ) -> Vec<String> {
+        let now = parse_time("2026-09-10T00:00:00Z").unwrap();
+        sessions_ready_to_archive(
+            &sessions
+                .into_iter()
+                .map(|record| (record.id.clone(), record))
+                .collect(),
+            &children
+                .into_iter()
+                .map(|child| (child.child_session_id.clone(), child))
+                .collect(),
+            now,
+            3,
+        )
+    }
+
+    #[test]
+    fn only_stopped_sessions_past_the_cut_off_are_archived() {
+        use mj_core::state::SessionState;
+        let selected = ready(
+            vec![
+                record("old-stopped", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+                record(
+                    "just-stopped",
+                    SessionState::Stopped,
+                    "2026-09-09T00:00:00Z",
+                ),
+                record("old-running", SessionState::Running, "2026-09-01T00:00:00Z"),
+                record("old-error", SessionState::Error, "2026-09-01T00:00:00Z"),
+                record("unparsable", SessionState::Stopped, "not a time"),
+                // Exactly the cut-off counts as old enough.
+                record("at-the-edge", SessionState::Stopped, "2026-09-07T00:00:00Z"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(selected, vec!["at-the-edge", "old-stopped"]);
+    }
+
+    #[test]
+    fn a_child_the_pass_is_not_archiving_holds_its_parent_back() {
+        use mj_core::state::SessionState;
+        let selected = ready(
+            vec![
+                record("parent", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+                record(
+                    "running-child",
+                    SessionState::Running,
+                    "2026-09-01T00:00:00Z",
+                ),
+            ],
+            vec![child("running-child", "parent")],
+        );
+        assert!(selected.is_empty(), "the parent must wait: {selected:?}");
+
+        let selected = ready(
+            vec![
+                record("parent", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+                record("young-child", SessionState::Stopped, "2026-09-09T00:00:00Z"),
+            ],
+            vec![child("young-child", "parent")],
+        );
+        assert!(selected.is_empty(), "the parent must wait: {selected:?}");
+
+        // A child whose record is already gone holds nothing open.
+        let selected = ready(
+            vec![record(
+                "parent",
+                SessionState::Stopped,
+                "2026-09-01T00:00:00Z",
+            )],
+            vec![child("departed-child", "parent")],
+        );
+        assert_eq!(selected, vec!["parent"]);
+    }
+
+    #[test]
+    fn children_are_archived_before_their_parents() {
+        use mj_core::state::SessionState;
+        let selected = ready(
+            vec![
+                record("parent", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+                record("child", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+                record("grandchild", SessionState::Stopped, "2026-09-01T00:00:00Z"),
+            ],
+            vec![child("child", "parent"), child("grandchild", "child")],
+        );
+        assert_eq!(selected, vec!["grandchild", "child", "parent"]);
     }
 }

@@ -76,6 +76,7 @@ pub use checkpoint::{
     CheckpointArtifact, CheckpointDeferred, IdleWorkspaceLease, SessionExportLayout,
     checkpoint_was_deferred, reconcile_managed_checkpoint_archives,
 };
+pub use lifecycle::BranchDisposition;
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
