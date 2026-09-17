@@ -6,7 +6,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::session_manager::StandaloneSession;
 use mj_core::config::{AwsAddressSource, SshConnection, TargetTemplate};
-use mj_core::state::{SessionRecord, SessionState, TargetLocator, normalize_session_title};
+use mj_core::state::{
+    PodmanWorkspaceLocator, SessionRecord, SessionState, TargetLocator, normalize_session_title,
+};
 
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 use mj_core::worker_launch::WorkerOwnership;
@@ -587,6 +589,9 @@ fn scan_target_workers(
                         locator: TargetLocator::SshBare {
                             host: ssh.host.clone(),
                             workspace: PathBuf::from(workspace),
+                            // The scan reads the session id from the worker
+                            // directory name and `targets::worker_root` falls
+                            // back to it, so the root still resolves.
                             worker_id: None,
                         },
                         ownership: None,
@@ -625,6 +630,23 @@ fn scan_container_engine(
     candidates_from_container_json(target_id, template, &output.stdout)
 }
 
+/// Where a Podman session's workspace really lives, derived the same way
+/// provisioning derives it: the backend container template plus the session id.
+fn recovery_workspace_storage(
+    template: &TargetTemplate,
+    session_id: &str,
+) -> Result<PodmanWorkspaceLocator> {
+    let backend = backend_target(template, None, ContainerOverrides::default())?;
+    let container = match &backend {
+        targets::TargetTemplate::LocalPodman(container) => container,
+        targets::TargetTemplate::SshPodman { container, .. } => container,
+        _ => bail!("target template is not a Podman target"),
+    };
+    Ok(PodmanWorkspaceLocator::from(
+        targets::podman_workspace_locator(container, session_id)?,
+    ))
+}
+
 fn candidates_from_container_json(
     target_id: &str,
     template: &TargetTemplate,
@@ -641,11 +663,27 @@ fn candidates_from_container_json(
                     return None;
                 }
             };
+            // A Podman workspace may live in a volume or a host directory, and
+            // destroying the container alone would leave it behind. The storage
+            // follows from the target template and the session id, so derive it
+            // here rather than recording the container layer by default.
+            let workspace_storage = match template {
+                TargetTemplate::LocalPodman { .. } | TargetTemplate::SshPodman { .. } => {
+                    match recovery_workspace_storage(template, &session_id) {
+                        Ok(storage) => storage,
+                        Err(error) => {
+                            tracing::debug!(%session_id, %error, "recovery scan could not derive the Podman workspace storage");
+                            return None;
+                        }
+                    }
+                }
+                _ => Default::default(),
+            };
             let locator = match template {
                 TargetTemplate::LocalPodman { .. } => TargetLocator::LocalPodman {
                     borrowed_from: None,
                     container_id: generated,
-                    workspace_storage: Default::default(),
+                    workspace_storage,
                 },
                 TargetTemplate::LocalDocker { .. } => TargetLocator::LocalDocker {
                     borrowed_from: None,
@@ -659,7 +697,7 @@ fn candidates_from_container_json(
                     borrowed_from: None,
                     host: ssh.host.clone(),
                     container_id: generated,
-                    workspace_storage: Default::default(),
+                    workspace_storage,
                 },
                 TargetTemplate::SshDocker { ssh, .. } => TargetLocator::SshDocker {
                     borrowed_from: None,
@@ -924,6 +962,21 @@ fn read_recovery_ownership(
     Some(marker)
 }
 
+/// The backend locator recovery uses to destroy an orphan worker.
+///
+/// This stays separate from `backend_locator` (and from the shared
+/// `TryFrom<StoredTarget>` conversion) because destroying an orphan has to
+/// succeed in two cases the shared conversion rejects or cannot answer:
+///
+/// - The AWS arm substitutes `unavailable.invalid` for a missing address on
+///   purpose. AWS cleanup terminates the instance through the `aws` CLI
+///   (`targets/cleanup.rs`), so an instance with no address must still be
+///   destroyable, whereas the shared conversion errors on the missing address.
+/// - `worker_id: None` for `SshBare` is correct here. The scan takes the
+///   session id from the worker directory name and `targets::worker_root`
+///   falls back to the session id, so the root resolves. A borrowed target's
+///   shared parent workspace is not discoverable from a scan, and recomputing
+///   the child's own (nonexistent) path is the safe direction for destroy.
 fn recovery_backend_locator(
     template: &TargetTemplate,
     locator: &TargetLocator,
@@ -935,13 +988,18 @@ fn recovery_backend_locator(
                 worker_root: worker_root.to_string_lossy().into_owned(),
             }
         }
-        (TargetTemplate::LocalPodman { .. }, TargetLocator::LocalPodman { container_id, .. }) => {
-            targets::TargetLocator::LocalPodman {
-                borrowed_from: None,
-                container_id: container_id.clone(),
-                workspace_storage: Default::default(),
-            }
-        }
+        (
+            TargetTemplate::LocalPodman { .. },
+            TargetLocator::LocalPodman {
+                container_id,
+                workspace_storage,
+                ..
+            },
+        ) => targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+            workspace_storage: workspace_storage.into(),
+        },
         (TargetTemplate::LocalDocker { .. }, TargetLocator::LocalDocker { container_id, .. }) => {
             targets::TargetLocator::LocalDocker {
                 borrowed_from: None,
@@ -955,14 +1013,19 @@ fn recovery_backend_locator(
             borrowed_from: None,
             container_id: container_id.clone(),
         },
-        (TargetTemplate::SshPodman { ssh, .. }, TargetLocator::SshPodman { container_id, .. }) => {
-            targets::TargetLocator::SshPodman {
-                borrowed_from: None,
-                ssh: SshTarget::from(ssh),
-                container_id: container_id.clone(),
-                workspace_storage: Default::default(),
-            }
-        }
+        (
+            TargetTemplate::SshPodman { ssh, .. },
+            TargetLocator::SshPodman {
+                container_id,
+                workspace_storage,
+                ..
+            },
+        ) => targets::TargetLocator::SshPodman {
+            borrowed_from: None,
+            ssh: SshTarget::from(ssh),
+            container_id: container_id.clone(),
+            workspace_storage: workspace_storage.into(),
+        },
         (
             TargetTemplate::SshDocker { ssh, .. },
             TargetLocator::SshDocker {
@@ -1021,7 +1084,8 @@ mod tests {
 
     use crate::controller::test_support::{IsolatedTest, test_name};
     use mj_core::config::{
-        AwsAddressSource, Config, ContainerTemplate as ConfigContainer, HarnessKind, TargetTemplate,
+        AwsAddressSource, Config, ContainerTemplate as ConfigContainer, HarnessKind,
+        PodmanWorkspaceStorage, TargetTemplate,
     };
     use mj_core::state::{State, TargetLocator};
 
@@ -1334,6 +1398,64 @@ mod tests {
             "{unknown}"
         );
         require_instance_access(&candidate("legacy", None), "qa", true).unwrap();
+    }
+
+    #[test]
+    fn a_podman_orphan_destroy_plan_removes_its_workspace_volume() {
+        // `destroy_orphan_worker` rescans, so this drives the two steps it runs
+        // on the candidate it finds: the scan's locator and the close plan
+        // built from it. Those are what carried the container-layer default.
+        let session = "0123456789abcdef0123456789abcdef";
+        let template = TargetTemplate::LocalPodman {
+            container: ConfigContainer {
+                image: "ignored".into(),
+                pull_policy: Default::default(),
+                platform: None,
+                cpus: None,
+                memory: None,
+                environment: BTreeMap::new(),
+                workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
+                build_cache: None,
+            },
+        };
+        let json = serde_json::json!([
+            {"Labels": {"dev.mj.managed": "true", "dev.mj.session": session}}
+        ]);
+
+        let candidates = candidates_from_container_json(
+            "local",
+            &template,
+            serde_json::to_string(&json).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let [candidate] = candidates.as_slice() else {
+            panic!("expected one orphan candidate, got {candidates:?}");
+        };
+        let volume = format!("{}-workspace", targets::resource_name(session).unwrap());
+        assert!(
+            matches!(
+                &candidate.locator,
+                TargetLocator::LocalPodman {
+                    workspace_storage: PodmanWorkspaceLocator::Volume { name },
+                    ..
+                } if name == &volume
+            ),
+            "candidate locator lost the volume storage: {:?}",
+            candidate.locator
+        );
+        let backend = recovery_backend_locator(&template, &candidate.locator, session).unwrap();
+        let plan = targets::close_plan(&backend, session).unwrap();
+        assert!(
+            plan.commands.iter().any(|command| {
+                command.args.iter().any(|argument| argument == &volume)
+                    && command
+                        .args
+                        .iter()
+                        .any(|argument| argument.contains("podman volume rm"))
+            }),
+            "destroy plan does not remove the workspace volume: {plan:?}"
+        );
     }
 
     #[test]
