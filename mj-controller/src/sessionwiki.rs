@@ -18,6 +18,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
+use mj_client::daemon::WikiRow;
 use mj_core::state::{SessionRecord, State};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::{Message, Role, Session};
@@ -469,6 +470,257 @@ fn is_busy(error: &anyhow::Error) -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Queries and restore
+// ---------------------------------------------------------------------------
+
+/// The largest page a caller may ask a wiki query for.
+pub const MAX_WIKI_LIMIT: usize = 200;
+/// The page size a caller that names none gets.
+pub const DEFAULT_WIKI_LIMIT: usize = 50;
+/// SessionWiki's full-text index needs three characters; shorter queries fall
+/// back to a substring scan.
+const MIN_FULLTEXT_QUERY: usize = 3;
+/// How stale the index may be before a query triggers a background sync.
+pub const SYNC_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a query should trigger a bounded background sync before it answers.
+pub fn sync_is_stale(last_success: Option<Instant>) -> bool {
+    last_success.is_none_or(|at| at.elapsed() >= SYNC_STALE_AFTER)
+}
+
+/// One page of the index, newest first or best match first.
+///
+/// `live` is the set of session ids this daemon still holds, which is what
+/// decides whether a Mjolnir row names a session the user can simply resume.
+/// Runs SQLite work, so callers on the async runtime wrap it in
+/// `spawn_blocking`.
+pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<Vec<WikiRow>> {
+    let limit = limit.clamp(1, MAX_WIKI_LIMIT);
+    let connection = open_readonly()?;
+    let query = query.trim();
+    if query.is_empty() {
+        let rows = sessionwiki::index::recent(&connection, limit, None, None, None, false)
+            .context("list recent SessionWiki sessions")?;
+        return Ok(rows
+            .into_iter()
+            .map(|row| wiki_row(row, None, live))
+            .collect());
+    }
+    let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
+        sessionwiki::index::search_like(&connection, query, limit, None, None)
+    } else {
+        sessionwiki::index::search(&connection, query, limit, None, None)
+    }
+    .context("search the SessionWiki index")?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| wiki_row(hit.row, Some(hit.snippet), live))
+        .collect())
+}
+
+/// The briefing for one indexed session, or `None` when the id names none.
+pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>> {
+    let connection = open_readonly()?;
+    let Some(row) = row_by_id(&connection, id)? else {
+        return Ok(None);
+    };
+    let session = sessionwiki::index::session_from_index(&connection, &row)
+        .context("read an indexed session")?;
+    Ok(Some(sessionwiki::commands::brief_markdown(
+        &session, max_chars, true,
+    )))
+}
+
+/// What a restore needs from the index: the transcript as a snapshot the
+/// compaction pipeline accepts, plus the title and project of the session it
+/// came from.
+pub struct ArchivedSession {
+    pub title: String,
+    /// The project directory the session ran in, when the row names one that
+    /// still exists.
+    pub project_directory: Option<PathBuf>,
+    pub snapshot: mj_core::archive::CanonicalSessionSnapshot,
+}
+
+/// Load one indexed session for restore, or `None` when the id names none.
+pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
+    let connection = open_readonly()?;
+    let Some(row) = row_by_id(&connection, id)? else {
+        return Ok(None);
+    };
+    let session = sessionwiki::index::session_from_index(&connection, &row)
+        .context("read an indexed session")?;
+    let snapshot = snapshot_of(&session)?;
+    Ok(Some(ArchivedSession {
+        title: session.title.clone(),
+        project_directory: project_directory_of(&session.project),
+        snapshot,
+    }))
+}
+
+fn open_readonly() -> Result<rusqlite::Connection> {
+    sessionwiki::index::open_readonly().context("open the SessionWiki index")
+}
+
+/// The one row an id names exactly. `resolve` matches prefixes, which is right
+/// for a person typing and wrong for a client passing an id back.
+fn row_by_id(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<sessionwiki::index::SessionRow>> {
+    Ok(sessionwiki::index::resolve(connection, id)
+        .context("look up an indexed session")?
+        .into_iter()
+        .find(|row| row.session_id == id))
+}
+
+fn wiki_row(
+    row: sessionwiki::index::SessionRow,
+    snippet: Option<String>,
+    live: &BTreeSet<String>,
+) -> WikiRow {
+    // Only this daemon's own sessions can be live here, and only under the key
+    // shape the adapter writes: the checkpoint directory and the session id.
+    let hel_session_id = (row.tool == TOOL)
+        .then(|| row.path.rsplit('/').next().unwrap_or_default().to_owned())
+        .filter(|session_id| live.contains(session_id));
+    let native_id = sessionwiki::index::native_id_of(&row.path);
+    WikiRow {
+        id: row.session_id,
+        tool: row.tool,
+        project: row.project,
+        title: row.title,
+        started: row.started,
+        msgs: row.msg_count,
+        preview: row.preview,
+        archived: row.archived,
+        native_id,
+        snippet,
+        hel_session_id,
+    }
+}
+
+/// The project a restored session should open.
+///
+/// A Mjolnir session runs in a managed worktree under the repository it was
+/// started from, and that worktree is gone once the session is archived. The
+/// repository above it is what the user still has, so a worktree path is
+/// reduced to it. Any other path is used as it stands, and a path that no
+/// longer exists is left for the caller to replace.
+fn project_directory_of(project: &str) -> Option<PathBuf> {
+    if project.trim().is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(project);
+    let repository = path
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".mj"))
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(path);
+    repository.is_dir().then_some(repository)
+}
+
+/// Rebuild an indexed transcript as a canonical snapshot.
+///
+/// The snapshot is only ever read by the compaction pipeline, which wants
+/// turns: a user message opens a turn and assistant and tool items attach to
+/// it. Messages before the first user message therefore have nowhere to go and
+/// are dropped, and a session with no user message at all cannot be restored.
+fn snapshot_of(
+    session: &sessionwiki::model::Session,
+) -> Result<mj_core::archive::CanonicalSessionSnapshot> {
+    use mj_core::archive::{
+        CanonicalExecutionState, CanonicalSessionSnapshot, CanonicalSessionState,
+        CanonicalTranscriptBody, CanonicalTranscriptItem,
+    };
+
+    let started_ms = session
+        .started
+        .map(|time| time.timestamp_millis())
+        .unwrap_or_default();
+    let mut transcript: Vec<CanonicalTranscriptItem> = Vec::new();
+    for message in &session.messages {
+        let text = message.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // Compaction attaches assistant and tool items to the open turn, so an
+        // item before the first user message would be dropped anyway.
+        if transcript.is_empty() && message.role != Role::User {
+            continue;
+        }
+        let position = transcript.len() as u64 + 1;
+        let body = match message.role {
+            Role::User => CanonicalTranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": text})],
+            },
+            Role::Assistant => CanonicalTranscriptBody::Agent {
+                chunks: vec![serde_json::json!({
+                    "content": {"type": "text", "text": text}
+                })],
+                streaming: false,
+            },
+            // The index keeps a tool call's title and nothing else, which is
+            // what the transcript showed the user.
+            Role::Tool => CanonicalTranscriptBody::Tool {
+                call: serde_json::json!({
+                    "toolCallId": format!("wiki-tool-{position}"),
+                    "title": text,
+                    "status": "completed"
+                }),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        };
+        let created_at_ms = message
+            .ts
+            .map(|time| time.timestamp_millis())
+            .unwrap_or(started_ms);
+        transcript.push(CanonicalTranscriptItem {
+            stable_id: format!("wiki-{position}"),
+            position,
+            // The validator wants an ordinal on agent messages and on nothing
+            // else; one event per item makes the item's own position right.
+            latest_content_event_ordinal: matches!(body, CanonicalTranscriptBody::Agent { .. })
+                .then_some(position),
+            created_at_ms,
+            last_changed_at_ms: created_at_ms,
+            body,
+        });
+    }
+    anyhow::ensure!(
+        !transcript.is_empty(),
+        "the archived session has no prompt to restore from"
+    );
+
+    let event_frontier = transcript.len() as u64;
+    let last_activity_at_ms = transcript.last().map(|item| item.last_changed_at_ms);
+    Ok(CanonicalSessionSnapshot {
+        event_frontier,
+        // Not a relay frontier, so there is no recorded digest to carry. It has
+        // to be a well-formed non-genesis digest, and deriving it from the
+        // session makes two restores of one session agree.
+        event_frontier_digest: {
+            use sha2::Digest;
+            format!(
+                "{:x}",
+                sha2::Sha256::digest(format!("sessionwiki:{}", session.id).as_bytes())
+            )
+        },
+        session: CanonicalSessionState {
+            execution: CanonicalExecutionState::Idle,
+            last_activity_at_ms,
+            session_title: Some(session.title.clone()).filter(|title| !title.trim().is_empty()),
+            configuration: BTreeMap::new(),
+        },
+        transcript,
+        queued_prompts: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -683,6 +935,100 @@ mod tests {
                 (Role::Tool, "Read config.toml"),
                 (Role::Assistant, "done"),
             ]
+        );
+    }
+
+    fn indexed(messages: Vec<(Role, &str)>) -> sessionwiki::model::Session {
+        Session {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            tool: "mjolnir",
+            path: PathBuf::from("/sessions/0123456789abcdef0123456789abcdef"),
+            project: "/home/dev/project".into(),
+            started: DateTime::from_timestamp_millis(1_700_000_000_000),
+            ended: None,
+            title: "the archived session".into(),
+            subagent: false,
+            messages: messages
+                .into_iter()
+                .map(|(role, text)| Message {
+                    role,
+                    text: text.to_owned(),
+                    ts: None,
+                })
+                .collect(),
+            touched: Vec::new(),
+            edits: Vec::new(),
+        }
+    }
+
+    /// The snapshot a restore hands to compaction has to satisfy the same
+    /// validator a real checkpoint does, and has to carry every message in
+    /// order.
+    #[test]
+    fn a_restored_snapshot_is_a_valid_transcript_of_the_indexed_session() {
+        let snapshot = snapshot_of(&indexed(vec![
+            (Role::User, "make the tests green"),
+            (Role::Tool, "Read src/lib.rs"),
+            (Role::Assistant, "they are green now"),
+            (Role::User, "  "),
+        ]))
+        .unwrap();
+
+        snapshot.validate().expect("the snapshot is well formed");
+        assert_eq!(snapshot.event_frontier, 3);
+        assert_eq!(
+            snapshot.session.session_title.as_deref(),
+            Some("the archived session")
+        );
+        assert!(snapshot.session.last_activity_at_ms.is_some());
+        let bodies = snapshot
+            .transcript
+            .iter()
+            .map(|item| match &item.body {
+                mj_core::archive::CanonicalTranscriptBody::User { content } => (
+                    "user",
+                    mj_core::transcript::materialized_content_text(content),
+                ),
+                mj_core::archive::CanonicalTranscriptBody::Agent { chunks, .. } => (
+                    "agent",
+                    mj_core::transcript::materialized_chunks_text(chunks),
+                ),
+                mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => (
+                    "tool",
+                    call["title"].as_str().unwrap_or_default().to_owned(),
+                ),
+                _ => ("other", String::new()),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies,
+            vec![
+                ("user", "make the tests green".to_owned()),
+                ("tool", "Read src/lib.rs".to_owned()),
+                ("agent", "they are green now".to_owned()),
+            ],
+            "the blank message is dropped and every other one keeps its role"
+        );
+    }
+
+    /// Compaction attaches assistant and tool items to the open turn, so an
+    /// index that starts mid-conversation must not produce a snapshot whose
+    /// first item has no turn to join.
+    #[test]
+    fn messages_before_the_first_prompt_are_dropped() {
+        let snapshot = snapshot_of(&indexed(vec![
+            (Role::Assistant, "still working"),
+            (Role::User, "carry on"),
+        ]))
+        .unwrap();
+        assert_eq!(snapshot.transcript.len(), 1);
+        assert_eq!(snapshot.transcript[0].position, 1);
+        snapshot.validate().unwrap();
+
+        let error = snapshot_of(&indexed(vec![(Role::Assistant, "nobody asked")])).unwrap_err();
+        assert!(
+            error.to_string().contains("no prompt"),
+            "a session with no prompt cannot be restored: {error}"
         );
     }
 }

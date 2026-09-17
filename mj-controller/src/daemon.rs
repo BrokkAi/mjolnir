@@ -422,6 +422,213 @@ impl RuntimeState {
         &self.wiki
     }
 
+    /// Search the user's SessionWiki index, with this daemon's own live
+    /// sessions marked so a surface can resume them instead of restoring them.
+    pub async fn wiki_search(&self, query: String, limit: usize) -> Result<Vec<WikiRow>> {
+        self.require_wiki()?;
+        if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
+            // Fresh enough matters less than answering now: the sync runs in
+            // the background and the next keystroke sees its result.
+            self.wiki.request_sync(false);
+        }
+        let live = self.live_session_ids();
+        blocking(move || crate::sessionwiki::query_rows(&query, limit, &live)).await
+    }
+
+    /// The markdown briefing for one indexed session, or `None` when the index
+    /// holds no session with that id.
+    pub async fn wiki_brief(&self, wiki_id: String, max_chars: usize) -> Result<Option<String>> {
+        self.require_wiki()?;
+        blocking(move || crate::sessionwiki::brief(&wiki_id, max_chars)).await
+    }
+
+    /// Start a new session carrying a hand-off compacted from an archived one.
+    ///
+    /// The session starts like any other; the hand-off is installed in the
+    /// background once the harness is ready, because building it can take
+    /// several summarizer requests and the caller should not hold a socket
+    /// open for them.
+    /// `None` means the index holds no session with that id.
+    pub async fn restore_wiki_session(
+        self: &Arc<Self>,
+        request: WikiRestoreRequest,
+    ) -> Result<Option<RegisteredSession>> {
+        self.require_wiki()?;
+        let wiki_id = request.wiki_id.clone();
+        let Some(archived) =
+            blocking(move || crate::sessionwiki::archived_session(&wiki_id)).await?
+        else {
+            return Ok(None);
+        };
+        let project_directory = request
+            .project_directory
+            .clone()
+            .or_else(|| archived.project_directory.clone())
+            .context(
+                "name a project directory: the archived session's own project is no longer on this machine",
+            )?;
+        let source = project_directory.display().to_string();
+        let bundle_id = blocking(move || {
+            crate::controller::create_bundle_from_sources(&[source])
+                .map(|created| created.bundle_id)
+                .map_err(anyhow::Error::new)
+        })
+        .await
+        .context("find or create a bundle for the restored session's project")?;
+        let registered = self
+            .start_create_session(CreateSessionRequest {
+                create_managed_worktree: None,
+                mjolnir_subagents: None,
+                initial_prompt: None,
+                workspace_id: request.workspace_id,
+                profile_id: request.profile_id,
+                bundle_id,
+                project_directory: Some(project_directory),
+                target_template_id: request.target_template_id,
+                additional_mounts: request.additional_mounts,
+                resource_allocation: request.resource_allocation,
+                title: archived.title.clone(),
+                session_title_override: None,
+            })
+            .await?;
+        let session_id = registered.session.id.clone();
+        let runtime = Arc::clone(self);
+        let handoff_session = session_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = runtime
+                .install_archive_handoff(&handoff_session, archived.snapshot)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %handoff_session,
+                    %error,
+                    "could not install the restored archive's hand-off"
+                );
+                runtime.push_notice(
+                    &handoff_session,
+                    format!(
+                        "The restored session started without its archived hand-off: {error:#}"
+                    ),
+                );
+            }
+        });
+        Ok(Some(registered))
+    }
+
+    /// Whether the user has switched SessionWiki on.
+    pub fn wiki_enabled(&self) -> bool {
+        self.controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .config
+            .sessionwiki
+            .enabled
+    }
+
+    fn require_wiki(&self) -> Result<()> {
+        ensure!(
+            self.controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .config
+                .sessionwiki
+                .enabled,
+            "SessionWiki is disabled; enable it in Setup to search and restore archived sessions"
+        );
+        Ok(())
+    }
+
+    fn live_session_ids(&self) -> BTreeSet<String> {
+        self.controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Compact an archived transcript and hand it to the new session's harness
+    /// as hidden context for its first prompt, which is what the cross-harness
+    /// resume does with a checkpoint.
+    async fn install_archive_handoff(
+        &self,
+        session_id: &str,
+        snapshot: mj_core::archive::CanonicalSessionSnapshot,
+    ) -> Result<()> {
+        let handle = self.wait_for_ready_session(session_id).await?;
+        let (config, profile_id) = {
+            let controller = self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let profile_id = controller
+                .state
+                .sessions
+                .get(session_id)
+                .map(|record| record.last_profile.clone());
+            (controller.config.clone(), profile_id)
+        };
+        let context_bytes = crate::handoff::profile_handoff_bytes(
+            profile_id.and_then(|id| config.profiles.get(&id)),
+        );
+        let cancel = CancellationToken::new();
+        let handoff = crate::handoff::build_handoff_context(
+            session_id,
+            &config,
+            &snapshot,
+            context_bytes,
+            &cancel,
+        )
+        .await
+        .context("compact the archived transcript")?;
+        handle
+            .install_prompt_context(format!(
+                "{} {handoff}",
+                crate::compaction::ARCHIVE_HANDOFF_PREAMBLE
+            ))
+            .await
+            .context("install the archived hand-off")?;
+        tracing::info!(
+            session_id,
+            bytes = handoff.len(),
+            "installed the restored archive's hand-off"
+        );
+        Ok(())
+    }
+
+    /// Wait until a just-created session has a harness that can be handed to.
+    async fn wait_for_ready_session(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::session_manager::ManagedSessionHandle> {
+        const POLL: Duration = Duration::from_millis(250);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30 * 60);
+        loop {
+            match self.session_state(session_id) {
+                Some(SessionState::Provisioning) | Some(SessionState::Running) => {}
+                Some(state) => bail!("session {session_id} is {state:?} before its hand-off"),
+                None => bail!("session {session_id} disappeared before its hand-off"),
+            }
+            if let Ok(handle) = self.session_manager.session(session_id).await {
+                let view = handle.view();
+                if view.connected
+                    && view
+                        .snapshot
+                        .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+                {
+                    return Ok(handle);
+                }
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "session {session_id} was not ready for its hand-off within 30 minutes"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     /// React to the durable outcome of one lifecycle operation.
     ///
     /// A session that has just reached `Stopped` is checkpointed and torn
@@ -3454,6 +3661,24 @@ async fn handle_action(
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
         )),
+        DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
+            state.wiki_search(query, limit).await?,
+        )),
+        DaemonAction::WikiBrief { wiki_id, max_chars } => {
+            let markdown = state
+                .wiki_brief(wiki_id.clone(), max_chars)
+                .await?
+                .with_context(|| format!("no indexed session {wiki_id}"))?;
+            Ok(DaemonReply::Text(markdown))
+        }
+        DaemonAction::WikiRestore(request) => {
+            let wiki_id = request.wiki_id.clone();
+            let registered = state
+                .restore_wiki_session(request)
+                .await?
+                .with_context(|| format!("no indexed session {wiki_id}"))?;
+            Ok(DaemonReply::RegisteredSession(Box::new(registered)))
+        }
         DaemonAction::ScanRecovery { all_instances } => {
             let scan = blocking(move || {
                 Ok(Controller::load()?.scan_orphan_workers(&ProcessExecutor, all_instances))

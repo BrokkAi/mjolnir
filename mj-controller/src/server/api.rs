@@ -790,6 +790,47 @@ pub trait SubagentBackend: Send + Sync {
 
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;
+
+    /// Whether the user has switched SessionWiki on.
+    fn wiki_enabled(&self) -> bool {
+        false
+    }
+
+    /// Whether the index was synced recently enough that a query need not ask
+    /// for one.
+    fn wiki_sync_is_stale(&self) -> bool {
+        false
+    }
+
+    /// Ask for a background sync. It is never waited for: a query answers from
+    /// what the index holds now.
+    fn wiki_request_sync(&self) {}
+
+    fn wiki_search(
+        &self,
+        _query: String,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_client::daemon::WikiRow>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
+    }
+
+    /// `None` when the index holds no session with that id.
+    fn wiki_brief(
+        &self,
+        _wiki_id: String,
+        _max_chars: usize,
+    ) -> BoxFuture<'_, AnyResult<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki briefings are unavailable") })
+    }
+
+    /// Start a session from an archived transcript, answering with its id, or
+    /// `None` when the index holds no session with that id.
+    fn wiki_restore(
+        &self,
+        _request: mj_client::daemon::WikiRestoreRequest,
+    ) -> BoxFuture<'_, AnyResult<Option<String>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki restore is unavailable") })
+    }
 }
 
 fn backend(state: &ServerState) -> Result<&Arc<dyn SubagentBackend>, ApiFailure> {
@@ -1060,6 +1101,9 @@ pub(super) fn router(state: ServerState) -> Router<ServerState> {
             post(respond_elicitation),
         )
         .route("/sessions/{session_id}/export", post(export))
+        .route("/wiki/search", get(wiki_search))
+        .route("/wiki/sessions/{wiki_id}/brief", get(wiki_brief))
+        .route("/wiki/sessions/{wiki_id}/restore", post(wiki_restore))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             require_api_auth,
@@ -1353,6 +1397,153 @@ async fn start_session(
                 model: request.model,
                 effort: request.effort,
                 prompt: request.prompt,
+            },
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(StartSessionResponse {
+            session_id,
+            turn_id: None,
+        }),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// SessionWiki
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiSearchResponse {
+    pub rows: Vec<mj_client::daemon::WikiRow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiBriefQuery {
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiBriefResponse {
+    pub markdown: String,
+}
+
+/// The fields of a start request a restore needs. The archived session decides
+/// the rest: its title, and the project it ran in when the caller names none.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiRestoreBody {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    pub profile_id: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// The largest briefing a caller may ask for, and the size one that names none
+/// gets.
+const DEFAULT_BRIEF_CHARS: usize = 24_000;
+const MAX_BRIEF_CHARS: usize = 400_000;
+
+fn require_wiki(state: &ServerState) -> Result<&Arc<dyn SubagentBackend>, ApiFailure> {
+    let backend = backend(state)?;
+    if !backend.wiki_enabled() {
+        return Err(ApiFailure::conflict(
+            "SessionWiki is disabled; enable it in Setup to search and restore archived sessions",
+        ));
+    }
+    Ok(backend)
+}
+
+async fn wiki_search(
+    State(state): State<ServerState>,
+    Query(query): Query<WikiSearchQuery>,
+) -> Result<Json<WikiSearchResponse>, ApiFailure> {
+    let backend = require_wiki(&state)?.clone();
+    // The index is answered from as it stands; a stale one is refreshed in the
+    // background so the next query is better without this one waiting.
+    if backend.wiki_sync_is_stale() {
+        backend.wiki_request_sync();
+    }
+    let limit = query
+        .limit
+        .unwrap_or(crate::sessionwiki::DEFAULT_WIKI_LIMIT)
+        .clamp(1, crate::sessionwiki::MAX_WIKI_LIMIT);
+    let rows = backend
+        .wiki_search(query.q.unwrap_or_default(), limit)
+        .await
+        .map_err(|error| {
+            ApiFailure::unavailable(format!("SessionWiki search failed: {error:#}"))
+        })?;
+    Ok(Json(WikiSearchResponse { rows }))
+}
+
+async fn wiki_brief(
+    State(state): State<ServerState>,
+    Path(wiki_id): Path<String>,
+    Query(query): Query<WikiBriefQuery>,
+) -> Result<Json<WikiBriefResponse>, ApiFailure> {
+    let backend = require_wiki(&state)?.clone();
+    let max_chars = query
+        .max_chars
+        .unwrap_or(DEFAULT_BRIEF_CHARS)
+        .clamp(1, MAX_BRIEF_CHARS);
+    let markdown = backend
+        .wiki_brief(wiki_id.clone(), max_chars)
+        .await
+        .map_err(|error| {
+            ApiFailure::unavailable(format!("SessionWiki briefing failed: {error:#}"))
+        })?
+        .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
+    Ok(Json(WikiBriefResponse { markdown }))
+}
+
+async fn wiki_restore(
+    State(state): State<ServerState>,
+    Path(wiki_id): Path<String>,
+    Json(request): Json<WikiRestoreBody>,
+) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
+    let backend = require_wiki(&state)?.clone();
+    super::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    super::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    let session_id = backend
+        .wiki_restore(mj_client::daemon::WikiRestoreRequest {
+            wiki_id: wiki_id.clone(),
+            workspace_id: request.workspace_id.unwrap_or_default(),
+            profile_id: request.profile_id,
+            target_template_id: request.target_id,
+            project_directory: request.project_directory,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        })
+        .await
+        .map_err(|error| ApiFailure::unavailable(format!("restore failed: {error:#}")))?
+        .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
+    // Model and effort are applied the same way a new session's are, once the
+    // harness is up.
+    backend
+        .start_followup(
+            session_id.clone(),
+            StartFollowup {
+                model: request.model,
+                effort: request.effort,
+                prompt: None,
             },
         )
         .await?;

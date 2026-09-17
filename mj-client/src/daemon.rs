@@ -51,6 +51,51 @@ pub struct SessionPreview {
     pub updated_at: String,
 }
 
+/// One session in the user's SessionWiki index, as a control surface shows it.
+///
+/// It is the daemon's own shape rather than SessionWiki's row: it carries the
+/// search snippet that found the row and, for a Mjolnir session this daemon
+/// still holds, the id that resumes it instead of restoring it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiRow {
+    pub id: String,
+    pub tool: String,
+    pub project: String,
+    pub title: String,
+    pub started: Option<String>,
+    pub msgs: i64,
+    pub preview: Option<String>,
+    /// The tool deleted its own copy and SessionWiki kept the transcript.
+    pub archived: bool,
+    /// The session id the tool that ran it knows it by, when its stored path
+    /// carries one. It is what matches a row against an import scan.
+    pub native_id: Option<String>,
+    /// The matching text, when this row came from a search.
+    pub snippet: Option<String>,
+    /// The live Mjolnir session this row describes, when this daemon has it.
+    pub hel_session_id: Option<String>,
+}
+
+/// Start a new session carrying a compacted hand-off from an archived one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiRestoreRequest {
+    /// The SessionWiki session id to restore from.
+    pub wiki_id: String,
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub target_template_id: String,
+    /// Where the new session opens. None takes the project the archived
+    /// session ran in, when that directory still exists.
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
+    pub resource_allocation: Option<SessionResourceAllocation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
@@ -300,6 +345,19 @@ pub enum DaemonAction {
     CheckpointSession {
         session_id: String,
     },
+    /// Search the user's SessionWiki index. An empty query lists the most
+    /// recent sessions.
+    WikiSearch {
+        query: String,
+        limit: usize,
+    },
+    /// The markdown briefing for one indexed session.
+    WikiBrief {
+        wiki_id: String,
+        max_chars: usize,
+    },
+    /// Start a new session from an archived one's transcript.
+    WikiRestore(WikiRestoreRequest),
     ScanRecovery {
         all_instances: bool,
     },
@@ -439,6 +497,7 @@ pub enum DaemonReply {
     OptionalSessionState(Option<SessionState>),
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
+    WikiRows(Vec<WikiRow>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
     Done,
 }
@@ -1026,6 +1085,39 @@ impl DaemonClient {
         {
             DaemonReply::Checkpoint(checkpoint) => Ok(checkpoint),
             reply => bail!("unexpected checkpoint reply {reply:?}"),
+        }
+    }
+
+    /// Search the user's SessionWiki index, newest first when the query is
+    /// empty and best match first otherwise.
+    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<Vec<WikiRow>> {
+        match self
+            .request(DaemonAction::WikiSearch { query, limit })
+            .await?
+        {
+            DaemonReply::WikiRows(rows) => Ok(rows),
+            reply => bail!("unexpected SessionWiki search reply {reply:?}"),
+        }
+    }
+
+    /// The markdown briefing for one indexed session.
+    pub async fn wiki_brief(&mut self, wiki_id: String, max_chars: usize) -> Result<String> {
+        match self
+            .request(DaemonAction::WikiBrief { wiki_id, max_chars })
+            .await?
+        {
+            DaemonReply::Text(markdown) => Ok(markdown),
+            reply => bail!("unexpected SessionWiki brief reply {reply:?}"),
+        }
+    }
+
+    /// Start a new session carrying a hand-off compacted from an archived one.
+    /// It answers like any other session start: the record exists and is
+    /// provisioning, and the hand-off follows once the harness is ready.
+    pub async fn wiki_restore(&mut self, request: WikiRestoreRequest) -> Result<RegisteredSession> {
+        match self.request(DaemonAction::WikiRestore(request)).await? {
+            DaemonReply::RegisteredSession(registered) => Ok(*registered),
+            reply => bail!("unexpected SessionWiki restore reply {reply:?}"),
         }
     }
 
