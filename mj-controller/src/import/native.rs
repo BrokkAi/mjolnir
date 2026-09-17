@@ -185,6 +185,65 @@ pub fn locate_native_session(
     })
 }
 
+/// Where one native session's transcript lives and when it last changed.
+///
+/// Cheaper than [`NativeSessionListing`]: no git branch and no directory size,
+/// because the search index only needs a stable key and a change token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSessionSource {
+    pub native_session_id: String,
+    pub source_path: PathBuf,
+    /// The newest modification time of the session's own transcript files, not
+    /// of the directory that holds them.
+    pub modified_at: SystemTime,
+}
+
+/// List the sessions of one harness home for indexing.
+///
+/// Only the harnesses whose sessions Mjolnir itself has to enumerate are
+/// supported; Codex and Claude Code keep one file per session, which their
+/// own readers walk directly.
+pub fn list_native_session_sources(
+    harness: HarnessKind,
+    home: &Path,
+) -> Result<Vec<NativeSessionSource>> {
+    let sources = match harness {
+        HarnessKind::Kimi => kimi_indexed_candidates(home, &home.join("sessions"))?
+            .into_iter()
+            .map(|candidate| NativeSessionSource {
+                native_session_id: candidate.native_session_id,
+                source_path: candidate.session_path,
+                modified_at: candidate.modified_at,
+            })
+            .collect(),
+        HarnessKind::Grok => grok::grok_candidates(&home.join("sessions"))?
+            .into_iter()
+            .map(|candidate| NativeSessionSource {
+                native_session_id: candidate.native_session_id,
+                source_path: candidate.session_path,
+                modified_at: candidate.modified_at,
+            })
+            .collect(),
+        HarnessKind::Muse => muse::list_sources(&mj_checkpoint::native::muse_sessions_root(home)?)?,
+        other => bail!("{other:?} keeps one session per file; there is nothing to enumerate"),
+    };
+    Ok(sources)
+}
+
+/// The title the harness itself records for one session, read from that
+/// session's own metadata file. `None` when the harness records none, which
+/// leaves the caller to derive a title from the conversation.
+pub fn native_session_title(harness: HarnessKind, source_path: &Path) -> Option<String> {
+    match harness {
+        HarnessKind::Kimi => kimi_state_listing_metadata(source_path, Path::new(""))
+            .ok()
+            .flatten()
+            .map(|(title, _, _)| title),
+        HarnessKind::Grok => grok::grok_listing_metadata(source_path).0,
+        _ => None,
+    }
+}
+
 /// Project one native session into the canonical transcript, for any harness.
 pub fn read_native_transcript(
     harness: HarnessKind,

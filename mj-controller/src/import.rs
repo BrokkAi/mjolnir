@@ -4,6 +4,8 @@
 mod muse;
 #[cfg(test)]
 mod native_tests;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

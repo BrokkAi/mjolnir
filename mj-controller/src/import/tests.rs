@@ -1,5 +1,7 @@
 use super::*;
 
+use super::test_fixtures::grok_session;
+
 fn container_template() -> mj_core::config::ContainerTemplate {
     mj_core::config::ContainerTemplate {
         build_cache: None,
@@ -1901,29 +1903,6 @@ fn kimi_wire_projects_user_prompt_and_text_without_thought() {
             .iter()
             .all(|event| event.recorded_at_ms == Some(expected_fallback))
     );
-}
-
-/// Synthetic `chat_history.jsonl`, modeled on the shape Grok Build writes:
-/// internally tagged items, user content as typed parts, reasoning
-/// summaries beside the assistant turn, and `search_replace` tool calls
-/// paired with their results.
-fn grok_session(directory: &Path, cwd: &str, history: &str) -> PathBuf {
-    let session = directory.join("sessions/%2Fwork%2Fapp/01a00c3a-553f-71e0-95ab-aa04396d3ad7");
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join("summary.json"),
-        json!({
-            "info": {"id": "01a00c3a-553f-71e0-95ab-aa04396d3ad7", "cwd": cwd},
-            "session_summary": "",
-            "num_chat_messages": 4,
-            "current_model_id": "grok-4.6",
-            "grok_home": "/home/me/.grok",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(session.join("chat_history.jsonl"), history).unwrap();
-    session
 }
 
 #[test]

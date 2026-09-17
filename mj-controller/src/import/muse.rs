@@ -172,6 +172,20 @@ pub(super) fn scan(
     Ok(())
 }
 
+/// Every Muse session file under the root, for the search index. Titles and
+/// working directories are left to the caller, which has to parse the session
+/// anyway.
+pub(super) fn list_sources(sessions_root: &Path) -> Result<Vec<NativeSessionSource>> {
+    Ok(muse_candidates(sessions_root)?
+        .into_iter()
+        .map(|candidate| NativeSessionSource {
+            native_session_id: candidate.native_session_id,
+            source_path: candidate.session_path,
+            modified_at: candidate.modified_at,
+        })
+        .collect())
+}
+
 /// Project a Muse session's visible conversation into Hel's canonical event
 /// transcript.  Tool details and retained permission records remain in the
 /// copied native artifacts.
