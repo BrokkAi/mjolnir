@@ -957,7 +957,10 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(_, target)| target.as_str())
         .unwrap_or(&session.target_template_id);
-    let target = session.project_target(&dashboard.config, target_id);
+    let target = dashboard
+        .state
+        .project_identity_session(session)
+        .project_target(&dashboard.config, target_id);
     let profile = operation
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())

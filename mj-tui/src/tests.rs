@@ -1216,10 +1216,25 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     parent.title = "Parent planning session".into();
     parent.session_title_override = Some("Parent planning session".into());
     parent.state = SessionState::Running;
+    parent.project_directory = Some(std::path::PathBuf::from("/worktrees/parent-session"));
+    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        source_project_directory: std::path::PathBuf::from("/src/mjolnir-main"),
+        source_repository: std::path::PathBuf::from("/src/mjolnir-main"),
+        worktree_root: std::path::PathBuf::from("/worktrees/parent-session"),
+        branch: "mj/parent-session".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
     let mut child = stopped_session();
     child.id = "child-session".into();
-    child.title = "Inspect parser".into();
+    child.title = "Inspect the parser and report back".into();
+    child.session_title_override = Some("Inspect parser".into());
+    child.acp_session_title = None;
     child.state = SessionState::Running;
+    // A child launches into the parent's worktree checkout and owns no
+    // worktree of its own, so its own project identity is the parent's
+    // session id.
+    child.project_directory = Some(std::path::PathBuf::from("/worktrees/parent-session"));
     let relation = mj_core::subagent::SubagentRecord {
         child_session_id: child.id.clone(),
         parent_session_id: parent.id.clone(),
@@ -1278,6 +1293,23 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     let screen = terminal.backend().to_string();
     assert!(screen.contains("Parent planning session"), "{screen}");
     assert!(screen.contains("X"), "{screen}");
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::render::render_sessions(frame, frame.area(), &dashboard);
+        })
+        .unwrap();
+    let rows = terminal.backend().to_string();
+    assert!(rows.contains("Inspect parser"), "{rows}");
+    assert!(
+        rows.contains("mjolnir-main"),
+        "a child groups under the project its parent works in: {rows}"
+    );
+    assert!(
+        !rows.contains("parent-session"),
+        "no row names the parent session id: {rows}"
+    );
 
     dashboard.close_subagent_workspace();
     assert_eq!(dashboard.subagent_parent_id(), None);

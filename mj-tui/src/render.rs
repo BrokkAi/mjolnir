@@ -20,7 +20,7 @@ use ratatui::widgets::{
 };
 
 use mj_core::config::{Config, PermissionMode};
-use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind};
+use mj_core::state::{SessionRecord, SessionState, SessionTransitionKind, State};
 
 use mj_chat::chat::render_agent_message_head;
 use mj_chat::components::{render_scrollbar, scrollbar_geometry};

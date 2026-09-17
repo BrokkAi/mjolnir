@@ -35,7 +35,7 @@ fn session_metadata_text(
         false,
         operation,
         now_epoch_seconds,
-        &session_target_label(session, operation, config),
+        &session_target_label(&State::default(), session, operation, config),
         session_permission_badge(session, operation, config),
         None,
         120,
@@ -857,7 +857,10 @@ fn session_transitions_preserve_the_blank_row_before_the_next_session() {
         let lines = buffer_lines(buffer);
         let first_y = lines
             .iter()
-            .position(|line| line.contains("podman [1]"))
+            // The row leads with the session name; the ellipsis action marks
+            // it as a Sessions-pane row rather than the conversation's own
+            // transition notice.
+            .position(|line| line.contains("First session") && line.contains('⋯'))
             .expect("transition row");
         let second_y = lines
             .iter()
@@ -3227,7 +3230,6 @@ fn transition_row_is_compact_and_contains_stage_identity_and_elapsed() {
         1_012,
         "podman",
         120,
-        &config(),
         None,
     );
     let text = line
@@ -3240,6 +3242,26 @@ fn transition_row_is_compact_and_contains_stage_identity_and_elapsed() {
     assert!(text.contains("12s"), "{text}");
     assert!(text.contains("ACP pretty name"), "{text}");
     assert!(!text.contains("No messages"), "{text}");
+
+    // Sessions that start together on one target differ only by their names,
+    // so the name has to survive a narrow Sessions pane.
+    let narrow = session_transition_line(
+        "› ",
+        &session,
+        mj_core::state::SessionTransitionKind::Moving,
+        Some(&operation),
+        1_012,
+        "podman",
+        40,
+        None,
+    );
+    let narrow = narrow
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(narrow.contains("ACP pretty name"), "{narrow}");
+    assert!(narrow.contains("Moving"), "{narrow}");
 }
 
 #[test]

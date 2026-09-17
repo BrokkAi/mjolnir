@@ -371,9 +371,11 @@ impl DashboardContext {
         let Some(chat) = self.active_chat.as_mut() else {
             return;
         };
+        let record = self.controller.state.sessions.get(chat.session_id());
         chat.refresh_context(
             &self.controller.config,
-            self.controller.state.sessions.get(chat.session_id()),
+            record,
+            record.map(|session| self.controller.state.project_identity_session(session)),
         );
         if self.dashboard.go_mode().is_some() {
             chat.set_display_title(self.dashboard.go_conversation_title(chat.session_id()));

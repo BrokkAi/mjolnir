@@ -288,7 +288,6 @@ pub(crate) fn drawn_session_rows_with_options(
                         now_epoch_seconds,
                         &target,
                         width,
-                        &dashboard.config,
                         None,
                     ));
                     rows.push(DrawnSessionRow {
@@ -308,7 +307,6 @@ pub(crate) fn drawn_session_rows_with_options(
                         now_epoch_seconds,
                         &target,
                         width,
-                        &dashboard.config,
                         session.last_error.as_deref(),
                     ));
                     rows.push(DrawnSessionRow {
@@ -845,6 +843,7 @@ pub(crate) fn session_display_targets(
         let key = (
             dashboard.project_source(session).key,
             session_target_label(
+                &dashboard.state,
                 session,
                 dashboard.session_operations.get(&session.id),
                 &dashboard.config,
@@ -857,6 +856,7 @@ pub(crate) fn session_display_targets(
         .iter()
         .map(|session| {
             let base = session_target_label(
+                &dashboard.state,
                 session,
                 dashboard.session_operations.get(&session.id),
                 &dashboard.config,
@@ -1115,7 +1115,6 @@ pub(crate) fn session_transition_line(
     now_epoch_seconds: u64,
     target: &str,
     width: u16,
-    config: &Config,
     failure: Option<&str>,
 ) -> Line<'static> {
     let started_at = operation
@@ -1150,13 +1149,18 @@ pub(crate) fn session_transition_line(
                 session.target_template_id.clone(),
             )
         });
-    let identity = format!(
-        "{} · {}",
-        session.project_name(config),
-        session_name(session)
+    // Lead with the name, as every other session row does. A transition row
+    // is a single line, so anything after it is what truncation drops first;
+    // sessions starting together on one target differ only by their names.
+    // Keep the name to half the row so the stage and clock always survive.
+    let content_width = usize::from(width.saturating_sub(3)).saturating_sub(prefix.chars().count());
+    let name = truncate_to_cells(
+        session_name(session),
+        (content_width / 2).max(12),
+        Truncate::PLAIN,
     );
     let line = format!(
-        "{prefix}{target}  {} · {stages} · {elapsed}  {profile} · {identity}{}",
+        "{prefix}{name}  {} · {stages} · {elapsed}  {target} · {profile}{}",
         transition.label(),
         failure.map_or_else(String::new, |error| format!(" · failed: {error}"))
     );
@@ -1180,7 +1184,15 @@ pub(crate) fn session_transition_line(
 pub(crate) static EMPTY_ACTIVITY: std::sync::LazyLock<mj_client::usage_format::SessionActivity> =
     std::sync::LazyLock::new(mj_client::usage_format::SessionActivity::default);
 
+/// The target a session row names, as `<target>/<project>` where the target
+/// runs the project directly.
+///
+/// The target id is the session's own, but the project comes from whichever
+/// session owns the project identity: a sub-agent child works in its parent's
+/// checkout, so naming it from its own record would label every child with
+/// the parent's session id.
 pub(crate) fn session_target_label(
+    state: &State,
     session: &SessionRecord,
     operation: Option<&SessionOperationDisplay>,
     config: &Config,
@@ -1189,7 +1201,9 @@ pub(crate) fn session_target_label(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(_, target_id)| target_id)
         .unwrap_or(&session.target_template_id);
-    session.project_target(config, target_id)
+    state
+        .project_identity_session(session)
+        .project_target(config, target_id)
 }
 
 pub(crate) fn session_permission_badge(
