@@ -1359,14 +1359,20 @@ end
             unreachable!("exec does not return on success");
         }
 
-        let root = tempfile::tempdir().expect("fixture directory");
+        // The fixture lives beside the test binary so the executable can be a
+        // hard link rather than a copy. A copy holds a write descriptor while
+        // it runs, and a child another test forks in this process inherits
+        // that descriptor until it execs; exec of the copy in that window
+        // fails with ETXTBSY. A link never opens the file for writing.
+        let test_binary = std::env::current_exe().expect("test binary");
+        let root = tempfile::tempdir_in(test_binary.parent().expect("test binary directory"))
+            .expect("fixture directory");
         let package_bin = root.path().join("package/bin");
         let manager_bin = root.path().join("manager");
         std::fs::create_dir_all(&package_bin).expect("package bin");
         std::fs::create_dir(&manager_bin).expect("manager bin");
         let executable = package_bin.join("mj");
-        std::fs::copy(std::env::current_exe().expect("test binary"), &executable)
-            .expect("copy test executable into package");
+        std::fs::hard_link(&test_binary, &executable).expect("link test executable into package");
         let replacement = root.path().join("replacement");
         std::fs::write(&replacement, "#!/bin/sh\necho UPDATED_MJ_RESTARTED\n")
             .expect("replacement script");
