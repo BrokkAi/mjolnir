@@ -16,11 +16,13 @@ const VIEWER_CSS = fs.readFileSync(
   'utf8',
 );
 
-function required(name) {
-  const value = process.env[name];
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
-}
+const { LAB_ABSENT_REASON, inspectLabEnvironment, requireLabEnvironment } = require('./lab-env');
+
+// Say out loud why the viewport cases are absent, since a skip annotation is
+// easy to miss in the reporters this suite runs under.
+const labStatus = inspectLabEnvironment();
+if (labStatus.state === 'absent')
+  process.stderr.write(`layout.spec.js: skipping the viewport cases — ${LAB_ABSENT_REASON}\n`);
 
 /// The widths a phone actually is, plus one that is not a phone at all.
 ///
@@ -106,8 +108,13 @@ test('paperclip stays hidden for sessions without image support', async ({ page 
 
 for (const viewport of VIEWPORTS) {
   test(`the viewer fits ${viewport.name} and stays reachable`, async ({ browser }) => {
-    const baseUrl = required('MJ_BROWSER_BASE_URL');
-    const code = required('MJ_BROWSER_CODE');
+    // The self-contained cases above run anywhere. This one needs the lab, so
+    // it is skipped with a reason when no lab variable is set at all, and it
+    // fails naming the gap when only some of them are.
+    test.skip(labStatus.state === 'absent', LAB_ABSENT_REASON);
+    const lab = requireLabEnvironment();
+    const baseUrl = lab.MJ_BROWSER_BASE_URL;
+    const code = lab.MJ_BROWSER_CODE;
 
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,

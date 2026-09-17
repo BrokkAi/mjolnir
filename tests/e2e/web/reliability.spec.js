@@ -1,14 +1,9 @@
 const fs = require('node:fs');
 const { test, expect } = require('@playwright/test');
+const { requireLabEnvironment } = require('./lab-env');
 
 function escapeForRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function required(name) {
-  const value = process.env[name];
-  if (!value) throw new Error(`missing ${name}`);
-  return value;
 }
 
 async function codeLogin(page, baseUrl, code) {
@@ -20,15 +15,16 @@ async function codeLogin(page, baseUrl, code) {
 }
 
 test('real viewer converges with a TUI after an SSE disconnect', async ({ browser }) => {
-  const baseUrl = required('MJ_BROWSER_BASE_URL');
-  const code = required('MJ_BROWSER_CODE');
-  const qrLoginUrl = required('MJ_BROWSER_QR_URL');
-  const title = required('MJ_BROWSER_TITLE');
-  const projectDirectory = required('MJ_BROWSER_PROJECT_DIRECTORY');
-  const readyMarker = required('MJ_BROWSER_READY_MARKER');
-  const changedMarker = required('MJ_TUI_CHANGED_MARKER');
-  const tracePath = required('MJ_BROWSER_TRACE');
-  const screenshotPath = required('MJ_BROWSER_SCREENSHOT');
+  const lab = requireLabEnvironment();
+  const baseUrl = lab.MJ_BROWSER_BASE_URL;
+  const code = lab.MJ_BROWSER_CODE;
+  const qrLoginUrl = lab.MJ_BROWSER_QR_URL;
+  const title = lab.MJ_BROWSER_TITLE;
+  const projectDirectory = lab.MJ_BROWSER_PROJECT_DIRECTORY;
+  const readyMarker = lab.MJ_BROWSER_READY_MARKER;
+  const changedMarker = lab.MJ_TUI_CHANGED_MARKER;
+  const tracePath = lab.MJ_BROWSER_TRACE;
+  const screenshotPath = lab.MJ_BROWSER_SCREENSHOT;
   const stage = value => process.stdout.write(`browser-stage: ${value}\n`);
 
   // A protected conversation route must remain a login page while its
