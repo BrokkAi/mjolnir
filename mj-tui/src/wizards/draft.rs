@@ -103,6 +103,15 @@ pub(crate) trait WizardDraft: Sized {
         id: WizardControl,
         edit: FieldEdit,
     ) -> Result<(), FieldEdit>;
+    /// Whether selecting a target should recompute the size at once. Creation
+    /// always does; a resume only does for a target the session can use.
+    fn prepares_target_on_select(&self, dashboard: &DashboardState) -> bool;
+    /// Handles an interaction with a control that only one wizard has.
+    fn apply_extra_interaction(
+        &mut self,
+        dashboard: &mut DashboardState,
+        interaction: &Interaction<WizardControl>,
+    );
 }
 
 impl WizardDraft for NewWizard {
@@ -294,6 +303,53 @@ impl WizardDraft for NewWizard {
             _ => Err(edit),
         }
     }
+
+    /// Every target is offered, and the size is prepared for whichever one is
+    /// picked; an unusable target is refused later, on Next.
+    fn prepares_target_on_select(&self, _dashboard: &DashboardState) -> bool {
+        true
+    }
+
+    fn apply_extra_interaction(
+        &mut self,
+        dashboard: &mut DashboardState,
+        interaction: &Interaction<WizardControl>,
+    ) {
+        match interaction {
+            Interaction::Select(WizardControl::BundleList, selected) => {
+                if self.bundle != *selected {
+                    self.note_draft_change(dashboard, DraftChange::BundleSelected);
+                }
+                self.bundle = *selected;
+            }
+            Interaction::Select(WizardControl::NewBundleRepositories, selected) => {
+                let next = (*selected).min(self.new_bundle_repositories.len().saturating_sub(1));
+                if self.new_bundle_selected != next
+                    || self.form.borrow().focused() != Some(WizardControl::NewBundleRepositories)
+                {
+                    self.new_bundle_selected = next;
+                    self.form
+                        .get_mut()
+                        .focus(WizardControl::NewBundleRepositories);
+                }
+            }
+            Interaction::Toggle(WizardControl::CreateManagedWorktree)
+                if self
+                    .selected_worktree_options(&dashboard.config)
+                    .is_some_and(|options| options.available) =>
+            {
+                self.create_managed_worktree = !self.create_managed_worktree;
+                dashboard.record_event_handled();
+            }
+            Interaction::Toggle(WizardControl::MjolnirSubagents)
+                if self.subagent_choice_applies(&dashboard.config) =>
+            {
+                self.mjolnir_subagents = !self.mjolnir_subagents;
+                dashboard.record_event_handled();
+            }
+            _ => {}
+        }
+    }
 }
 
 impl WizardDraft for ResumeWizard {
@@ -423,6 +479,28 @@ impl WizardDraft for ResumeWizard {
         edit: FieldEdit,
     ) -> Result<(), FieldEdit> {
         Err(edit)
+    }
+
+    /// Preparing the size for a target this session cannot resume on would
+    /// overwrite the size it already has with one it will never use.
+    fn prepares_target_on_select(&self, dashboard: &DashboardState) -> bool {
+        let target_id = nth_key(&dashboard.config.targets, self.target);
+        dashboard
+            .resume_target_rejection(&self.session_id, &target_id)
+            .is_none()
+    }
+
+    fn apply_extra_interaction(
+        &mut self,
+        _dashboard: &mut DashboardState,
+        interaction: &Interaction<WizardControl>,
+    ) {
+        if matches!(
+            interaction,
+            Interaction::Toggle(WizardControl::DiscardQueue)
+        ) {
+            self.discard_queue = !self.discard_queue;
+        }
     }
 }
 

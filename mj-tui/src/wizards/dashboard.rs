@@ -351,7 +351,7 @@ impl DashboardState {
         let result = wizard.form.borrow_mut().handle(&form_event);
         self.last_event_consumed.set(result.consumed);
         if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
-            return self.apply_new_interaction(wizard, interaction);
+            return self.apply_wizard_interaction(wizard, interaction);
         }
         if result.consumed {
             self.mode = Mode::New(wizard);
@@ -421,7 +421,7 @@ impl DashboardState {
         let result = wizard.form.borrow_mut().handle(&form_event);
         self.last_event_consumed.set(result.consumed);
         if let Some(interaction) = wizard.mounts.access_combo.route(result.action) {
-            return self.apply_resume_interaction(wizard, interaction);
+            return self.apply_wizard_interaction(wizard, interaction);
         }
         if result.consumed {
             self.mode = Mode::Resume(wizard);
@@ -440,9 +440,9 @@ impl DashboardState {
         }
     }
 
-    fn apply_new_interaction(
+    fn apply_wizard_interaction<W: WizardDraft>(
         &mut self,
-        mut wizard: NewWizard,
+        mut wizard: W,
         interaction: Interaction<WizardControl>,
     ) -> DashboardAction {
         match interaction {
@@ -450,199 +450,52 @@ impl DashboardState {
                 self.cancel_modal();
                 DashboardAction::None
             }
+            Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
             Interaction::Edit(id, edit) => {
+                wizard.note_draft_change(self, DraftChange::FieldEdit);
                 self.apply_wizard_field_edit(&mut wizard, id, edit);
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Select(id, selected) => {
-                match id {
-                    WizardControl::ProfileList => {
-                        if wizard.profile != selected {
-                            wizard.profile = selected;
-                        }
-                    }
-                    WizardControl::BundleList => {
-                        if wizard.bundle != selected {
-                            self.invalidate_new_remote_preflight(&mut wizard);
-                        }
-                        wizard.bundle = selected;
-                    }
-                    WizardControl::NewBundleRepositories => {
-                        let next =
-                            selected.min(wizard.new_bundle_repositories.len().saturating_sub(1));
-                        if wizard.new_bundle_selected != next
-                            || wizard.form.borrow().focused()
-                                != Some(WizardControl::NewBundleRepositories)
-                        {
-                            wizard.new_bundle_selected = next;
-                            wizard
-                                .form
-                                .get_mut()
-                                .focus(WizardControl::NewBundleRepositories);
-                        }
-                    }
-                    WizardControl::TargetList => {
-                        let target_changed = wizard.target != selected;
-                        if target_changed {
-                            self.invalidate_new_remote_preflight(&mut wizard);
-                        }
-                        wizard.target = selected;
-                        let action = if target_changed {
-                            self.prepare_wizard_target(&mut wizard)
-                        } else {
-                            DashboardAction::None
-                        };
-                        self.mode = Mode::New(wizard);
-                        return action;
-                    }
-                    WizardControl::ReviewAttachments => {
-                        let next = selected.min(wizard.mounts.mounts.len().saturating_sub(1));
-                        if wizard.mounts.history_index != next
-                            || wizard.form.borrow().focused()
-                                != Some(WizardControl::ReviewAttachments)
-                        {
-                            wizard.mounts.history_index = next;
-                            wizard
-                                .form
-                                .get_mut()
-                                .focus(WizardControl::ReviewAttachments);
-                        }
-                    }
-                    _ => {}
-                }
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Toggle(WizardControl::CreateManagedWorktree) => {
-                if wizard
-                    .selected_worktree_options(&self.config)
-                    .is_some_and(|options| options.available)
-                {
-                    wizard.create_managed_worktree = !wizard.create_managed_worktree;
-                    self.record_event_handled();
-                }
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Toggle(WizardControl::MjolnirSubagents) => {
-                if wizard.subagent_choice_applies(&self.config) {
-                    wizard.mjolnir_subagents = !wizard.mjolnir_subagents;
-                    self.record_event_handled();
-                }
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+                self.keep(wizard)
             }
             Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
-                commit_mount_access(&mut wizard.mounts, index);
-                wizard.form.get_mut().focus(WizardControl::MountAccess);
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
+                wizard.note_draft_change(self, DraftChange::ReadOnlyToggled);
+                commit_mount_access(wizard.mounts_mut(), index);
+                wizard.form_mut().focus(WizardControl::MountAccess);
+                self.keep(wizard)
             }
-            Interaction::ComboBoxDismiss(WizardControl::MountAccess) => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Toggle(WizardControl::ReviewAttachments) => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Toggle(_) => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::ComboBoxCommit(_, _) | Interaction::ComboBoxDismiss(_) => {
-                self.mode = Mode::New(wizard);
-                DashboardAction::None
-            }
-            Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
-        }
-    }
-
-    fn apply_resume_interaction(
-        &mut self,
-        mut wizard: ResumeWizard,
-        interaction: Interaction<WizardControl>,
-    ) -> DashboardAction {
-        match interaction {
-            Interaction::Cancel => {
-                self.cancel_modal();
-                DashboardAction::None
-            }
-            Interaction::Edit(id, edit) => {
-                invalidate_move_preparation(&mut wizard);
-                self.apply_wizard_field_edit(&mut wizard, id, edit);
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            Interaction::Select(id, selected) => {
-                match id {
-                    WizardControl::ProfileList => {
-                        invalidate_move_preparation(&mut wizard);
-                        if wizard.profile != selected {
-                            wizard.profile = selected;
-                        }
-                    }
-                    WizardControl::TargetList => {
-                        let target_changed = wizard.target != selected;
-                        if target_changed {
-                            invalidate_move_preparation(&mut wizard);
-                        }
-                        let target_id = nth_key(&self.config.targets, selected);
-                        wizard.target = selected;
-                        if target_changed
-                            && self
-                                .resume_target_rejection(&wizard.session_id, &target_id)
-                                .is_none()
-                        {
-                            let action = self.prepare_wizard_target(&mut wizard);
-                            self.mode = Mode::Resume(wizard);
-                            return action;
-                        }
-                    }
-                    WizardControl::ReviewAttachments => {
-                        let next = selected.min(wizard.mounts.mounts.len().saturating_sub(1));
-                        if wizard.mounts.history_index != next
-                            || wizard.form.borrow().focused()
-                                != Some(WizardControl::ReviewAttachments)
-                        {
-                            wizard.mounts.history_index = next;
-                            wizard
-                                .form
-                                .get_mut()
-                                .focus(WizardControl::ReviewAttachments);
-                        }
-                    }
-                    _ => {}
+            Interaction::Select(WizardControl::ProfileList, selected) => {
+                wizard.note_draft_change(self, DraftChange::ProfileSelected);
+                if wizard.profile() != selected {
+                    wizard.set_profile(selected);
                 }
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
+                self.keep(wizard)
             }
-            Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
-                invalidate_move_preparation(&mut wizard);
-                commit_mount_access(&mut wizard.mounts, index);
-                wizard.form.get_mut().focus(WizardControl::MountAccess);
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
+            Interaction::Select(WizardControl::TargetList, selected) => {
+                let target_changed = wizard.target() != selected;
+                if target_changed {
+                    wizard.note_draft_change(self, DraftChange::TargetSelected);
+                }
+                wizard.set_target(selected);
+                if target_changed && wizard.prepares_target_on_select(self) {
+                    let action = self.prepare_wizard_target(&mut wizard);
+                    self.mode = wizard.into_mode();
+                    return action;
+                }
+                self.keep(wizard)
             }
-            Interaction::ComboBoxDismiss(WizardControl::MountAccess) => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
+            Interaction::Select(WizardControl::ReviewAttachments, selected) => {
+                let next = selected.min(wizard.mounts().mounts.len().saturating_sub(1));
+                let focused_elsewhere =
+                    wizard.form().borrow().focused() != Some(WizardControl::ReviewAttachments);
+                if wizard.mounts().history_index != next || focused_elsewhere {
+                    wizard.mounts_mut().history_index = next;
+                    wizard.form_mut().focus(WizardControl::ReviewAttachments);
+                }
+                self.keep(wizard)
             }
-            Interaction::Toggle(WizardControl::DiscardQueue) => {
-                wizard.discard_queue = !wizard.discard_queue;
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
+            other => {
+                wizard.apply_extra_interaction(self, &other);
+                self.keep(wizard)
             }
-            Interaction::Toggle(_) => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            Interaction::ComboBoxCommit(_, _) | Interaction::ComboBoxDismiss(_) => {
-                self.mode = Mode::Resume(wizard);
-                DashboardAction::None
-            }
-            Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
         }
     }
 
@@ -879,7 +732,7 @@ impl DashboardState {
                 .get_mut()
                 .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             if let Some(interaction) = result.action {
-                return self.apply_new_interaction(wizard, interaction);
+                return self.apply_wizard_interaction(wizard, interaction);
             }
         }
         if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
@@ -1807,7 +1660,7 @@ impl DashboardState {
                 .get_mut()
                 .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
             if let Some(interaction) = result.action {
-                return self.apply_resume_interaction(wizard, interaction);
+                return self.apply_wizard_interaction(wizard, interaction);
             }
         }
         if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
