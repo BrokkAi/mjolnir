@@ -283,6 +283,7 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::{Arc, Mutex};
 
     #[test]
