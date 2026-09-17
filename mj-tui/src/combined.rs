@@ -368,7 +368,7 @@ fn render_combined_themed(
     dashboard.resume_sessions_area = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => Some(resume_sessions_pane(
             area,
-            dialog.preview_text(dashboard.resume_rows()).is_some(),
+            dialog.has_preview(dashboard.resume_rows()),
         )),
         _ => None,
     };

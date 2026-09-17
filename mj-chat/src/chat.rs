@@ -76,7 +76,7 @@ use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
 pub use elicitation::ElicitationDraft;
 use history::{HistorySearch, HistorySearchRequest};
-pub use rendering::truncate_line_to_width;
+pub use rendering::{truncate_line_to_width, wrap_styled_line};
 #[cfg(test)]
 use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};

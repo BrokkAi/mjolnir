@@ -32,6 +32,8 @@ pub enum SurfaceId {
     DashboardPane(u8),
     /// Session list inside the resume dialog.
     ResumeList,
+    /// Scrollable transcript preview under the resume dialog's list.
+    ResumePreview,
     /// Autocomplete popup rows.
     AutocompletePopup,
     /// Body of a modal dialog or wizard step.
