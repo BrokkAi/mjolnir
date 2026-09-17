@@ -12,6 +12,8 @@ use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation
 
 use mj_core::targets::{AdditionalMount, MountAccess};
 
+use mj_client::quota::{ProfileQuota, QuotaWindow};
+
 use super::*;
 use crate::test_support::*;
 
@@ -875,7 +877,7 @@ fn new_session_profile_step_aligns_its_columns() {
         assert_eq!(cell_column(line, profile), profile_column);
         assert_eq!(
             cell_column(line, "refreshing"),
-            cell_column(headings, "QUOTA")
+            cell_column(headings, "WEEKLY")
         );
     }
     assert_eq!(
@@ -895,6 +897,65 @@ fn new_session_profile_step_aligns_its_columns() {
         cell_column(kimi, "⚠") + 1 + u16::try_from(COLUMN_GAP).unwrap(),
         profile_column
     );
+}
+
+/// The profile step reports quota as two percentages remaining, one per
+/// window, in their own columns and with no reset countdown.
+#[test]
+fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.quotas = BTreeMap::from([(
+        "claude-1".to_string(),
+        ProfileQuota {
+            profile_id: "claude-1".into(),
+            harness: HarnessKind::Claude,
+            windows: vec![
+                QuotaWindow {
+                    label: "Week".into(),
+                    remaining_percent: Some(63),
+                    used: None,
+                    limit: None,
+                    resets: Some("09:00 Aug 20".into()),
+                    resets_at_epoch_seconds: Some(604_800),
+                },
+                QuotaWindow {
+                    label: "5H".into(),
+                    remaining_percent: Some(40),
+                    used: None,
+                    limit: None,
+                    resets: Some("14:00 Aug 13".into()),
+                    resets_at_epoch_seconds: Some(14_400),
+                },
+            ],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: 0,
+        },
+    )]);
+    dashboard.begin_new();
+    let lines = drawn(&mut dashboard, 120, 30);
+
+    let heading_index = lines
+        .iter()
+        .position(|line| line.contains("PROFILE"))
+        .unwrap_or_else(|| panic!("missing profile heading in {lines:?}"));
+    let headings = &lines[heading_index];
+    // Profiles are listed in id order, so the reported one is the first row.
+    let claude = &lines[heading_index + 1];
+    assert!(claude.contains("claude-1"), "{claude:?}");
+
+    assert_eq!(
+        cell_column(claude, "63%"),
+        cell_column(headings, "WEEKLY"),
+        "{claude:?}"
+    );
+    assert_eq!(
+        cell_column(claude, "40%"),
+        cell_column(headings, "5H"),
+        "{claude:?}"
+    );
+    assert!(!claude.contains("09:00 Aug 20"), "{claude:?}");
+    assert!(!claude.contains("resets"), "{claude:?}");
 }
 
 #[test]
@@ -2035,10 +2096,10 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     // The session runs Codex, so the Claude and Kimi rows carry the note that
     // says the cross-harness resume drops everything but text.
     let headings = row("PROFILE");
-    let (profile_column, harness_column, quota_column) = (
+    let (profile_column, harness_column, weekly_column) = (
         cell_column(headings, "PROFILE"),
         cell_column(headings, "HARNESS"),
-        cell_column(headings, "QUOTA"),
+        cell_column(headings, "WEEKLY"),
     );
     let mut note_column = None;
     for (id, harness, lossy) in [
@@ -2051,12 +2112,12 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
         assert_eq!(cell_column(line, harness), harness_column, "{id}: {line}");
         assert_eq!(
             cell_column(line, "refreshing"),
-            quota_column,
+            weekly_column,
             "{id}: {line}"
         );
         if lossy {
             let column = cell_column(line, "(lossy: text-only transcript)");
-            assert!(column > quota_column, "{id}: {line}");
+            assert!(column > weekly_column, "{id}: {line}");
             assert_eq!(column, *note_column.get_or_insert(column), "{id}: {line}");
         } else {
             assert!(!line.contains("(lossy"), "{id}: {line}");

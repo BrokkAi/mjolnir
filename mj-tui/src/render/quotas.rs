@@ -367,9 +367,7 @@ pub(crate) struct QuotaTableRow {
     profile: String,
     harness: String,
     weekly: Line<'static>,
-    weekly_reset: String,
     five_hour: Line<'static>,
-    five_hour_reset: String,
 }
 
 impl QuotaTableRow {
@@ -378,9 +376,7 @@ impl QuotaTableRow {
             Cell::from(self.profile),
             Cell::from(self.harness),
             Cell::from(self.weekly),
-            Cell::from(self.weekly_reset),
             Cell::from(self.five_hour),
-            Cell::from(self.five_hour_reset),
         ])
     }
 }
@@ -397,9 +393,9 @@ pub(crate) fn quota_chart(mut chart: Line<'static>, chart_present: bool) -> Line
     Line::from(spans)
 }
 
-/// Trailing room after each content column. Quota-window resets sit one cell
-/// after their percentage; the larger table groups retain two-cell gaps.
-pub(crate) const QUOTA_COLUMN_GAPS: [u16; 6] = [2, 2, 1, 2, 1, 0];
+/// Trailing room after each content column. The table groups keep two-cell
+/// gaps between them, and the last column needs none.
+pub(crate) const QUOTA_COLUMN_GAPS: [u16; 4] = [2, 2, 2, 0];
 
 pub(crate) fn quota_column_width(
     header: &str,
@@ -410,82 +406,48 @@ pub(crate) fn quota_column_width(
     u16::try_from(width).unwrap_or(u16::MAX).min(maximum)
 }
 
-pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> {
+pub(crate) fn quota_table_rows(dashboard: &DashboardState) -> Vec<QuotaTableRow> {
     dashboard
         .config
         .enabled_profiles()
         .map(|(id, profile)| {
-            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if dashboard
-                    .quotas
-                    .get(id)
-                    .is_some_and(|quota| quota.is_usage_priced())
-                {
-                    (
-                        api_quota_bar(),
-                        String::new(),
-                        Line::default(),
-                        String::new(),
-                        true,
-                        false,
-                    )
-                } else if dashboard.quota_refreshing.contains(id) {
-                    (
-                        Line::raw("refreshing…"),
-                        String::new(),
-                        Line::default(),
-                        String::new(),
-                        false,
-                        false,
-                    )
-                } else {
-                    match dashboard.quotas.get(id) {
-                        Some(quota) if quota.error.is_none() => {
-                            let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
-                            let weekly = quota_bar(quota.weekly_window());
-                            let five_hour = five_hour_quota_bar(quota);
-                            let weekly_chart = !weekly.spans.is_empty();
-                            let five_hour_chart = !five_hour.spans.is_empty();
-                            (
-                                weekly,
-                                weekly_reset,
-                                five_hour,
-                                five_hour_reset,
-                                weekly_chart,
-                                five_hour_chart,
-                            )
-                        }
-                        Some(quota) => (
-                            Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
-                        None => (
-                            Line::raw("refreshing…"),
-                            String::new(),
-                            Line::default(),
-                            String::new(),
-                            false,
-                            false,
-                        ),
+            let (weekly, five_hour, weekly_chart, five_hour_chart) = if dashboard
+                .quotas
+                .get(id)
+                .is_some_and(|quota| quota.is_usage_priced())
+            {
+                (api_quota_bar(), Line::default(), true, false)
+            } else if dashboard.quota_refreshing.contains(id) {
+                (Line::raw("refreshing…"), Line::default(), false, false)
+            } else {
+                match dashboard.quotas.get(id) {
+                    Some(quota) if quota.error.is_none() => {
+                        let weekly = quota_bar(quota.weekly_window());
+                        let five_hour = five_hour_quota_bar(quota);
+                        let weekly_chart = !weekly.spans.is_empty();
+                        let five_hour_chart = !five_hour.spans.is_empty();
+                        (weekly, five_hour, weekly_chart, five_hour_chart)
                     }
-                };
+                    Some(quota) => (
+                        Line::raw(quota.error_label().unwrap_or_else(|| "unavailable".into())),
+                        Line::default(),
+                        false,
+                        false,
+                    ),
+                    None => (Line::raw("refreshing…"), Line::default(), false, false),
+                }
+            };
             QuotaTableRow {
                 profile: id.to_owned(),
                 harness: profile.kind.display_name().into(),
                 weekly: quota_chart(weekly, weekly_chart),
-                weekly_reset,
                 five_hour: quota_chart(five_hour, five_hour_chart),
-                five_hour_reset,
             }
         })
         .collect()
 }
 
-pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
+pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 4] {
     [
         quota_column_width(
             "Profile",
@@ -504,30 +466,14 @@ pub(crate) fn quota_table_column_widths(rows: &[QuotaTableRow]) -> [u16; 6] {
             rows.iter().map(|row| row.weekly.width()),
             u16::MAX,
         ),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.weekly_reset.as_str()).width()),
-            u16::MAX,
-        ),
         quota_column_width("5H", rows.iter().map(|row| row.five_hour.width()), u16::MAX),
-        quota_column_width(
-            "Resets",
-            rows.iter()
-                .map(|row| Line::raw(row.five_hour_reset.as_str()).width()),
-            u16::MAX,
-        ),
     ]
 }
 
 /// Width needed to draw the complete Quota table, including its
 /// inter-column spacing, border, and always-present selection marker.
 pub(crate) fn quota_table_width(dashboard: &DashboardState) -> u16 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let content_widths = quota_table_column_widths(&quota_table_rows(dashboard, now));
+    let content_widths = quota_table_column_widths(&quota_table_rows(dashboard));
     content_widths
         .into_iter()
         .fold(0_u16, u16::saturating_add)
@@ -545,7 +491,7 @@ pub(crate) fn render_quotas(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let rows = quota_table_rows(dashboard, now);
+    let rows = quota_table_rows(dashboard);
     let refresh_status = if !dashboard.quota_refreshing.is_empty() {
         "refreshing…".to_string()
     } else {
@@ -579,7 +525,7 @@ pub(crate) fn render_quotas(
     ]);
     let quotas_focused = dashboard.focus == Focus::Quota;
     let content_widths = quota_table_column_widths(&rows);
-    let widths: [Constraint; 6] = std::array::from_fn(|index| {
+    let widths: [Constraint; 4] = std::array::from_fn(|index| {
         Constraint::Length(content_widths[index].saturating_add(QUOTA_COLUMN_GAPS[index]))
     });
     let block = theme::panel(quotas_focused).title(title);
@@ -592,7 +538,7 @@ pub(crate) fn render_quotas(
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
         .column_spacing(0)
         .header(
-            Row::new(["Profile", "Harness", "Weekly", "Resets", "5H", "Resets"])
+            Row::new(["Profile", "Harness", "Weekly", "5H"])
                 .style(theme::muted().add_modifier(Modifier::BOLD)),
         )
         .row_highlight_style(if quotas_focused {
