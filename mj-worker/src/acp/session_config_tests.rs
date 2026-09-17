@@ -101,6 +101,50 @@ for line in sys.stdin:
     script
 }
 
+/// A harness that answers a successful model change with the configuration it
+/// held before the change, the way Codex and Kimi do, and that caps an effort
+/// request to a lower value it reports straight away.
+fn stale_answer_harness(root: &std::path::Path) -> PathBuf {
+    let script = root.join("stale_answer.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+model, effort = 'default', 'low'
+def options():
+    return [
+      {'id':'model_id','name':'Model','category':'model','type':'select',
+       'currentValue':model,'options':[{'value':x,'name':x} for x in ['default','chosen']]},
+      {'id':'thinking','name':'Thinking','category':'thought_level','type':'select',
+       'currentValue':effort,'options':[{'value':x,'name':x} for x in ['low','high','max']]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params = request.get('params', {})
+    if method == 'initialize': result = {'protocolVersion':1}
+    elif method in ('session/new','session/load'):
+        result = {'sessionId':'native','configOptions':options()}
+    elif method == 'session/set_config_option':
+        key, value = params['configId'], params['value']
+        if key == 'model_id':
+            # Applied, but answered with the configuration from before it.
+            answer = options()
+            model = value
+        elif key == 'thinking':
+            effort = 'high' if value == 'max' else value
+            answer = options()
+        else: raise AssertionError(key)
+        result = {'configOptions':answer}
+    elif method == 'session/prompt': result = {'stopReason':'end_turn'}
+    else: result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#,
+    )
+    .unwrap();
+    script
+}
+
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
         subagent_mcp_socket: None,
@@ -554,6 +598,73 @@ async fn declining_the_recovery_question_keeps_the_harness_default_and_clears_th
         Some("withdrawn-model"),
         "declining defers the choice rather than discarding what was stored"
     );
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+/// Send one selector change and return the configuration the worker reports
+/// with the `ConfigApplied` event that answers it.
+async fn set_config(
+    commands: &mpsc::Sender<CommandRequest>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    key: &str,
+    value: &str,
+) -> Vec<SessionConfigOption> {
+    commands
+        .send(CommandRequest::SetConfig {
+            request_id: format!("{key}-{value}"),
+            key: key.into(),
+            value: value.into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        match next(events).await {
+            RuntimeEvent::ConfigApplied { config_options, .. } => return config_options,
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            RuntimeEvent::Stopped => panic!("the session must survive a selector change"),
+            _ => {}
+        }
+    }
+}
+
+fn reported(options: &[SessionConfigOption], key: &str) -> String {
+    let option = find_session_config_option(options, key).expect("the selector stays advertised");
+    let SessionConfigKind::Select(select) = &option.kind else {
+        panic!("{key} is a select");
+    };
+    select.current_value.to_string()
+}
+
+#[tokio::test]
+async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_applied() {
+    let root = tempfile::tempdir().unwrap();
+    let spec = launch(
+        root.path(),
+        stale_answer_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    let options = set_config(&commands, &mut events, "model", "chosen").await;
+    assert_eq!(
+        reported(&options, "model"),
+        "chosen",
+        "a successful change is reported as applied, not as the value it replaced"
+    );
+
+    // The harness answered this one with a value of its own choosing. That is a
+    // real mismatch and it has to stay visible.
+    let options = set_config(&commands, &mut events, "effort", "max").await;
+    assert_eq!(reported(&options, "effort"), "high");
+
     drop(commands);
     tokio::time::timeout(Duration::from_secs(10), runtime)
         .await
