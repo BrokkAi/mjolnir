@@ -22,9 +22,12 @@ in `docs/` deliberately leaves them out. The documented settings are in
   by the `child.wait()` arm of the select in `mj-worker/src/acp.rs`.
   Read in `mj-worker/src/acp/drive.rs`.
 
-Both turn bounds are read from the worker's own process environment, so a
+Both turn bounds are read from the worker's own process environment. A
 container target can set them for every session on it through
-`[targets.<id>.container] environment` in the instance configuration.
+`[targets.<id>.container] environment` in the instance configuration; on any
+target, a value set for the daemon process is carried to the workers it starts,
+because the worker re-execs with a cleared environment and could not inherit it
+otherwise (`mj-controller/src/controller/worker_binary/launch.rs`).
 
 `MJ_CONTROLLER_LOCK_EXPECTED`, `MJ_CONTROLLER_LOCK_PROBE` and
 `MJ_WORKER_BINARY_OVERRIDE_CHILD` appear in the source but only inside

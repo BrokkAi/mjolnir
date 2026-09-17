@@ -43,6 +43,10 @@ pub struct LaunchSpec {
     /// records them. The turn stall watchdog reads this: a turn blocked in a
     /// long tool call is working, however silent the protocol is (#1020).
     pub tools_in_flight: mj_core::activity::ToolsInFlight,
+    /// How long a running turn may go without a sign of life. `None` reads the
+    /// process environment, which is what every launch does; a test sets it
+    /// directly so it does not have to reach for a global.
+    pub stall_policy: Option<mj_core::activity::StallPolicy>,
 }
 
 pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {

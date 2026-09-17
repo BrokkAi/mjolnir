@@ -470,7 +470,7 @@ pub(super) async fn serve_session(
                 // Claude and Codex mark their own turn ends, so a lost reply
                 // cannot hang them and the watchdog stays out of their way.
                 let stall_policy = if turn_ends_only_on_prompt_reply(spec.harness) {
-                    turn_stall_policy()
+                    spec.stall_policy.unwrap_or_else(turn_stall_policy)
                 } else {
                     mj_core::activity::StallPolicy {
                         silence: None,

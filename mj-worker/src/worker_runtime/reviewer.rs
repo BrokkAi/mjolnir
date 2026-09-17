@@ -840,6 +840,7 @@ impl ReviewerRole {
             acp_activity,
             step_clock,
             tools_in_flight,
+            stall_policy: None,
         };
 
         let (commands_tx, commands_rx) = mpsc::channel(32);

@@ -22,6 +22,7 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     }
 }
 

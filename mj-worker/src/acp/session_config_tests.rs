@@ -165,6 +165,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     }
 }
 

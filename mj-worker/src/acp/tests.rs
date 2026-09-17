@@ -28,6 +28,7 @@ fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
     assert_eq!(
@@ -114,6 +115,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
 
     for harness in [HarnessKind::Claude, HarnessKind::Codex] {
@@ -177,6 +179,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let servers = project_memory_mcp(&spec);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
@@ -231,6 +234,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
     assert_eq!(
@@ -438,6 +442,7 @@ fn resumed_session_request_keeps_load_context() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let load = serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
         .expect("load request serializes");
@@ -594,6 +599,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let spec = LaunchSpec {
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            stall_policy: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
@@ -1132,6 +1138,7 @@ async fn answer_to_ext_request(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1293,6 +1300,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1690,6 +1698,7 @@ async fn config_change_request(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1864,6 +1873,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -1945,6 +1955,7 @@ async fn policy_is_enforced_before_session_is_reported(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2130,6 +2141,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2232,6 +2244,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2421,6 +2434,242 @@ async fn stalled_prompt_bridge(
             }
         }
     }
+}
+
+/// A bridge that accepts a prompt, optionally announces one tool call, and
+/// then goes silent for good. This is what a harness blocked in a long build
+/// looks like from Mjolnir: an open tool call and no protocol traffic at all.
+async fn silent_after_prompt_bridge(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    open_a_tool_call: bool,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let _ = observed.send(method.to_owned());
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response = match method {
+            "initialize" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"protocolVersion": 1},
+            }),
+            "session/new" | "session/load" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"sessionId": "scripted"},
+            }),
+            "session/prompt" => {
+                if open_a_tool_call {
+                    let update = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "scripted",
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "long-build",
+                                "title": "cargo nextest run",
+                                "status": "in_progress",
+                            },
+                        },
+                    });
+                    if write
+                        .write_all(format!("{update}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                // Never answer: the turn is now as silent as a harness
+                // blocked inside one long tool call.
+                continue;
+            }
+            _ => continue,
+        };
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
+    LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        // Muse marks no turn end of its own, so the watchdog covers it.
+        harness: HarnessKind::Muse,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
+        stall_policy: Some(stall_policy),
+    }
+}
+
+/// Issue #1020: a harness blocked inside one long tool call sends nothing at
+/// all, and the watchdog used to fail the turn for it. The tool call is the
+/// sign of life; only its own, much longer bound may end such a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: Some(Duration::from_millis(200)),
+        tool_call: Some(Duration::from_secs(3_600)),
+    });
+    // The relay records the tool call the bridge announced; the watchdog reads
+    // the same handle, which is the whole of the fix.
+    let tools = spec.tools_in_flight.clone();
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("build it"))],
+        })
+        .await
+        .unwrap();
+    let mut methods = Vec::new();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+    // Record the tool call the bridge announced, exactly as the worker runtime
+    // does when it applies the update to the relay.
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionUpdate { update, .. }
+            if update.get("sessionUpdate").and_then(serde_json::Value::as_str) == Some("tool_call"))
+    })
+    .await;
+    tools.open("long-build", mj_core::clock::epoch_millis());
+
+    // Well past the silence bound, and nothing has arrived since the tool call.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let finished = tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await;
+    assert!(
+        !matches!(
+            finished,
+            Ok(Some(RuntimeEvent::PromptFinished { .. })) | Ok(Some(RuntimeEvent::Warning { .. }))
+        ),
+        "a turn blocked in a tool call must not be failed: {finished:?}"
+    );
+
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    bridge.abort();
+}
+
+/// The other half: a harness that really has gone quiet, with nothing in
+/// flight, still loses its turn, and the reason travels with the outcome
+/// instead of living only in the transcript.
+#[tokio::test(flavor = "current_thread")]
+async fn a_silent_harness_fails_the_turn_with_a_reason() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(silent_after_prompt_bridge(
+        bridge_stream,
+        observed_tx,
+        false,
+    ));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: Some(Duration::from_millis(200)),
+        tool_call: Some(Duration::from_secs(3_600)),
+    });
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("say something"))],
+        })
+        .await
+        .unwrap();
+    let mut methods = Vec::new();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+
+    let warning = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::Warning { .. })
+    })
+    .await;
+    let RuntimeEvent::Warning { message } = warning else {
+        panic!("expected the stall warning");
+    };
+    assert!(
+        message.contains("no tool call was open"),
+        "the transcript says why the short bound applied: {message}"
+    );
+
+    let finished = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::PromptFinished { .. })
+    })
+    .await;
+    let RuntimeEvent::PromptFinished {
+        stop_reason,
+        diagnostic,
+        ..
+    } = finished
+    else {
+        panic!("expected the turn to be failed");
+    };
+    assert_eq!(stop_reason, TURN_STALLED_STOP_REASON);
+    let diagnostic = diagnostic.expect("the outcome carries the reason, not only the transcript");
+    assert_eq!(diagnostic.code.as_deref(), Some(TURN_STALLED_STOP_REASON));
+    assert!(diagnostic.message.contains("stopped responding"), "{diagnostic:?}");
+
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    bridge.abort();
 }
 
 /// Read scripted-bridge methods into `methods` until a `session/prompt`
@@ -2662,6 +2911,7 @@ async fn exercise_image_steering(with_images: bool) {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2796,6 +3046,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -2926,6 +3177,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let driver = tokio::spawn(async move {
         drive(
@@ -3009,6 +3261,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            stall_policy: None,
         }
     }
 
@@ -3335,6 +3588,7 @@ mod terminals {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            stall_policy: None,
         };
         let driver = tokio::spawn(async move {
             drive(
@@ -3845,6 +4099,7 @@ for line in sys.stdin:
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            stall_policy: None,
         },
         request_rx,
         event_tx,
@@ -4004,6 +4259,7 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -4134,6 +4390,7 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
 
@@ -4236,6 +4493,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     };
 
     let error = tokio::time::timeout(
@@ -4298,6 +4556,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            stall_policy: None,
         };
 
         let error = run(spec, request_rx, event_tx).await.unwrap_err();
@@ -4524,6 +4783,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     }
 }
 
@@ -4597,6 +4857,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            stall_policy: None,
         }
     }
     // The message as codex-acp wraps it.
@@ -4725,6 +4986,7 @@ fn missing_native_session_spec(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        stall_policy: None,
     }
 }
 

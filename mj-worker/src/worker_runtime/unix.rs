@@ -384,6 +384,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             acp_activity,
             step_clock,
             tools_in_flight,
+            stall_policy: None,
         };
         let mut acp_task = tokio::spawn(acp::run(acp_spec, acp_commands_rx, acp_events_tx));
 

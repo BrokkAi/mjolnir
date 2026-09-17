@@ -487,6 +487,7 @@ for line in sys.stdin:
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
+                stall_policy: None,
             };
             let (tx, rx) = mpsc::channel(8);
             let (events, mut receive) = mpsc::channel(8);
@@ -649,6 +650,7 @@ for line in sys.stdin:
                     acp_activity: Default::default(),
                     step_clock: Default::default(),
                     tools_in_flight: Default::default(),
+                    stall_policy: None,
                 };
                 let (tx, rx) = mpsc::channel(8);
                 let (events, mut receive) = mpsc::channel(2);
