@@ -143,6 +143,10 @@ fn format_conversion_bytes(bytes: u64) -> String {
 pub struct MovePreparation {
     #[serde(default)]
     pub source_unavailable: bool,
+    /// The destination is the source target: only the harness is replaced;
+    /// the container or worker root and the workspace are kept.
+    #[serde(default)]
+    pub in_place: bool,
     /// Present only when this move converts a local checkout into an isolated
     /// workspace. Boxed because this preparation travels inside several
     /// request enums whose other variants are far smaller.
@@ -196,6 +200,10 @@ pub struct MoveOperation {
     /// Keep the source harness stopped across recovery until destination restoration.
     #[serde(default)]
     pub source_checkpoint_only: bool,
+    /// The destination is the source target: only the harness is replaced;
+    /// the container or worker root and the workspace are kept.
+    #[serde(default)]
+    pub in_place: bool,
     pub operation_id: String,
     pub selection: MoveSelection,
     pub source_profile_id: String,

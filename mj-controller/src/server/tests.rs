@@ -2738,6 +2738,7 @@ async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
     request
         .reply
         .send(Ok(MovePreparation {
+            in_place: false,
             source_unavailable: false,
             conversion: None,
             selection: request.selection,
@@ -3231,6 +3232,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        in_place: false,
         source_unavailable: false,
         conversion: None,
         selection,

@@ -3172,6 +3172,187 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     );
 }
 
+/// An in-place harness replacement keeps the environment, so the reset has to
+/// take the old harness out of it: its daemon, its relay state, the installed
+/// worker files, and its per-session profile home.
+#[test]
+fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_home() {
+    let local_root = format!("/var/lib/hel/workers/{SESSION}");
+    let local = in_place_worker_reset_plan(
+        &TargetLocator::LocalBare {
+            worker_root: local_root.clone(),
+        },
+        SESSION,
+        Some(&format!("{local_root}/profile")),
+    )
+    .unwrap();
+    assert_eq!(
+        local.purpose,
+        "reset the worker root for an in-place harness replacement"
+    );
+    assert_eq!(local.stage, Some(ProvisionStage::Syncing));
+    assert_eq!(local.program, "sh");
+    let script = &local.args[1];
+    assert!(script.contains("hel_signal TERM"), "{script}");
+    assert!(
+        script.contains(&format!(
+            "rm -rf -- '{local_root}/relay-state.json' '{local_root}/relay-journal'"
+        )),
+        "{script}"
+    );
+    let unlinked = format!(
+        "rm -f -- '{local_root}/hel' '{local_root}/launch.json' '{local_root}/ownership.json'"
+    );
+    assert!(script.contains(&unlinked), "{script}");
+    assert!(
+        script.contains(&format!("rm -rf -- '{local_root}/profile'")),
+        "{script}"
+    );
+    assert!(
+        script.contains(&format!("mkdir -p -- '{local_root}'")),
+        "{script}"
+    );
+
+    let remote = in_place_worker_reset_plan(
+        &TargetLocator::SshBare {
+            worker_id: None,
+            ssh: ssh(),
+            workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+        },
+        SESSION,
+        Some(&format!(".local/share/hel/profiles/{SESSION}")),
+    )
+    .unwrap();
+    assert_eq!(remote.program, "ssh");
+    let remote_script = remote.args.last().unwrap();
+    assert!(
+        remote_script.contains(&format!(
+            ".local/share/hel/workers/{SESSION}/ownership.json"
+        )),
+        "{remote_script}"
+    );
+    assert!(
+        remote_script.contains(&format!(".local/share/hel/profiles/{SESSION}")),
+        "{remote_script}"
+    );
+
+    // Unlike the bare-target relay cleanup, a container gets the same reset:
+    // the container itself survives an in-place swap.
+    let container_id = resource_name(SESSION).unwrap();
+    let container = in_place_worker_reset_plan(
+        &TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+            workspace_storage: Default::default(),
+        },
+        SESSION,
+        Some(&format!("/var/lib/hel/profiles/{SESSION}")),
+    )
+    .unwrap();
+    assert_eq!(container.program, "podman");
+    assert_eq!(
+        container.args[..3],
+        ["exec".to_owned(), "-i".to_owned(), container_id]
+    );
+    assert_eq!(container.args[3], "sh");
+    let container_script = container.args.last().unwrap();
+    assert!(
+        container_script.contains(&format!("rm -rf -- '/var/lib/hel/profiles/{SESSION}'")),
+        "{container_script}"
+    );
+
+    // A profile home the session does not own is never removed.
+    let shared = in_place_worker_reset_plan(
+        &TargetLocator::LocalBare {
+            worker_root: local_root.clone(),
+        },
+        SESSION,
+        None,
+    )
+    .unwrap();
+    let shared_script = &shared.args[1];
+    assert_eq!(
+        shared_script.matches("rm -rf --").count(),
+        1,
+        "only the relay state is removed: {shared_script}"
+    );
+    assert!(
+        shared_script.contains(&format!("mkdir -p -- '{local_root}'")),
+        "{shared_script}"
+    );
+}
+
+/// Which profile directory belongs to one session, and so may be deleted when
+/// its harness is replaced in place.
+#[test]
+fn removable_profile_root_names_only_per_session_profile_directories() {
+    use crate::controller::removable_profile_root;
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    let profile = |kind: HarnessKind, home: &str| HarnessProfile {
+        enabled: true,
+        kind,
+        home: std::path::PathBuf::from(home),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let worker_root = format!("/var/lib/hel/workers/{SESSION}");
+    let local = TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    };
+    let container = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: resource_name(SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    };
+
+    // Claude always runs from a staged private copy under the worker root.
+    assert_eq!(
+        removable_profile_root(
+            &local,
+            SESSION,
+            &profile(HarnessKind::Claude, "/home/dev/.claude")
+        ),
+        Some(format!("{worker_root}/profile"))
+    );
+    // A plain Codex profile reads and writes the user's own home, which is not
+    // the session's to delete.
+    assert_eq!(
+        removable_profile_root(
+            &local,
+            SESSION,
+            &profile(HarnessKind::Codex, "/home/dev/.codex")
+        ),
+        None
+    );
+    // Muse owns a per-session root under the data directory, and the whole
+    // root is removable, not just the `muse` directory inside it.
+    let muse = removable_profile_root(
+        &local,
+        SESSION,
+        &profile(HarnessKind::Muse, "/home/dev/.muse"),
+    )
+    .expect("Muse stages a per-session root even on a local bare target");
+    assert_eq!(
+        muse,
+        mj_core::config::data_dir()
+            .join("profiles")
+            .join(SESSION)
+            .to_string_lossy()
+            .into_owned()
+    );
+    assert!(!muse.ends_with("muse"), "{muse}");
+
+    for kind in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Muse] {
+        assert_eq!(
+            removable_profile_root(&container, SESSION, &profile(kind, "/home/dev/.codex")),
+            Some(format!("/var/lib/hel/profiles/{SESSION}")),
+            "{kind:?} stages its own profile home inside a container"
+        );
+    }
+}
+
 #[test]
 fn podman_cleanup_ignores_an_already_absent_container() {
     let name = resource_name(SESSION).unwrap();

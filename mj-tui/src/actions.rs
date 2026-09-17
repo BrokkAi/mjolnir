@@ -1336,6 +1336,7 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = mj_core::state::MovePreparation {
+            in_place: false,
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {

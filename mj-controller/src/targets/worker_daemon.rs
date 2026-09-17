@@ -173,3 +173,50 @@ pub fn clear_relay_state_plan(
         | TargetLocator::AwsEc2 { .. } => None,
     })
 }
+
+/// Everything an in-place harness replacement must remove before the new
+/// profile is staged: the running daemon, relay state, the installed worker
+/// files, and the previous per-session profile root. Runs inside the target on
+/// every locator, unlike [`clear_relay_state_plan`], because the environment
+/// survives the swap whether or not it is a container.
+///
+/// The worker files are unlinked rather than overwritten: a mapped `hel` cannot
+/// be overwritten while the daemon holds it, and a stale `ownership.json` must
+/// not survive a crash and let a later reader believe the old profile is still
+/// installed. The worker root itself is recreated, so the caller can install
+/// straight afterwards.
+pub fn in_place_worker_reset_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+    previous_profile_root: Option<&str>,
+) -> Result<CommandSpec> {
+    verify_locator(locator, session_id)?;
+    let session_worker_root = worker_root(locator, session_id)?;
+    let mut script = format!(
+        "{}\nrm -rf -- {} {}\nrm -f -- {} {} {}\n",
+        stop_worker_daemon_script(&session_worker_root),
+        posix_quote(&format!(
+            "{session_worker_root}/{}",
+            mj_core::relay::RELAY_STATE_FILE
+        )),
+        posix_quote(&format!(
+            "{session_worker_root}/{}",
+            mj_core::relay::RELAY_JOURNAL_DIR
+        )),
+        posix_quote(&format!("{session_worker_root}/hel")),
+        posix_quote(&format!("{session_worker_root}/launch.json")),
+        posix_quote(&format!("{session_worker_root}/ownership.json")),
+    );
+    if let Some(root) = previous_profile_root {
+        script.push_str(&format!("rm -rf -- {}\n", posix_quote(root)));
+    }
+    script.push_str(&format!(
+        "mkdir -p -- {}\n",
+        posix_quote(&session_worker_root)
+    ));
+    Ok(
+        locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("reset the worker root for an in-place harness replacement")
+            .stage(ProvisionStage::Syncing),
+    )
+}

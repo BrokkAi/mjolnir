@@ -50,6 +50,7 @@ fn state_with(sessions: Vec<SessionRecord>) -> State {
 
 fn incomplete_move() -> MoveOperation {
     MoveOperation {
+        in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
 use sha2::{Digest, Sha256};
 
+use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
 
 fn mutation_holds() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
@@ -289,7 +290,10 @@ impl Controller {
         ))?;
         Ok((active, queued, fingerprint))
     }
-    fn move_configuration_fingerprint(&self, selection: &MoveSelection) -> Result<String> {
+    pub(super) fn move_configuration_fingerprint(
+        &self,
+        selection: &MoveSelection,
+    ) -> Result<String> {
         let profile = self
             .config
             .profiles
@@ -514,6 +518,12 @@ impl Controller {
             .unwrap_or(new_command_id("move")?);
         Ok(MovePreparation {
             source_unavailable: false,
+            in_place: in_place_move_eligible(
+                source,
+                &selection,
+                self.state.subagents.contains_key(&source.id),
+                retry,
+            ),
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -631,6 +641,12 @@ impl Controller {
             }
             None => MoveOperation {
                 source_checkpoint_only: false,
+                in_place: in_place_move_eligible(
+                    &source,
+                    &checked.selection,
+                    self.state.subagents.contains_key(&id),
+                    false,
+                ),
                 operation_id: prepared.operation_id.clone(),
                 selection: checked.selection.clone(),
                 source_profile_id: source.last_profile.clone(),
@@ -812,8 +828,17 @@ impl Controller {
                         Some("Move was cancelled before the source was sealed".into());
                     crate::database::save_lifecycle_session(record)?;
                 } else {
-                    self.close_session_for_move(&id, executor, manager, operation, None)
-                        .await?;
+                    // A recovered source stop always tears its target down: an
+                    // interrupted in-place swap falls back to the fresh path.
+                    self.close_session_for_move(
+                        &id,
+                        executor,
+                        manager,
+                        operation,
+                        None,
+                        SourceTargetDisposition::Destroy,
+                    )
+                    .await?;
                 }
                 return Ok(());
             }
@@ -866,8 +891,19 @@ impl Controller {
                 operation.phase = MovePhase::ClosingSource;
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
-                self.close_session_for_move(&id, executor, manager, operation, preparation)
-                    .await?;
+                // The in-place restore is not wired yet, so every move still
+                // tears its source down; `in_place` is recorded but not acted
+                // on until `restore_session_in_place` lands.
+                let disposition = SourceTargetDisposition::Destroy;
+                self.close_session_for_move(
+                    &id,
+                    executor,
+                    manager,
+                    operation,
+                    preparation,
+                    disposition,
+                )
+                .await?;
             }
             if self.state.sessions[&id].state == SessionState::Stopped
                 && self.state.sessions[&id].target.is_some()
@@ -1088,6 +1124,31 @@ fn validate_preserved_configuration(
         );
     }
     Ok(())
+}
+
+/// Whether this move can replace only the harness inside the source target.
+///
+/// The environment is kept only when nothing about it changes: the same target
+/// template, the same attached mounts, and the same resource allocation. A
+/// retry starts from a torn-down or unknown source, and a sub-agent never owns
+/// its own target, so both take the full fresh-environment path.
+pub(super) fn in_place_move_eligible(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+    is_subagent: bool,
+    retry: bool,
+) -> bool {
+    !retry
+        && !is_subagent
+        && source.target.is_some()
+        && matches!(
+            source.state,
+            SessionState::Running | SessionState::Disconnected
+        )
+        && Some(&source.target_template_id) == selection.target_template_id.as_ref()
+        && Some(&source.additional_mounts) == selection.additional_mounts.as_ref()
+        && source.resource_allocation == selection.resource_allocation
+        && !selection.clear_resource_allocation
 }
 
 fn outcome(

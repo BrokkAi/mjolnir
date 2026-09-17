@@ -270,6 +270,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            in_place: false,
             source_checkpoint_only: false,
             operation_id: format!("move-recovery-terminal-{prefix}"),
             selection,
@@ -627,6 +628,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-queue-replay".into(),
         selection,
@@ -842,9 +844,118 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
     });
 }
 
+#[test]
+fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
+    let mut source = raw_session_on("local-bare", "/home/dev/project");
+    source.state = SessionState::Running;
+    source.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/tmp/worker"),
+    });
+    source.additional_mounts = Vec::new();
+    source.resource_allocation = None;
+    let baseline = mj_core::state::MoveSelection {
+        clear_resource_allocation: false,
+        session_id: source.id.clone(),
+        profile_id: Some("codex".into()),
+        target_template_id: Some("local-bare".into()),
+        additional_mounts: Some(Vec::new()),
+        resource_allocation: None,
+    };
+
+    let another_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 * 1024 * 1024 * 1024,
+    });
+    let another_mount = Some(vec![crate::targets::AdditionalMount {
+        source: PathBuf::from("/home/dev/notes"),
+        destination: PathBuf::from("/mnt/notes"),
+        access: crate::targets::MountAccess::Ro,
+    }]);
+
+    // Each row is one departure from the baseline, and the flag says whether
+    // the environment can be kept.
+    let cases: Vec<(&str, mj_core::state::MoveSelection, bool, bool, bool)> = vec![
+        ("profile only", baseline.clone(), false, false, true),
+        (
+            "different target template",
+            mj_core::state::MoveSelection {
+                target_template_id: Some("ssh-bare".into()),
+                ..baseline.clone()
+            },
+            false,
+            false,
+            false,
+        ),
+        (
+            "different attached mounts",
+            mj_core::state::MoveSelection {
+                additional_mounts: another_mount,
+                ..baseline.clone()
+            },
+            false,
+            false,
+            false,
+        ),
+        (
+            "different resource allocation",
+            mj_core::state::MoveSelection {
+                resource_allocation: another_allocation,
+                ..baseline.clone()
+            },
+            false,
+            false,
+            false,
+        ),
+        (
+            "cleared resource allocation",
+            mj_core::state::MoveSelection {
+                clear_resource_allocation: true,
+                ..baseline.clone()
+            },
+            false,
+            false,
+            false,
+        ),
+        ("retry", baseline.clone(), false, true, false),
+        ("sub-agent", baseline.clone(), true, false, false),
+    ];
+    for (label, selection, is_subagent, retry, expected) in cases {
+        assert_eq!(
+            super::in_place_move_eligible(&source, &selection, is_subagent, retry),
+            expected,
+            "{label}"
+        );
+    }
+
+    // A source with no provisioned target has no environment to keep, and a
+    // stopped source has already lost it.
+    let mut without_target = source.clone();
+    without_target.target = None;
+    assert!(!super::in_place_move_eligible(
+        &without_target,
+        &baseline,
+        false,
+        false
+    ));
+    let mut stopped = source.clone();
+    stopped.state = SessionState::Stopped;
+    assert!(!super::in_place_move_eligible(
+        &stopped, &baseline, false, false
+    ));
+    let mut disconnected = source;
+    disconnected.state = SessionState::Disconnected;
+    assert!(super::in_place_move_eligible(
+        &disconnected,
+        &baseline,
+        false,
+        false
+    ));
+}
+
 #[cfg(unix)]
 fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        in_place: false,
         source_checkpoint_only: false,
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
