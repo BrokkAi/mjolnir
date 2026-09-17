@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use crate::pollers::{
     dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_close_session_ids,
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
+    unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -238,6 +239,8 @@ enum CloseRoute {
     Graceful,
     /// A previous close stopped partway; finish it from its checkpoint.
     RecoverInterrupted,
+    /// Nothing to checkpoint: tear down whatever target is left and settle.
+    SettleWithoutCheckpoint,
     /// Already stopped, but the target still has to be removed.
     DeferredCleanup,
     /// Already stopped with nothing left to do.
@@ -259,6 +262,8 @@ fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
         } else {
             CloseRoute::Done
         }
+    } else if crate::controller::has_nothing_to_checkpoint(session) {
+        CloseRoute::SettleWithoutCheckpoint
     } else {
         CloseRoute::Graceful
     }

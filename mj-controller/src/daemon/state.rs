@@ -308,6 +308,54 @@ impl RuntimeState {
     /// A session that has just reached `Stopped` is checkpointed and torn
     /// down, so its transcript is complete and ready to index. This is the one
     /// place the daemon sees every operation's reloaded durable state.
+    /// Apply a failed create or resume to a record the operation left in
+    /// `Provisioning`.
+    ///
+    /// Both of those operations roll their own record back when they return an
+    /// error, but a task that panics, or one dropped with its runtime, never
+    /// reaches that rollback. The stored result is then the only evidence the
+    /// operation ended, and nothing else owns a `Provisioning` record, so the
+    /// session waits for a provision that will never resume. The operation's
+    /// owner applies the failure here instead.
+    pub(super) async fn fail_unfinished_provisioning(
+        self: &Arc<Self>,
+        session_id: &str,
+        error: &str,
+    ) {
+        let provisioning = {
+            let controller = self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            durable_session_state(&controller, session_id) == Some(SessionState::Provisioning)
+        };
+        if !provisioning {
+            return;
+        }
+        let cause = format!("session provisioning ended without finishing: {error}");
+        let applied = blocking({
+            let session_id = session_id.to_owned();
+            move || {
+                let mut controller = Controller::load()?;
+                controller.fail_interrupted_lifecycle(&session_id, &cause)
+            }
+        })
+        .await;
+        match applied {
+            Ok(true) => {
+                if let Err(error) = self.reload_controller().await {
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after recording a failed provision");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %session_id,
+                error = format!("{error:#}"),
+                "could not record that provisioning ended without finishing"
+            ),
+        }
+    }
+
     pub(super) fn note_lifecycle_outcome(&self, session_id: &str) {
         let stopped = {
             let controller = self

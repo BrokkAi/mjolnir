@@ -39,6 +39,72 @@ pub fn interrupted_close_session_ids(controller: &Controller) -> Vec<String> {
         .collect()
 }
 
+/// Why a record left in an in-flight lifecycle state has nobody to finish it,
+/// in words the user reads in `mj sessions` and the TUI.
+///
+/// Every in-flight state needs an owner that will complete it. A durable move
+/// intent owns its session, [`is_interrupted_close`] owns a close or teardown
+/// that still holds its target, and
+/// `database::recover_interrupted_checkpointing_sessions` returns an
+/// interrupted `Checkpointing` record to `Running` before the controller
+/// loads. What is left is a record whose operation died with the process, and
+/// it has to say so instead of waiting forever.
+///
+/// `None` means the state needs no reconciliation; callers exclude the owned
+/// sessions before asking.
+pub fn interrupted_lifecycle_cause(session: &SessionRecord) -> Option<String> {
+    match session.state {
+        // Provisioning has no durable operation behind it. Whatever the dead
+        // provision created is not named by this record, so the resource is
+        // recovered through `mj recover scan`, which can see it again once the
+        // record is no longer in flight.
+        SessionState::Provisioning => Some(
+            "the daemon stopped while this session was provisioning; anything it created \
+             is offered by `mj recover scan`"
+                .to_owned(),
+        ),
+        // An interrupted close or teardown that still holds its target is
+        // resumed rather than failed, so only the target-less residue reaches
+        // here: there is nothing left to tear down, and no relay through which
+        // to finish the close the record claims.
+        SessionState::Closing => Some(
+            "the daemon stopped while this session was closing, and it has no target left \
+             to close"
+                .to_owned(),
+        ),
+        SessionState::Destroying => Some(
+            "the daemon stopped while this session was being torn down, and it has no \
+             target left to remove"
+                .to_owned(),
+        ),
+        SessionState::Checkpointing
+        | SessionState::Running
+        | SessionState::Disconnected
+        | SessionState::Stopped
+        | SessionState::Lost
+        | SessionState::Error
+        | SessionState::DestroyedWithDataLoss => None,
+    }
+}
+
+/// Every session whose in-flight lifecycle state has no owner, with the cause
+/// to record against it. `owned` names the sessions a durable move intent or
+/// another startup recovery has already claimed.
+pub fn unowned_interrupted_lifecycles(
+    controller: &Controller,
+    owned: &std::collections::BTreeSet<String>,
+) -> Vec<(String, String)> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| !owned.contains(&session.id) && !is_interrupted_close(session))
+        .filter_map(|session| {
+            interrupted_lifecycle_cause(session).map(|cause| (session.id.clone(), cause))
+        })
+        .collect()
+}
+
 pub fn spawn_interrupted_close_recovery(
     session_id: String,
     session_manager: SessionManagerControl,
