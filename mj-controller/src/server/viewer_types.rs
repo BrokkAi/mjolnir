@@ -112,6 +112,7 @@ impl ViewerSnapshot {
                     )
                     .then(|| session.last_error.clone())
                     .flatten(),
+                    last_error: session.last_error.clone(),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -276,6 +277,11 @@ pub struct ViewerSession {
     /// the reason instead of a bare "failed to launch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_error: Option<String>,
+    /// Why `has_error` is set, when the reason is not a launch failure. A
+    /// summary that says a session has an error and then carries no error
+    /// text leaves the reader nowhere to go, which is half of issue #1020.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,

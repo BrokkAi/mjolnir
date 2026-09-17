@@ -469,54 +469,72 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     if json {
         print_json(response)?;
     } else {
-        let mut line = outcome_name(response.outcome).to_owned();
-        if let Some(stop_reason) = &response.stop_reason {
-            line.push_str(&format!(" ({stop_reason})"));
-        }
-        if let Some(turn_number) = response.turn_number {
-            line.push_str(&format!(" turn {turn_number}"));
-        }
-        if let Some(elapsed_ms) = response.elapsed_ms {
-            line.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
-        }
-        println!("{line}");
-        if !response.pending_elicitations.is_empty() {
-            print_json(&response.pending_elicitations)?;
-        }
-        if let Some(message) = &response.message {
-            println!("{message}");
-        }
-        if let Some(retry) = &response.capacity_retry {
-            println!(
-                "a capacity retry is armed (attempt {}); do not send another prompt yet",
-                retry.attempt
-            );
-        }
-        // A turn that is still running and a worker the daemon cannot see look
-        // identical from a timeout alone, so name the relay when it is at
-        // fault.
-        if response.outcome == WaitOutcome::Timeout
-            && let Some(relay) = &response.relay
-            && relay.state != RelayState::Connected
-        {
-            let mut line = format!(
-                "the daemon's view of this session is {}",
-                relay_state_name(relay.state)
-            );
-            if let Some(detail) = &relay.detail {
-                line.push_str(&format!(": {detail}"));
-            }
+        for line in wait_report_lines(response) {
             println!("{line}");
         }
-        if let Some(final_message) = &response.final_message {
-            println!();
-            println!("{final_message}");
+        if !response.pending_elicitations.is_empty() {
+            print_json(&response.pending_elicitations)?;
         }
     }
     match response.outcome {
         WaitOutcome::Finished | WaitOutcome::InputRequired => Ok(()),
         outcome => bail!("the turn ended as {}", outcome_name(outcome)),
     }
+}
+
+/// What `mj wait` prints, one line per entry.
+///
+/// Separate from the printing so the content can be tested: a turn that failed
+/// used to print the bare word "error" and leave the reason in the transcript,
+/// where automation never saw it (#1020).
+fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut summary = outcome_name(response.outcome).to_owned();
+    if let Some(stop_reason) = &response.stop_reason {
+        summary.push_str(&format!(" ({stop_reason})"));
+    }
+    if let Some(turn_number) = response.turn_number {
+        summary.push_str(&format!(" turn {turn_number}"));
+    }
+    if let Some(elapsed_ms) = response.elapsed_ms {
+        summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
+    }
+    lines.push(summary);
+    if let Some(message) = &response.message {
+        lines.push(message.clone());
+    }
+    // Why the turn ended, when the worker recorded a reason.
+    if let Some(diagnostic) = &response.diagnostic
+        && response.outcome != WaitOutcome::Finished
+    {
+        lines.push(diagnostic.message.clone());
+    }
+    if let Some(retry) = &response.capacity_retry {
+        lines.push(format!(
+            "a capacity retry is armed (attempt {}); do not send another prompt yet",
+            retry.attempt
+        ));
+    }
+    // A turn that is still running and a worker the daemon cannot see look
+    // identical from a timeout alone, so name the relay when it is at fault.
+    if response.outcome == WaitOutcome::Timeout
+        && let Some(relay) = &response.relay
+        && relay.state != RelayState::Connected
+    {
+        let mut line = format!(
+            "the daemon's view of this session is {}",
+            relay_state_name(relay.state)
+        );
+        if let Some(detail) = &relay.detail {
+            line.push_str(&format!(": {detail}"));
+        }
+        lines.push(line);
+    }
+    if let Some(final_message) = &response.final_message {
+        lines.push(String::new());
+        lines.push(final_message.clone());
+    }
+    lines
 }
 
 fn relay_state_name(state: RelayState) -> &'static str {
@@ -861,6 +879,62 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    fn wait_response(outcome: &str, extra: serde_json::Value) -> WaitResponse {
+        let mut body = serde_json::json!({
+            "outcome": outcome,
+            "session": {
+                "id": "s1", "workspace_id": "w1", "title": "t",
+                "harness_kind": "codex", "profile_id": "p", "target_id": "t",
+                "bundle_id": "b", "state": "running", "lifecycle": "live",
+                "chat_phase": "idle", "is_idle": false, "has_error": false,
+                "created_at": "now", "updated_at": "now"
+            }
+        });
+        let object = body.as_object_mut().expect("wait response object");
+        for (key, value) in extra.as_object().expect("extra fields") {
+            object.insert(key.clone(), value.clone());
+        }
+        serde_json::from_value(body).expect("wait response")
+    }
+
+    /// A turn the worker failed for going quiet has to say why, where a script
+    /// waiting on it can see it. Before this the reason lived only in the
+    /// transcript and `mj wait` printed the bare word "error" (#1020).
+    #[test]
+    fn a_failed_turn_reports_the_reason_the_worker_recorded() {
+        let response = wait_response(
+            "error",
+            serde_json::json!({
+                "stop_reason": "harness_inactive",
+                "diagnostic": {
+                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minute(s).",
+                    "code": "harness_inactive"
+                }
+            }),
+        );
+        let lines = wait_report_lines(&response);
+        assert_eq!(lines[0], "error (harness_inactive)");
+        assert!(
+            lines.iter().any(|line| line.contains("job_output-7")),
+            "the reason is printed: {lines:?}"
+        );
+
+        // A turn that finished normally is not annotated with a diagnostic it
+        // may still carry from an earlier attempt.
+        let finished = wait_response(
+            "finished",
+            serde_json::json!({
+                "diagnostic": {"message": "an older failure"}
+            }),
+        );
+        assert!(
+            !wait_report_lines(&finished)
+                .iter()
+                .any(|line| line.contains("an older failure")),
+            "a finished turn prints no failure reason"
+        );
+    }
 
     #[test]
     fn creating_a_session_parses_its_target_selection_and_first_prompt() {

@@ -35,7 +35,10 @@ pub struct ApiSession {
     pub chat_phase: crate::server::ViewerChatPhase,
     pub is_idle: bool,
     pub has_error: bool,
-    /// Why a launch failed, for a session in the error state. Absent otherwise.
+    /// Why this session has an error: the launch failure for a session in the
+    /// error state, and otherwise whatever set `has_error`. A summary that
+    /// reports an error and carries no text to explain it leaves the reader
+    /// nowhere to go (#1020).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at: String,
@@ -69,7 +72,7 @@ impl From<&ViewerSession> for ApiSession {
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
             has_error: session.has_error,
-            error: session.launch_error.clone(),
+            error: session.launch_error.clone().or_else(|| session.last_error.clone()),
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
