@@ -78,11 +78,10 @@ mid-turn must keep the session reporting `running`.
       hand-rolled predicates — the worker's capacity-retry admission, the file-write
       barrier, the close's cancellation, and `SessionActivity::is_idle` — became calls into
       the mechanism.
-- [ ] Remaining: the tool-call bound has never been seen to fire in a live Muse session,
-      although it fires in the ACP-loop test (completed: the live silence bound, the live
-      restart evidence, the end-to-end tests; remaining: one instrumented live run logging
-      what `turn_stall_facts` sees, to find out whether Muse's shell cards register as
-      in-flight tool calls at all).
+- [x] (2026-09-17 23:15Z) Milestone 9, from review (`bea92946`): the instrumented live run
+      found why the tool-call bound never fired — the lookup read a different variable name
+      than everything else — and both live scenarios now discriminate against the
+      pre-change rule.
 
 ## Surprises & Discoveries
 
@@ -137,12 +136,29 @@ mid-turn must keep the session reporting `running`.
   `a_wait_never_concludes_finished_while_the_session_is_unaccounted_for` failed on exactly
   that state before `has_work_in_flight` stopped recursing.
 
-- Observation: a live Muse session on a local target cannot demonstrate the tool-call rule,
-  because Muse keeps the activity clock fresh right through a blocking shell command.
-  Evidence: with the silence bound cut to five seconds, a turn spending ninety seconds
-  inside one `sleep 90` finished normally — and so did the same run on a build patched back
-  to the pre-change rule. Only a genuinely silent harness discriminates, which is what the
-  scripted-bridge tests provide and what the issue reporters saw in containers.
+- Observation: **the live A/B runs before this point proved nothing, because the worker
+  binary was stale.** A local-bare session runs `target/debug/mj-worker`, not the `mj`
+  binary; `cargo build --bin mj` never rebuilds it, so a live run can silently execute code
+  from hours earlier. Anything measured live has to check that the binary under
+  `<worker root>/hel` actually contains the change.
+  Evidence: `strings` on the running worker found the new stall message but not the newest
+  instrumentation, and `target/debug/mj-worker` carried an older timestamp than
+  `target/debug/mj`.
+
+- Observation: Muse does go silent during a blocking shell command, and its tool cards do
+  register. The opposite conclusion earlier came from the stale binary.
+  Evidence: the watchdog's own log, once a second —
+  `tools_in_flight=[("item-56c13dd1-...", InProgress, 965)] silent_ms=965` and, a minute
+  later, `(..., InProgress, 58055) silent_ms=58055`. The silence tracks the tool's age
+  exactly, which is what a harness blocked in a tool call looks like.
+
+- Observation: the tool-call bound read `MJ_TURN_TOOL_CALL_TIMEOUT_MS` while its own failure
+  message, the documentation and the daemon's passthrough said
+  `MJ_TURN_TOOL_STALL_TIMEOUT_MS`. The documented variable did nothing and the bound was
+  always the four-hour default; every test asserted on the message, so nothing caught it.
+  Evidence: the watchdog logged `policy=StallPolicy { silence: Some(600s), tool_call:
+  Some(14400s) }` in a worker whose environment held
+  `MJ_TURN_TOOL_STALL_TIMEOUT_MS=15000`.
 
 - Observation: the worker already tracks in-flight tool calls with their start times, in
   two places at once, and the stall watchdog can reach neither.
@@ -960,12 +976,22 @@ durable record saying `running`, eight consecutive probes reported
 {"state":"turn",...}}`. The same window on a build patched back to the old fallback
 reported `"chat_phase":"idle"` — the ticket's symptom, side by side.
 
-What remains: the tool-call bound has not been seen to fire in a live Muse session. It
-fires in the ACP-loop test, the handle the watchdog reads is pinned by test to the tracker
-the relay fills, and Muse never goes silent during a tool call on a local target, so the
-live runs never reach either bound. Whether Muse's shell cards register as in-flight tool
-calls at all is unresolved and is the one thing worth an instrumented live run before this
-is relied on for a harness that does go silent.
+Both halves of the watchdog are now proved live against the rule they replace, on the same
+harness, prompt and bound, minutes apart:
+
+A turn blocked in a long tool call survives. `sleep 120` in one tool call with the silence
+bound at thirty seconds: `finished (EndTurn) turn 1 in 132.9s`. The same run on a build
+patched back to the pre-change rule: `error (harness_inactive) turn 1 in 35.2s`, "mj
+received no activity from the harness for 30 second(s) while a turn was running and no tool
+call was open" — issue #1020 reproduced on demand.
+
+The bound on one tool call still ends a turn. With that bound at fifteen seconds:
+`error (harness_inactive) turn 1 in 15.0s`, naming the tool call and the variable that
+raises the limit.
+
+Nothing is left open. The one loose end from the previous round — the bound never firing
+live — was a variable-name mismatch, fixed with a test that pins the name the message
+advertises to the name the code reads.
 
 ---
 
@@ -991,3 +1017,10 @@ records what the column actually does. Closing it uncovered two real defects —
 that slept through changes in what was in flight, so the tool-call bound never tripped, and
 an unknown session that reported it held no work — both fixed with tests. The migration is
 finished: every predicate in the list below is deleted or a call into `mj_core::activity`.
+
+
+Revision note (2026-09-17, after the second review): the instrumented live run closed the
+last open question. It found a variable-name mismatch that made the tool-call bound
+unreachable, and it invalidated the earlier live A/B results, which had been run against a
+stale worker binary — a trap now recorded in Surprises so the next contributor checks the
+binary before believing a live measurement.
