@@ -514,7 +514,7 @@ impl TextField {
     }
 
     /// Applies an edit emitted by a form to a text input.
-    pub fn apply(input: &mut TextInput, edit: super::FieldEdit) -> rat_event::Outcome {
+    pub fn apply(input: &mut TextInput, edit: super::FieldEdit) -> crate::text_input::EditOutcome {
         super::apply_field_edit(input, edit)
     }
 }

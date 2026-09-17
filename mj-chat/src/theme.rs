@@ -201,6 +201,13 @@ pub fn key_hint() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Description text beside a key hint. Panel titles are bold, so the
+/// description must remove BOLD explicitly; patching a plain muted style
+/// over a bold title style cannot clear the modifier.
+pub fn hint_description() -> Style {
+    muted().remove_modifier(Modifier::BOLD)
+}
+
 /// Rounded panels keep identical content geometry regardless of focus.
 pub fn panel(focused: bool) -> Block<'static> {
     Block::default()

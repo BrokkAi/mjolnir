@@ -20,7 +20,7 @@ use mj_tui::{DashboardAction, RemoteRepositoryPreview, SessionOperationKind};
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, spawn_cancellable_io,
+    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_cancellable_io,
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
     spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
@@ -1015,15 +1015,14 @@ pub(crate) async fn apply_dashboard_action(
                 }
                 .await
                 .map_err(|error: anyhow::Error| format!("{error:#}"));
-                if updates
-                    .send(DashboardIoUpdate::LifecycleCancellation {
+                report(
+                    "cancelling a lifecycle operation",
+                    &updates,
+                    DashboardIoUpdate::LifecycleCancellation {
                         session_id: daemon_session_id,
                         result,
-                    })
-                    .is_err()
-                {
-                    tracing::debug!("dashboard closed before lifecycle cancellation completed");
-                }
+                    },
+                );
             });
             context.dashboard.set_notice(format!(
                 "Cancelling {} for {}…",
@@ -1067,13 +1066,15 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
         }
         .await
         .map_err(|error: anyhow::Error| format!("{error:#}"));
-        if let Err(error) = updates.send(DashboardIoUpdate::MovePrepared {
-            session_id,
-            request_id,
-            result,
-        }) {
-            tracing::debug!(%error, "move preparation result dropped after dashboard shutdown");
-        }
+        report(
+            "preparing a move",
+            &updates,
+            DashboardIoUpdate::MovePrepared {
+                session_id,
+                request_id,
+                result,
+            },
+        );
     });
 }
 
@@ -1460,9 +1461,7 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
             } else {
                 DashboardIoUpdate::WebAccessError { generation, error }
             };
-            if let Err(error) = updates.send(update) {
-                tracing::debug!(%error, "web viewer result dropped after dashboard shutdown");
-            }
+            report("web viewer request", &updates, update);
         }
     });
 }

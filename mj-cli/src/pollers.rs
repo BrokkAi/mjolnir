@@ -1,5 +1,5 @@
 //! Terminal-specific adapters for controller background feeds.
-use crate::dashboard::io::DashboardIoUpdate;
+use crate::dashboard::io::{DashboardIoUpdate, report};
 use anyhow::Result;
 use mj_controller::controller::Controller;
 pub(crate) use mj_controller::pollers::*;
@@ -157,11 +157,11 @@ fn spawn_worker_record_persistence(
         }
         .await
         .map_err(|error| format!("{error:#}"));
-        if let Err(error) =
-            updates.send(DashboardIoUpdate::WorkerRecordPersistence { operation, result })
-        {
-            tracing::debug!(%error, "worker record persistence result dropped after dashboard shutdown");
-        }
+        report(
+            "persisting a worker record",
+            &updates,
+            DashboardIoUpdate::WorkerRecordPersistence { operation, result },
+        );
         drop(guard);
     });
 }
@@ -191,13 +191,15 @@ pub(crate) fn spawn_worker_diagnosis(
         })
         .await;
         let result = joined.map_err(|error| format!("worker diagnosis task failed: {error}"));
-        if let Err(error) = updates.send(DashboardIoUpdate::WorkerDiagnosis {
-            session_id: session_id.clone(),
-            episode_id,
-            result,
-        }) {
-            tracing::debug!(%session_id, %error, "worker diagnosis result dropped after dashboard shutdown");
-        }
+        report(
+            "diagnosing a worker",
+            &updates,
+            DashboardIoUpdate::WorkerDiagnosis {
+                session_id,
+                episode_id,
+                result,
+            },
+        );
         drop(guard);
     });
 }

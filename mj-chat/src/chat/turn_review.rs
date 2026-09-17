@@ -22,18 +22,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::theme;
 use crossterm::event::{Event, MouseEvent};
-use rat_event::ConsumedEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::components::{ButtonRow, ControlKind, Form, Interaction, Outcome, TabStrip};
+use crate::components::{ButtonRow, ControlKind, Form, Interaction, TabStrip};
 use mj_client::review::{RuntimeReviewView, VerdictKind};
 use mj_core::review::driver::{Resolution, RoleState, TurnReviewPhase};
 
 use super::second_opinion::ReviewerPane;
+use super::viewport::RowViewport;
 
 /// Which of the review's actions the keyboard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,12 +113,12 @@ pub(super) struct TurnReview {
     /// The verdict's wrapped rows currently above the viewport. Verdicts are
     /// rendered separately from a reviewer's journal because the daemon can
     /// publish one before that journal has produced a readable event.
-    verdict_top_row: usize,
+    verdict_viewport: RowViewport,
     verdict_total_rows: usize,
     verdict_viewport_height: usize,
     /// The progress tab is short in a normal pane but remains scrollable when
     /// a split is only a few rows high.
-    overview_top_row: usize,
+    overview_viewport: RowViewport,
     overview_total_rows: usize,
     overview_viewport_height: usize,
     /// A refusal from the daemon, shown in place rather than in a dialog that
@@ -182,10 +182,10 @@ impl TurnReview {
             action: Self::preferred_action(&view),
             view,
             panes: BTreeMap::new(),
-            verdict_top_row: 0,
+            verdict_viewport: RowViewport::default(),
             verdict_total_rows: 0,
             verdict_viewport_height: 0,
-            overview_top_row: 0,
+            overview_viewport: RowViewport::default(),
             overview_total_rows: 0,
             overview_viewport_height: 0,
             failure: None,
@@ -387,43 +387,29 @@ impl TurnReview {
     fn set_verdict_viewport(&mut self, total_rows: usize, height: usize) {
         self.verdict_total_rows = total_rows;
         self.verdict_viewport_height = height;
-        let maximum = total_rows.saturating_sub(height);
-        self.verdict_top_row = self.verdict_top_row.min(maximum);
+        self.verdict_viewport.clamp(total_rows, height);
     }
 
     fn scroll_verdict(&mut self, delta: isize) -> bool {
-        let before = self.verdict_top_row;
-        let maximum = self
-            .verdict_total_rows
-            .saturating_sub(self.verdict_viewport_height);
-        self.verdict_top_row = if delta.is_negative() {
-            self.verdict_top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.verdict_top_row.saturating_add(delta as usize)
-        }
-        .min(maximum);
-        self.verdict_top_row != before
+        self.verdict_viewport.scroll_by(
+            delta,
+            self.verdict_total_rows,
+            self.verdict_viewport_height,
+        )
     }
 
     fn set_overview_viewport(&mut self, total_rows: usize, height: usize) {
         self.overview_total_rows = total_rows;
         self.overview_viewport_height = height;
-        let maximum = total_rows.saturating_sub(height);
-        self.overview_top_row = self.overview_top_row.min(maximum);
+        self.overview_viewport.clamp(total_rows, height);
     }
 
     fn scroll_overview(&mut self, delta: isize) -> bool {
-        let before = self.overview_top_row;
-        let maximum = self
-            .overview_total_rows
-            .saturating_sub(self.overview_viewport_height);
-        self.overview_top_row = if delta.is_negative() {
-            self.overview_top_row.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.overview_top_row.saturating_add(delta as usize)
-        }
-        .min(maximum);
-        self.overview_top_row != before
+        self.overview_viewport.scroll_by(
+            delta,
+            self.overview_total_rows,
+            self.overview_viewport_height,
+        )
     }
 
     fn scroll_pane(&mut self, delta: isize, height: usize) -> bool {
@@ -559,11 +545,7 @@ impl super::ChatState {
 
     pub(super) fn cancel_turn_review_pointer(&mut self) {
         if let Some(review) = self.turn_review.as_mut() {
-            let captured = review.form.captures_pointer();
             review.form.cancel_pointer();
-            if captured {
-                self.mark_visible_changed();
-            }
         }
     }
 
@@ -582,9 +564,6 @@ impl super::ChatState {
             Some(review) => review.form.handle(&event),
             None => return (false, super::ChatAction::None),
         };
-        if result.outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         match result.action {
             Some(Interaction::Activate(control)) => {
                 if let Some(review) = self.turn_review.as_mut() {
@@ -604,20 +583,17 @@ impl super::ChatState {
             }
             _ => {}
         }
-        (result.outcome.is_consumed(), super::ChatAction::None)
+        (result.consumed, super::ChatAction::None)
     }
 
     /// Shows the daemon's review, or takes the pane down when it has resolved.
     pub(super) fn set_turn_review(&mut self, view: Option<RuntimeReviewView>) {
         match (view, self.turn_review.as_mut()) {
             (Some(view), Some(open)) => {
-                if open.update(view) {
-                    self.mark_visible_changed();
-                }
+                open.update(view);
             }
             (Some(view), None) => {
                 self.turn_review = Some(Box::new(TurnReview::new(view)));
-                self.mark_visible_changed();
             }
             (None, _) => self.close_turn_review(),
         }
@@ -626,7 +602,6 @@ impl super::ChatState {
     pub(super) fn close_turn_review(&mut self) {
         if self.turn_review.take().is_some() {
             self.turn_review_action_areas.clear();
-            self.mark_visible_changed();
         }
     }
 
@@ -646,9 +621,6 @@ impl super::ChatState {
             };
             (review.component_ready, review.form.handle(&event))
         };
-        if result.outcome == Outcome::Changed {
-            self.mark_visible_changed();
-        }
         if let Some(interaction) = result.action {
             match interaction {
                 Interaction::Select(ReviewControl::Tabs, selected) => {
@@ -684,7 +656,7 @@ impl super::ChatState {
                 _ => {}
             }
         }
-        if result.outcome.is_consumed()
+        if result.consumed
             && (component_ready || !matches!(key.code, KeyCode::Tab | KeyCode::BackTab))
         {
             return super::ChatAction::None;
@@ -694,12 +666,8 @@ impl super::ChatState {
             // the actions, so a fan-out stays readable without giving up the
             // one-key Forward.
             KeyCode::Tab => {
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.cycle_selection())
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.cycle_selection();
                 }
                 super::ChatAction::None
             }
@@ -709,7 +677,6 @@ impl super::ChatState {
                         Some(action) => action.next(1),
                         None => ReviewAction::Forward,
                     });
-                    self.mark_visible_changed();
                 }
                 super::ChatAction::None
             }
@@ -719,29 +686,20 @@ impl super::ChatState {
                         Some(action) => action.next(-1),
                         None => ReviewAction::Cancel,
                     });
-                    self.mark_visible_changed();
                 }
                 super::ChatAction::None
             }
             KeyCode::PageUp => {
                 let page = self.last_viewport_height.max(1);
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.scroll_pane(-(page as isize), page))
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.scroll_pane(-(page as isize), page);
                 }
                 super::ChatAction::None
             }
             KeyCode::PageDown => {
                 let page = self.last_viewport_height.max(1);
-                if self
-                    .turn_review
-                    .as_mut()
-                    .is_some_and(|review| review.scroll_pane(page as isize, page))
-                {
-                    self.mark_visible_changed();
+                if let Some(review) = self.turn_review.as_mut() {
+                    review.scroll_pane(page as isize, page);
                 }
                 super::ChatAction::None
             }
@@ -810,11 +768,7 @@ impl super::ChatState {
         let Some(review) = self.turn_review.as_mut() else {
             return false;
         };
-        let changed = review.scroll_pane(rows, height);
-        if changed {
-            self.mark_visible_changed();
-        }
-        changed
+        review.scroll_pane(rows, height)
     }
 }
 
@@ -943,10 +897,10 @@ fn render_review_overview(
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner.width);
     review.set_overview_viewport(total, usize::from(inner.height));
-    let top = u16::try_from(review.overview_top_row).unwrap_or(u16::MAX);
+    let top = u16::try_from(review.overview_viewport.top_row).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((top, 0)), inner);
     // Expose the measured viewport for mouse scrolling in short panes.
-    (inner, review.overview_top_row, total)
+    (inner, review.overview_viewport.top_row, total)
 }
 
 fn role_state_color(state: RoleState) -> Color {
@@ -986,9 +940,9 @@ fn render_verdict_panel(
     let paragraph = Paragraph::new(text.to_owned()).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner.width);
     review.set_verdict_viewport(total, usize::from(inner.height));
-    let top = u16::try_from(review.verdict_top_row).unwrap_or(u16::MAX);
+    let top = u16::try_from(review.verdict_viewport.top_row).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((top, 0)), inner);
-    (inner, review.verdict_top_row, total)
+    (inner, review.verdict_viewport.top_row, total)
 }
 
 /// Draws the review's action bar and reports where each button landed, so a

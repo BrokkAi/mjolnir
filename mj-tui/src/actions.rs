@@ -11,7 +11,7 @@
 //! availability is a question about [`DashboardState`].
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mj_chat::components::{EventResult, Outcome};
+use mj_chat::components::EventResult;
 use mj_core::state::SessionTransitionKind;
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
@@ -971,7 +971,6 @@ impl DashboardState {
                             session_id,
                             count: active_children,
                         }));
-                    self.mark_render_changed();
                     return DashboardAction::None;
                 }
                 DashboardAction::Close { session_id }
@@ -984,7 +983,6 @@ impl DashboardState {
                 self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
                     session_id,
                 }));
-                self.mark_render_changed();
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
@@ -1023,7 +1021,6 @@ impl DashboardState {
                 // makes the target step's documented "F5 recheck" work. A
                 // cleared entry is re-probed on the next render.
                 self.target_readiness.clear();
-                self.mark_render_changed();
                 DashboardAction::RefreshAll
             }
             CommandId::ManageProfiles => {
@@ -1069,22 +1066,12 @@ impl DashboardState {
         }
     }
 
-    /// Runs one command while preserving whether dispatch changed the visible
-    /// dashboard. Commands that return an action are still consumed when they
-    /// do not redraw immediately; the caller must execute those actions
-    /// independently of the repaint decision.
+    /// Runs one command. A command always consumes its chord, whether or not
+    /// it also hands the caller an action to execute.
     pub fn dispatch_command_result(&mut self, id: CommandId) -> EventResult<DashboardAction> {
-        let revision = self.render_change_revision();
-        let notice_generation = self.notices.generation();
         let action = self.dispatch_command(id);
-        let changed = self.render_change_revision() != revision
-            || self.notices.generation() != notice_generation;
         EventResult {
-            outcome: if changed {
-                Outcome::Changed
-            } else {
-                Outcome::Unchanged
-            },
+            consumed: true,
             action: (!matches!(&action, DashboardAction::None)).then_some(action),
         }
     }

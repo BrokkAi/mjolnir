@@ -24,7 +24,7 @@ use mj_core::state::{
 };
 
 use mj_chat::chat::{ChatAction, ChatState, Notices, SessionHeaderIdentity};
-use mj_chat::components::{EventResult, Outcome};
+use mj_chat::components::EventResult;
 use mj_chat::selection::FrameSurfaces;
 use mj_client::quota::ProfileQuota;
 use mj_client::review::RuntimeReviewView;
@@ -48,6 +48,7 @@ mod dialogs;
 mod go;
 mod help;
 mod ingest;
+mod modal_surface;
 mod palette;
 mod render;
 mod render_changes;
@@ -689,12 +690,8 @@ pub struct DashboardState {
     pub(crate) workspace_control_focus: WorkspaceControlFocus,
     workspace_management_generation: u64,
     pub(crate) render_change_snapshot: render_changes::RenderChangeSnapshot,
-    /// Set by visible mutations and consumed by the controller before its
-    /// next wait. A separate revision lets event handling distinguish a
-    /// mutation made during this event from a flag set by earlier work.
-    render_changed: Cell<bool>,
-    render_change_revision: Cell<u64>,
-    last_event_outcome: Cell<Outcome>,
+    /// Whether a handler took responsibility for the event being dispatched.
+    last_event_consumed: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -802,9 +799,7 @@ impl DashboardState {
             workspace_control_focus: WorkspaceControlFocus::Tabs,
             workspace_management_generation: 0,
             render_change_snapshot: render_changes::RenderChangeSnapshot::default(),
-            render_changed: Cell::new(false),
-            render_change_revision: Cell::new(0),
-            last_event_outcome: Cell::new(Outcome::Continue),
+            last_event_consumed: Cell::new(false),
         };
         dashboard.session_details = dashboard
             .state
@@ -839,7 +834,6 @@ impl DashboardState {
         self.current_session_id = None;
         self.focus = Focus::Sessions;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
     pub fn close_subagent_workspace(&mut self) {
@@ -849,40 +843,11 @@ impl DashboardState {
         self.selected_session_id = Some(parent_id);
         self.current_session_id = None;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
-    /// Records a visible mutation for the controller's dirty gate.
-    pub(crate) fn mark_render_changed(&self) {
-        mark_render_changed_cells(&self.render_changed, &self.render_change_revision);
-    }
-
-    /// Takes the accumulated visible-mutation flag. This is deliberately a
-    /// flag rather than a whole-state comparison: background feeds can report
-    /// one repaint even when the dashboard contains large transcript maps.
-    pub fn take_render_changed(&self) -> bool {
-        self.render_changed.replace(false)
-    }
-
-    pub(crate) fn render_change_revision(&self) -> u64 {
-        self.render_change_revision.get()
-    }
-
-    pub(crate) fn record_event_outcome(&self, outcome: Outcome) {
-        self.last_event_outcome.set(outcome);
-        if outcome == Outcome::Changed {
-            self.mark_render_changed();
-        }
-    }
-
-    pub(crate) fn record_visible_event_change(&self) {
-        self.record_event_outcome(Outcome::Changed);
-    }
-
+    /// Records that a handler took responsibility for the current event.
     pub(crate) fn record_event_handled(&self) {
-        if self.last_event_outcome.get() == Outcome::Continue {
-            self.last_event_outcome.set(Outcome::Unchanged);
-        }
+        self.last_event_consumed.set(true);
     }
 
     /// Workspace ids in stable tab order. Runtime snapshots may remove an id;
@@ -901,18 +866,11 @@ impl DashboardState {
     /// Select a tab locally. The caller should save any open chat draft before
     /// invoking this setter; the setter itself performs no external work.
     pub fn set_active_workspace(&mut self, workspace_id: Option<String>) {
-        let manager_marker_changed = if let Mode::WorkspaceManager(manager) = &mut self.mode {
-            let changed = manager.active_workspace_id != workspace_id;
+        if let Mode::WorkspaceManager(manager) = &mut self.mode {
             manager.active_workspace_id = workspace_id.clone();
-            changed
-        } else {
-            false
-        };
+        }
         if self.active_workspace_id == workspace_id {
             self.clamp_selections();
-            if manager_marker_changed {
-                self.mark_render_changed();
-            }
             return;
         }
         let workspace_focused = self.focus == Focus::Workspaces;
@@ -969,7 +927,6 @@ impl DashboardState {
         if workspace_focused {
             self.focus = Focus::Workspaces;
         }
-        self.mark_render_changed();
     }
 
     /// Applies a controller-provided pane-size cache unless this client has
@@ -979,12 +936,8 @@ impl DashboardState {
             return;
         }
         if self.active_workspace_id.as_deref() == Some(workspace_id) {
-            let changed = self.pane_sizes != sizes;
             self.pane_sizes = sizes;
             self.clamp_selections();
-            if changed {
-                self.mark_render_changed();
-            }
         }
         self.workspace_views
             .entry(workspace_id.to_owned())
@@ -1026,7 +979,6 @@ impl DashboardState {
             && self.selected_session_id.as_deref() != Some(session_id)
         {
             self.selected_session_id = Some(session_id.to_owned());
-            self.mark_render_changed();
         }
     }
 
@@ -1059,7 +1011,6 @@ impl DashboardState {
     pub(crate) fn set_session_action_focus(&mut self, action: Option<CommandId>) {
         if self.session_action_focus != action {
             self.session_action_focus = action;
-            self.mark_render_changed();
         }
     }
 
@@ -1070,7 +1021,6 @@ impl DashboardState {
         self.focus = Focus::Prompt;
         self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
-        self.mark_render_changed();
         true
     }
 
@@ -1081,11 +1031,7 @@ impl DashboardState {
         self.workspace_control_focus = WorkspaceControlFocus::Tabs;
         self.set_session_action_focus(None);
         self.clamp_selections();
-        let changed = before != self.focus;
-        if changed {
-            self.mark_render_changed();
-        }
-        changed
+        before != self.focus
     }
 
     /// Moves focus one stop along the Tab ring.
@@ -1104,11 +1050,7 @@ impl DashboardState {
             self.set_session_action_focus(None);
         }
         self.clamp_selections();
-        let changed = previous != self.focus;
-        if changed {
-            self.mark_render_changed();
-        }
-        changed
+        previous != self.focus
     }
 
     #[must_use]
@@ -1127,12 +1069,8 @@ impl DashboardState {
     /// enough room to grow a pane to its maximum size.
     pub fn restore_pane_sizes(&mut self, sizes: PaneSizes) -> anyhow::Result<()> {
         sizes.validate()?;
-        let changed = self.pane_sizes != sizes;
         self.pane_sizes = sizes;
         self.clamp_selections();
-        if changed {
-            self.mark_render_changed();
-        }
         Ok(())
     }
 
@@ -1171,12 +1109,11 @@ impl DashboardState {
         }
         *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
         self.clamp_selections();
-        if self.pane_sizes != previous {
-            if let Some(workspace_id) = &self.active_workspace_id {
-                self.workspace_pane_sizes_modified
-                    .insert(workspace_id.clone());
-            }
-            self.mark_render_changed();
+        if self.pane_sizes != previous
+            && let Some(workspace_id) = &self.active_workspace_id
+        {
+            self.workspace_pane_sizes_modified
+                .insert(workspace_id.clone());
         }
     }
 
@@ -1197,7 +1134,6 @@ impl DashboardState {
     /// Alt-G's stable global preset: restore any custom arrangement to all
     /// Standard; from all Standard, minimize every support pane for the conversation.
     pub fn toggle_pane_preset(&mut self) {
-        let previous = self.pane_sizes;
         if self.pane_sizes.all_standard() {
             self.pane_sizes = PaneSizes {
                 sessions: PaneSize::Minimized,
@@ -1208,9 +1144,6 @@ impl DashboardState {
             self.pane_sizes = PaneSizes::default();
         }
         self.clamp_selections();
-        if self.pane_sizes != previous {
-            self.mark_render_changed();
-        }
     }
 
     #[must_use]
@@ -1262,7 +1195,6 @@ impl DashboardState {
         }
         self.current_session_id = session_id;
         self.clamp_selections();
-        self.mark_render_changed();
     }
 
     /// When this session's materialized projection last changed, in
@@ -1286,7 +1218,6 @@ impl DashboardState {
             return;
         }
         self.opening_session = session_id;
-        self.mark_render_changed();
     }
 
     /// The session an attach is still running for, if any.
@@ -1437,12 +1368,7 @@ impl DashboardState {
         // CONTROL. Once the dashboard has declined the chord, keep that
         // platform convention from turning Ctrl-A/K/Y into inserted text.
         let key = standby_prompt_key(key);
-        let (action, changed) = {
-            let standby = self.standby_prompt_mut(&session_id);
-            let action = standby.handle_key(key);
-            let changed = standby.take_render_changed();
-            (action, changed)
-        };
+        let action = self.standby_prompt_mut(&session_id).handle_key(key);
         match action {
             ChatAction::CycleFocus { reverse } => {
                 self.cycle_focus(reverse);
@@ -1456,9 +1382,6 @@ impl DashboardState {
                 );
             }
             _ => {}
-        }
-        if changed {
-            self.mark_render_changed();
         }
         self.record_event_handled();
         Some(DashboardAction::None)
@@ -1476,18 +1399,14 @@ impl DashboardState {
     /// Opens the web-access dialog and asks the controller to load it.
     pub fn open_web_dialog(&mut self) -> DashboardAction {
         self.mode = Mode::Web(WebDialog::loading());
-        self.mark_render_changed();
         DashboardAction::LoadWebAccess
     }
 
-    /// Handles one terminal event and preserves both whether the event was
-    /// consumed and whether it changed the visible dashboard. The legacy
-    /// key and mouse wrappers below remain available to callers that only
-    /// need the action.
+    /// Handles one terminal event and reports whether the dashboard consumed
+    /// it. The legacy key and mouse wrappers below remain available to callers
+    /// that only need the action.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<DashboardAction> {
-        self.last_event_outcome.set(Outcome::Continue);
-        let revision = self.render_change_revision();
-        let notice_generation = self.notices.generation();
+        self.last_event_consumed.set(false);
         let action = match event {
             Event::Key(key) => self.handle_key_at(key, Instant::now()),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -1503,20 +1422,10 @@ impl DashboardState {
             }
             Event::FocusGained => DashboardAction::None,
         };
-        let changed = self.render_change_revision() != revision
-            || self.notices.generation() != notice_generation;
-        let outcome = if changed {
-            Outcome::Changed
-        } else if self.last_event_outcome.get() == Outcome::Unchanged
-            || !matches!(&action, DashboardAction::None)
-        {
-            Outcome::Unchanged
-        } else {
-            self.last_event_outcome.get()
-        };
+        let action = (!matches!(&action, DashboardAction::None)).then_some(action);
         EventResult {
-            outcome,
-            action: (!matches!(&action, DashboardAction::None)).then_some(action),
+            consumed: self.last_event_consumed.get() || action.is_some(),
+            action,
         }
     }
 
@@ -1581,36 +1490,8 @@ impl DashboardState {
     }
 
     fn text_input_focused(&self) -> bool {
-        match &self.mode {
-            Mode::Rename(editor) => editor
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::RepositoryOrigin(dialog) => dialog
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::EditContainer(editor) => editor.field().is_some(),
-            Mode::ResumeDialog(dialog) => dialog.focused() == crate::resume::ResumeFocus::Search,
-            // The palette's query is a text field, so Ctrl-C closes it and a
-            // paste lands in the query rather than on the dashboard.
-            Mode::Palette(palette) => palette
-                .form
-                .borrow()
-                .is_focused(palette::PaletteControl::Query),
-            Mode::ConfigId(editor) => editor
-                .form
-                .borrow()
-                .is_focused(dialogs::DialogControl::Field),
-            Mode::New(wizard) => wizard.text_input_focused(),
-            Mode::Resume(wizard) => wizard.text_input_focused(),
-            Mode::Setup(dialog) => dialog.form.borrow().is_focused(setup::SetupControl::Field),
-            Mode::WorkspaceManager(dialog) => dialog
-                .form
-                .borrow()
-                .is_focused(crate::workspaces::WorkspaceControl::Name),
-            _ => false,
-        }
+        self.active_modal()
+            .is_some_and(|modal| modal.text_input_focused())
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
@@ -1625,9 +1506,6 @@ impl DashboardState {
             let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
             let standby = self.standby_prompt_mut(&session_id);
             standby.paste(&normalized);
-            if standby.take_render_changed() {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -1693,12 +1571,10 @@ impl DashboardState {
                 .workspace_pane_area
                 .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
             {
-                if self.focus != Focus::Workspaces {
-                    self.focus = Focus::Workspaces;
-                    self.mark_render_changed();
-                }
+                self.focus = Focus::Workspaces;
                 self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
                 self.set_session_action_focus(None);
+                self.record_event_handled();
                 return DashboardAction::None;
             }
             if let Some(&(pane, size, _)) = self
@@ -1712,6 +1588,7 @@ impl DashboardState {
                     return DashboardAction::None;
                 }
                 self.set_pane_size(pane, size);
+                self.record_event_handled();
                 return DashboardAction::None;
             }
             if let Some((project_key, _)) = self
@@ -1722,6 +1599,7 @@ impl DashboardState {
                 let project_key = project_key.clone();
                 self.focus_sessions();
                 self.toggle_project(&project_key);
+                self.record_event_handled();
                 return DashboardAction::None;
             }
             if let Some(&(index, _)) = self
@@ -1729,6 +1607,7 @@ impl DashboardState {
                 .iter()
                 .find(|(_, area)| rect_contains(*area, mouse.column, mouse.row))
             {
+                self.record_event_handled();
                 return self.handle_row_click(Focus::Sessions, index);
             }
             // The click missed every row; forget any pending double click so
@@ -1749,6 +1628,7 @@ impl DashboardState {
             } else {
                 1
             };
+            self.record_event_handled();
             return self.select_adjacent_workspace(delta);
         }
         let hovered = self.pane_areas.and_then(|areas| {
@@ -1772,18 +1652,25 @@ impl DashboardState {
             || hovered
                 .support_pane()
                 .is_some_and(|pane| self.pane_size(pane) != PaneSize::Minimized);
+        // A wheel or a press inside a pane is the dashboard's answer, even
+        // when it produces no action: the frame the next pointer event is
+        // hit-tested against has to be rebuilt after it.
         match mouse.kind {
-            MouseEventKind::ScrollUp if rows_visible => self.scroll_selection_for(hovered, -1),
-            MouseEventKind::ScrollDown if rows_visible => self.scroll_selection_for(hovered, 1),
+            MouseEventKind::ScrollUp if rows_visible => {
+                self.scroll_selection_for(hovered, -1);
+                self.record_event_handled();
+            }
+            MouseEventKind::ScrollDown if rows_visible => {
+                self.scroll_selection_for(hovered, 1);
+                self.record_event_handled();
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.focus != hovered {
-                    self.focus = hovered;
-                    self.mark_render_changed();
-                }
+                self.focus = hovered;
                 if hovered != Focus::Sessions {
                     self.set_session_action_focus(None);
                 }
                 self.clamp_selections();
+                self.record_event_handled();
             }
             _ => {}
         }
@@ -1795,11 +1682,7 @@ impl DashboardState {
     fn handle_row_click(&mut self, focus: Focus, index: usize) -> DashboardAction {
         // Clicking a row selects it wherever the dial has left the pane.
         self.scroll_lookahead.set(None);
-        let focus_changed = self.focus != focus;
         self.focus = focus;
-        if focus_changed {
-            self.mark_render_changed();
-        }
         self.set_session_action_focus(None);
         if focus == Focus::Sessions {
             let clicked = self
@@ -1808,7 +1691,6 @@ impl DashboardState {
                 .map(|session| session.id.clone());
             if clicked.is_some() && self.selected_session_id != clicked {
                 self.selected_session_id = clicked;
-                self.mark_render_changed();
             }
         } else {
             self.set_selection_for(focus, index);
@@ -1875,7 +1757,7 @@ impl DashboardState {
             && self.focus == Focus::Sessions
             && let Some(action) = self.handle_session_action_key(key)
         {
-            self.last_event_outcome.set(Outcome::Unchanged);
+            self.record_event_handled();
             return action;
         }
         // List navigation, shared by visible lists. It comes before the
@@ -1944,7 +1826,7 @@ impl DashboardState {
     fn handle_session_action_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         let session_count = self.visible_session_indices().len();
         let focused_action = self.session_action_focus;
-        let action = match (focused_action, key.code) {
+        match (focused_action, key.code) {
             (Some(id), KeyCode::Left | KeyCode::Right) => {
                 if let Some(next) = crate::surface_controls::adjacent_enabled_session_action(
                     self,
@@ -1991,11 +1873,7 @@ impl DashboardState {
                 Some(DashboardAction::None)
             }
             _ => None,
-        };
-        if self.session_action_focus != focused_action {
-            self.mark_render_changed();
         }
-        action
     }
 
     /// Opens the selected session's conversation and hands the keyboard to its
@@ -2018,7 +1896,6 @@ impl DashboardState {
                 error: issue,
                 previous: Box::new(self.mode.clone()),
             }));
-            self.mark_render_changed();
             return DashboardAction::None;
         }
         if let Some(operation) = self.session_operations.get(&session.id) {
@@ -2042,7 +1919,6 @@ impl DashboardState {
                 recoverable: session.checkpoint.is_some(),
             };
             self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
-            self.mark_render_changed();
             return DashboardAction::None;
         }
         if let Some(operation) = self
@@ -2060,7 +1936,6 @@ impl DashboardState {
             self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
                 operation: Box::new(operation),
             }));
-            self.mark_render_changed();
             return DashboardAction::None;
         }
         // A failed session has two reasonable answers - read what it did, or
@@ -2073,7 +1948,6 @@ impl DashboardState {
                 recoverable: session.checkpoint.is_some(),
             };
             self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
-            self.mark_render_changed();
             return DashboardAction::None;
         }
         let session_id = session.id.clone();
@@ -2251,16 +2125,8 @@ impl DashboardState {
 
     pub fn set_project_source(&mut self, session_id: &str, source: ProjectSourceIdentity) {
         if self.state.sessions.contains_key(session_id) {
-            let visible = self
-                .ordered_sessions()
-                .iter()
-                .any(|session| session.id == session_id);
-            let changed = self.project_sources.get(session_id) != Some(&source);
             self.project_sources.insert(session_id.to_owned(), source);
             self.clamp_selections();
-            if visible && changed {
-                self.mark_render_changed();
-            }
         }
     }
 
@@ -2289,7 +2155,6 @@ impl DashboardState {
         if !self.collapsed_project_keys.remove(project_key) {
             self.collapsed_project_keys.insert(project_key.to_owned());
         }
-        self.mark_render_changed();
     }
 
     fn toggle_selected_project(&mut self) {
@@ -2400,7 +2265,6 @@ impl DashboardState {
     }
 
     pub fn cancel_modal(&mut self) {
-        let was_modal = !matches!(self.mode, Mode::Dashboard);
         if self.review_settings_discovery_active() {
             self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
         }
@@ -2411,9 +2275,6 @@ impl DashboardState {
         }
         self.mode = Mode::Dashboard;
         self.rebuild_resume_rows();
-        if was_modal {
-            self.mark_render_changed();
-        }
     }
 
     fn focus_len_for(&self, focus: Focus) -> usize {
@@ -2432,7 +2293,7 @@ impl DashboardState {
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
         }
-        let changed = match focus {
+        match focus {
             Focus::Sessions => {
                 let sessions = self.ordered_sessions();
                 let next = self
@@ -2464,11 +2325,7 @@ impl DashboardState {
                 }
             }
             Focus::Workspaces | Focus::Prompt => false,
-        };
-        if changed {
-            self.mark_render_changed();
         }
-        changed
     }
 
     fn selection_for(&self, focus: Focus) -> usize {
@@ -2507,10 +2364,6 @@ impl DashboardState {
     }
 
     pub(crate) fn clamp_selections(&mut self) {
-        let previous_selected = self.selected_session_id.clone();
-        let previous_collapsed_len = self.collapsed_project_keys.len();
-        let previous_quota = self.quota_index;
-        let previous_capacity = self.capacity_index;
         // The selection is anchored by id, so it survives the list changing
         // under it; it only moves when the session it named stopped being on
         // screen.
@@ -2536,30 +2389,6 @@ impl DashboardState {
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
-        if previous_selected != self.selected_session_id
-            || previous_collapsed_len != self.collapsed_project_keys.len()
-            || previous_quota != self.quota_index
-            || previous_capacity != self.capacity_index
-        {
-            self.mark_render_changed();
-        }
-    }
-}
-
-pub(crate) fn mark_render_changed_cells(changed: &Cell<bool>, revision: &Cell<u64>) {
-    changed.set(true);
-    revision.set(revision.get().wrapping_add(1));
-}
-
-pub(crate) fn record_form_outcome_cells<A>(
-    event_outcome: &Cell<Outcome>,
-    changed: &Cell<bool>,
-    revision: &Cell<u64>,
-    result: &EventResult<A>,
-) {
-    event_outcome.set(result.outcome);
-    if result.outcome == Outcome::Changed {
-        mark_render_changed_cells(changed, revision);
     }
 }
 
@@ -2644,20 +2473,12 @@ mod tests {
     use crate::render::render;
 
     #[test]
-    fn rendering_and_inert_pointer_motion_leave_the_frame_clean() {
+    fn inert_pointer_motion_is_not_consumed() {
         let mut dashboard = dashboard_with_session(running_session());
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| render(frame, &mut dashboard))
             .unwrap();
-        dashboard.take_render_changed();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        assert!(
-            !dashboard.take_render_changed(),
-            "geometry registration is not a visible mutation"
-        );
 
         for column in 0..120 {
             let result = dashboard.handle_event_result(Event::Mouse(MouseEvent {
@@ -2666,55 +2487,49 @@ mod tests {
                 row: 1,
                 modifiers: KeyModifiers::NONE,
             }));
-            assert_ne!(result.outcome, Outcome::Changed);
+            assert!(!result.consumed, "pointer motion belongs to the selection");
         }
-        assert!(!dashboard.take_render_changed());
     }
 
     #[test]
-    fn event_result_distinguishes_selection_limit_from_movement() {
+    fn a_clamped_selection_move_is_still_consumed() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.select_active_session("session-1");
-        dashboard.take_render_changed();
 
         let result = dashboard.handle_event_result(Event::Key(key(KeyCode::Down)));
 
-        assert_eq!(result.outcome, Outcome::Unchanged);
+        assert!(result.consumed);
         assert!(result.action.is_none());
-        assert!(!dashboard.take_render_changed());
     }
 
     #[test]
-    fn activating_target_rename_repaints_the_new_modal() {
+    fn activating_target_rename_opens_the_config_id_editor() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_target_actions();
         dashboard.handle_event_result(Event::Key(key(KeyCode::Tab)));
-        dashboard.take_render_changed();
 
         let result = dashboard.handle_event_result(Event::Key(key(KeyCode::Enter)));
+
         assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
-        assert_eq!(result.outcome, Outcome::Changed);
-        assert!(dashboard.take_render_changed());
+        assert!(result.consumed);
     }
 
     #[test]
-    fn event_result_repaints_for_a_cursor_only_text_edit() {
+    fn a_cursor_only_text_edit_is_consumed_without_an_action() {
         let mut session = running_session();
         session.session_title_override = Some("rename me".into());
         let mut dashboard = dashboard_with_session(session);
         dashboard.select_active_session("session-1");
         dashboard.dispatch_command(CommandId::RenameSession);
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
-        dashboard.take_render_changed();
 
         let result = dashboard.handle_event_result(Event::Key(crossterm::event::KeyEvent::new(
             KeyCode::Left,
             KeyModifiers::NONE,
         )));
 
-        assert_eq!(result.outcome, Outcome::Changed);
+        assert!(result.consumed);
         assert!(result.action.is_none());
-        assert!(dashboard.take_render_changed());
     }
 
     /// Opens the rename editor the way the surface offers it now: `F2`, type

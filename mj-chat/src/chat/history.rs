@@ -36,7 +36,6 @@ pub(super) struct HistorySearchRequest {
 
 impl ChatState {
     pub(super) fn set_project_history(&mut self, entries: Vec<PromptHistoryEntry>) {
-        let previous_error = self.project_history_error.take();
         self.project_history_error = None;
         // Entries arrive newest-first; split this session's prompts from the
         // rest of the project so history navigation reaches them first.
@@ -45,9 +44,6 @@ impl ChatState {
             .partition(|entry| entry.session_id == self.session_id);
         let session_history = session.into_iter().rev().map(|entry| entry.text).collect();
         let project_history = project.into_iter().rev().map(|entry| entry.text).collect();
-        let changed = previous_error.is_some()
-            || self.session_history != session_history
-            || self.project_history != project_history;
         self.session_history = session_history;
         self.project_history = project_history;
         if let Some(index) = self.history_index
@@ -57,15 +53,11 @@ impl ChatState {
             self.history_draft.clear();
             self.history_draft_images.clear();
         }
-        if changed {
-            self.mark_visible_changed();
-        }
     }
 
     pub(super) fn set_project_history_unavailable(&mut self, error: String) {
         if self.project_history_error.as_deref() != Some(error.as_str()) {
             self.project_history_error = Some(error);
-            self.mark_visible_changed();
         }
     }
 
@@ -83,7 +75,6 @@ impl ChatState {
             unavailable: None,
         });
         self.pending_history_search = None;
-        self.mark_visible_changed();
     }
 
     pub(super) fn refresh_history_search(&mut self) {
@@ -150,7 +141,6 @@ impl ChatState {
                     self.set_input_payload(original);
                     self.input_cursor = original_cursor;
                 }
-                self.mark_visible_changed();
             }
             Err(error) => {
                 self.set_input_payload(original);
@@ -158,7 +148,6 @@ impl ChatState {
                 self.history_search = None;
                 self.set_notice(format!("History unavailable: {error}"));
                 self.update_autocomplete();
-                self.mark_visible_changed();
             }
         }
     }
@@ -340,7 +329,6 @@ impl ChatState {
         self.input_cursor = self.input.len();
         self.preferred_column = None;
         self.update_autocomplete();
-        self.mark_visible_changed();
     }
 }
 

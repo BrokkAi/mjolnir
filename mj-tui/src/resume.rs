@@ -34,7 +34,8 @@ use mj_chat::text_input::TextInput;
 use crate::dialogs::{ConfirmDialog, Confirmation, ImportProfileOption};
 use crate::render::render_session_scrollbar;
 use crate::widgets::{
-    centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes, truncate_text,
+    Truncate, centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes,
+    truncate_to_cells,
 };
 use crate::{DashboardAction, DashboardState, Mode};
 
@@ -618,7 +619,6 @@ impl DashboardState {
             self.resume_rows.clear();
             return;
         };
-        let previous_rows = std::mem::take(&mut self.resume_rows);
         self.resume_rows = build_resume_rows(
             &self.config,
             &self.state,
@@ -652,9 +652,6 @@ impl DashboardState {
         // Repair the key and index together so the form never points outside
         // the freshly rebuilt list.
         self.resync_resume_selection();
-        if self.resume_rows != previous_rows {
-            self.mark_render_changed();
-        }
     }
 
     /// The rows the open dialog shows; empty when no dialog is open.
@@ -720,7 +717,6 @@ impl DashboardState {
         // Record which row the initial selection lands on, so the first
         // incremental scan result cannot slide the selection out from under it.
         self.resync_resume_selection();
-        self.mark_render_changed();
     }
 
     /// Fold one profile's scan result into the open dialog, keeping the
@@ -752,7 +748,6 @@ impl DashboardState {
         }
         self.rebuild_resume_rows();
         self.resync_resume_selection();
-        self.mark_render_changed();
     }
 
     /// Fold one SessionWiki search result into the open dialog. A result for
@@ -767,7 +762,6 @@ impl DashboardState {
         dialog.wiki = Arc::new(rows);
         self.rebuild_resume_rows();
         self.resync_resume_selection();
-        self.mark_render_changed();
     }
 
     /// Fold one fetched briefing into the open dialog's preview cache.
@@ -779,7 +773,6 @@ impl DashboardState {
             dialog.preview_pending = None;
         }
         Arc::make_mut(&mut dialog.previews).insert(wiki_id, markdown);
-        self.mark_render_changed();
     }
 
     /// Ask for the briefing of the selected row, unless it is cached or
@@ -843,13 +836,9 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return;
         };
-        let changed = dialog.row_index != index || dialog.selected != key;
         dialog.row_index = index;
         dialog.selected = key;
         dialog.prepare(&self.resume_rows);
-        if changed {
-            self.mark_render_changed();
-        }
     }
 
     fn switch_resume_tab(&mut self, tab: ResumeTab) -> bool {
@@ -864,7 +853,6 @@ impl DashboardState {
         dialog.row_index = 0;
         self.rebuild_resume_rows();
         self.resync_resume_selection();
-        self.mark_render_changed();
         true
     }
 
@@ -900,20 +888,12 @@ impl DashboardState {
         {
             if focused == Search && key.code == KeyCode::Down {
                 dialog.form.get_mut().focus(Sessions);
-                crate::mark_render_changed_cells(
-                    &self.render_changed,
-                    &self.render_change_revision,
-                );
                 return DashboardAction::None;
             }
             if focused != Search {
                 match key.code {
                     KeyCode::Char('/') => {
                         dialog.form.get_mut().focus(Search);
-                        crate::mark_render_changed_cells(
-                            &self.render_changed,
-                            &self.render_change_revision,
-                        );
                         return DashboardAction::None;
                     }
                     KeyCode::Delete if focused == Sessions => {
@@ -942,24 +922,12 @@ impl DashboardState {
             event => event,
         };
         let result = dialog.form.get_mut().handle(&event);
-        crate::record_form_outcome_cells(
-            &self.last_event_outcome,
-            &self.render_changed,
-            &self.render_change_revision,
-            &result,
-        );
+        self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(Search, edit)) => {
-                if TextField::apply(&mut dialog.search, edit)
-                    == mj_chat::components::Outcome::Changed
-                {
-                    crate::mark_render_changed_cells(
-                        &self.render_changed,
-                        &self.render_change_revision,
-                    );
-                }
+                TextField::apply(&mut dialog.search, edit);
                 self.rebuild_resume_rows();
                 self.select_resume_row(0);
                 return self.wiki_search_action();
@@ -974,10 +942,6 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Search | Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
-                crate::mark_render_changed_cells(
-                    &self.render_changed,
-                    &self.render_change_revision,
-                );
             }
             Some(Interaction::Activate(Sessions | Open)) => {
                 let row = self.selected_resume_row();
@@ -1264,7 +1228,11 @@ pub(crate) fn render_resume_dialog(
     let mut footer = Vec::new();
     if let Some(detail) = selected {
         footer.push(Line::styled(
-            truncate_text(&detail.details, usize::from(footer_band.width)),
+            truncate_to_cells(
+                &detail.details,
+                usize::from(footer_band.width),
+                Truncate::SUMMARY,
+            ),
             Style::default().fg(theme::palette().muted),
         ));
     }
@@ -1273,9 +1241,10 @@ pub(crate) fn render_resume_dialog(
         && let Some(error) = errors.first()
     {
         footer.push(Line::styled(
-            truncate_text(
+            truncate_to_cells(
                 &format!("Scan failed for {error}"),
                 usize::from(footer_band.width),
+                Truncate::SUMMARY,
             ),
             Style::default().fg(theme::palette().warning),
         ));
@@ -1355,12 +1324,19 @@ fn resume_header_line(layout: &RowLayout) -> Line<'static> {
         Span::raw("  "),
         Span::styled(padded_cell("LAST ACTIVE", layout.activity), style),
         Span::raw("  "),
-        Span::styled(truncate_text("SESSION", layout.title), style),
+        Span::styled(
+            truncate_to_cells("SESSION", layout.title, Truncate::SUMMARY),
+            style,
+        ),
     ])
 }
 
 fn padded_cell(text: &str, width: usize) -> String {
-    format!("{:<width$}", truncate_text(text, width), width = width)
+    format!(
+        "{:<width$}",
+        truncate_to_cells(text, width, Truncate::SUMMARY),
+        width = width
+    )
 }
 
 fn resume_row_line<Tz>(
@@ -1385,7 +1361,7 @@ where
         None => Span::styled(
             format!(
                 "{:<width$}",
-                truncate_text(&row.origin, layout.origin),
+                truncate_to_cells(&row.origin, layout.origin, Truncate::SUMMARY),
                 width = layout.origin
             ),
             Style::default().fg(theme::palette().accent),
@@ -1418,7 +1394,10 @@ where
             Style::default().fg(theme::palette().muted),
         ),
         Span::raw("  "),
-        Span::styled(truncate_text(&row.title, layout.title), title_style),
+        Span::styled(
+            truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+            title_style,
+        ),
         Span::styled(marks, Style::default().fg(theme::palette().muted)),
     ])
 }

@@ -17,8 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::{Button, ControlKind};
-use crate::components::{EventResult, Outcome, render_scrollbar, scrollbar_geometry};
-use crate::selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
+use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
+use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
 use mj_core::storage::{HistoryScope, PromptHistoryEntry};
@@ -343,7 +343,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
             // down around a stopped manager.
             if state.activity_reachable {
                 state.activity_reachable = false;
-                state.mark_visible_changed();
             }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
             state.set_notice(format!("connection lost: {error:#}"));
@@ -356,7 +355,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if state.activity_reachable != activity_reachable {
         state.activity_reachable = activity_reachable;
-        state.mark_visible_changed();
     }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
@@ -377,7 +375,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         state.set_prompt_in_flight(snapshot.operational.active_prompt.is_some());
         if state.steering_supported != snapshot.operational.steering_supported {
             state.steering_supported = snapshot.operational.steering_supported;
-            state.mark_visible_changed();
         }
         state.set_session_activity(mj_client::usage_format::SessionActivity::of(
             &snapshot.operational,
@@ -386,7 +383,6 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     if let Some(error) = view.error {
         if state.activity_reachable {
             state.activity_reachable = false;
-            state.mark_visible_changed();
         }
         match error {
             ViewError::Unreachable(detail) => {
@@ -975,55 +971,20 @@ impl ActiveChat {
         );
     }
 
-    /// The composer's current draft. Image-bearing drafts use a versioned
-    /// envelope so detach and session switching preserve the embedded bytes.
-    pub fn draft(&self) -> String {
-        self.state.encoded_draft()
-    }
-
     pub fn latest_event_ordinal(&self) -> u64 {
         self.state.latest_seq()
     }
 
-    /// Whether visible background activity needs animation frames.
-    pub fn needs_animation(&self) -> bool {
-        self.state.needs_animation()
-    }
-
-    /// Whether the transcript or task clocks differ from the last drawn frame.
-    pub fn clock_changed(&self) -> bool {
-        self.state.clock_changed()
-    }
-
-    /// An animation tick changes the activity spinner while work is visible.
-    pub fn animation_changed(&self) -> bool {
-        self.state.animation_changed()
-    }
-
-    /// Consumes a visible mutation performed by an external host callback,
-    /// such as review projection or refreshed session context.
-    pub fn take_render_changed(&mut self) -> bool {
-        self.state.take_render_changed()
-    }
-
-    /// Records the time-dependent cells represented by the frame just drawn.
-    /// The next clock or animation tick can then request a redraw only after
-    /// its displayed value actually moves.
-    pub fn acknowledge_render(&mut self) {
-        self.state.acknowledge_render();
-    }
-
     /// Waits for the next background message, applies it, and drains whatever
-    /// queued behind it, reporting whether their visible state changed.
+    /// queued behind it.
     ///
     /// `None` means no chat is warm, and the feed never wakes the caller. Cancel
     /// safe: every arm is a cancel-safe receive, and a message is applied only
     /// once its arm has won.
-    pub async fn pump(chat: Option<&mut Self>) -> Outcome {
+    pub async fn pump(chat: Option<&mut Self>) {
         let Some(chat) = chat else {
             return std::future::pending().await;
         };
-        let before = chat.state.visible_revision();
         enum Wakeup {
             Remote(Option<ChatRemoteResult>),
             Io(ChatIoUpdate),
@@ -1049,12 +1010,6 @@ impl ActiveChat {
         }
         chat.drain().await;
         chat.report_worker_death().await;
-        let changed = chat.state.visible_revision() != before;
-        if changed {
-            Outcome::Changed
-        } else {
-            Outcome::Unchanged
-        }
     }
 
     async fn drain(&mut self) {
@@ -1109,10 +1064,8 @@ impl ActiveChat {
         else {
             return;
         };
-        if let Some(view) = self.state.second_opinion_mut()
-            && view.set_status("the reviewer is reading the plan…")
-        {
-            self.state.mark_visible_changed();
+        if let Some(view) = self.state.second_opinion_mut() {
+            view.set_status("the reviewer is reading the plan…");
         }
         self.persist_review();
         self.run_workflow_request(request);
@@ -1150,11 +1103,6 @@ impl ActiveChat {
             }
         }
         self.surface_reviewer_elicitations();
-    }
-
-    /// Mirrors `[review]` into the view, from the config the dashboard drains.
-    pub fn set_review_config(&mut self, review: mj_core::config::ReviewConfig) {
-        self.state.set_review_config(review);
     }
 
     /// Asks the daemon to review the turn that just finished.
@@ -1217,9 +1165,7 @@ impl ActiveChat {
     pub fn report_review_refusal(&mut self, message: String) {
         match self.state.turn_review_mut() {
             Some(review) => {
-                if review.report_failure(message) {
-                    self.state.mark_visible_changed();
-                }
+                review.report_failure(message);
             }
             None => self.state.set_notice(message),
         }
@@ -1438,10 +1384,7 @@ impl ActiveChat {
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
             VoiceUpdate::Finished(result) => {
-                if self.state.voice_active {
-                    self.state.voice_active = false;
-                    self.state.mark_visible_changed();
-                }
+                self.state.voice_active = false;
                 self.voice_cancel = None;
                 self.voice_finishing = false;
                 match result {
@@ -1568,12 +1511,9 @@ impl ActiveChat {
             .unwrap_or(ChatEventOutcome::None)
     }
 
-    /// Applies one terminal event while preserving both dispatch and repaint
-    /// information.  The action is intentionally separate from `Outcome`:
-    /// editing the composer may need a redraw without asking the host to do
-    /// anything, while a remote command can be consumed with no visual delta.
+    /// Applies one terminal event, reporting whether the conversation consumed
+    /// it and whatever action it asks the host to take.
     pub fn handle_event_result(&mut self, event: Event) -> EventResult<ChatEventOutcome> {
-        let before = self.state.visible_revision();
         let action = match &event {
             Event::Key(key) => self.state.handle_key(*key),
             Event::Paste(pasted) => self.state.handle_terminal_paste(pasted),
@@ -1584,16 +1524,9 @@ impl ActiveChat {
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
-        let changed = self.state.visible_revision() != before;
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
         EventResult {
-            outcome: if changed {
-                Outcome::Changed
-            } else if consumed || action.is_some() {
-                Outcome::Unchanged
-            } else {
-                Outcome::Continue
-            },
+            consumed: consumed || action.is_some(),
             action,
         }
     }
@@ -1825,7 +1758,6 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state.mark_visible_changed();
                     self.state.set_notice(
                         "Starting microphone… click again or press Alt-V to transcribe",
                     );
@@ -1841,11 +1773,6 @@ impl ActiveChat {
             ChatAction::QuitDetach => return self.detach(),
         }
         ChatEventOutcome::Handled
-    }
-
-    /// Refreshes the parent session's direct-child count without reopening chat.
-    pub fn set_subagent_count(&mut self, count: usize) {
-        self.state.set_subagent_count(count);
     }
 
     /// Leaves the conversation: stops any dictation and reports how far the
@@ -1910,10 +1837,8 @@ impl ActiveChat {
         self.state
             .open_second_opinion(CapturedProposal { request, proposal }, setup);
         if let Some(selection) = remembered {
-            if let Some(view) = self.state.second_opinion_mut()
-                && view.set_status("resuming the reviewer…")
-            {
-                self.state.mark_visible_changed();
+            if let Some(view) = self.state.second_opinion_mut() {
+                view.set_status("resuming the reviewer…");
             }
             self.probe_reviewer(
                 0,
@@ -2462,12 +2387,8 @@ impl ActiveChat {
         let events = match result {
             Ok(events) => events,
             Err(error) => {
-                let changed = self
-                    .state
-                    .second_opinion_mut()
-                    .is_some_and(|view| view.report_failure(error));
-                if changed {
-                    self.state.mark_visible_changed();
+                if let Some(view) = self.state.second_opinion_mut() {
+                    view.report_failure(error);
                 }
                 return;
             }
@@ -2480,28 +2401,21 @@ impl ActiveChat {
         } else {
             false
         };
-        if reviewer_changed {
-            if let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
-                && let Some(answer) = review.reviewer.latest_answer()
-                && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
-                    review.workflow.stage().clone()
-            {
-                review.workflow.reviewer_turn_completed(&command_id, answer);
-            }
-            self.state.mark_visible_changed();
+        if reviewer_changed
+            && let Some(SecondOpinion::Review(review)) = self.state.second_opinion_mut()
+            && let Some(answer) = review.reviewer.latest_answer()
+            && let mj_core::second_opinion::ReviewStage::Reviewing { command_id } =
+                review.workflow.stage().clone()
+        {
+            review.workflow.reviewer_turn_completed(&command_id, answer);
         }
         let finished = self.state.second_opinion().is_some_and(
             |view| matches!(view, SecondOpinion::Review(review) if review.workflow.finished()),
         );
-        let status_changed = if let Some(view) = self.state.second_opinion_mut()
+        if let Some(view) = self.state.second_opinion_mut()
             && view.reviewer().is_some_and(|reviewer| !reviewer.is_empty())
         {
-            view.set_status("Enter to act · Tab to choose")
-        } else {
-            false
-        };
-        if status_changed {
-            self.state.mark_visible_changed();
+            view.set_status("Enter to act · Tab to choose");
         }
         self.persist_review();
         self.surface_reviewer_elicitations();
@@ -2518,22 +2432,6 @@ impl ActiveChat {
         {
             tracing::debug!(%error, "dictation worker already stopped");
         }
-    }
-
-    /// The surfaces the last frame registered, for the selection engine.
-    pub fn frame_surfaces(&self) -> &FrameSurfaces {
-        self.state.frame_surfaces()
-    }
-
-    /// Keep a scrollbar gesture routed here even outside the chat pane.
-    pub fn transcript_scrollbar_dragging(&self) -> bool {
-        self.state.transcript_scrollbar_dragging()
-    }
-
-    /// Rows the composer wants at `width`: the wrapped input, up to three
-    /// queued-prompt previews, and the block's own border rows.
-    pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        self.state.desired_prompt_height(width)
     }
 
     /// Draws the transcript and the composer into `regions`, for a host that
@@ -2564,56 +2462,6 @@ impl ActiveChat {
         self.state.footer_command_areas.borrow().clone()
     }
 
-    /// Whether the last frame's surfaces stand alone, because a modal owned
-    /// the frame.
-    pub fn frame_surfaces_exclusive(&self) -> bool {
-        self.state.frame_surfaces_exclusive()
-    }
-
-    /// Clears the screen geometry retained by chat components before a host
-    /// redraw. Focus and an in-flight pointer gesture remain owned by chat.
-    pub fn reset_component_geometry(&mut self) {
-        self.state.reset_component_geometry();
-    }
-
-    /// Whether a chat component owns this pointer event before host selection.
-    pub fn component_handles_mouse(&self, mouse: crossterm::event::MouseEvent) -> bool {
-        self.state.component_handles_mouse(mouse)
-    }
-
-    /// Whether a chat modal currently owns the frame.
-    pub fn component_modal_open(&self) -> bool {
-        self.state.component_modal_open()
-    }
-
-    /// Releases any pointer gesture held by a chat component.
-    pub fn cancel_component_pointer(&mut self) {
-        self.state.cancel_component_pointer();
-    }
-
-    /// The transcript text a finished selection covers.
-    pub fn transcript_selection_text(&mut self, range: &SelectionRange) -> Option<String> {
-        self.state.transcript_selection_text(range)
-    }
-
-    /// The message text a selection in the elicitation pane covers.
-    pub fn elicitation_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.elicitation_selection_text(range)
-    }
-
-    /// The text a selection in the reviewer pane covers. It is resolved
-    /// against that pane's own rows, so a drag there can never pick up the
-    /// primary transcript's text.
-    pub fn reviewer_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.reviewer_selection_text(range)
-    }
-
-    /// Whether the transcript's selection row space stopped describing the
-    /// rows on screen since the last call.
-    pub fn transcript_selection_invalidated(&mut self) -> bool {
-        self.state.transcript_selection_invalidated()
-    }
-
     /// Scrolls the surface a drag is holding against one of its edges.
     /// `direction` is negative for up and positive for down.
     pub fn autoscroll_selection(&mut self, surface: SurfaceId, direction: i8) {
@@ -2634,6 +2482,22 @@ impl ActiveChat {
             }
             _ => {}
         }
+    }
+}
+
+/// A live chat is its [`ChatState`] plus the session plumbing around it, so
+/// every read and edit of the conversation reaches the state directly instead
+/// of through a wrapper per method. Methods that consult the session handle or
+/// the feed flags stay inherent on `ActiveChat` and take precedence.
+impl std::ops::Deref for ActiveChat {
+    type Target = ChatState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for ActiveChat {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 
@@ -3112,15 +2976,15 @@ pub(super) fn render_composer_band(
         if chat.standby {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" keeps the draft ", theme::muted()),
+                Span::styled(" keeps the draft ", theme::hint_description()),
             ])
             .right_aligned()
         } else {
             Line::from(vec![
                 Span::styled(" Enter ", theme::key_hint()),
-                Span::styled(" send  ", theme::muted()),
+                Span::styled(" send  ", theme::hint_description()),
                 Span::styled(" / ", theme::key_hint()),
-                Span::styled(" commands ", theme::muted()),
+                Span::styled(" commands ", theme::hint_description()),
             ])
             .right_aligned()
         }
@@ -3702,7 +3566,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn handle_event_result_reports_only_real_chat_repaints() {
+    async fn handle_event_result_reports_which_events_the_chat_consumed() {
         let fixture =
             mj_client::session::replacement_session_test_fixture("session-event-result", 72);
         let mut chat = ActiveChat::open(
@@ -3714,7 +3578,6 @@ mod tests {
             String::new(),
             Notices::default(),
         );
-        chat.acknowledge_render();
 
         let moved = chat.handle_event_result(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -3722,35 +3585,30 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         }));
-        assert_ne!(moved.outcome, Outcome::Changed);
-        assert!(!chat.take_render_changed());
-
-        let unchanged = chat.handle_event_result(Event::Key(KeyEvent::new(
-            KeyCode::Backspace,
-            KeyModifiers::NONE,
-        )));
-        assert_eq!(unchanged.outcome, Outcome::Unchanged);
+        assert!(!moved.consumed);
 
         let ignored = chat.handle_event_result(Event::Key(KeyEvent::new(
             KeyCode::F(12),
             KeyModifiers::NONE,
         )));
-        assert_eq!(ignored.outcome, Outcome::Continue);
+        assert!(!ignored.consumed);
 
-        let changed = chat.handle_event_result(Event::Key(KeyEvent::new(
+        let typed = chat.handle_event_result(Event::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
         )));
-        assert_eq!(changed.outcome, Outcome::Changed);
+        assert!(typed.consumed);
         assert_eq!(chat.draft(), "x");
 
-        let cursor_changed =
+        // A cursor move and a cursor move that is already clamped are both the
+        // composer's to answer, so neither reaches the dashboard behind it.
+        let moved_cursor =
             chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        assert_eq!(cursor_changed.outcome, Outcome::Changed);
+        assert!(moved_cursor.consumed);
 
         let clamped =
             chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        assert_eq!(clamped.outcome, Outcome::Unchanged);
+        assert!(clamped.consumed);
     }
 
     #[test]
@@ -5668,7 +5526,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_hint_keys_are_bold_without_the_blue_highlight() {
+    fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let mut terminal =
             Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
@@ -5695,6 +5553,17 @@ mod tests {
             + enter_byte;
         let slash_column =
             usize::from(buffer.area.x) + prompt_text[..slash_byte].chars().count() + 1;
+        let send_byte = prompt_text[enter_byte..]
+            .find("send")
+            .expect("the send description is rendered")
+            + enter_byte;
+        let send_column = usize::from(buffer.area.x) + prompt_text[..send_byte].chars().count();
+        let commands_byte = prompt_text[slash_byte..]
+            .find("commands")
+            .expect("the commands description is rendered")
+            + slash_byte;
+        let commands_column =
+            usize::from(buffer.area.x) + prompt_text[..commands_byte].chars().count();
 
         for column in enter_column..enter_column + "Enter".len() {
             let cell = &buffer[(column as u16, prompt_y)];
@@ -5704,6 +5573,12 @@ mod tests {
         let slash = &buffer[(slash_column as u16, prompt_y)];
         assert!(slash.modifier.contains(ratatui::style::Modifier::BOLD));
         assert_ne!(slash.bg, theme::palette().selection);
+        for (start, word) in [(send_column, "send"), (commands_column, "commands")] {
+            for column in start..start + word.len() {
+                let cell = &buffer[(column as u16, prompt_y)];
+                assert!(!cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            }
+        }
     }
 
     #[test]

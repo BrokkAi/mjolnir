@@ -14,12 +14,28 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 
 ## Progress
 
-- [ ] Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
-- [ ] Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
-- [ ] Milestone 3: background job helpers report panics and share one send path.
-- [ ] Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
-- [ ] Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in the staged order given below.
-- [ ] Milestone 6: small single-purpose cleanups (ActiveChat `Deref`, one truncation helper, one text-prompt dialog, one row viewport type).
+- [x] (2026-09-16 22:49Z) Milestone 1: one repaint rule (delete the manual dirty-flag protocol; collapse `Outcome` to a consumed flag; drop the `rat-event` dependency).
+- [x] (2026-09-16 23:18Z) Milestone 2: one erased view of the active modal (`ModalSurface` trait replacing seven `match &self.mode` copies).
+- [x] (2026-09-16 23:43Z) Milestone 3: background job helpers report panics and share one send path.
+- [x] (2026-09-17 00:14Z) Milestone 4: one implementation of readline cursor motion (composer reuses `text_input.rs` helpers; multiline motions move into `TextInput`).
+- [x] (2026-09-17 02:05Z) Milestone 5: one body for the New and Move wizard twins (`WizardDraft` trait), in twelve commits. The steps ran in the order 0, 1, 2, 3, 4, 6, 7, 8, 9, 5, 11, 10; see the Decision Log for why.
+  - [x] Step 0: `mj-tui/src/wizards/draft.rs` with `DraftChange`, `WizardDraft`, both impls, and `DashboardState::keep`.
+  - [x] Step 1: `adjust_wizard_resources`.
+  - [x] Step 2: `prepare_wizard_target` and `apply_wizard_aws_options`.
+  - [x] Step 3: `complete_wizard_mount_source`, `validate_wizard_mount`, `apply_wizard_mount_completions`.
+  - [x] Step 4: `activate_wizard_mount`, generic `begin_mount_editor` and `edit_selected_mount`.
+  - [x] Step 6: `activate_wizard_review`.
+  - [x] Step 7: `activate_wizard_control`.
+  - [x] Step 8: `apply_wizard_field_edit` and `apply_mount_field_edit`, with the stated alignment.
+  - [x] Step 9: `apply_wizard_interaction`.
+  - [x] Step 5: `handle_wizard_shortcut`.
+  - [x] Step 11: `declare_wizard_controls`; `can_advance_target` replaced by `target_advance_enabled`.
+  - [x] Step 10: `handle_wizard_event`; `component_events.rs` calls it for both modes.
+- [x] (2026-09-17 01:30Z) Milestone 6: small single-purpose cleanups, in four commits.
+  - [x] `ActiveChat` reaches `ChatState` through `Deref`; nineteen wrappers deleted.
+  - [x] `truncate_to_cells` replaces four truncation functions; one punctuation set.
+  - [x] `render_text_prompt` and `handle_text_prompt_event` behind the two rename editors.
+  - [x] `RowViewport` behind the reviewer pane, the verdict panel, and the overview panel.
 
 ## Surprises & Discoveries
 
@@ -29,8 +45,181 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
   Evidence: `mj-chat/src/chat/input.rs:11-35` (`replace_input_range`), `mj-chat/src/chat/attachments.rs:359-465`.
 - Observation: `#[derive(Default)]` on `ReviewWizardView` does not compile because it holds `&'a MountWizard`, and references to arbitrary types have no `Default`. That item is dropped (see Decision Log).
   Evidence: `mj-tui/src/wizards.rs:1554`.
+- Observation: substituting "consumed" for "changed" in the batch loop's pre-dispatch draw is lossy without extra work. The dashboard's plain mouse handling (`mj-tui/src/lib.rs:1557-1690`) marked a repaint on a pane-focus click, a row click, a project-heading click, a pane-size control click and a pane wheel, but never called `record_event_handled`, so those events would have reported `consumed == false` and left a stale frame under the next pointer event in the batch. Fixed by recording consumption there; see the Decision Log.
+- Observation: the redraw rule as first written had a hole. `tokio::select!` picks one ready arm at random, and `drain_feeds` then applies every message queued behind it. If a clock tick won the select while a background message was also ready, the timer arm set `redraw = false` and the drain applied a visible update that never reached the screen until some later wakeup. The old protocol did not have this hole because `draw()` re-read `take_render_changed()` after the drain. `Feed` now reports whether the drain took a message (`take_delivered`, `mj-controller/src/pollers.rs:205-216`) and the loop ORs that into `redraw` (`mj-cli/src/dashboard.rs:653`).
+  Evidence: `mj-cli/src/dashboard.rs` select arms at `:575-650` versus `drain_feeds` at `:1947`; every `drain_*` reads `Feed::next_ready`, which the winning arm's `accept` only latches.
+- Observation: `EditOutcome` is kept, not collapsed to `bool`. One caller branches on `EditOutcome::Changed` for a reason that is not repaint: `ChatState::handle_history_search_key` re-runs `refresh_history_search()` only when the key changed the query text, so a cursor move must not restart the search.
+  Evidence: `mj-chat/src/chat/history.rs:266-276`.
+- Observation: the acceptance grep for `Outcome::` has to be a word-boundary grep. `WaitOutcome::`, `RemotePreflightOutcome::`, `SetupOutcome::`, `WorkerRecordPersistenceOutcome::`, `ReviewDiscoveryOutcome::` and `EditOutcome::` are unrelated enums in the same three crates. `grep -rEn '\bOutcome::' mj-tui/src mj-chat/src mj-cli/src` reports zero; a plain `grep Outcome::` reports the unrelated ones.
 - Observation: `mark_render_changed` and its relatives are called from far more places than first counted. The dashboard side has 204 `mark_render_changed()` calls plus 49 `mark_render_changed_cells` calls; the chat side has 152 `mark_visible_changed()` calls plus an elicitation-dialog flag (`take_changed`/`mark_changed`) that is polled from five places. Three trackers are layered: the manual flags, a revision counter diffed around every event, and a visual-state diff inside `Form::handle_at`.
   Evidence: `grep -rc "mark_visible_changed()" mj-chat/src`; `mj-tui/src/lib.rs:1489`; `mj-chat/src/components/scope.rs:826-842`.
+
+- Observation: the Milestone 2 text says "twelve payloads whose whole erased behaviour is one `RefCell<Dialog<K>>`" and then lists eleven. Eleven plus the five hand-written impls is sixteen, which is exactly the number of `Mode` variants other than `Dashboard`, so the list was right and the count was a typo.
+  Evidence: `mj-tui/src/lib.rs` `enum Mode` has seventeen variants; `mode_surfaces!` in `mj-tui/src/modal_surface.rs` names sixteen.
+- Observation: Milestone 2 does not reduce the line count. It removes 304 lines from the five files it touches and adds a 393-line module, a net gain of about 90 lines, against a predicted saving of 180 to 200. The prediction counted the deleted `match` arms but not what replaces them: fourteen `impl DialogModal` blocks cost two accessor methods each even behind a macro, and the two `Mode` accessors are still one arm per variant. The milestone's actual benefit is the one that was always the main one, that a new modal is declared in one list instead of seven matches.
+  Evidence: `git diff --shortstat` for the milestone commit.
+- Observation: `SetupDialog::prepare_dialog_state` reads `self.editor`, which is private to `mj-tui/src/setup.rs`, so its `ModalSurface` impl cannot live in `mj-tui/src/modal_surface.rs`. It is written in `setup.rs` instead, and the six inherent methods it absorbed are gone. Every other payload exposes its form as `pub(crate)`, so the rest of the impls are in the new module.
+  Evidence: `mj-tui/src/setup.rs` `struct SetupDialog` fields `editor`, `path`, `draft`.
+- Observation: `ContainerEditFocus` was re-exported from `mj-tui/src/dialogs.rs` only under `#[cfg(test)]`, so naming `Dialog<ContainerEditFocus>` in another module did not compile. It is now an unconditional `pub(crate) use`.
+  Evidence: `mj-tui/src/dialogs.rs:3-4`.
+- Observation: Milestone 3 does not remove 55 lines either; it adds about 22 non-test
+  lines, plus 70 lines of panic tests. `report` and `blocking_result` cost 30 lines,
+  and rustfmt renders `report("label", &updates, DashboardIoUpdate::X { … })` over
+  five to seven lines where the `if let Err(error) = updates.send(…) { tracing::debug!(…) }`
+  block it replaces took six to eight. The saving is real only where the update value
+  is short. The milestone's benefit is the closed bug class and the single send path,
+  not the line count.
+  Evidence: `git diff --shortstat` for the milestone commit reports 265 insertions and
+  173 deletions across four files.
+- Observation: three send sites in `mj-cli/src` legitimately do not go through `report`,
+  because their send result is control flow rather than a report. `mj-cli/src/dashboard/io.rs:1501`
+  sends a remote-repair request and uses `.context("dashboard closed during remote repair
+  preparation")?` to abandon the creation recipe; `mj-cli/src/dashboard/actions.rs:1384` and
+  `:1392` send inside a web-viewer polling task whose `?` ends the poll when the dashboard
+  is gone.
+- Observation: the panic message survives the trip. Tokio 1.52's `JoinError: Display`
+  writes `task <id> panicked with message "boom"`, so `"{operation} task failed: {error}"`
+  contains both the operation and the payload, and the tests can assert on both without
+  reaching for `into_panic`.
+  Evidence: `~/.cargo/registry/src/*/tokio-1.52.3/src/runtime/task/error.rs:135-152`.
+- Observation: `spawn_io`, `spawn_critical_io` and `spawn_cancellable_io_with_token` each
+  already had a closure parameter named `report`, so the new free function needed the
+  call sites' parameter renamed to `to_update`. The public signatures are unchanged;
+  every caller passes it positionally.
+- Observation: the composer's Ctrl-K chaining and `TextInput::kill(range, append)` already
+  produce the same kill buffer. The composer takes the old buffer aside, kills, then splices
+  the old text back in front; `TextInput::kill` appends the new text behind the old one.
+  Both give "earlier kill, then later kill" in Emacs order, so `kill_to_line_end(chained)`
+  in `TextInput` is one call to the existing `kill(range, chained)`.
+  Evidence: `mj-chat/src/chat/input.rs` `kill_to_line_end` versus `mj-chat/src/text_input.rs` `kill`;
+  `sequential_control_k_accumulates_one_yankable_block` passes unchanged against both.
+- Observation: for a single-line `TextInput` the new line motions and line kills are
+  *already* the old whole-value ones. `insert_filtered` drops every control character
+  unless the field is multiline, so a single-line value can never contain `\n`, which makes
+  `line_start` always zero and `line_end` always the value length. The `self.multiline`
+  gate in `handle_key` is therefore belt and braces rather than a behaviour fork; it is kept
+  because it states the intent and survives a future change to the filter.
+  Evidence: `mj-chat/src/text_input.rs` `insert_filtered`; the new test
+  `single_line_fields_keep_their_whole_value_motions`.
+- Observation: clippy's `wrong_self_convention` rejects `fn to_line_start(&mut self)`,
+  because a `to_*` method on a non-`Copy` type is expected to take `self` by reference
+  only. The three private key-routing helpers are named `handle_line_start`,
+  `handle_line_end` and `handle_vertical` instead, which also reads better beside
+  `handle_key`.
+  Evidence: `error: methods with the following characteristics: (\`to_*\` and \`self\` type is
+  not \`Copy\`) usually take \`self\` by reference` from `cargo clippy --all-targets`.
+- Observation: `mj-chat` holds no other user of the composer's grapheme helpers.
+  `previous_grapheme_boundary` was `pub(super)` but had no caller outside
+  `mj-chat/src/chat/input.rs`, so it and `next_grapheme_boundary` are deleted outright
+  rather than re-exported.
+  Evidence: `grep -rn "previous_grapheme_boundary" mj-chat/src mj-tui/src mj-cli/src`
+  reported only `chat/input.rs`.
+- Observation: Milestone 4 costs about 87 non-test lines rather than saving about 80.
+  `mj-chat/src/chat/input.rs` went from 328 non-test lines to 246 and
+  `mj-chat/src/text_input.rs` from 553 to 722. Only seven of the added lines are the
+  moved algorithms; the rest are the five new public `TextInput` methods, the five private
+  routing helpers in `handle_key`, and the doc comments the four now-public free functions
+  need. This is the third milestone in a row where the estimate assumed that replacing a
+  duplicated block with a call always shortens the file.
+  Evidence: `git diff --shortstat HEAD~2 HEAD -- mj-chat` reports 348 insertions and
+  215 deletions; the per-file non-test counts above.
+- Observation: two full-suite runs failed one test each in a crate this milestone does not
+  touch, and both passed on their own immediately afterwards:
+  `brokk-mj-core local_sockets::tests::a_short_path_binds_without_switching_directory`
+  (the run that produced it was sandboxed, which the repository guidelines say invalidates
+  socket tests) and `brokk-mj-worker acp::tests::bridge_exit_during_initialize_returns_an_actionable_error`
+  (its test binary took 198 seconds under full-suite load). Neither crate depends on
+  `mj-chat`. The accepted run is the elevated `cargo test --no-fail-fast` that reports every
+  target green.
+
+- Observation: the plan's step order does not compile. `handle_wizard_shortcut` (step 5)
+  calls the control-activation body (step 7) and the interaction body (step 9), and
+  `handle_wizard_event` (step 10) calls the control declaration (step 11). Running the steps
+  in the written order would have needed two throwaway trait hooks in step 5 and one in
+  step 10, each deleted a commit or two later. The steps were run 0, 1, 2, 3, 4, 6, 7, 8, 9,
+  5, 11, 10 instead, which is the same twelve commits with no scaffolding.
+- Observation: `ResumeWizard::can_advance_target` has a second caller the milestone text did
+  not mention, the resume picker's footer at `mj-tui/src/wizards.rs` (`next_enabled:
+  wizard.step != WizardStep::Target || wizard.can_advance_target(dashboard)`). Deleting it
+  outright would have left that site without a rule, so the rule is now one free function,
+  `target_advance_enabled`, shared by the footer and the target step's declaration.
+- Observation: the two field-edit twins had drifted on four side effects, not the two the
+  milestone counted. Besides the non-key edit differences it names, creation cleared the
+  completion candidates only for a typed key in the mount *source* (not for a paste, and
+  never for the destination), while resume cleared them for every changing edit to either
+  field. Every one of the four is invisible, because each cleared value belongs to a control
+  on a step the edited field does not appear on; they are listed in the step 8 commit
+  message.
+- Observation: the accessor `sizing_error` from the milestone's trait sketch has no caller.
+  The two `advance_*` bodies, which are the only readers of that field, stay unmerged and
+  read it directly, so the accessor was removed rather than carried with an `allow`.
+- Observation: two tests named in the milestone do not exist under those names.
+  `a_source_the_host_forces_read_only_cannot_be_unchecked` (step 3) has no match in
+  `mj-tui/src/wizards/tests.rs`; the nearest is
+  `a_new_attachment_starts_read_only_and_the_combobox_picks_its_access`. Every other named
+  test exists and passes, and each step also ran the whole `brokk-mj-tui` suite.
+- Observation: three full-suite runs during this milestone each failed one test in a crate
+  that does not depend on `mj-tui`, and each of those tests passed on its own straight
+  afterwards: `brokk-mj-chat clipboard::tests::downsizes_oversized_synthetic_image_in_powershell`,
+  `brokk-mj-core local_sockets::tests::a_short_path_binds_without_switching_directory` (the
+  same one Milestone 4 saw) and `brokk-mj-worker subagent_mcp::tests::a_slow_tool_call_does_not_block_a_later_one`.
+  All three are load-sensitive. The accepted runs are the elevated `cargo test --no-fail-fast`
+  after step 0 and after step 5, which reported every target green.
+- Observation: Milestone 5 saves about 155 lines, not the 300 to 330 predicted.
+  `mj-tui/src/wizards/dashboard.rs` went from 2,840 lines to 1,979 and `mj-tui/src/wizards.rs`
+  from 2,677 to 2,667, against a new 716-line `mj-tui/src/wizards/draft.rs`. Of those 716,
+  about 200 are the two accessor blocks (thirteen one-line methods each, written out twice
+  because a trait cannot derive them) and about 180 are the New-only bodies that moved out of
+  `dashboard.rs` rather than disappearing. This is the fourth milestone in a row where the
+  estimate counted the deleted copy and not its replacement. The benefit is the one the plan
+  always named: a change to the wizards' shared behaviour is now written once.
+
+- Observation: `ActiveChat::draft` needed no rename at all. The milestone lists it as a
+  wrapper that renames `ChatState::encoded_draft`, but `ChatState` already has a `pub fn
+  draft` whose body is exactly `self.encoded_draft()`, so the `ActiveChat` copy is a plain
+  duplicate and auto-deref resolves every caller. The other two renames stay as wrappers
+  because the methods they call have other callers under their own names: `latest_seq` is
+  read three times inside `mj-chat` and `second_opinion_active` eleven times.
+  Evidence: `mj-chat/src/chat.rs:844-847`; `grep -rn "\.latest_seq()\|\.second_opinion_active()" mj-chat/src`.
+- Observation: auto-deref does not cover a method used as a function path. The one caller
+  that failed to compile after the wrappers were deleted is
+  `mj-cli/src/dashboard.rs:1441`, `.is_some_and(mj_chat::chat::ActiveChat::transcript_selection_invalidated)`,
+  because a path names an inherent method on that exact type and never a `Deref` target's.
+  It is a closure now. Every ordinary `chat.method()` call compiled unchanged, as the
+  milestone predicted.
+  Evidence: `error[E0599]: no associated function or constant named
+  \`transcript_selection_invalidated\` found for struct \`ActiveChat\`` … `help: the function
+  \`transcript_selection_invalidated\` is implemented on \`ChatState\``.
+- Observation: the four truncation functions did not disagree, so nothing had to be
+  adjudicated. `truncate_text` and `clip` counted characters while `truncate_display_text`
+  and the `workspace_label` copy counted cells, but the two cell-counting ones use exactly
+  the arithmetic the unified helper does (keep the longest prefix whose width plus one
+  fits), and for the ASCII these sites carry characters and cells agree. The one genuine
+  difference is the degenerate `width == 0` case, where `clip` returned a lone `…` that did
+  not fit the space it was given; the helper returns an empty string like the other three.
+  Evidence: `mj-tui/src/palette.rs` `clip` chained `['…']` after `take(0)`.
+- Observation: Milestone 6 costs about 20 lines rather than saving any. The four commits are
+  -83, +53, +27 and +23 lines. Only the `Deref` one subtracts, because it deletes code and
+  adds a ten-line impl. The other three each replace two or four short copies with one
+  documented helper plus a named result type: `Truncate` with its two configurations is
+  35 lines and its tests another 30; `TextPromptOutcome` with a doc comment per variant is
+  16 lines and the two renderers keep a wrapper each; `RowViewport` is a 42-line file
+  against about 35 lines of deleted arithmetic. This is the fifth milestone in a row where
+  the estimate counted the deleted copies and not the named, documented thing that replaces
+  them. The estimates in this plan should be read as a count of duplicated code, not as a
+  prediction of the diff.
+  Evidence: `git show --shortstat` for each of the four commits.
+- Observation: the two text-prompt handlers had drifted on one side effect, not the two the
+  milestone counted. On an empty value, the session rename editor moves focus back to the
+  field and the configuration ID editor does not. The difference is preserved rather than
+  aligned, because unlike Milestone 5's four invisible ones this one is visible: it decides
+  where the caret sits after a refused save.
+  Evidence: `mj-tui/src/dialogs.rs`, the `Rejected` arms of `handle_rename_event` and
+  `handle_config_id_event`.
+- Observation: `render_rename_editor` carried a doc comment describing "editable
+  per-session container provisioning inputs: the size overrides and the attached host
+  directories", which belongs to a different dialog entirely. It is dropped rather than
+  moved onto the shared renderer.
 
 ## Decision Log
 
@@ -57,12 +246,415 @@ The expected reduction is roughly 1,800 to 2,300 non-test lines and a comparable
 - Decision: Drop the `ReviewWizardView: Default` item. A `base()` constructor would be line-neutral.
   Rationale: see Surprises & Discoveries.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
+- Decision: `drain_feeds` returns whether it applied a background message, and the loop ORs that into `redraw`; `Feed` gained a `delivered` flag to report it.
+  Rationale: closes the hole described in Surprises & Discoveries. The alternative, leaving the timer arms free to suppress a drained feed update, would have made a visible update wait for an unrelated wakeup. This is not a per-mutation dirty flag: it reports that a message arrived, not that something visible changed, and it is cleared by the drain that reads it.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The dashboard's plain mouse paths now call `record_event_handled()`, so a click that moves pane focus, selects a row, collapses a project, resizes a pane, or switches a workspace tab reports itself consumed.
+  Rationale: the batch loop's new `previous_consumed` gate replaces a gate that was on "did anything visible change", and those paths marked a repaint but never recorded consumption. Without this, a second pointer event in the same input batch would be hit-tested against the frame from before the first one. Recording is also the honest answer: those handlers do take responsibility for the event.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `DashboardContext::maybe_open_startup_session` returns whether the pick ran, and the clock arm ORs that into `redraw`.
+  Rationale: the startup pick runs inside the clock arm and opens a conversation. `StartupSession::ready` answers true at most once, so the report costs nothing and keeps that one frame from waiting a second.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: Keep `EditOutcome` as a three-state enum and give `apply_field_edit`, `TextField::apply`, and `PathField::apply` that return type in place of `rat_event::Outcome`.
+  Rationale: the plan said to collapse it only if every remaining reader of `Changed` used it for repaint. One does not; see Surprises & Discoveries. The mapping is one-to-one with the old outcomes (`Unhandled`/`Handled`/`Changed` for `Continue`/`Unchanged`/`Changed`), so no call site changed meaning.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The loop keeps its draw at the top of the iteration rather than moving it after `drain_feeds`, with `redraw` reset to true immediately after each draw.
+  Rationale: the draw has to happen before the loop blocks on `select!`, or the first frame would wait for the first event, and `continue`/`break` inside the select arms would skip a trailing draw. Drawing at the top of iteration N+1 is still "after the drain of iteration N", which is what the plan's rule asks for.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The two new loop tests assert at the `DashboardState` plus `TestBackend` level rather than driving `run_dashboard_for_workspace`.
+  Rationale: `DashboardContext::open` enters raw terminal mode, loads the controller, and spawns fourteen pollers, so the loop is not reachable from a unit test. `an_unchanged_clock_tick_does_not_redraw` asserts the exact condition the clock arm evaluates (`clock_changed()` is false on a settled surface) and that the frame it declines is byte-identical to the one on screen. `a_feed_update_redraws_without_a_dirty_mark` applies a quota report the way `drain_feeds` does and asserts the next unconditional frame differs, with nothing having marked anything.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `DialogModal` carries an overridable `fn text_input_focused(&self) -> bool` instead of the planned `fn text_controls(&self) -> &'static [Self::Control]`.
+  Rationale: `text_controls` can only express "focus is on one of these controls". Three payloads whose behaviour is otherwise exactly one `RefCell<Dialog<K>>` do not fit that shape: `ContainerEditor` answers `field().is_some()`, and the two wizards answer a per-step rule. Under the written plan those three would each need a hand-written `ModalSurface` repeating the five form methods. One overridable predicate covers all fourteen with one mechanism and no repetition; the eleven simple cases are still a single line each.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: The two `Mode` accessors are generated by a `mode_surfaces!` macro from one list of variant names.
+  Rationale: written out they are two identical sixteen-arm matches, so the "add a variant here and nowhere else" property lived in two places that could drift. Both generated matches are still exhaustive, so a new variant still fails to compile.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `component_handles_mouse` keeps its dashboard case as an early `if matches!(self.mode, Mode::Dashboard)` return rather than a `match` with a `_` arm.
+  Rationale: the acceptance criterion asks that `component_events.rs` hold no `match &self.mode` outside `handle_component_event`, and a two-arm match would have left one. The behaviour is identical.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `NewWizard::text_input_focused` and `ResumeWizard::text_input_focused` moved into their `DialogModal` impls rather than being delegated to.
+  Rationale: a trait method and an inherent method with the same name on the same type resolve in favour of the inherent one, so delegation compiles and is correct, but deleting the inherent method later would turn it into silent infinite recursion. Their only caller was the `match` in `text_input_focused` that this milestone deletes. Milestone 5's note that the two methods stay unmerged still holds; they are just in `modal_surface.rs` now.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `TextInput::move_to_line_start`, `move_to_line_end` and `move_vertical` return
+  `()` while `kill_to_line_start` and `kill_to_line_end` return `bool`, rather than all five
+  returning `()` as the Interfaces section wrote them.
+  Rationale: `handle_key` must still answer `EditOutcome::Changed` versus `Handled` for
+  Ctrl-U and Ctrl-K, and `EditOutcome::Changed` is not a repaint signal any more (Milestone 1
+  kept the enum because `handle_history_search_key` re-runs its search only on `Changed`).
+  A kill that removed nothing must not claim a change. The motions have nothing to report.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `handle_key` routes through three private helpers (`handle_line_start`,
+  `handle_line_end`, `handle_vertical`) and two more for the kills (`kill_line_backward`,
+  `kill_line_forward`) instead of adding a `if self.multiline` guard to each of the eight
+  key arms.
+  Rationale: Ctrl-A and Home want the same decision with a different `cross_boundary`, as do
+  Ctrl-E and End, and Ctrl-P/Up and Ctrl-N/Down; writing the guard inline would have repeated
+  it eight times inside a `match` that is already long.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the composer's word-motion methods `ChatState::previous_word_start` and
+  `next_word_end` are deleted rather than kept as one-line wrappers, and their five callers
+  in `mj-chat/src/chat.rs` call `text_input::previous_word_start(&self.input, self.input_cursor)`
+  directly.
+  Rationale: the acceptance criterion is that `chat/input.rs` defines no word, grapheme or
+  line boundary function. A wrapper would satisfy the letter and not the point, which is that
+  there is one name for each algorithm.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the milestone is two commits, `text_input.rs` first and `chat/input.rs` second,
+  and the three moved tests travel with the first commit.
+  Rationale: the first commit is purely additive to `TextInput` plus the test move, so it can
+  be read on its own; the second is purely subtractive from the composer. Moving the tests
+  in the first commit keeps the new `TextInput` behaviour covered from the moment it exists.
+  Date/Author: 2026-09-17 / Claude Opus 5.
 - Decision: Order the milestones 1, 2, 3, 4, 5, 6. Milestone 1 goes first because it deletes hundreds of `mark_render_changed` calls that Milestones 2 and 5 would otherwise have to carry through their rewrites. Milestone 3 is independent of everything and can be done at any time.
   Date/Author: 2026-09-16 / Claude Fable 5.1.
+- Decision: `report` is generic over the message type (`fn report<T>(operation: &str,
+  updates: &UnboundedSender<T>, update: T)`) rather than taking `UnboundedSender<DashboardIoUpdate>`
+  as the milestone text wrote it.
+  Rationale: three of the send sites it replaces post `LifecycleUpdate` on the lifecycle
+  channel (`spawn_lifecycle_operation` and the two in `spawn_dashboard_create_session`).
+  A second near-identical function for that channel would defeat the point. `SendError<T>`
+  implements `Display` for every `T`, so the debug log is unchanged.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: the restructured blocking helpers report first and drop the critical-operation
+  guard second, keeping today's order, rather than the `drop(guard); report(…)` order the
+  milestone text sketched.
+  Rationale: the guard is what holds quit open. Dropping it before the send opens a window
+  in which another thread sees no blockers and quits while the answer is still in flight.
+  Reporting first costs nothing and matches `spawn_async_job`.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `report` is `pub(crate)` and `mj-cli/src/pollers.rs` uses it too, though the
+  milestone named only `io.rs`, `actions.rs` and `dashboard.rs`.
+  Rationale: `spawn_worker_record_persistence` and `spawn_worker_diagnosis` held the same
+  two "send or log a closed channel" blocks, and the acceptance grep is over `mj-cli/src`.
+  Leaving two copies behind would have kept the pattern alive in the one file a future
+  contributor is most likely to copy from.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: a third panic test, `a_panicking_cancellable_job_reports_its_failure_and_releases_quit`,
+  covers `spawn_cancellable_io`.
+  Rationale: it is the third helper the milestone restructures and the one whose blocking
+  closure is wrapped rather than passed straight to `spawn_blocking`, so it is the one
+  most likely to be broken by a later edit. The test is eighteen lines.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+- Decision: `mj-cli/src/dashboard.rs:1106` (`let _ = updates.send(TranscriptTailSeed …)`)
+  also goes through `report`, making four converted sites outside `io.rs` rather than the
+  three the milestone counted.
+  Rationale: it was the one send in the dashboard that discarded its error outright, which
+  the repository guidelines forbid. It now logs like every other one.
+  Date/Author: 2026-09-16 / Claude Opus 5.
+
+- Decision: run Milestone 5's twelve steps in the order 0, 1, 2, 3, 4, 6, 7, 8, 9, 5, 11, 10
+  rather than 0 through 11.
+  Rationale: three steps call bodies that later steps unify (see Surprises & Discoveries).
+  The written order would have needed three throwaway trait hooks. The reordering keeps every
+  commit a self-contained unification with nothing to undo.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `WizardDraft::sizing_mut` hands out `&mut BTreeMap<String, Vec<SessionResourceAllocation>>`
+  rather than the shared reference the milestone sketched.
+  Rationale: `apply_aws_resource_options` caches a newly resolved size list for a target the
+  draft is not currently on, which is a write. A shared reference would have forced a second
+  accessor for that one site. Every reader takes a reborrow, so nothing else changed.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `apply_extra_interaction` returns `()` and `apply_extra_field_edit` returns
+  `Result<(), FieldEdit>`, rather than the `bool` the milestone gave the first one.
+  Rationale: both outcomes of `apply_extra_interaction` end in the same thing, putting the
+  draft back, so a handled flag would have been computed and dropped at its only call site.
+  The field-edit hook keeps a `Result` because it really does hand the edit on.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `DraftChange::AttachmentOpened` is the review's attachment list being activated
+  (editing an entry that already exists) and `DraftChange::AttachmentEditorOpened` is the
+  review's Add button (a fresh entry).
+  Rationale: the milestone names both variants but does not say which is which, and the two
+  wizards disagree about exactly one of them: creation invalidates its preflight when an
+  existing attachment is opened and not when a new one is started, while a move invalidates
+  on both. This reading is the one that preserves today's behaviour, and it matches the
+  milestone's list of the changes creation reacts to.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `ResumeWizard::can_advance_target` is replaced by a free function
+  `target_advance_enabled(dashboard, wizard)` instead of simply being deleted.
+  Rationale: it had a second caller in the resume picker's footer; see Surprises & Discoveries.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `prepare_mount_editor` and `prepare_selected_mount_editor` no longer take the
+  wizard's step by mutable reference. The selected-entry one answers whether it loaded
+  anything and the caller sets the step.
+  Rationale: a generic `begin_mount_editor<W>` cannot hand out `&mut wizard.step` and
+  `&mut wizard.mounts` at once through accessors. Returning the fact instead of writing
+  through an out-parameter is also the clearer signature. Behaviour is unchanged: the only
+  other caller reaches the function having just found the entry's index, so the list is never
+  empty there.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the draft-trait hooks call `DashboardState` methods that are now `pub(super)`
+  (`invalidate_new_remote_preflight`, `preflight_create_session_action`,
+  `preflight_resume_session_action`, `advance_new_wizard`, `advance_resume_wizard`,
+  `validate_new_project`, `activate_new_bundle_control`, `request_move_preparation_for_review`)
+  plus the two free functions `invalidate_move_preparation` and `declare_wizard_buttons`.
+  Rationale: the impls live in `mj-tui/src/wizards/draft.rs` and the bodies they delegate to
+  live in `mj-tui/src/wizards/dashboard.rs`, which is a sibling module, so file-private was
+  not enough. `pub(super)` keeps them inside `crate::wizards`. The alternative, moving the
+  impls into `dashboard.rs`, would have put the trait's definition and its implementations in
+  different files for no gain.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+
+- Decision: `Truncate` carries two named configurations, `Truncate::PLAIN` and
+  `Truncate::SUMMARY`, and does not derive `Default`.
+  Rationale: only two configurations are used, `PLAIN` at nine call sites and `SUMMARY` at
+  thirteen, and writing the two-field literal at each of them would have been noise.
+  `Default` was dropped once the constants existed so that one configuration has one
+  spelling, which is the point of the milestone.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `trim_before_ellipsis` moves from `mj-chat/src/chat/rendering.rs` into
+  `mj-chat/src/components/text_layout.rs` beside `truncate_to_cells`, rather than staying in
+  `rendering.rs` as a `pub(crate)` item the way the milestone offered.
+  Rationale: `text_layout.rs` is where text measurement and wrapping already live, and the
+  repository guidelines ask for shared interpretation of a data shape to sit in one place.
+  `rendering.rs` imports it for its span-aware truncation; the definition is not duplicated
+  either way, but this direction keeps the lower-level module free of an upward dependency.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `handle_text_prompt_event` is a method on `DashboardState` taking `&self`, not
+  the free function the milestone sketched.
+  Rationale: it has to record `last_event_consumed` and set the empty-value notice, which
+  are both `DashboardState`'s. Both use interior mutability, so `&self` is enough and the
+  caller keeps its own `&mut self` for the mode change. A free function would have needed
+  the `Cell` and the `Notices` passed in, which is the same coupling spelled longer.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `TextPromptOutcome::Edited` also covers "the event did nothing", so the two
+  handlers have four arms rather than five.
+  Rationale: both call sites treat an edit and an unhandled event identically, by putting
+  the dialog back. A fifth variant would have been matched to the same arm at every call
+  site that exists.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: `RowViewport::clamp` re-derives `follow` as well as clamping `top_row`, and the
+  turn review's two `set_*_viewport` methods call it.
+  Rationale: the shared `scroll_by` reports movement as `(top_row, follow) != before`, which
+  is what the second-opinion pane has always done. Without a `follow` that is already
+  correct, the turn review's first scroll on content that fits its pane would have reported
+  movement where the old code reported none. Clamping is called from the render pass before
+  any scroll reaches it, so `follow` is accurate whenever `scroll_by` runs and the reported
+  value is unchanged. `follow` is otherwise unread by the turn review, which keeps its own
+  total and height fields.
+  Date/Author: 2026-09-17 / Claude Opus 5.
+- Decision: the session rename editor keeps moving focus to its field after an empty save
+  and the configuration ID editor keeps not moving it.
+  Rationale: see Surprises & Discoveries. The difference is visible, and this milestone is
+  not the place to change where a caret lands.
+  Date/Author: 2026-09-17 / Claude Opus 5.
 
 ## Outcomes & Retrospective
 
-To be written at the end of each milestone and at completion.
+Milestone 1 (2026-09-16). The dashboard now draws once per event-loop wakeup.
+Every manual repaint signal is gone: `mark_render_changed`, `take_render_changed`,
+`render_change_revision`, `mark_render_changed_cells`, `record_form_outcome_cells`
+and `record_visible_event_change` on the dashboard side; `mark_visible_changed`,
+`visible_revision`, `take_render_changed` on the chat side; the elicitation
+dialog's third flag; the `FormVisualState` diff inside `Form::handle_at`; and
+`DashboardContext::dirty` with its 31 assignment sites. `EventResult` now carries
+`consumed: bool` instead of `rat_event::Outcome`, and `rat-event` is no longer a
+dependency of `mj-chat`. About 800 non-test lines went with them, together with
+the "previous value" snapshots that only existed to compare against.
+
+Two things did not go as the plan assumed, both recorded above: the timer arms
+could swallow a background update that the drain applied in the same iteration,
+which needed `Feed::take_delivered`; and `EditOutcome` has a caller that branches
+on `Changed` for a non-repaint reason, so it stays a three-state enum.
+
+What is left for a later milestone: the timer signatures in
+`mj-tui/src/render_changes.rs` (`clock_changed`, `animation_changed`,
+`acknowledge_render`) are still the right gate and stay. `visible_state_signature`,
+`capacity_display_signature`, `materialized_display_signature` and
+`move_recovery_signature` are gone; `session_is_visible`,
+`session_row_is_visible_at` and `support_projection_visible` survive because the
+clock and animation signatures still consult them.
+
+Milestone 2 (2026-09-16). One trait now answers what the dashboard asks of
+whichever modal is open. `mj-tui/src/modal_surface.rs` defines `ModalSurface`
+(confirmation, pointer hit test, pointer release, geometry reset, text focus,
+dialog preparation, layer detail) and the helper trait `DialogModal`, which
+gives a blanket implementation to the fourteen payloads that answer everything
+through the one `RefCell<Dialog<K>>` they own. `HelpOverlay` and `SetupDialog`
+write `ModalSurface` out by hand, the latter in `mj-tui/src/setup.rs` because it
+reads private fields. `Mode::surface` and `Mode::surface_mut`, generated from one
+list of variant names, are the only per-variant lists left outside
+`handle_component_event` and `render_modal`.
+
+Seven `match &self.mode` copies in `mj-tui/src/component_events.rs` and the one
+in `text_input_focused` are gone, together with six inherent `SetupDialog`
+methods and the two wizards' `text_input_focused`. Behaviour is unchanged; the
+three places where the old code was inconsistent rather than uniform
+(`ContainerEditor` treating no focus as its first field, Setup ignoring the
+review editor's text fields, Help hit-testing its stored rectangle) are kept as
+they were, each with a comment saying so.
+
+This milestone costs about 90 lines rather than saving 190; see Surprises &
+Discoveries for why the estimate was wrong and why the milestone is still worth
+having.
+
+Milestone 3 (2026-09-16). A background job that panics now says so. The three
+blocking helpers in `mj-cli/src/dashboard/io.rs` (`spawn_io`, `spawn_critical_io`,
+`spawn_cancellable_io_with_token`) run their `spawn_blocking` job from an outer
+`tokio::spawn` and await its join handle, so a panic becomes
+`<operation> task failed: task N panicked with message "boom"` on the I/O
+channel instead of a dialog that waits forever. `blocking_result` does that
+mapping in one place and `report` does every send, which removed twenty-two
+copies of the "send or log a closed channel" block across `io.rs`, `actions.rs`,
+`dashboard.rs` and `pollers.rs`.
+
+Two hand-rolled spawns are gone: `spawn_project_source_resolution` is now one
+call to `spawn_cancellable_io`, and `spawn_config_rename` is one call to
+`spawn_critical_async`. The rename therefore gains the fifteen-second
+acknowledgement timeout (`SAVE_ACK_TIMEOUT`) that every other daemon save has:
+if the daemon goes quiet mid-rename, the dashboard now says the save was not
+confirmed and releases quit instead of holding a blocker until the daemon
+answers. That is the milestone's one user-visible change.
+
+Three sends stay outside `report` because their send result is control flow, not
+a report; they are named in Surprises & Discoveries.
+
+Milestone 4 (2026-09-17). There is now one implementation of each readline
+boundary algorithm. `mj-chat/src/text_input.rs` exports `previous_word_start`,
+`next_word_end`, `line_start` and `line_end` as free functions over `(text,
+cursor)` beside the `previous_grapheme` and `next_grapheme` it already had, and
+`TextInput` gained `move_to_line_start`, `move_to_line_end`, `move_vertical`,
+`kill_to_line_start`, `kill_to_line_end` and the `preferred_column` that
+`move_vertical` aims for and every other cursor change clears. `handle_key`
+routes Ctrl-A, Ctrl-E, Home, End, Ctrl-U, Ctrl-K, Up and Down to them when the
+field is multiline, so any future multiline `TextField` gets composer-grade
+editing for free. No production code constructs `TextInput::multiline()` today;
+the only callers are three tests in `mj-chat/src/components/controls.rs`.
+
+`mj-chat/src/chat/input.rs` lost its copies of all seven algorithms and calls
+the shared ones. What stayed is exactly the part that is not shared: every
+composer edit still goes through `attachments::replace_range` and
+`attachments::snap_cursor`, so an `[image N]` marker is still inserted, moved
+over and deleted as one unit. The file is 150 lines shorter.
+
+Tests moved with the behaviour. The three readline tests that covered line
+motion and chained kills through `ChatState` now run against
+`TextInput::multiline()`, joined by two new ones for the preferred column and
+for the unchanged single-line routing; the duplicate
+`readline_word_edits_and_grapheme_cursor_are_atomic` is gone, its Alt-B
+assertion folded into `readline_edits_at_unicode_grapheme_boundaries`. One
+composer test remains for the part only the composer does:
+`control_k_and_control_y_round_trip_a_line_holding_an_image_marker`.
+
+Like Milestones 2 and 3, it does not shrink the code. `chat/input.rs` loses 82
+non-test lines and `text_input.rs` gains 169, a net cost of about 87 non-test
+lines against a predicted saving of about 80, plus 45 net test lines. The plan's
+estimate counted the seven deleted algorithms and not what replaces them: five
+new public methods on `TextInput`, five private routing helpers, and four free
+functions that now carry doc comments because they are public. Most of that
+addition is capability that did not exist before -- any multiline `TextField`
+now has line motion, vertical motion with a preferred column, and line kills --
+rather than relocated code. The milestone's benefit is the closed bug class,
+which is that word or line movement can no longer be fixed in one editor and
+missed in the other.
+
+Milestone 5 (2026-09-17). The New-session and Move/Resume wizards have one
+body each. `mj-tui/src/wizards/draft.rs` defines `DraftChange` and the
+`WizardDraft` trait: thirteen accessors, `into_mode`, and thirteen hooks for
+the places the two wizards genuinely differ. Fourteen twin function pairs in
+`mj-tui/src/wizards/dashboard.rs` became fourteen generic bodies
+(`declare_wizard_controls`, `handle_wizard_event`, `apply_wizard_interaction`,
+`apply_wizard_field_edit`, `activate_wizard_control`, `activate_wizard_review`,
+`activate_wizard_mount`, `handle_wizard_shortcut`, `complete_wizard_mount_source`,
+`validate_wizard_mount`, `apply_wizard_mount_completions`,
+`apply_wizard_aws_options`, `prepare_wizard_target`, `adjust_wizard_resources`),
+and `begin_mount_editor` and `edit_selected_mount` in `mj-tui/src/wizards.rs`
+lost their resume copies. `ResumeWizard::can_advance_target` is gone, replaced
+by one `target_advance_enabled` that the target step and the resume picker's
+footer share.
+
+What stays unmerged is what the milestone said would: the two `preflight_*`
+submit actions, the two `advance_*` step machines, and the two
+`text_input_focused` methods that Milestone 2 moved into
+`mj-tui/src/modal_surface.rs`.
+
+One step changes behaviour on purpose. Step 8 aligned four side effects the
+two field-edit copies had drifted on, all of them invisible because each
+cleared value belongs to a control on a different step; they are listed in
+that commit's message and in Surprises & Discoveries.
+
+Like the three milestones before it, it saves less than predicted: about 155
+lines against 300 to 330. Two hand-written accessor blocks and the New-only
+bodies that moved rather than vanished account for most of the difference.
+
+Milestone 6 (2026-09-17). Four unrelated duplications are gone. `ActiveChat`
+implements `Deref` and `DerefMut` to `ChatState`, and the nineteen methods whose
+whole body was one call to the same-named `ChatState` method went with it; five
+`ChatState` methods widened from `pub(super)` to `pub` and took the wrappers'
+doc comments. `mj-chat/src/components/text_layout.rs` gained
+`truncate_to_cells(text, width, Truncate)`, which replaced `truncate_text`,
+`truncate_display_text`, `clip` and the copy inlined in `workspace_label`, and
+now holds the one definition of the punctuation a cut swallows.
+`mj-tui/src/dialogs.rs` gained `render_text_prompt` and
+`handle_text_prompt_event`, which the session rename editor and the
+configuration ID rename editor share. `mj-chat/src/chat/viewport.rs` holds
+`RowViewport`, used by the reviewer pane, the verdict panel and the overview
+panel; the primary transcript's `TranscriptViewport` is untouched.
+
+One behaviour changed on purpose, as the milestone said it would: the command
+palette measured its columns in characters and now measures them in display
+cells, so a row of double-width glyphs no longer overruns its column.
+
+## Outcomes for the whole plan
+
+The plan set out to replace six duplications with one implementation each, and
+it did. What a contributor writes once now, having had to write it several times
+before: a repaint (there is no repaint protocol left, only an unconditional draw
+per wakeup), the answer to a question about whichever modal is open, a
+background job's failure path, each readline boundary algorithm, each behaviour
+of the two session wizards, a truncation, a one-field dialog, and a scroll
+position. The user sees the same TUI, with one visible change from Milestone 3
+(a rename whose daemon goes quiet now reports an unconfirmed save instead of
+holding quit open) and one from Milestone 6 (the palette's columns measure
+cells).
+
+The line count did not follow. The six milestones, measured over `mj-tui`,
+`mj-chat`, `mj-cli` and `mj-controller`:
+
+    Milestone 1   491 inserted, 2074 deleted    -1583
+    Milestone 2   520 inserted,  431 deleted      +89
+    Milestone 3   265 inserted,  173 deleted      +92
+    Milestone 4   348 inserted,  215 deleted     +133
+    Milestone 5  1078 inserted, 1233 deleted     -155
+    Milestone 6   420 inserted,  400 deleted      +20
+    Total                                       -1404
+
+against a prediction of 1,800 to 2,300 non-test lines removed plus a comparable
+amount of test scaffolding. Milestone 1 delivered most of the reduction and more
+than its own share of it. Every other milestone cost lines or saved a fraction
+of its estimate.
+
+The reason is the same in all five cases, and it is the lesson worth carrying:
+deleting duplicated code and calling one function instead does not shorten a
+file unless the duplication is large and its replacement is anonymous. What
+replaces a duplication is a named, documented thing -- a trait with accessors
+for every field the two sides disagree about, an options struct with its
+configurations, a result enum with a doc comment per variant, a module with a
+header. Milestone 1 shrank the code because its target was not a duplication at
+all: 400-odd calls to `mark_render_changed` were deleted and nothing replaced
+them. The other five replaced N copies of a body with one body plus an
+interface, and the interface is not free. A future plan of this kind should
+estimate the interface as well as the copies, and should justify itself on the
+bug classes it closes rather than on a line count. Each of them does close one:
+a missed repaint mark, a modal that answers one of seven questions wrongly, a
+background job that panics into silence, word motion fixed in one editor and
+not the other, a wizard behaviour changed for New and forgotten for Move, a
+truncation that counts characters where its neighbour counts cells.
+
+Note that `git diff --shortstat 513cd5e4 HEAD -- mj-tui mj-chat mj-cli
+mj-controller` reports 6,880 insertions against 4,902 deletions, a gain of 1,978
+lines. That range starts at this plan's own commit and includes unrelated
+feature work that landed before Milestone 1 began (container build cache,
+per-session workspace paths, attached-directory access modes), which added 3,382
+lines to those crates by itself. Subtracting it gives the -1,404 in the table
+above, which is the plan's own effect.
+
+What was not attempted, and why, is recorded in the milestones: `rat-focus`
+stays (one file, no saving), the generic `TextInput<B: EditBuffer>` that would
+let the composer be a `TextInput` stays deferred (its sketch is in Artifacts and
+Notes), the two wizards' submit actions and step machines stay unmerged because
+they share no logic, and `TranscriptViewport` stays its own type because
+freezing row estimates during a drag is not what the other three panes do.
 
 ## Context and Orientation
 
@@ -285,7 +877,7 @@ Expected: after the dashboard settles, CPU stays at or near 0.0 while idle; typi
 
 Milestone 1 is accepted when all tests pass, the two new loop tests (`an_unchanged_clock_tick_does_not_redraw`, `a_feed_update_redraws_without_a_dirty_mark`) pass, no file in the three crates mentions `mark_render_changed`, `mark_visible_changed`, `take_render_changed`, `render_change_revision`, `visible_revision`, `rat_event`, or `Outcome::`, and the manual idle check shows no periodic repaint.
 
-Milestone 2 is accepted when all tests pass, `component_events.rs` contains no `match &self.mode` outside `handle_component_event`, `lib.rs` contains the two `Mode::surface` accessors as its only exhaustive per-variant lists besides `render_modal`, and the new Help-overlay test passes.
+Milestone 2 is accepted when all tests pass, `component_events.rs` contains no `match &self.mode` outside `handle_component_event`, `mj-tui/src/modal_surface.rs` contains the two `Mode::surface` accessors as the only exhaustive per-variant lists besides `handle_component_event` and `render_modal` (the accessors live in the new module, not in `lib.rs` as first written, because that is where the trait is), and the new Help-overlay test passes.
 
 Milestone 3 is accepted when the two panic tests pass and `grep -c "updates.send" mj-cli/src/dashboard/io.rs` reports only the `report` function's own send.
 
@@ -316,7 +908,11 @@ The generic composer design considered and deferred for Milestone 4, for the rec
         pub fn with_action(action: A) -> Self;
     }
 
-`mj-cli/src/dashboard.rs` after Milestone 1: `DashboardContext` has no `dirty` field; `fn draw(&mut self) -> Result<()>` always draws; `fn dispatch_event(…) -> (bool /* consumed */, bool /* batch continues */)`.
+`mj-chat/src/text_input.rs` keeps `EditOutcome` as it is. `apply_field_edit`, `TextField::apply` and `PathField::apply` return `EditOutcome` in place of `rat_event::Outcome`, and `mj_chat::components` re-exports `EditOutcome` where it used to re-export `Outcome` and `ConsumedEvent`.
+
+`mj-cli/src/dashboard.rs` after Milestone 1: `DashboardContext` has no `dirty` field and no `drawn_size`; `fn draw(&mut self) -> Result<()>` always draws; `fn dispatch_event(…) -> (bool /* consumed */, bool /* batch continues */)`; `fn drain_feeds(&mut self) -> bool` reports whether it applied a background message; `fn clock_tick_redraws(&mut self) -> bool` is the clock arm's whole condition; `fn maybe_open_startup_session(&mut self) -> bool` reports whether the pick ran.
+
+`mj-controller/src/pollers.rs` after Milestone 1: `Feed` has `pub fn take_delivered(&mut self) -> bool`, set by `next_ready` when it produced a message.
 
 `mj-tui/src/modal_surface.rs` after Milestone 2: `ModalSurface`, `DialogModal`, and `impl Mode { fn surface(&self) -> Option<&dyn ModalSurface>; fn surface_mut(&mut self) -> Option<&mut dyn ModalSurface>; }` as specified in Milestone 2.
 
@@ -327,3 +923,74 @@ The generic composer design considered and deferred for Milestone 4, for the rec
 `mj-tui/src/wizards/draft.rs` after Milestone 5: `DraftChange` and `WizardDraft` as specified in Milestone 5, implemented for `NewWizard` and `ResumeWizard`.
 
 Dependencies removed: `rat-event` from `mj-chat/Cargo.toml` (Milestone 1). No dependencies added.
+
+## Revision notes
+
+2026-09-16, after implementing Milestone 1. Recorded what the milestone actually
+required beyond the written plan: `Feed::take_delivered` and a `bool` from
+`drain_feeds` (a timer wakeup could otherwise swallow a background update the
+drain applied), `record_event_handled` on the dashboard's plain mouse paths (the
+batch loop's new `consumed` gate replaces a "changed" gate those paths fed), a
+`bool` from `maybe_open_startup_session`, and keeping `EditOutcome` as an enum
+because one caller branches on `Changed` to decide whether to re-run a search.
+The two named loop tests are written at the `DashboardState` plus `TestBackend`
+level because `DashboardContext::open` needs a real terminal and fourteen
+pollers. Each of these is in the Decision Log with its reason.
+
+2026-09-16, after implementing Milestone 2. Recorded the four decisions that
+departed from the written milestone (an overridable `text_input_focused` in
+place of `text_controls`, a macro for the two `Mode` accessors, an early return
+in place of the last `match &self.mode`, and moving the wizards'
+`text_input_focused` bodies rather than delegating to them), the two facts that
+forced the shape of the code (`SetupDialog`'s private fields, `ContainerEditFocus`
+being test-only), and the honest line count.
+
+2026-09-16, after implementing Milestone 3. Recorded the five decisions that
+departed from the written milestone (`report` generic over the channel message so
+the lifecycle channel can use it, reporting before dropping the critical-operation
+guard, extending the single send path to `mj-cli/src/pollers.rs`, a third panic
+test for the cancellable helper, and converting the one `let _ = …send(…)` in
+`dashboard.rs`), the three send sites that legitimately remain inline, the
+`report` parameter rename that the new free function forced, and the honest line
+count. The reason for each is in the Decision Log; the pattern is the same as
+Milestone 2, where the written estimate also assumed that replacing a block with
+a call always shortens the file.
+
+2026-09-17, after implementing Milestone 4. Recorded the four decisions that
+departed from the written milestone (the kills return `bool` so Ctrl-U and
+Ctrl-K can still answer `EditOutcome::Changed`; five private routing helpers in
+`handle_key` rather than eight inline `multiline` guards; deleting the
+composer's word-motion methods outright and pointing their five callers in
+`chat.rs` at the free functions; and splitting the milestone into two commits
+with the test move in the first), the clippy rule that forced the helpers'
+names, and the two facts that made the port safe to do mechanically: the
+composer's chained Ctrl-K and `TextInput::kill(range, append)` already build the
+same kill buffer, and a single-line `TextInput` can never hold a newline, so the
+new line motions reduce to the old whole-value ones.
+
+2026-09-17, after implementing Milestone 5. Recorded the step reordering the
+written plan required to compile (three steps called bodies that later steps
+unified), the six decisions that departed from the written milestone (a mutable
+AWS-options accessor, two hook return types, the reading of the two attachment
+`DraftChange` variants, `target_advance_enabled` in place of a deleted
+`can_advance_target`, the attachment-editor helpers losing their step
+out-parameter, and the `pub(super)` widenings the sibling-module trait impls
+need), the two milestone-named tests that no longer exist under those names,
+the four rather than two side effects step 8 aligned, and the honest line count.
+
+2026-09-17, after implementing Milestone 6 and completing the plan. Recorded the
+six decisions that departed from the written milestone (two named `Truncate`
+configurations instead of a struct literal per call site, moving
+`trim_before_ellipsis` into `text_layout.rs` rather than exporting it from
+`rendering.rs`, `handle_text_prompt_event` as a `&self` method on
+`DashboardState` because it owns the consumed flag and the notices,
+`TextPromptOutcome::Edited` covering an unhandled event as well, `RowViewport::clamp`
+re-deriving `follow` so the turn review's movement reports do not change, and
+keeping the two rename editors' different focus behaviour after a refused save),
+the fact that `ActiveChat::draft` needed no rename because `ChatState::draft`
+already existed, the one caller auto-deref could not cover, and the honest line
+count for the milestone and for the whole plan. Added the `Outcomes for the
+whole plan` section with the per-milestone diff table and the lesson about the
+estimates: an interface that replaces a duplication is not free, and five of the
+six milestones cost lines because the estimates counted only the copies they
+deleted.
