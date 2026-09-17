@@ -325,6 +325,7 @@ pub(super) async fn enforce_execution_mode(
         option.category == Some(SessionConfigOptionCategory::Mode)
             && select_contains(&option.kind, desired)
     }) {
+        let option_id = option.id.to_string();
         let response = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
@@ -335,6 +336,14 @@ pub(super) async fn enforce_execution_mode(
             .await
             .with_context(|| format!("select required ACP execution mode {desired}"))?;
         *config_options = response.config_options;
+        // A harness can answer the request and still report another mode, so
+        // the session is only safe to use once it confirms the effective one.
+        let effective = surface::config_current_value(config_options, &option_id);
+        ensure!(
+            effective.as_deref() == Some(desired),
+            "the harness acknowledged execution mode {desired} but reports {}",
+            effective.map_or_else(|| "no mode".to_owned(), |mode| format!("{mode:?}"))
+        );
         if let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = desired.to_owned().into();
         }
@@ -354,6 +363,10 @@ pub(super) async fn enforce_execution_mode(
             .block_task()
             .await
             .with_context(|| format!("select required ACP execution mode {desired}"))?;
+        // `session/set_mode` answers with an empty result, so the only
+        // acknowledgement this path can check is that the request succeeded.
+        // Harnesses that report an effective value expose the mode as a
+        // config option, which the branch above verifies.
         if let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = desired.to_owned().into();
         }
