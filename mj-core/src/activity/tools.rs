@@ -51,6 +51,14 @@ impl ToolsInFlight {
         self.observe_at(update, epoch_millis());
     }
 
+    /// Fold one session update in, dating a call the update opens from the
+    /// step it belongs to rather than from the moment it was read. The step
+    /// clock is the better start: it is when the agent began this piece of
+    /// work, not when the relay got round to recording it.
+    pub fn observe_with_start(&self, update: &SessionUpdate, started_at_ms: i64) {
+        self.observe_at(update, started_at_ms);
+    }
+
     /// Open a call that the harness never reported as a tool call, such as a
     /// terminal Mjolnir runs on the agent's behalf.
     pub fn open(&self, tool_call_id: impl Into<String>, started_at_ms: i64) {

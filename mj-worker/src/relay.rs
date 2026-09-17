@@ -128,7 +128,11 @@ pub struct DurableRelay {
     /// Tool calls that still report pending or in-progress, with the start of
     /// their current status. This is stronger foreground evidence than a
     /// harness-neutral step clock, whose prose steps have no portable ending.
-    foreground_tools: BTreeMap<String, (agent_client_protocol::schema::v1::ToolCallStatus, i64)>,
+    ///
+    /// A shared handle rather than a private map: the turn stall watchdog
+    /// reads the same tool calls, and when it could not, a turn blocked in a
+    /// long build was failed as if the harness had died (#1020).
+    foreground_tools: mj_core::activity::ToolsInFlight,
     /// Codex tool calls explicitly introduced as execute cards, with the
     /// command needed if a later partial update says the process is detached.
     codex_execute_tools: BTreeMap<String, String>,
@@ -361,7 +365,7 @@ impl DurableRelay {
             harness_turns: HarnessTurnPolicy::default(),
             background_work: BackgroundWorkPolicy::default(),
             capacity_response: CapacityResponse::default(),
-            foreground_tools: BTreeMap::new(),
+            foreground_tools: mj_core::activity::ToolsInFlight::default(),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
@@ -465,14 +469,14 @@ impl DurableRelay {
         state.steering_supported = self.steering_supported;
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
-        state.foreground_tool_started_at_ms = self
-            .foreground_tools
-            .values()
-            .map(|(_, started_at_ms)| *started_at_ms)
-            .max();
+        state.tools_in_flight = self.foreground_tools.snapshot();
+        state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
+        // Answer the activity question once, here, where every fact is in
+        // hand. Consumers read this instead of each deriving their own.
+        state.activity = Some(mj_core::activity::classify(&self.activity_facts()));
         state
     }
 
@@ -487,15 +491,63 @@ impl DurableRelay {
         self.steering_supported = supported;
     }
 
+    /// Every fact that bears on whether this session is working.
+    ///
+    /// The idle clock runs on every journal append, so this assembles the
+    /// facts directly rather than through a whole operational state, which
+    /// would clone the session's configuration once per streamed chunk. It
+    /// must stay identical to `RelayOperationalState::facts`, which is what
+    /// the daemon reads; `worker_facts_match_the_published_state` pins them
+    /// together.
+    pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
+        mj_core::activity::ActivityFacts {
+            execution: self.snapshot.execution,
+            prompt_started_at_ms: self
+                .snapshot
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.started_at_ms),
+            harness_turn_started_at_ms: self.snapshot.harness_turn.map(|turn| turn.started_at_ms),
+            turn_started_at_ms: self.snapshot.activity_turn_started_at_ms,
+            queued_commands: self.snapshot.queued_prompts.len(),
+            tools_in_flight: self.foreground_tools.snapshot(),
+            background_started_at_ms: self
+                .background_commands()
+                .iter()
+                .map(|command| command.started_at_ms)
+                .chain(
+                    self.snapshot
+                        .active_user_shells
+                        .values()
+                        .filter_map(|shell| shell.started_at_ms),
+                )
+                .min(),
+            background_commands: self.background_commands().len(),
+            active_user_shells: self.snapshot.active_user_shells.len(),
+            active_agent_terminals: self.active_agent_terminals.len(),
+            goal_active: self.snapshot.goal.active(),
+            goal_running: self.snapshot.goal.running(),
+            goal_pending_resume: self.snapshot.goal.pending_resume.is_some(),
+            goal_decision: self.snapshot.goal.decision.is_some(),
+            goal_synchronized: self.snapshot.goal.synchronized(),
+            background_work_known: self.background_work_known,
+            acp_ready: Some(self.acp_ready),
+            checkpoint_only: self.checkpoint_only,
+            checkpoint_barrier: self.snapshot.checkpoint_barrier.is_some(),
+            last_acp_activity_at_ms: self.acp_activity.last_at_ms(),
+            current_step_started_at_ms: self.step_clock.started_at_ms(),
+            idle_since_ms: self.snapshot.idle_since_ms,
+        }
+    }
+
+    /// Whether the session's idle clock should be running.
+    ///
+    /// The same classification every other part of Mjolnir uses. This was a
+    /// private duplicate of it, and it disagreed: it counted neither queued
+    /// commands nor open terminals, so the worker could publish "idle since"
+    /// about a session the controller called busy.
     fn activity_is_idle(&self) -> bool {
-        self.snapshot.execution == RelayExecutionState::Idle
-            && self.background_work_known != Some(false)
-            && self.snapshot.active_prompt.is_none()
-            && self.snapshot.harness_turn.is_none()
-            && !self.snapshot.goal.active()
-            && self.foreground_tools.is_empty()
-            && self.snapshot.active_user_shells.is_empty()
-            && self.background_commands().is_empty()
+        mj_core::activity::classify(&self.activity_facts()).is_idle()
     }
 
     /// Update only at activity mutations, never when a viewer reads status.
@@ -701,7 +753,10 @@ impl DurableRelay {
             )?;
         }
         let settles = claude.then(|| claude_turn_origin(&update)).flatten();
-        self.track_foreground_tool(&update);
+        self.foreground_tools.observe_with_start(
+            &update,
+            self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
+        );
         if self.background_work == BackgroundWorkPolicy::CodexExecCards {
             self.track_codex_exec_card(&update);
         }
