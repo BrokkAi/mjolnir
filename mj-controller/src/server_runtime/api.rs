@@ -32,7 +32,7 @@ use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, ne
 use mj_core::relay::RelayCommand;
 
 use crate::daemon::RuntimeState;
-use mj_client::daemon::{WikiRestoreRequest, WikiSearchPage};
+use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage};
 
 /// How the follow-up task learns whether a session is still on its way up.
 ///
@@ -94,6 +94,16 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki briefings are unavailable") })
     }
 
+    fn wiki_hits(
+        &self,
+        _wiki_id: String,
+        _query: String,
+        _context_messages: usize,
+        _per_message_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<WikiHitTranscript>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki transcript hits are unavailable") })
+    }
+
     fn wiki_restore(
         self: Arc<Self>,
         _request: WikiRestoreRequest,
@@ -150,6 +160,18 @@ impl ExportRuntime for RuntimeState {
         max_chars: usize,
     ) -> BoxFuture<'_, Result<Option<String>>> {
         Box::pin(async move { RuntimeState::wiki_brief(self, wiki_id, max_chars).await })
+    }
+
+    fn wiki_hits(
+        &self,
+        wiki_id: String,
+        query: String,
+        context_messages: usize,
+        per_message_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<WikiHitTranscript>>> {
+        Box::pin(async move {
+            RuntimeState::wiki_hits(self, wiki_id, query, context_messages, per_message_chars).await
+        })
     }
 
     fn wiki_restore(
@@ -1061,6 +1083,21 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, Result<Option<String>>> {
         let runtime = Arc::clone(&self.exports);
         Box::pin(async move { runtime.wiki_brief(wiki_id, max_chars).await })
+    }
+
+    fn wiki_hits(
+        &self,
+        wiki_id: String,
+        query: String,
+        context_messages: usize,
+        per_message_chars: usize,
+    ) -> BoxFuture<'_, Result<Option<WikiHitTranscript>>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move {
+            runtime
+                .wiki_hits(wiki_id, query, context_messages, per_message_chars)
+                .await
+        })
     }
 
     fn wiki_restore(&self, request: WikiRestoreRequest) -> BoxFuture<'_, Result<Option<String>>> {

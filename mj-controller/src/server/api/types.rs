@@ -486,6 +486,17 @@ pub struct WikiBriefResponse {
     pub markdown: String,
 }
 
+/// The query for the matching passages of one indexed session.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiHitsQuery {
+    pub q: String,
+    #[serde(default)]
+    pub context_messages: Option<usize>,
+    #[serde(default)]
+    pub per_message_chars: Option<usize>,
+}
+
 /// The fields of a start request a restore needs. The archived session decides
 /// the rest: its title, and the project it ran in when the caller names none.
 #[derive(Debug, Clone, Default, Deserialize)]

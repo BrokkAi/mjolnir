@@ -221,6 +221,16 @@ pub(super) async fn handle_action(
                 .with_context(|| format!("no indexed session {wiki_id}"))?;
             Ok(DaemonReply::Text(markdown))
         }
+        DaemonAction::WikiHits {
+            wiki_id,
+            query,
+            context_messages,
+            per_message_chars,
+        } => Ok(DaemonReply::WikiHits(
+            state
+                .wiki_hits(wiki_id, query, context_messages, per_message_chars)
+                .await?,
+        )),
         DaemonAction::WikiRestore(request) => {
             let wiki_id = request.wiki_id.clone();
             let registered = state

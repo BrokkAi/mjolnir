@@ -110,6 +110,35 @@ pub struct WikiSearchPage {
     pub status: WikiStatus,
 }
 
+/// One message of an indexed transcript, reduced to what a search preview
+/// shows: the text around the query's matches, with the matches located in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiHitBlock {
+    /// `user`, `assistant` or `tool`.
+    pub role: String,
+    /// The message text, redacted, and windowed to the caller's per-message
+    /// budget when the message is longer than that.
+    pub text: String,
+    /// Byte ranges of the matches inside `text`, on character boundaries, in
+    /// order. A context message has none.
+    pub hits: Vec<(usize, usize)>,
+    /// Messages between the previous block and this one that no group covered.
+    /// Non-zero only on the first block of a group.
+    pub omitted_before: usize,
+    /// `text` is a window of the message rather than the whole of it.
+    pub truncated: bool,
+}
+
+/// The matching passages of one indexed transcript.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiHitTranscript {
+    pub blocks: Vec<WikiHitBlock>,
+    /// Messages after the last block that no group covered.
+    pub omitted_after: usize,
+}
+
 /// Start a new session carrying a compacted hand-off from an archived one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,6 +418,13 @@ pub enum DaemonAction {
         wiki_id: String,
         max_chars: usize,
     },
+    /// The passages of one indexed session that match a query, with context.
+    WikiHits {
+        wiki_id: String,
+        query: String,
+        context_messages: usize,
+        per_message_chars: usize,
+    },
     /// Start a new session from an archived one's transcript.
     WikiRestore(WikiRestoreRequest),
     ScanRecovery {
@@ -531,6 +567,7 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    WikiHits(Option<WikiHitTranscript>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
     Done,
 }
@@ -1146,6 +1183,31 @@ impl DaemonClient {
         }
     }
 
+    /// The passages of one indexed session that match a query, each matching
+    /// message with `context_messages` neighbours on either side and its text
+    /// capped at `per_message_chars`. `None` when the index holds no session
+    /// with that id.
+    pub async fn wiki_hits(
+        &mut self,
+        wiki_id: String,
+        query: String,
+        context_messages: usize,
+        per_message_chars: usize,
+    ) -> Result<Option<WikiHitTranscript>> {
+        match self
+            .request(DaemonAction::WikiHits {
+                wiki_id,
+                query,
+                context_messages,
+                per_message_chars,
+            })
+            .await?
+        {
+            DaemonReply::WikiHits(transcript) => Ok(transcript),
+            reply => bail!("unexpected SessionWiki hits reply {reply:?}"),
+        }
+    }
+
     /// Start a new session carrying a hand-off compacted from an archived one.
     /// It answers like any other session start: the record exists and is
     /// provisioning, and the hand-off follows once the harness is ready.
@@ -1526,7 +1588,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
