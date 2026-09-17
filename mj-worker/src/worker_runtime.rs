@@ -14,8 +14,7 @@ pub use mj_core::relay::WORKER_PID_FILE;
 use mj_core::worker_launch::WorkerLaunchConfig;
 #[cfg(unix)]
 use mj_core::worker_launch::{
-    DISCOVER_LOGIN_PATH_ENV, ProjectMemoryLaunchConfig, REVIEWER_DIR, REVIEWER_PROFILE_DIR,
-    ReviewerLaunchConfig,
+    ProjectMemoryLaunchConfig, REVIEWER_DIR, REVIEWER_PROFILE_DIR, ReviewerLaunchConfig,
 };
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
@@ -228,8 +227,8 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 
 #[cfg(unix)]
 pub use unix::{
-    attach_session_git_environment, configure_github_cli, lead_process_group,
-    prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
+    SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
+    lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
 };
 
 #[cfg(not(unix))]

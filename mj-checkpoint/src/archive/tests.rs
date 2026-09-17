@@ -108,26 +108,7 @@ fn git_ok(stdout: impl Into<Vec<u8>>) -> GitOutput {
     }
 }
 
-fn git(repository: &Path, arguments: &[&str]) -> Vec<u8> {
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
-
-fn git_line(repository: &Path, arguments: &[&str]) -> String {
-    String::from_utf8(git(repository, arguments))
-        .unwrap()
-        .trim()
-        .to_owned()
-}
+use crate::test_support::{git, git_line};
 
 fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();

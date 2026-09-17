@@ -251,7 +251,10 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
             environment.extend(
                 WorkerLaunchConfig::read(&root.join("launch.json"))
-                    .context("load branch export target settings; resume the session to restore its setup")?
+                    .with_context(|| {
+                        let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
+                        format!("load branch export target settings; {guidance}")
+                    })?
                     .target_environment,
             );
             mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
@@ -292,18 +295,19 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
 fn main() -> Result<()> {
     install_stderr_logging()?;
     let cli = Cli::parse();
-    if let Err(error) = bootstrap_login_environment(&cli) {
-        let Command::Worker(args) = &cli.command;
-        if let WorkerCommand::Run { root, .. } = &args.command {
-            write_worker_exit_record(root, &format!("initialize worker environment: {error:#}"));
-        }
-        return Err(error);
+    let Command::Worker(args) = &cli.command;
+    // A detached worker's only channel is its root directory, so the exit
+    // record has to cover the whole of startup: a panic or an error in the
+    // login-environment bootstrap or in the runtime build happens before
+    // `run_command` and would otherwise leave nothing behind at all.
+    let exit_root = match &args.command {
+        WorkerCommand::Run { root, .. } => Some(root.clone()),
+        _ => None,
+    };
+    if let Some(root) = &exit_root {
+        install_worker_last_words(root);
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("build Tokio runtime")?;
-    let result = runtime.block_on(run_command(cli.command));
+    let result = run_worker(cli);
     if let Err(error) = &result
         && let Some(refusal) = error.downcast_ref::<ExportRefused>()
     {
@@ -314,6 +318,9 @@ fn main() -> Result<()> {
         std::process::exit(EXPORT_REFUSED_EXIT_CODE);
     }
     if let Err(error) = &result {
+        if let Some(root) = &exit_root {
+            write_worker_exit_record(root, &format!("{error:#}"));
+        }
         tracing::error!(
             error = format!("{error:#}"),
             "Mjolnir worker exited with an error"
@@ -322,17 +329,23 @@ fn main() -> Result<()> {
     result
 }
 
+fn run_worker(cli: Cli) -> Result<()> {
+    bootstrap_login_environment(&cli).context("initialize worker environment")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build Tokio runtime")?;
+    runtime.block_on(run_command(cli.command))
+}
+
 async fn run_command(command: Command) -> Result<()> {
     let Command::Worker(args) = command;
     match args.command {
         WorkerCommand::Run { root, config } => {
             lead_process_group();
-            install_worker_last_words(&root);
-            let result = run_daemon(root.clone(), WorkerLaunchConfig::read(&config)?).await;
-            if let Err(error) = &result {
-                write_worker_exit_record(&root, &format!("{error:#}"));
-            }
-            result
+            // `main` installed the panic hook and writes the exit record for
+            // every error this returns.
+            run_daemon(root, WorkerLaunchConfig::read(&config)?).await
         }
         WorkerCommand::PrepareHarness { config } => {
             prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await

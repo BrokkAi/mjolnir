@@ -507,9 +507,13 @@ mod tests {
             }
             return;
         }
-        let directory = tempfile::tempdir().unwrap();
+        // Hard-linked beside the test binary rather than copied: a copy's
+        // write descriptor is inherited by children other tests fork until
+        // they exec, and exec of the copy in that window fails with ETXTBSY.
+        let test_binary = std::env::current_exe().unwrap();
+        let directory = tempfile::tempdir_in(test_binary.parent().unwrap()).unwrap();
         let executable = directory.path().join("client");
-        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        fs::hard_link(&test_binary, &executable).unwrap();
         let mut command = std::process::Command::new(&executable);
         command.args(["--exact", TEST]).env(STAGE, directory.path());
         let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();

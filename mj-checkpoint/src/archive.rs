@@ -4,6 +4,7 @@
 //! time.  Harness adapters must use a versioned allowlist; recursively copying
 //! a profile home would risk archiving credentials and configuration.
 
+use mj_core::hex::lower_hex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -300,20 +301,10 @@ pub fn write_archive_hashed_borrowed(
 }
 
 fn write_archive_hashed_view(path: &Path, input: ArchiveInputView<'_>) -> Result<String> {
-    let installed_started = std::time::Instant::now();
     write_archive_installed_view(path, input, PAYLOAD_PART_BYTES)?;
-    let installed_ms = installed_started.elapsed().as_millis();
-    let hash_started = std::time::Instant::now();
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let digest = digest_reader(&mut file)
-        .with_context(|| format!("hash newly written archive {}", path.display()))?;
-    if std::env::var_os("MJ_CHECKPOINT_BENCH_PHASES").is_some() {
-        eprintln!(
-            "archive writer phases: installed_ms={installed_ms} final_hash_ms={}",
-            hash_started.elapsed().as_millis()
-        );
-    }
-    Ok(digest)
+    digest_reader(&mut file)
+        .with_context(|| format!("hash newly written archive {}", path.display()))
 }
 
 fn write_archive_installed(path: &Path, input: &ArchiveInput) -> Result<()> {
@@ -333,9 +324,7 @@ fn write_archive_installed_view(
     input: ArchiveInputView<'_>,
     part_bytes: usize,
 ) -> Result<()> {
-    let prepare_started = std::time::Instant::now();
     let (manifest, payloads) = prepare_archive_view_with_part_size(input, part_bytes)?;
-    let prepare_ms = prepare_started.elapsed().as_millis();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
         .with_context(|| format!("create archive directory {}", parent.display()))?;
@@ -343,30 +332,17 @@ fn write_archive_installed_view(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary archive in {}", parent.display()))?;
     restrict_archive_permissions(temporary.path())?;
-    let zip_started = std::time::Instant::now();
     write_zip(temporary.as_file_mut(), &manifest, &payloads)?;
-    let zip_ms = zip_started.elapsed().as_millis();
-    let file_sync_started = std::time::Instant::now();
     temporary
         .as_file_mut()
         .sync_all()
         .with_context(|| format!("fsync temporary archive in {}", parent.display()))?;
-    let file_sync_ms = file_sync_started.elapsed().as_millis();
-    let persist_started = std::time::Instant::now();
     temporary
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("atomically replace {}", path.display()))?;
     restrict_archive_permissions(path)?;
-    let persist_ms = persist_started.elapsed().as_millis();
-    let directory_sync_started = std::time::Instant::now();
     mj_core::config::sync_directory(parent)?;
-    if std::env::var_os("MJ_CHECKPOINT_BENCH_PHASES").is_some() {
-        eprintln!(
-            "archive install phases: prepare_ms={prepare_ms} zip_ms={zip_ms} file_sync_ms={file_sync_ms} persist_ms={persist_ms} directory_sync_ms={}",
-            directory_sync_started.elapsed().as_millis()
-        );
-    }
     drop(payloads);
     drop(manifest);
     Ok(())
@@ -1272,7 +1248,7 @@ impl<R> DigestingReader<R> {
     }
 
     fn finish(self) -> (u64, String) {
-        (self.bytes_read, format!("{:x}", self.digest.finalize()))
+        (self.bytes_read, lower_hex(self.digest.finalize()))
     }
 }
 
@@ -1539,7 +1515,7 @@ fn normalized_mode(mode: u32) -> Result<u32> {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    lower_hex(Sha256::digest(bytes))
 }
 
 fn digest_reader(reader: &mut impl Read) -> Result<String> {
@@ -1552,7 +1528,7 @@ fn digest_reader(reader: &mut impl Read) -> Result<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(lower_hex(digest.finalize()))
 }
 
 #[cfg(unix)]

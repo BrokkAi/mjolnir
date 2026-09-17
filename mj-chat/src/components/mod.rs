@@ -8,6 +8,9 @@ mod scope;
 pub mod scrollbar;
 pub(crate) mod text_layout;
 
+#[cfg(test)]
+mod test_support;
+
 pub use crate::text_input::EditOutcome;
 pub use controls::{
     Button, ButtonColumn, ButtonRow, Checkbox, ChoiceList, ColumnAlign, ColumnSplit, ComboBox,

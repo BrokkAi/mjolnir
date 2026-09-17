@@ -16,17 +16,17 @@ name = "mj-voice-worker"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
+anyhow.workspace = true
 anvil-client.workspace = true
 bytes = "1"
 cpal = "0.16"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

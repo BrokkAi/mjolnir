@@ -583,6 +583,12 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_BIFROST_BIN` | Path or command name for the review analyzer. |
+| `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
+| `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
+| `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started. For development checkouts. |
+| `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence before a turn is treated as stalled. |
+| `MJ_GITHUB_CLI_BIN` | Path or command name for the GitHub CLI used to read tokens. |
 | `RUST_LOG` | Tracing/log filter for Mjolnir processes. |
 | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub token source, checked in that order before `gh auth token`, for private clones and live non-local session sync. |
 | `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |

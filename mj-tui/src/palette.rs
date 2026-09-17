@@ -546,18 +546,11 @@ mod tests {
     use crate::SessionOperationKind;
     use crate::render::render;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, key, operation, running_session, stopped_session,
+        buffer_lines, dashboard_with_session, drawn, key, operation, running_session,
+        stopped_session,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-
-    fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw the surface");
-        buffer_lines(terminal.backend().buffer())
-    }
 
     fn type_query(dashboard: &mut DashboardState, query: &str) {
         for character in query.chars() {

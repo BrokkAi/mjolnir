@@ -150,10 +150,11 @@ fn resolve_at(
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
-    if harness == HarnessKind::Muse {
+    // Muse's CLI is the extra executable its own installer creates.
+    if let (HarnessKind::Muse, Some(entry)) = (harness, harness.extra_managed_entrypoint()) {
         launch_environment.insert(
             "MUSE_CLI".into(),
-            install.join("bin/muse").to_string_lossy().into_owned(),
+            install.join(entry).to_string_lossy().into_owned(),
         );
     }
     if harness == HarnessKind::Codex {
@@ -530,12 +531,7 @@ fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> 
 }
 
 fn validate_entrypoint(path: &Path, selected: HarnessPin, harness: HarnessKind) -> Result<()> {
-    let additional = match harness {
-        HarnessKind::Muse => Some("bin/muse"),
-        HarnessKind::Grok => Some("bin/agent"),
-        _ => None,
-    };
-    for entry in std::iter::once(selected.entrypoint).chain(additional) {
+    for entry in std::iter::once(selected.entrypoint).chain(harness.extra_managed_entrypoint()) {
         let entrypoint = path.join(entry);
         if !entrypoint_is_executable(&entrypoint) {
             bail!(

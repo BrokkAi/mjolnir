@@ -23,28 +23,26 @@ test-hooks = ["mj-core/test-hooks"]
 workspace = true
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
-getrandom = "0.3"
-flate2 = "1"
-sha2 = "0.10"
-zstd = "0.13"
-regex = "1"
+rusqlite.workspace = true
+getrandom.workspace = true
+flate2.workspace = true
+sha2.workspace = true
 mj-core.workspace = true
 mj-review.workspace = true
 mj-checkpoint.workspace = true
-agent-client-protocol = { version = "2", features = ["unstable_session_fork", "unstable_end_turn_token_usage", "unstable_elicitation", "unstable_auth_methods"] }
-anyhow = "1"
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", features = ["derive"] }
-libc = "0.2"
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
-tempfile = "3"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat", "rt"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["compat"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 mimalloc = "0.1"
@@ -55,5 +53,5 @@ mj-transcript = { path = "../mj-transcript", package = "brokk-mj-transcript" }
 proptest = "1"
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-controller = { path = "../mj-controller", package = "brokk-mj-controller" }
-tempfile = "3"
-tokio = { version = "1", features = ["test-util"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

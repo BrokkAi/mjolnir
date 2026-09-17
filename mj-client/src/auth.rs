@@ -16,7 +16,7 @@ pub fn auth_paths(config: &Config, preferred: &str) -> Vec<PathBuf> {
     profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
     profiles
         .into_iter()
-        .map(|(_, profile)| profile.home.join("auth.json"))
+        .map(|(_, profile)| profile.home.join(profile.kind.credential_file_name()))
         .collect()
 }
 

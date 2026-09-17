@@ -1740,6 +1740,15 @@ pub fn new_container_workspace(session_id: &str) -> Result<PathBuf> {
     Ok(Path::new(CONTAINER_WORKSPACE).join(session_id))
 }
 
+/// The workspace directory an EC2 session owns in its login home.
+///
+/// EC2 instances are provisioned per session, so the path is decided by the
+/// session id alone and is the same whether it is read from a target template
+/// or rebuilt from a stored locator.
+pub fn aws_workspace(session_id: &str) -> String {
+    format!(".local/share/hel/workspaces/{session_id}")
+}
+
 pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<String> {
     validate_session_id(session_id)?;
     match template {
@@ -1753,7 +1762,7 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::SshDocker { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
-        TargetTemplate::AwsEc2(_) => Ok(format!(".local/share/hel/workspaces/{session_id}")),
+        TargetTemplate::AwsEc2(_) => Ok(aws_workspace(session_id)),
         TargetTemplate::SshBare {
             workspace_prefix, ..
         } => {
@@ -1840,6 +1849,9 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         ),
     })
 }
+mod convert;
+pub use convert::{StoredTarget, TargetConversionError, ssh_args_with_identity};
+
 mod ssh;
 pub use ssh::*;
 

@@ -18,3 +18,5 @@ pub mod subagent_mcp;
 
 #[cfg(all(test, unix))]
 mod checkpoint_tests;
+#[cfg(test)]
+mod test_support;
