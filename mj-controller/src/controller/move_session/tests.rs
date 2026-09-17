@@ -8,10 +8,11 @@ use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent}
 use anyhow::Result;
 
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
+#[cfg(unix)]
+use crate::controller::test_support::install_fake_command;
 use crate::controller::test_support::{
-    IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository,
-    install_fake_command, local_bundle, managed_raw_session, raw_session_on,
-    resume_compatibility_config, ssh_worktree_target,
+    IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository, local_bundle,
+    managed_raw_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{

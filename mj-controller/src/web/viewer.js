@@ -1682,16 +1682,6 @@ function resumeDraft(session) {
   return draft;
 }
 
-function resumeSearchText(session) {
-  return [
-    session.title,
-    session.project_label,
-    session.display_location,
-    session.target_id,
-    session.profile_id,
-  ].filter(Boolean).join(' ').toLocaleLowerCase();
-}
-
 function resumeRecencyLabel(session) {
   return recencyLabel(resumeActivityMs(session));
 }
@@ -1745,12 +1735,16 @@ function renderResumable() {
   // already said and redrawn when a later answer arrives.
   startWikiSearchIfIdle(state.query);
   if (resumeSearch && document.activeElement !== resumeSearch) resumeSearch.value = state.query;
-  const query = state.query.trim().toLocaleLowerCase();
-  // A session the index matched stays in the list even when its own title and
-  // project do not carry the words: the match is inside the transcript, and
-  // dropping the row would hide the one hit the person was looking for.
-  const list = resumeSessions(workspaceId).filter(session =>
-    !query || resumeSearchText(session).includes(query) || Boolean(wikiSnippetFor(session.id)));
+  renderWikiSearchBox();
+  const query = state.query.trim();
+  // One search path: with a query, the list is the sessions the index
+  // returned, in the order it ranked them. Nothing is matched here.
+  const ranks = wikiSessionRanks();
+  const list = query
+    ? resumeSessions(workspaceId)
+      .filter(session => ranks.has(session.id))
+      .sort((left, right) => ranks.get(left.id) - ranks.get(right.id))
+    : resumeSessions(workspaceId);
   for (const id of resumeRows.keys()) {
     if (!list.some(session => session.id === id)) resumeRows.delete(id);
   }
@@ -1824,6 +1818,12 @@ function resumeChoiceField(label, id, items, value, onChange) {
 // one started is dropped, so the list always shows the newest query's result.
 
 const WIKI_SEARCH_DEBOUNCE_MS = 250;
+/// How long the page waits before asking again while the first build runs.
+const WIKI_INDEXING_POLL_MS = 5000;
+/// How long it waits before repeating the query while a sync is running.
+const WIKI_TOP_UP_POLL_MS = 2000;
+/// How many times one query is repeated for a running sync.
+const WIKI_TOP_UP_LIMIT = 10;
 const WIKI_SEARCH_LIMIT = 50;
 const WIKI_BRIEF_CHARS = 24000;
 
@@ -1837,10 +1837,17 @@ const wikiState = {
   searching: false,
   rows: [],
   error: '',
-  /// True once the daemon has said the index is not there to ask: the feature
-  /// is switched off, or this daemon has no wiki routes at all. Asking again
-  /// in this page load would only repeat the same answer.
-  disabled: false,
+  /// What the last answer said about the index: `ready`, `indexing` while the
+  /// first build runs, or `version_mismatch`. Nothing has answered yet, so the
+  /// page starts closed rather than offering a search it cannot run. A daemon
+  /// that answers without a status is treated as ready.
+  status: { state: 'indexing', topping_up: false },
+  /// How many times the current query has been repeated for a running sync.
+  topUps: 0,
+  /// True once the daemon has said there is nothing to ask: this daemon has no
+  /// wiki routes at all. Asking again in this page load would only repeat the
+  /// same answer.
+  unavailable: false,
   /// The one line the page shows about that.
   notice: '',
   /// Briefings and restore choices, kept per archived session id.
@@ -1850,30 +1857,56 @@ const wikiState = {
 
 const wikiRowNodes = new Map();
 
-/// Ask for the current query after the typing pause. Each keystroke replaces
-/// the pending timer, so one request follows a burst of typing.
-function scheduleWikiSearch(query) {
+/// Ask for the current query after a pause. Each keystroke replaces the
+/// pending timer, so one request follows a burst of typing. The repeats a
+/// still-building or still-syncing index asks for use the same timer with
+/// their own longer waits.
+function scheduleWikiSearch(query, delayMs = WIKI_SEARCH_DEBOUNCE_MS) {
+  // A new query gets its own repeat budget; the old one's is spent.
+  if (query !== wikiState.query) wikiState.topUps = 0;
   wikiState.query = query;
   wikiState.started = true;
-  if (wikiState.disabled) return;
+  if (wikiState.unavailable) return;
   if (wikiState.timer !== null) clearTimeout(wikiState.timer);
   wikiState.timer = setTimeout(() => {
     wikiState.timer = null;
     // The timer's return value is nothing to the browser; handing the request
     // back is what lets a test wait for the round trip it started.
     return runWikiSearch();
-  }, WIKI_SEARCH_DEBOUNCE_MS);
+  }, delayMs);
 }
 
 /// Schedule the first search of a visit. Rendering calls this; it only ever
 /// sets a timer, so no fetch happens while the page is being drawn.
 function startWikiSearchIfIdle(query) {
-  if (wikiState.started || wikiState.disabled) return;
-  scheduleWikiSearch(query || '');
+  if (wikiState.started || wikiState.unavailable) return;
+  // This first ask has no typing to wait out, and its answer is what opens the
+  // search box, so it goes as soon as the page yields.
+  scheduleWikiSearch(query || '', 0);
+}
+
+/// Ask again when the last answer was not the final one.
+///
+/// While the first build runs the whole answer will change, so the page polls
+/// every five seconds until it is ready, which is also what re-enables the
+/// search box. While a sync is topping the index up the same query may gain
+/// rows, so it is repeated every two seconds, at most ten times.
+function scheduleWikiRefresh() {
+  if (wikiState.unavailable) return;
+  const { state, topping_up: toppingUp } = wikiState.status;
+  if (state === 'version_mismatch') return;
+  if (state === 'indexing') {
+    scheduleWikiSearch(wikiState.query, WIKI_INDEXING_POLL_MS);
+    return;
+  }
+  if (toppingUp && wikiState.topUps < WIKI_TOP_UP_LIMIT) {
+    wikiState.topUps += 1;
+    scheduleWikiSearch(wikiState.query, WIKI_TOP_UP_POLL_MS);
+  }
 }
 
 async function runWikiSearch() {
-  if (wikiState.disabled) return;
+  if (wikiState.unavailable) return;
   wikiState.requestId += 1;
   const requestId = wikiState.requestId;
   const query = wikiState.query.trim();
@@ -1883,18 +1916,18 @@ async function runWikiSearch() {
       `/api/v1/wiki/search?q=${encodeURIComponent(query)}&limit=${WIKI_SEARCH_LIMIT}`);
     if (requestId !== wikiState.requestId) return;
     wikiState.rows = body?.rows || [];
+    wikiState.status = body?.status || { state: 'ready', topping_up: false };
     wikiState.error = '';
+    scheduleWikiRefresh();
   } catch (err) {
     if (requestId !== wikiState.requestId) return;
-    if (err.status === 409 || err.status === 404) {
-      // 409 is SessionWiki switched off and worth a line; 404 is a daemon
-      // without these routes, which is not this page's news to report.
-      wikiState.disabled = true;
+    if (err.status === 404) {
+      // A daemon without these routes. There is nothing to search and nothing
+      // to report; the page simply has no archived sessions and no search.
+      wikiState.unavailable = true;
       wikiState.rows = [];
       wikiState.error = '';
-      wikiState.notice = err.status === 409
-        ? 'SessionWiki is disabled; archived sessions are not listed.'
-        : '';
+      wikiState.notice = '';
     } else {
       wikiState.error = err.message;
     }
@@ -1904,6 +1937,28 @@ async function runWikiSearch() {
       if (route.name === 'resume') renderResumable();
     }
   }
+}
+
+/// What stands in the search box while it cannot be typed into, or null when
+/// the index can answer.
+function wikiSearchPlaceholder() {
+  if (wikiState.unavailable) return 'Search is unavailable';
+  if (wikiState.status.state === 'indexing') return 'Indexing…';
+  if (wikiState.status.state === 'version_mismatch') {
+    return 'SessionWiki index is at a different version';
+  }
+  return null;
+}
+
+const WIKI_SEARCH_PLACEHOLDER = 'Title, project, or anything said';
+
+/// Search is the index's answer, so the box is closed until the index can
+/// answer. The list and the rows keep working meanwhile.
+function renderWikiSearchBox() {
+  if (!resumeSearch) return;
+  const placeholder = wikiSearchPlaceholder();
+  resumeSearch.disabled = Boolean(placeholder);
+  resumeSearch.placeholder = placeholder || WIKI_SEARCH_PLACEHOLDER;
 }
 
 /// The rows the Archived section lists: the tool's own copy is gone and this
@@ -1917,6 +1972,16 @@ function wikiArchivedRows() {
 function wikiSnippetFor(sessionId) {
   const hit = wikiState.rows.find(row => row.hel_session_id === sessionId && row.snippet);
   return hit ? hit.snippet : '';
+}
+
+/// Where each live session the index returned sat in its answer, so a query
+/// can list them in the order the index ranked them.
+function wikiSessionRanks() {
+  const ranks = new Map();
+  wikiState.rows.forEach((row, rank) => {
+    if (row.hel_session_id && !ranks.has(row.hel_session_id)) ranks.set(row.hel_session_id, rank);
+  });
+  return ranks;
 }
 
 /// SessionWiki marks the matched words with U+0002 and U+0003.
@@ -1977,10 +2042,10 @@ function wikiRowNode(row) {
 
 function renderWikiSections() {
   if (!resumeArchived || !resumeArchivedRows || !resumeWikiNote) return;
-  const note = wikiState.disabled ? wikiState.notice : wikiState.error;
+  const note = wikiState.unavailable ? wikiState.notice : wikiState.error;
   resumeWikiNote.textContent = note;
   resumeWikiNote.classList.toggle('hidden', !note);
-  const rows = wikiState.disabled ? [] : wikiArchivedRows();
+  const rows = wikiState.unavailable ? [] : wikiArchivedRows();
   resumeArchived.classList.toggle('hidden', rows.length === 0);
   for (const id of [...wikiRowNodes.keys()]) {
     if (!rows.some(row => row.id === id)) wikiRowNodes.delete(id);
@@ -2014,7 +2079,6 @@ function ensureWikiBrief(wikiId) {
       brief.markdown = body?.markdown || '';
     })
     .catch(err => {
-      if (err.status === 409) wikiState.disabled = true;
       brief.status = 'error';
       brief.error = err.message;
     })
@@ -5210,8 +5274,8 @@ resumeDetailBack.onclick = () => {
 resumeSearch.oninput = () => {
   const state = resumeListState(route.workspaceId || selectedWorkspaceId());
   state.query = resumeSearch.value;
-  // The live list filters as you type; the index is asked once the typing
-  // pauses, and answers it in the background.
+  // The index is the only search path: it is asked once the typing pauses
+  // and answers in the background, and the list is drawn from its answer.
   scheduleWikiSearch(state.query);
   renderResumable();
 };

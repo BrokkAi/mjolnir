@@ -28,7 +28,10 @@ async function mount(page, {
   ],
   holdAction = null,
   rejectAction = false,
-  wiki = null,
+  // A ready index with nothing in it, which is what most of these tests want:
+  // search works, and there is nothing archived. Pass `wiki: null` for a
+  // daemon that has no wiki routes at all.
+  wiki = { rows: [], restoredId: 'restored' },
 } = {}) {
   const state = {
     snapshot: {
@@ -82,19 +85,12 @@ async function mount(page, {
     }
     if (pathname.startsWith('/api/v1/wiki/')) {
       if (!state.wiki) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'not found' }) });
-      if (state.wiki.disabled) {
-        return route.fulfill({
-          status: 409,
-          contentType: 'application/json',
-          body: JSON.stringify({ error: 'SessionWiki is disabled; enable it in Setup' }),
-        });
-      }
       if (pathname === '/api/v1/wiki/search') {
         const query = new URL(route.request().url()).searchParams.get('q') || '';
         state.wikiQueries.push(query);
         const rows = (state.wiki.rows || []).filter(row =>
           !query || JSON.stringify(row).toLowerCase().includes(query.toLowerCase()));
-        return json({ rows });
+        return json({ rows, status: state.wiki.status || { state: 'ready', topping_up: false } });
       }
       if (pathname.endsWith('/brief')) return json({ markdown: state.wiki.brief || '' });
       if (pathname.endsWith('/restore')) {
@@ -150,7 +146,24 @@ async function checkedValue(field) {
   return field.locator('select').inputValue();
 }
 
-test('resume opens with compact current-workspace rows and searches by session details', async ({ page }) => {
+function wikiRow(id, sessionId, overrides = {}) {
+  return {
+    id,
+    tool: 'mjolnir',
+    project: '/tmp/project',
+    title: sessionId,
+    started: '2026-09-17T00:23:00Z',
+    msgs: 3,
+    preview: '',
+    archived: false,
+    native_id: null,
+    snippet: null,
+    hel_session_id: sessionId,
+    ...overrides,
+  };
+}
+
+test('resume opens with compact current-workspace rows and lists what the index returned', async ({ page }) => {
   const sessions = [
     session('newest', { title: 'Newest profile work', project_label: 'alpha-project', last_activity_at_ms: 3_000 }),
     session('older', { title: 'A very long session title that must stay inside the phone viewport without horizontal scrolling', project_label: 'older-project', last_activity_at_ms: 2_000 }),
@@ -158,7 +171,19 @@ test('resume opens with compact current-workspace rows and searches by session d
     session('tie-a', { title: 'Tie A', project_label: 'shared-project', last_activity_at_ms: 1_000 }),
     session('other-workspace', { title: 'Other workspace', workspace_id: 'other', last_activity_at_ms: 9_000 }),
   ];
-  const state = await mount(page, { sessions, profiles: Array.from({ length: 18 }, (_, index) => ({ id: `profile-${index}`, harness_kind: 'codex' })) });
+  const state = await mount(page, {
+    sessions,
+    profiles: Array.from({ length: 18 }, (_, index) => ({ id: `profile-${index}`, harness_kind: 'codex' })),
+    wiki: {
+      // The index ranks the older session first; the list must follow it
+      // rather than fall back to newest first.
+      rows: [
+        wikiRow('w-older', 'older', { snippet: 'a pomegranate sentinel' }),
+        wikiRow('w-newest', 'newest', { title: 'pomegranate' }),
+      ],
+      restoredId: 'restored',
+    },
+  });
   await expect(page.locator('#resume-list-view')).toBeVisible();
   await expect(page.locator('#resumable [data-session-id]')).toHaveCount(4);
   await expect(page.locator('#resume-detail-view')).toBeHidden();
@@ -177,14 +202,21 @@ test('resume opens with compact current-workspace rows and searches by session d
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(await page.evaluate(() => document.body.scrollWidth <= window.innerWidth)).toBe(true);
 
-  await page.locator('#resume-search').fill('older-project');
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(1);
-  await expect(page.locator('#resumable [data-session-id="older"]')).toBeVisible();
-  await page.locator('#resume-search').fill('alpha');
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(4);
+  // A query lists the index's hits, in the index's order, and the snippet it
+  // matched on. A session whose own title carries the word is not a hit.
+  await page.locator('#resume-search').fill('pomegranate');
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(2);
+  expect(await page.locator('#resumable [data-session-id]')
+    .evaluateAll(nodes => nodes.map(node => node.dataset.sessionId)))
+    .toEqual(['older', 'newest']);
+  await expect(page.locator('#resumable [data-session-id="older"]')).toContainText('a pomegranate sentinel');
+
   await page.locator('#resume-search').fill('does-not-exist');
   await expect(page.locator('#resumable')).toContainText(/no (matching sessions|sessions match)/i);
   await expect(page.locator('#resumable [data-session-id]')).toHaveCount(0);
+
+  await page.locator('#resume-search').fill('');
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(4);
   await expect.poll(() => state.snapshots).toBeGreaterThan(0);
 });
 
@@ -194,6 +226,10 @@ test('selecting a row asks for settings only after selection and Back restores s
       session('first', { title: 'First session', last_activity_at_ms: 2_000 }),
       session('second', { title: 'Second session', last_activity_at_ms: 1_000 }),
     ],
+    wiki: {
+      rows: [wikiRow('w-first', 'first'), wikiRow('w-second', 'second')],
+      restoredId: 'restored',
+    },
   });
   const search = page.locator('#resume-search');
   await search.fill('session');
@@ -559,13 +595,33 @@ test('an archived row shows its brief and restores into a new session', async ({
   await expect(page).toHaveURL(/#conversation\/restored$/);
 });
 
-test('a disabled SessionWiki hides the Archived section behind one line', async ({ page }) => {
-  const state = await mount(page, { wiki: { disabled: true, rows: [], restoredId: 'restored' } });
-  await expect(page.locator('#resume-wiki-note')).toHaveText(/SessionWiki is disabled/);
+test('a daemon without the wiki routes still lists sessions and closes the search box', async ({ page }) => {
+  const state = await mount(page, { wiki: null });
   await expect(page.locator('#resume-archived')).toBeHidden();
+  await expect(page.locator('#resume-wiki-note')).toBeHidden();
+  // The rows are Mjolnir's own and are still listed; only searching them is
+  // gone, because the index is what searches.
+  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(1);
+  await expect(page.locator('#resume-search')).toBeDisabled();
+  await expect(page.locator('#resume-search')).toHaveAttribute('placeholder', 'Search is unavailable');
   const asked = state.wikiQueries.length;
-  await page.locator('#resume-search').fill('anything');
   await page.waitForTimeout(600);
   expect(state.wikiQueries.length).toBe(asked);
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(0);
+});
+
+test('the search box stays closed while the first index build runs and opens when it ends', async ({ page }) => {
+  const state = await mount(page, {
+    wiki: { rows: [], restoredId: 'restored', status: { state: 'indexing', topping_up: true } },
+  });
+  await expect(page.locator('#resume-search')).toBeDisabled();
+  await expect(page.locator('#resume-search')).toHaveAttribute('placeholder', 'Indexing…');
+  // Rows keep working while it builds.
+  await expect(page.locator('#resumable [data-session-id="stopped"]')).toBeVisible();
+
+  // The page asks again on its own; when the build ends the box opens without
+  // the person reopening the page.
+  const asked = state.wikiQueries.length;
+  state.wiki.status = { state: 'ready', topping_up: false };
+  await expect.poll(() => state.wikiQueries.length, { timeout: 15_000 }).toBeGreaterThan(asked);
+  await expect(page.locator('#resume-search')).toBeEnabled();
 });

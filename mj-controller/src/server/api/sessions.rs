@@ -168,21 +168,11 @@ pub(super) async fn start_session(
 const DEFAULT_BRIEF_CHARS: usize = 24_000;
 const MAX_BRIEF_CHARS: usize = 400_000;
 
-fn require_wiki(state: &ServerState) -> Result<&Arc<dyn SubagentBackend>, ApiFailure> {
-    let backend = backend(state)?;
-    if !backend.wiki_enabled() {
-        return Err(ApiFailure::conflict(
-            "SessionWiki is disabled; enable it in Setup to search and restore archived sessions",
-        ));
-    }
-    Ok(backend)
-}
-
 pub(super) async fn wiki_search(
     State(state): State<ServerState>,
     Query(query): Query<WikiSearchQuery>,
-) -> Result<Json<WikiSearchResponse>, ApiFailure> {
-    let backend = require_wiki(&state)?.clone();
+) -> Result<Json<mj_client::daemon::WikiSearchPage>, ApiFailure> {
+    let backend = backend(&state)?.clone();
     // The index is answered from as it stands; a stale one is refreshed in the
     // background so the next query is better without this one waiting.
     if backend.wiki_sync_is_stale() {
@@ -192,13 +182,13 @@ pub(super) async fn wiki_search(
         .limit
         .unwrap_or(crate::sessionwiki::DEFAULT_WIKI_LIMIT)
         .clamp(1, crate::sessionwiki::MAX_WIKI_LIMIT);
-    let rows = backend
+    let page = backend
         .wiki_search(query.q.unwrap_or_default(), limit)
         .await
         .map_err(|error| {
             ApiFailure::unavailable(format!("SessionWiki search failed: {error:#}"))
         })?;
-    Ok(Json(WikiSearchResponse { rows }))
+    Ok(Json(page))
 }
 
 pub(super) async fn wiki_brief(
@@ -206,7 +196,7 @@ pub(super) async fn wiki_brief(
     Path(wiki_id): Path<String>,
     Query(query): Query<WikiBriefQuery>,
 ) -> Result<Json<WikiBriefResponse>, ApiFailure> {
-    let backend = require_wiki(&state)?.clone();
+    let backend = backend(&state)?.clone();
     let max_chars = query
         .max_chars
         .unwrap_or(DEFAULT_BRIEF_CHARS)
@@ -226,7 +216,7 @@ pub(super) async fn wiki_restore(
     Path(wiki_id): Path<String>,
     Json(request): Json<WikiRestoreBody>,
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
-    let backend = require_wiki(&state)?.clone();
+    let backend = backend(&state)?.clone();
     crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
     crate::server::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
     let session_id = backend

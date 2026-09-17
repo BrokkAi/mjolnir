@@ -128,17 +128,20 @@ pub struct ReviewConfig {
     pub effort: Option<String>,
 }
 
-/// Indexing every checkpointed session into the user's SessionWiki index.
+/// Indexing every session into the user's SessionWiki index.
 ///
 /// SessionWiki is a separate tool that keeps one searchable index of AI coding
-/// sessions across every tool the user runs. When this is enabled the daemon
-/// writes Mjolnir's own closed sessions into it under the tool name
-/// `mjolnir`, so one search covers every harness.
+/// sessions across every tool the user runs. The daemon always writes
+/// Mjolnir's own sessions into it under the tool name `mjolnir`, so one search
+/// covers every harness. Only archiving is a setting, because only archiving
+/// deletes data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionWikiConfig {
-    /// Whether the daemon indexes closed sessions into SessionWiki.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Deprecated switch retained for read compatibility with configurations
+    /// written while indexing was optional. It is ignored and omitted from
+    /// newly written configurations.
+    #[serde(default, skip_serializing)]
     pub enabled: bool,
     /// Age after which a stopped session Mjolnir has indexed is removed from
     /// Mjolnir's own storage. `None` keeps every session.
@@ -147,8 +150,10 @@ pub struct SessionWikiConfig {
 }
 
 impl SessionWikiConfig {
+    /// The deprecated `enabled` key is never written, so a section holding
+    /// only that key is still a default section and stays out of the file.
     fn is_default(&self) -> bool {
-        self == &Self::default()
+        self.archive_after_days.is_none()
     }
 
     /// Rejects an age that would archive a session the moment it stops.

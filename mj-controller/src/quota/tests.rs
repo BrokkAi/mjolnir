@@ -915,6 +915,7 @@ async fn a_held_kimi_lock_republishes_its_mtime_several_times_per_cli_break_wind
     drop(held);
 }
 
+#[cfg(unix)]
 fn process_is_gone(pid: i32) -> bool {
     // SAFETY: signal 0 only probes whether the process exists.
     unsafe { libc::kill(pid, 0) != 0 }

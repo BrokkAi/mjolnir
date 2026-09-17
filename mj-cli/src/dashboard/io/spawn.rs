@@ -1262,22 +1262,26 @@ pub(crate) fn spawn_dashboard_create_session(
     });
 }
 
-/// Search the SessionWiki index for the resume dialog, 250 ms after the last
-/// keystroke.
+/// Search the SessionWiki index for the resume dialog, after `delay`.
 ///
-/// The debounce is in the task rather than in a timer on the event loop: each
+/// The wait is in the task rather than in a timer on the event loop: each
 /// keystroke starts one, and a task whose request id is no longer the newest
 /// when it wakes stops without asking the daemon. The dialog drops any answer
-/// that names an older request as well, because two searches can still overlap.
+/// that names an older request as well, because two searches can still
+/// overlap. The same task serves the repeats a still-building or still-syncing
+/// index asks for, with their own longer waits.
 pub(crate) fn spawn_wiki_search(
     request_id: u64,
     query: String,
+    delay: Duration,
     newest_request: Arc<AtomicU64>,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     newest_request.store(request_id, Ordering::Release);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         if newest_request.load(Ordering::Acquire) != request_id {
             return;
         }
@@ -1296,6 +1300,9 @@ pub(crate) fn spawn_wiki_search(
         );
     });
 }
+
+/// How long the dialog waits after a keystroke before asking the index.
+pub(crate) const WIKI_SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// How many archived sessions one search asks for.
 const WIKI_SEARCH_LIMIT: usize = 50;

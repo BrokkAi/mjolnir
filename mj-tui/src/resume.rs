@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
@@ -24,7 +24,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use mj_client::daemon::WikiRow;
+use mj_client::daemon::{WikiIndexState, WikiRow, WikiSearchPage, WikiStatus};
 use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
 
@@ -41,6 +41,15 @@ use crate::{DashboardAction, DashboardState, Mode};
 
 /// Origin shown for a native session that has never run under Hel.
 pub(crate) const LOCAL_ORIGIN: &str = "local";
+
+/// How long the dialog waits before asking again while the first index build
+/// is still running.
+pub(crate) const WIKI_INDEXING_POLL: Duration = Duration::from_secs(5);
+/// How long it waits before repeating the current query while a top-up sync
+/// is running.
+pub(crate) const WIKI_TOP_UP_POLL: Duration = Duration::from_secs(2);
+/// How many times one query is repeated for a running top-up sync.
+pub(crate) const WIKI_TOP_UP_LIMIT: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeFocus {
@@ -165,6 +174,10 @@ pub(crate) struct ResumeRow {
     /// The SessionWiki session a search matched to this live row, so the
     /// preview can show the same transcript the hit came from.
     pub(crate) wiki_match: Option<String>,
+    /// Where the matching hit sat in the index's answer. A query lists only
+    /// rows that have one, in this order, so the index's ranking is what the
+    /// dialog shows.
+    pub(crate) wiki_rank: Option<usize>,
 }
 
 impl ResumeRow {
@@ -201,9 +214,6 @@ pub(crate) struct ResumeDialog {
     pub(crate) search: TextInput,
     pub(crate) form: RefCell<Dialog<ResumeFocus>>,
     pub(crate) opened_at: Instant,
-    /// Whether SessionWiki is switched on. With it off the Archived tab shows
-    /// one line saying so and no search runs.
-    pub(crate) wiki_enabled: bool,
     /// The newest search results, or the most recent sessions before anything
     /// has been typed. Shared rather than copied: a confirmation clones the
     /// whole dialog.
@@ -211,6 +221,12 @@ pub(crate) struct ResumeDialog {
     /// The search this dialog last asked for. A result that names an older
     /// request is stale and dropped.
     pub(crate) wiki_request_id: u64,
+    /// What the last answer said about the index: whether it can be searched
+    /// at all, and whether a sync is adding to it right now.
+    pub(crate) wiki_status: WikiStatus,
+    /// How many times the current query has been re-issued because a sync was
+    /// still running. Bounded so a long sync cannot poll forever.
+    pub(crate) wiki_top_ups: u32,
     /// Briefings already fetched, by SessionWiki id, for the dialog's life.
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
@@ -237,7 +253,7 @@ impl ResumeDialog {
             },
             true,
         );
-        form.declare_with_enabled(Search, ControlKind::TextField, true);
+        form.declare_with_enabled(Search, ControlKind::TextField, self.search_enabled());
         form.declare_with_enabled(
             Sessions,
             ControlKind::ChoiceList {
@@ -256,6 +272,21 @@ impl ResumeDialog {
             format!("{:?}", rows.iter().map(|row| &row.key).collect::<Vec<_>>()),
         );
         form.end_frame(Sessions);
+    }
+
+    /// Whether the search box accepts typing. Search is the index's answer, so
+    /// there is nothing to type into until the index can answer.
+    pub(crate) fn search_enabled(&self) -> bool {
+        self.wiki_status.state == WikiIndexState::Ready
+    }
+
+    /// What stands in the search box while it cannot be typed into.
+    pub(crate) fn search_placeholder(&self) -> Option<&'static str> {
+        match self.wiki_status.state {
+            WikiIndexState::Ready => None,
+            WikiIndexState::Indexing => Some("Indexing…"),
+            WikiIndexState::VersionMismatch => Some("SessionWiki index is at a different version"),
+        }
     }
 
     fn can_open(&self, rows: &[ResumeRow]) -> bool {
@@ -298,9 +329,6 @@ impl ResumeDialog {
     /// text, or a line saying it is on its way. `None` when the row has no
     /// SessionWiki session behind it, and the pane is then not drawn at all.
     pub(crate) fn preview_text(&self, rows: &[ResumeRow]) -> Option<String> {
-        if !self.wiki_enabled {
-            return None;
-        }
         let index = selected_index(self, rows.len())?;
         let wiki_id = rows.get(index)?.wiki_id()?;
         Some(
@@ -444,6 +472,7 @@ pub(crate) fn merged_resume_rows(
             unavailable_reason: None,
             move_recovery: None,
             wiki_match: None,
+            wiki_rank: None,
         });
     }
     for profile in profiles {
@@ -464,6 +493,7 @@ pub(crate) fn merged_resume_rows(
                 unavailable_reason: native.unavailable_reason.clone(),
                 move_recovery: None,
                 wiki_match: None,
+                wiki_rank: None,
             });
         }
     }
@@ -471,7 +501,7 @@ pub(crate) fn merged_resume_rows(
     // rows of their own. A row is archived only when nothing on this machine
     // still holds the session: no Mjolnir record, and no native file an import
     // could adopt.
-    for hit in wiki {
+    for (rank, hit) in wiki.iter().enumerate() {
         let native = hit
             .native_id
             .as_deref()
@@ -486,6 +516,7 @@ pub(crate) fn merged_resume_rows(
         if let Some(key) = existing {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
                 row.wiki_match = Some(hit.id.clone());
+                row.wiki_rank = Some(rank);
                 if let Some(snippet) = snippet_text(hit) {
                     row.details = format!("{} · {snippet}", row.details);
                 }
@@ -515,6 +546,7 @@ pub(crate) fn merged_resume_rows(
             unavailable_reason: None,
             move_recovery: None,
             wiki_match: Some(hit.id.clone()),
+            wiki_rank: Some(rank),
         });
     }
     // Newest first across the whole merged list; the key breaks ties so the
@@ -564,18 +596,23 @@ fn archive_details(hit: &WikiRow) -> String {
 }
 
 /// The rows one dialog tab shows: the merged sources split by ownership, with
-/// checkpoint sizes appended and search applied.
+/// checkpoint sizes appended.
+///
+/// There is one search path. With an empty query a tab lists everything it
+/// owns, newest first. With a query it lists only the rows the index returned,
+/// in the order the index ranked them, so what the dialog shows and what
+/// SessionWiki found are the same thing.
 fn build_resume_rows(
     config: &Config,
     state: &State,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
-    now: &chrono::DateTime<chrono::Local>,
 ) -> Vec<ResumeRow> {
-    let needle = dialog.search.to_lowercase();
-    merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
+    let searching = !dialog.search.is_empty();
+    let mut rows = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
         .into_iter()
         .filter(|row| dialog.tab.includes(row))
+        .filter(|row| !searching || row.wiki_rank.is_some())
         .map(|mut row| {
             // The checkpoint's size is loaded in the background, so it is
             // appended here rather than folded into the pure merge.
@@ -590,29 +627,19 @@ fn build_resume_rows(
             }
             row
         })
-        .filter(|row| {
-            // An archived row is here because the index matched the query, so
-            // the local filter must not drop it for lacking the literal text.
-            if matches!(row.key, ResumeRowKey::Archive(_)) {
-                return true;
-            }
-            let activity = format_last_active(now, row.last_activity_ms).to_lowercase();
-            needle.is_empty()
-                || row.title.to_lowercase().contains(&needle)
-                || row.details.to_lowercase().contains(&needle)
-                || row.profile_id.to_lowercase().contains(&needle)
-                || row.origin.to_lowercase().contains(&needle)
-                || activity.contains(&needle)
-        })
-        .collect()
+        .collect::<Vec<_>>();
+    if searching {
+        // The index ranked these; the newest-first order the merge applied is
+        // not the answer's order and would hide the best hit below the rest.
+        rows.sort_by_key(|row| row.wiki_rank.unwrap_or(usize::MAX));
+    }
+    rows
 }
 
 impl DashboardState {
     /// Rebuilds the open dialog's rows from what they are derived from: the
-    /// Hel records, the scanned native sessions, the checkpoint sizes, the
-    /// search, and the clock the activity labels read. Every mutation of those
-    /// inputs calls this, and the dashboard's one-second clock calls it again
-    /// so searches keep moving.
+    /// Hel records, the scanned native sessions, the checkpoint sizes, and the
+    /// newest search answer. Every mutation of those inputs calls this.
     /// Moving the selection only reads the rows.
     pub fn rebuild_resume_rows(&mut self) {
         let Mode::ResumeDialog(dialog) = &self.mode else {
@@ -624,7 +651,6 @@ impl DashboardState {
             &self.state,
             dialog,
             &self.checkpoint_archive_sizes,
-            &chrono::Local::now(),
         );
         self.resume_rows.retain(|row| {
             row.session_id().is_none_or(|id| {
@@ -707,9 +733,10 @@ impl DashboardState {
             search: TextInput::new(),
             form: RefCell::new(Dialog::default()),
             opened_at: Instant::now(),
-            wiki_enabled: self.config.sessionwiki.enabled,
             wiki: Arc::new(Vec::new()),
             wiki_request_id: 0,
+            wiki_status: WikiStatus::default(),
+            wiki_top_ups: 0,
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
         });
@@ -752,16 +779,63 @@ impl DashboardState {
 
     /// Fold one SessionWiki search result into the open dialog. A result for
     /// an older request is dropped: the person has typed since.
-    pub fn apply_wiki_search(&mut self, request_id: u64, rows: Vec<WikiRow>) {
+    pub fn apply_wiki_search(&mut self, request_id: u64, page: WikiSearchPage) {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return;
         };
-        if dialog.wiki_request_id != request_id || *dialog.wiki == rows {
+        if dialog.wiki_request_id != request_id {
             return;
         }
-        dialog.wiki = Arc::new(rows);
+        // The status moves even when the rows do not: a build that finished
+        // between two identical answers is what re-enables the search box.
+        dialog.wiki_status = page.status;
+        if *dialog.wiki == page.rows {
+            self.rebuild_resume_rows();
+            return;
+        }
+        dialog.wiki = Arc::new(page.rows);
         self.rebuild_resume_rows();
         self.resync_resume_selection();
+    }
+
+    /// The briefing the open dialog still needs for the row under its
+    /// selection, if any.
+    ///
+    /// Moving the selection asks for one. A search answer can also put a
+    /// different row under an unmoved selection, and that row's transcript is
+    /// what the preview pane is already promising, so it is asked for here.
+    pub fn next_wiki_brief(&mut self) -> Option<String> {
+        match self.wiki_preview_action() {
+            DashboardAction::LoadArchivedBrief { wiki_id } => Some(wiki_id),
+            _ => None,
+        }
+    }
+
+    /// The query to re-issue, and how long to wait first, after an answer said
+    /// the index is still changing. `None` when the answer was final.
+    ///
+    /// Two reasons to ask again. The first build has not finished, so the
+    /// whole answer will change: poll every five seconds until it is ready,
+    /// which also re-enables the search box without reopening the dialog. Or a
+    /// top-up sync is running, so this query may gain rows: repeat it every
+    /// two seconds, at most ten times, and then leave it alone.
+    pub fn next_wiki_refresh(&mut self) -> Option<(u64, String, Duration)> {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return None;
+        };
+        let delay = match dialog.wiki_status.state {
+            WikiIndexState::VersionMismatch => return None,
+            WikiIndexState::Indexing => WIKI_INDEXING_POLL,
+            WikiIndexState::Ready => {
+                if !dialog.wiki_status.topping_up || dialog.wiki_top_ups >= WIKI_TOP_UP_LIMIT {
+                    return None;
+                }
+                dialog.wiki_top_ups += 1;
+                WIKI_TOP_UP_POLL
+            }
+        };
+        dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        Some((dialog.wiki_request_id, dialog.search.to_string(), delay))
     }
 
     /// Fold one fetched briefing into the open dialog's preview cache.
@@ -784,7 +858,7 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let Some(wiki_id) = wiki_id.filter(|_| dialog.wiki_enabled) else {
+        let Some(wiki_id) = wiki_id else {
             return DashboardAction::None;
         };
         if dialog.previews.contains_key(&wiki_id)
@@ -809,15 +883,14 @@ impl DashboardState {
     }
 
     /// Claim the next search request id for the open dialog, with the query it
-    /// should run. `None` when no dialog is open or SessionWiki is off.
+    /// should run. `None` when no dialog is open.
     pub fn next_wiki_search(&mut self) -> Option<(u64, String)> {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return None;
         };
-        if !dialog.wiki_enabled {
-            return None;
-        }
         dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        // A new query gets its own top-up budget; the old one's is spent.
+        dialog.wiki_top_ups = 0;
         Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
@@ -893,7 +966,11 @@ impl DashboardState {
             if focused != Search {
                 match key.code {
                     KeyCode::Char('/') => {
-                        dialog.form.get_mut().focus(Search);
+                        // A disabled box cannot take the focus, and asking for
+                        // it would leave the focus pending until it can.
+                        if dialog.search_enabled() {
+                            dialog.form.get_mut().focus(Search);
+                        }
                         return DashboardAction::None;
                     }
                     KeyCode::Delete if focused == Sessions => {
@@ -1127,18 +1204,42 @@ pub(crate) fn render_resume_dialog(
             search_area.height,
         ),
     );
-    TextField::render(
-        frame,
-        Rect::new(
-            search_area.x + label_width,
-            search_area.y,
-            search_area.width - label_width,
-            search_area.height,
-        ),
-        &dialog.search,
-        &mut form,
-        ResumeFocus::Search,
+    let field_area = Rect::new(
+        search_area.x + label_width,
+        search_area.y,
+        search_area.width - label_width,
+        search_area.height,
     );
+    // Search is the index's answer. While the index cannot answer, the box
+    // says why instead of taking text nothing would act on; the tabs and the
+    // list keep working.
+    if let Some(placeholder) = dialog.search_placeholder() {
+        form.register(
+            ResumeFocus::Search,
+            ControlKind::TextField,
+            field_area,
+            false,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate_to_cells(
+                    placeholder,
+                    usize::from(field_area.width),
+                    Truncate::SUMMARY,
+                ),
+                Style::default().fg(theme::palette().muted),
+            )),
+            field_area,
+        );
+    } else {
+        TextField::render(
+            frame,
+            field_area,
+            &dialog.search,
+            &mut form,
+            ResumeFocus::Search,
+        );
+    }
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
     let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
@@ -1167,9 +1268,6 @@ pub(crate) fn render_resume_dialog(
     let now = chrono::Local::now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
-            (ResumeTab::Archive, ..) if !dialog.wiki_enabled => {
-                "Enable SessionWiki in Setup to search and archive sessions"
-            }
             (ResumeTab::Import, true, _) => "Scanning native sessions…",
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
             (ResumeTab::Import, _, true) => "No importable sessions",

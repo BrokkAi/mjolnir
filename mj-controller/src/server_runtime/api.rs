@@ -32,7 +32,7 @@ use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, ne
 use mj_core::relay::RelayCommand;
 
 use crate::daemon::RuntimeState;
-use mj_client::daemon::{WikiRestoreRequest, WikiRow};
+use mj_client::daemon::{WikiRestoreRequest, WikiSearchPage};
 
 /// How the follow-up task learns whether a session is still on its way up.
 ///
@@ -75,12 +75,6 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
-    /// Whether the user has switched SessionWiki on. The wiki routes answer
-    /// 409 when it is off rather than searching an index nobody asked for.
-    fn wiki_enabled(&self) -> bool {
-        false
-    }
-
     /// Whether the index is stale enough that a query should ask for a sync.
     fn wiki_sync_is_stale(&self) -> bool {
         false
@@ -88,7 +82,7 @@ pub trait ExportRuntime: Send + Sync {
 
     fn wiki_request_sync(&self) {}
 
-    fn wiki_search(&self, _query: String, _limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+    fn wiki_search(&self, _query: String, _limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
     }
 
@@ -138,10 +132,6 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move { self.close_session(session_id).await })
     }
 
-    fn wiki_enabled(&self) -> bool {
-        RuntimeState::wiki_enabled(self)
-    }
-
     fn wiki_sync_is_stale(&self) -> bool {
         crate::sessionwiki::sync_is_stale(self.wiki().last_success())
     }
@@ -150,7 +140,7 @@ impl ExportRuntime for RuntimeState {
         self.wiki().request_sync(false);
     }
 
-    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         Box::pin(async move { RuntimeState::wiki_search(self, query, limit).await })
     }
 
@@ -1051,10 +1041,6 @@ impl SubagentBackend for ApiBackend {
         self.profile_catalog.published(profile)
     }
 
-    fn wiki_enabled(&self) -> bool {
-        self.exports.wiki_enabled()
-    }
-
     fn wiki_sync_is_stale(&self) -> bool {
         self.exports.wiki_sync_is_stale()
     }
@@ -1063,7 +1049,7 @@ impl SubagentBackend for ApiBackend {
         self.exports.wiki_request_sync();
     }
 
-    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<Vec<WikiRow>>> {
+    fn wiki_search(&self, query: String, limit: usize) -> BoxFuture<'_, Result<WikiSearchPage>> {
         let runtime = Arc::clone(&self.exports);
         Box::pin(async move { runtime.wiki_search(query, limit).await })
     }

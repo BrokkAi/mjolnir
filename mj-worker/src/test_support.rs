@@ -1,5 +1,6 @@
 //! Fixtures shared by more than one test module in this crate.
 
+#[cfg(unix)]
 use std::path::Path;
 
 /// Run Git in `repository` and return its trimmed standard output.
@@ -7,6 +8,7 @@ use std::path::Path;
 /// Every test that builds a repository needs this, so it lives here rather
 /// than once per test module. Callers that only need the side effect discard
 /// the returned text.
+#[cfg(unix)]
 pub(crate) fn git(repository: &Path, arguments: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(arguments)

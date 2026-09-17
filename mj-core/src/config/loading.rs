@@ -1,7 +1,9 @@
 //! Instance names, configuration directories and atomic file writes.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -115,7 +117,56 @@ pub fn apply_instance_flag(value: Option<&str>) -> Result<()> {
             std::env::set_var(INSTANCE_ENV, name);
         }
     }
-    validate_instance_env()
+    validate_instance_env()?;
+    // The data directory is settled by now, which is what the session index
+    // location follows.
+    if let Some(directory) = session_index_dir_for(
+        std::env::var_os(SESSION_INDEX_ENV).as_deref(),
+        env_override_os("DATA_DIR").as_deref(),
+    ) {
+        // SAFETY: as above. This is the same single-threaded startup step.
+        unsafe {
+            std::env::set_var(SESSION_INDEX_ENV, directory);
+        }
+    }
+    SESSION_INDEX_RESOLVED.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Environment variable naming the directory holding SessionWiki's index.
+/// SessionWiki reads it itself; Mjolnir only decides what it should say.
+pub const SESSION_INDEX_ENV: &str = "SESSIONWIKI_DATA";
+
+static SESSION_INDEX_RESOLVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Where this process's session index belongs, or `None` to leave the choice
+/// alone.
+///
+/// Session indexing is always on, so a process running against an overridden
+/// data directory — every end-to-end test daemon — must not walk the user's
+/// real session stores or write the user's real index. Such a process gets its
+/// own index beside its own data. A named instance without a data-directory
+/// override keeps sharing the user's one index, and an explicit
+/// `SESSIONWIKI_DATA` is always obeyed.
+pub(crate) fn session_index_dir_for(
+    existing: Option<&std::ffi::OsStr>,
+    data_dir_override: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if existing.is_some() {
+        return None;
+    }
+    data_dir_override.map(|data| PathBuf::from(data).join("sessionwiki"))
+}
+
+/// Whether process startup has chosen where the session index lives.
+///
+/// Only [`apply_instance_flag`] sets this, and only a real Mjolnir binary runs
+/// it. A unit test that builds a daemon runtime directly therefore never
+/// reaches an index at all, which is what keeps always-on indexing out of the
+/// user's real data.
+pub fn session_index_is_resolved() -> bool {
+    SESSION_INDEX_RESOLVED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Nest `base` under [`INSTANCE_DIR`] when an instance is selected. A name that

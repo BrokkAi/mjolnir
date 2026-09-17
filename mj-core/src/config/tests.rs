@@ -1701,6 +1701,24 @@ fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
 }
 
 #[test]
+fn an_overridden_data_directory_gets_its_own_session_index() {
+    // Without the override the user's own index is the right one.
+    assert_eq!(session_index_dir_for(None, None), None);
+    let overridden = std::ffi::OsString::from("/tmp/lab/data");
+    assert_eq!(
+        session_index_dir_for(None, Some(overridden.as_os_str())),
+        Some(PathBuf::from("/tmp/lab/data/sessionwiki")),
+        "a daemon with its own data directory indexes into its own directory"
+    );
+    let chosen = std::ffi::OsString::from("/tmp/elsewhere");
+    assert_eq!(
+        session_index_dir_for(Some(chosen.as_os_str()), Some(overridden.as_os_str())),
+        None,
+        "an explicit choice is never overridden"
+    );
+}
+
+#[test]
 fn instance_identity_prefers_a_valid_instance_name() {
     let dir = Path::new("/home/user/.local/share/mjolnir");
     assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");

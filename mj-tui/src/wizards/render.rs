@@ -1267,6 +1267,18 @@ pub(crate) fn render_mount_wizard(
     }
 }
 
+/// The title bar of one step of the resume wizard.
+///
+/// The same three steps start a resumed session, a moved one, and a session
+/// restored from an archived transcript, so the first word says which.
+fn resume_wizard_title(wizard: &ResumeWizard, step: &str, moving_step: &str) -> String {
+    match (wizard.source, wizard.moving) {
+        (_, true) => format!(" Move · {moving_step} "),
+        (ResumeSource::Archive, false) => format!(" Restore · {step} "),
+        (ResumeSource::Session, false) => format!(" Resume · {step} "),
+    }
+}
+
 pub(crate) fn render_resume_wizard(
     frame: &mut Frame,
     area: Rect,
@@ -1295,12 +1307,19 @@ pub(crate) fn render_resume_wizard(
             })
             .and_then(|session| session.project_directory.as_deref())
             .map(|directory| directory.display().to_string());
-        let (project_label, project, project_note) =
-            if let Some(directory) = reused_project_directory.as_deref() {
-                ("Project directory", directory, " (reused)")
-            } else {
-                ("Project", bundle_id, "")
-            };
+        // An archived session has no record here, so its own title is what
+        // identifies it; a plain resume names the project it reopens.
+        let (project_label, project, project_note) = match wizard.source {
+            ResumeSource::Archive => ("Archived session", wizard.title.as_str(), ""),
+            ResumeSource::Session => {
+                if let Some(directory) = reused_project_directory.as_deref() {
+                    ("Project directory", directory, " (reused)")
+                } else {
+                    ("Project", bundle_id, "")
+                }
+            }
+        };
+        let review_title = resume_wizard_title(wizard, "3/3 review", "3/3 confirm");
         render_review_wizard(
             frame,
             area,
@@ -1315,15 +1334,13 @@ pub(crate) fn render_resume_wizard(
                 target_id: &target_id,
                 allocation: wizard.resource_allocation.as_ref(),
                 mounts: &wizard.mounts,
-                title: if wizard.moving {
-                    " Move · 3/3 confirm "
-                } else {
-                    " Resume · 3/3 review "
-                },
+                title: &review_title,
                 submit_label: if wizard.moving && wizard.preparation_error.is_some() {
                     "Retry"
                 } else if wizard.moving {
                     "Move"
+                } else if wizard.source == ResumeSource::Archive {
+                    "Restore"
                 } else {
                     "Resume"
                 },
@@ -1413,7 +1430,7 @@ pub(crate) fn render_resume_wizard(
         form.end_frame(initial);
         return;
     }
-    let (title, choices, selected, help) = match wizard.step {
+    let (title, choices, selected, mut help) = match wizard.step {
         WizardStep::Profile => {
             let profiles = dashboard.resume_wizard_profiles(wizard);
             let session_harness = dashboard
@@ -1443,22 +1460,18 @@ pub(crate) fn render_resume_wizard(
                 help.push(guardian_footnote());
             }
             (
-                if wizard.moving {
-                    " Move · 1/3 profile (cross-harness supported) "
-                } else {
-                    " Resume · 1/3 profile (cross-harness supported) "
-                },
+                resume_wizard_title(
+                    wizard,
+                    "1/3 profile (cross-harness supported)",
+                    "1/3 profile (cross-harness supported)",
+                ),
                 profile_table(rows),
                 wizard.profile,
                 help,
             )
         }
         WizardStep::Target => (
-            if wizard.moving {
-                " Move · 2/3 new target "
-            } else {
-                " Resume · 2/3 new target "
-            },
+            resume_wizard_title(wizard, "2/3 new target", "2/3 new target"),
             dashboard
                 .config
                 .targets
@@ -1492,10 +1505,15 @@ pub(crate) fn render_resume_wizard(
         WizardStep::NewBundle => unreachable!("resume does not create bundles"),
         WizardStep::ProjectDirectory => unreachable!("resume does not select a project directory"),
     };
+    if wizard.source == ResumeSource::Archive {
+        // An archived session has no record to read a name from, so the title
+        // the index kept is shown beside the choices.
+        help.insert(0, picker_help(&format!("Restoring: {}", wizard.title)));
+    }
     render_picker(
         frame,
         area,
-        title,
+        &title,
         choices,
         help,
         PickerNavigation {

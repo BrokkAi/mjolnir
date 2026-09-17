@@ -139,7 +139,7 @@ pub(crate) enum DashboardIoUpdate {
     /// answer for an older one is dropped there.
     WikiRows {
         request_id: u64,
-        result: std::result::Result<Vec<mj_client::daemon::WikiRow>, String>,
+        result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
@@ -790,7 +790,28 @@ impl DashboardContext {
                 }
             }
             DashboardIoUpdate::WikiRows { request_id, result } => match result {
-                Ok(rows) => self.dashboard.apply_wiki_search(request_id, rows),
+                Ok(page) => {
+                    self.dashboard.apply_wiki_search(request_id, page);
+                    // A new answer can put a different row under an unmoved
+                    // selection, and the preview pane is already promising
+                    // that row's transcript.
+                    if let Some(wiki_id) = self.dashboard.next_wiki_brief() {
+                        spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
+                    }
+                    // An index that is still building, or still topping up,
+                    // answers again by itself: the dialog says when and the
+                    // repeat runs in the same background task the first ask
+                    // used, never on the event loop.
+                    if let Some((request_id, query, delay)) = self.dashboard.next_wiki_refresh() {
+                        spawn_wiki_search(
+                            request_id,
+                            query,
+                            delay,
+                            self.wiki_search_request.clone(),
+                            self.dashboard_io_tx.clone(),
+                        );
+                    }
+                }
                 Err(error) => self
                     .dashboard
                     .set_notice(format!("Archive search failed: {error}")),

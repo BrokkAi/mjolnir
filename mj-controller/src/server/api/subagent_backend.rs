@@ -154,11 +154,6 @@ pub trait SubagentBackend: Send + Sync {
     /// A git bundle of the session's committed work.
     fn bundle(&self, session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>>;
 
-    /// Whether the user has switched SessionWiki on.
-    fn wiki_enabled(&self) -> bool {
-        false
-    }
-
     /// Whether the index was synced recently enough that a query need not ask
     /// for one.
     fn wiki_sync_is_stale(&self) -> bool {
@@ -173,7 +168,7 @@ pub trait SubagentBackend: Send + Sync {
         &self,
         _query: String,
         _limit: usize,
-    ) -> BoxFuture<'_, AnyResult<Vec<mj_client::daemon::WikiRow>>> {
+    ) -> BoxFuture<'_, AnyResult<mj_client::daemon::WikiSearchPage>> {
         Box::pin(async { anyhow::bail!("SessionWiki search is unavailable") })
     }
 

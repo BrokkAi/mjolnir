@@ -77,6 +77,39 @@ pub struct WikiRow {
     pub hel_session_id: Option<String>,
 }
 
+/// How far along the daemon's SessionWiki index is when a search answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiIndexState {
+    /// The index has completed one full build; its answers are complete.
+    Ready,
+    /// The first full build has not finished yet, so a search can miss
+    /// sessions that exist. This is the state a fresh index starts in.
+    #[default]
+    Indexing,
+    /// The index file on disk was written by a different SessionWiki schema
+    /// version. Mjolnir will not open it, because opening it would drop and
+    /// rebuild the user's whole cache.
+    VersionMismatch,
+}
+
+/// What a search says about the index it answered from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiStatus {
+    pub state: WikiIndexState,
+    /// A sync is running now, so repeating the query may return more.
+    pub topping_up: bool,
+}
+
+/// One page of search results with the state of the index behind them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSearchPage {
+    pub rows: Vec<WikiRow>,
+    pub status: WikiStatus,
+}
+
 /// Start a new session carrying a compacted hand-off from an archived one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -497,7 +530,7 @@ pub enum DaemonReply {
     OptionalSessionState(Option<SessionState>),
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
-    WikiRows(Vec<WikiRow>),
+    WikiRows(WikiSearchPage),
     Reviewer(Box<crate::session::ReviewerOutcome>),
     Done,
 }
@@ -1089,13 +1122,15 @@ impl DaemonClient {
     }
 
     /// Search the user's SessionWiki index, newest first when the query is
-    /// empty and best match first otherwise.
-    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<Vec<WikiRow>> {
+    /// empty and best match first otherwise. The reply carries the state of
+    /// the index as well as the rows, so a caller can say the first build is
+    /// still running.
+    pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })
             .await?
         {
-            DaemonReply::WikiRows(rows) => Ok(rows),
+            DaemonReply::WikiRows(page) => Ok(page),
             reply => bail!("unexpected SessionWiki search reply {reply:?}"),
         }
     }

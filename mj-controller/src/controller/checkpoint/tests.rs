@@ -13,8 +13,10 @@ use anyhow::Result;
 #[cfg(unix)]
 use crate::controller::now;
 use crate::controller::restore_session_after_persistence_failure;
+#[cfg(unix)]
+use crate::controller::test_support::IsolatedTest;
 use crate::controller::test_support::{
-    IsolatedTest, RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
+    RefusingExecutor, checkpoint_test_session, write_checkpoint_gate_archive,
 };
 #[cfg(unix)]
 use crate::session_manager::{ManagedSessionHandle, new_command_id};

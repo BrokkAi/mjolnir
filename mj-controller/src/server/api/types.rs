@@ -474,11 +474,6 @@ pub struct WikiSearchQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WikiSearchResponse {
-    pub rows: Vec<mj_client::daemon::WikiRow>,
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WikiBriefQuery {

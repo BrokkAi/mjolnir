@@ -188,6 +188,11 @@ pub async fn run_server(
         // The sweep is hourly rather than on every request, because it is
         // housekeeping and nothing waits for it.
         let mut prune_tick = tokio::time::interval(prune_tick_interval());
+        // The first index build can take many minutes on a large corpus, and
+        // nothing else would start it until the first hourly tick. Ask for it
+        // here, explicitly, rather than leaning on the interval's immediate
+        // first tick: that tick may run the archive job instead.
+        daemon_runtime.wiki().request_sync(true);
         let client_state_retention = options_session_ttl;
         let (action_done_tx, mut action_done_rx) = tokio::sync::mpsc::unbounded_channel::<(
             u64,
@@ -668,12 +673,7 @@ pub async fn run_server(
                     // full sync itself. It runs as a background task, and only
                     // when no earlier one is still running: a pass over a large
                     // corpus can outlast the tick.
-                    let archive_after_days = controller
-                        .config
-                        .sessionwiki
-                        .enabled
-                        .then_some(controller.config.sessionwiki.archive_after_days)
-                        .flatten();
+                    let archive_after_days = controller.config.sessionwiki.archive_after_days;
                     match archive_after_days {
                         Some(days) if archive_jobs.is_empty() => {
                             let runtime = daemon_runtime.clone();

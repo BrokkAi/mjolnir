@@ -16,12 +16,16 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
-        // The Archived tab lists the most recent indexed sessions before
-        // anything is typed, so the first search runs as the dialog opens.
+        // Opening the dialog issues the empty query. It lists the most recent
+        // indexed sessions and, just as importantly, brings back the index's
+        // state, which decides whether the search box can be typed into.
         if let Some((request_id, query)) = self.dashboard.next_wiki_search() {
             crate::dashboard::io::spawn_wiki_search(
                 request_id,
                 query,
+                // The dialog has just opened and has nothing to show yet, so
+                // this first ask does not wait out a typing pause.
+                std::time::Duration::ZERO,
                 self.wiki_search_request.clone(),
                 self.dashboard_io_tx.clone(),
             );

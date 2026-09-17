@@ -88,7 +88,7 @@ def focus_sessions(client) -> None:
 def stop_from_dashboard(client) -> None:
     focus_sessions(client)
     client.send(b"\x1bOQ")
-    client.wait_for("Enter runs \u00b7 Esc closes")
+    client.wait_for("Click/Enter runs \u00b7 Tab moves \u00b7 Esc closes")
     client.send(b"stop\r")
     client.wait_for("Stop session?")
     client.send(b"\r")

@@ -1020,6 +1020,13 @@ details.block-fold > pre {
   box-sizing: border-box;
 }
 
+/* The box is closed while the index cannot answer, and says why in its own
+   placeholder. It has to read as unavailable rather than merely empty. */
+.resume-search-field input:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .resume-session-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

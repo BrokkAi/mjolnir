@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 
@@ -1093,8 +1094,10 @@ async fn stopped_actor_is_replaced_without_late_completion_removing_replacement(
     tasks.abort_all();
 }
 
+#[cfg(unix)]
 const UNREACHABLE_VIEW_TEST_CHILD: &str = "MJ_TEST_UNREACHABLE_RELAY_CHILD";
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn unreachable_relay_publishes_error_view() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in
@@ -1154,8 +1157,10 @@ async fn unreachable_relay_publishes_error_view() {
     assert!(!update.view.connected);
 }
 
+#[cfg(unix)]
 const UNREADABLE_PROJECTION_TEST_CHILD: &str = "MJ_TEST_UNREADABLE_PROJECTION_CHILD";
 
+#[cfg(unix)]
 #[tokio::test]
 async fn connecting_to_an_absent_worker_never_reads_the_projection() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in

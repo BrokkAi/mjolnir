@@ -17,7 +17,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
         }
         "sessionwiki" => {
-            json!({"enabled":false,"archive_after_days":null})
+            json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
             json!({"enabled":true,"max_concurrent":6,"eligible_profiles":{}})
@@ -290,7 +290,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Choose an agent profile for reviews. Model and effort can use the profile defaults."
         }
         "sessionwiki" => {
-            "Index closed sessions into your SessionWiki index so one search covers every coding tool."
+            "Your sessions are always indexed into SessionWiki so one search covers every coding tool. Archiving is what this section chooses."
         }
         "archive_after_days" => {
             "Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. The session's branch in the repository is kept; the checkpoint and any image attachments are deleted. Leave empty to keep every session."

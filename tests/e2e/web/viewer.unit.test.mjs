@@ -656,7 +656,8 @@ function wikiContext(overrides = {}) {
       return id;
     },
     clearTimeout: id => timers.delete(id),
-    request: async () => ({ rows: [] }),
+    request: async () => ({ rows: [], status: { state: 'ready', topping_up: false } }),
+    resumeSearch: { disabled: false, placeholder: '' },
     ...overrides,
   });
   vm.runInContext(
@@ -698,9 +699,9 @@ test('wiki search waits out a burst of typing and drops an overtaken answer', as
   const second = fire();
   assert.equal(urls.length, 2);
 
-  pending[1]({ rows: [{ id: 'new' }] });
+  pending[1]({ rows: [{ id: 'new' }], status: { state: 'ready', topping_up: false } });
   await second;
-  pending[0]({ rows: [{ id: 'stale' }] });
+  pending[0]({ rows: [{ id: 'stale' }], status: { state: 'ready', topping_up: false } });
   await first;
   assert.deepEqual(
     vm.runInContext('wikiState.rows.map(row => row.id)', context),
@@ -710,21 +711,83 @@ test('wiki search waits out a burst of typing and drops an overtaken answer', as
   assert.equal(context.renders, 1, 'only the current request redraws the page');
 });
 
-test('a disabled SessionWiki stops asking and reports one line', async () => {
+test('a daemon without the wiki routes stops being asked', async () => {
   const { context, timers, fire } = wikiContext({
     request: async () => {
-      const failure = new Error('SessionWiki is disabled');
-      failure.status = 409;
+      const failure = new Error('not found');
+      failure.status = 404;
       throw failure;
     },
   });
   vm.runInContext("scheduleWikiSearch('anything')", context);
   await fire();
-  assert.equal(vm.runInContext('wikiState.disabled', context), true);
+  assert.equal(vm.runInContext('wikiState.unavailable', context), true);
   assert.equal(vm.runInContext('wikiState.rows.length', context), 0);
-  assert.match(vm.runInContext('wikiState.notice', context), /SessionWiki is disabled/);
+  assert.equal(vm.runInContext('wikiState.notice', context), '', 'an old daemon is not news');
+  assert.equal(
+    vm.runInContext('wikiSearchPlaceholder()', context),
+    'Search is unavailable',
+    'there is nothing to search, so the box says so',
+  );
   vm.runInContext("scheduleWikiSearch('more typing')", context);
-  assert.equal(timers.size, 0, 'a switched-off index is not asked again');
+  assert.equal(timers.size, 0, 'an index that is not there is not asked again');
+});
+
+test('a building index closes the search box and is asked again every five seconds', async () => {
+  let status = { state: 'indexing', topping_up: true };
+  const { context, timers, fire } = wikiContext({
+    request: async () => ({ rows: [], status }),
+  });
+
+  vm.runInContext("scheduleWikiSearch('')", context);
+  await fire();
+  assert.equal(vm.runInContext('wikiSearchPlaceholder()', context), 'Indexing…');
+  vm.runInContext('renderWikiSearchBox()', context);
+  assert.equal(context.resumeSearch.disabled, true);
+  assert.equal(context.resumeSearch.placeholder, 'Indexing…');
+  assert.equal(timers.size, 1, 'the page asks again by itself');
+  assert.equal([...timers.values()][0].ms, 5000);
+
+  status = { state: 'ready', topping_up: false };
+  await fire();
+  assert.equal(vm.runInContext('wikiSearchPlaceholder()', context), null);
+  vm.runInContext('renderWikiSearchBox()', context);
+  assert.equal(context.resumeSearch.disabled, false, 'the box opens without a reload');
+  assert.equal(timers.size, 0, 'a ready, idle index is not polled');
+});
+
+test('an index at another version is reported and never polled', async () => {
+  const { context, timers, fire } = wikiContext({
+    request: async () => ({ rows: [], status: { state: 'version_mismatch', topping_up: false } }),
+  });
+  vm.runInContext("scheduleWikiSearch('')", context);
+  await fire();
+  assert.equal(
+    vm.runInContext('wikiSearchPlaceholder()', context),
+    'SessionWiki index is at a different version',
+  );
+  assert.equal(timers.size, 0);
+});
+
+test('a running top-up repeats the query at most ten times', async () => {
+  const { context, timers, fire } = wikiContext({
+    request: async () => ({ rows: [], status: { state: 'ready', topping_up: true } }),
+  });
+  vm.runInContext("scheduleWikiSearch('pomegranate')", context);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await fire();
+    assert.equal(timers.size, 1, `repeat ${attempt} was not scheduled`);
+    assert.equal([...timers.values()][0].ms, 2000);
+  }
+  await fire();
+  assert.equal(timers.size, 0, 'the repeats are bounded');
+  assert.equal(vm.runInContext('wikiState.topUps', context), 10);
+
+  // A new query gets its own budget.
+  vm.runInContext("scheduleWikiSearch('something else')", context);
+  assert.equal(vm.runInContext('wikiState.topUps', context), 0);
+  await fire();
+  assert.equal(timers.size, 1);
 });
 
 test('wiki rows split into archived rows and snippets for live sessions', () => {
@@ -743,6 +806,11 @@ test('wiki rows split into archived rows and snippets for live sessions', () => 
   );
   assert.equal(vm.runInContext("wikiSnippetFor('live-1')", context), 'a match here');
   assert.equal(vm.runInContext("wikiSnippetFor('missing')", context), '');
+  assert.equal(
+    vm.runInContext('JSON.stringify([...wikiSessionRanks()])', context),
+    JSON.stringify([['live-1', 1], ['live-2', 2]]),
+    'a live row keeps the place the index gave it, so a query can be listed in that order',
+  );
 });
 
 test('a search snippet marks the matched words as elements, not markup', () => {

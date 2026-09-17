@@ -676,6 +676,37 @@ pub(super) fn replace_materialized_queued_prompts_in(
     Ok(())
 }
 
+/// The activity watermark of every session whose projection holds at least one
+/// transcript item, by session id.
+///
+/// This is a change token, not a projection: session indexing needs to know
+/// which live conversations have moved since it last looked, and loading each
+/// one's transcript to find out would cost the whole corpus every sync.
+pub fn load_transcribed_session_activity() -> Result<BTreeMap<String, Option<i64>>> {
+    load_transcribed_session_activity_from(&database_path())
+}
+
+fn load_transcribed_session_activity_from(path: &Path) -> Result<BTreeMap<String, Option<i64>>> {
+    let connection = open_reader(path)?;
+    let mut statement = connection.prepare(
+        "SELECT session_id, last_activity_at_ms
+         FROM materialized_sessions s
+         WHERE EXISTS (
+             SELECT 1 FROM materialized_transcript_items i
+             WHERE i.session_id = s.session_id
+         )",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut activity = BTreeMap::new();
+    for row in rows {
+        let (session_id, last_activity_at_ms) = row?;
+        activity.insert(session_id, last_activity_at_ms);
+    }
+    Ok(activity)
+}
+
 /// Load only the durable prompt queues without deserializing transcript rows.
 /// Dashboard startup uses this path so work is proportional to queued prompts,
 /// not to the complete retained conversation history.

@@ -40,8 +40,11 @@ def wait_hook(lab: Lab, hook: str) -> int:
 
 
 def kill_hook_owner(lab: Lab, hook: str, pid: int) -> None:
-    if pid not in lab.owned_pids():
-        raise ScenarioFailure(f"hook {hook} named unowned process {pid}")
+    deadline = time.monotonic() + 2
+    while pid not in lab.owned_pids():
+        if time.monotonic() >= deadline:
+            raise ScenarioFailure(f"hook {hook} named unowned process {pid}")
+        time.sleep(0.02)
     os.kill(pid, signal.SIGKILL)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
