@@ -1438,7 +1438,7 @@ impl DashboardContext {
         // to avoid.
         let invalidated = self
             .visible_chat()
-            .is_some_and(mj_chat::chat::ActiveChat::transcript_selection_invalidated);
+            .is_some_and(|chat| chat.transcript_selection_invalidated());
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
         }

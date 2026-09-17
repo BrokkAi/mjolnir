@@ -18,7 +18,7 @@ use ratatui::widgets::{Padding, Paragraph, Wrap};
 
 use crate::components::{Button, ControlKind};
 use crate::components::{EventResult, render_scrollbar, scrollbar_geometry};
-use crate::selection::{FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId};
+use crate::selection::{SurfaceFrame, SurfaceId};
 use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, TranscriptItem, config_command_text};
 use mj_core::storage::{HistoryScope, PromptHistoryEntry};
@@ -971,36 +971,8 @@ impl ActiveChat {
         );
     }
 
-    /// The composer's current draft. Image-bearing drafts use a versioned
-    /// envelope so detach and session switching preserve the embedded bytes.
-    pub fn draft(&self) -> String {
-        self.state.encoded_draft()
-    }
-
     pub fn latest_event_ordinal(&self) -> u64 {
         self.state.latest_seq()
-    }
-
-    /// Whether visible background activity needs animation frames.
-    pub fn needs_animation(&self) -> bool {
-        self.state.needs_animation()
-    }
-
-    /// Whether the transcript or task clocks differ from the last drawn frame.
-    pub fn clock_changed(&self) -> bool {
-        self.state.clock_changed()
-    }
-
-    /// An animation tick changes the activity spinner while work is visible.
-    pub fn animation_changed(&self) -> bool {
-        self.state.animation_changed()
-    }
-
-    /// Records the time-dependent cells represented by the frame just drawn.
-    /// The next clock or animation tick can then request a redraw only after
-    /// its displayed value actually moves.
-    pub fn acknowledge_render(&mut self) {
-        self.state.acknowledge_render();
     }
 
     /// Waits for the next background message, applies it, and drains whatever
@@ -1131,11 +1103,6 @@ impl ActiveChat {
             }
         }
         self.surface_reviewer_elicitations();
-    }
-
-    /// Mirrors `[review]` into the view, from the config the dashboard drains.
-    pub fn set_review_config(&mut self, review: mj_core::config::ReviewConfig) {
-        self.state.set_review_config(review);
     }
 
     /// Asks the daemon to review the turn that just finished.
@@ -1808,11 +1775,6 @@ impl ActiveChat {
         ChatEventOutcome::Handled
     }
 
-    /// Refreshes the parent session's direct-child count without reopening chat.
-    pub fn set_subagent_count(&mut self, count: usize) {
-        self.state.set_subagent_count(count);
-    }
-
     /// Leaves the conversation: stops any dictation and reports how far the
     /// transcript has been read, which the host turns into the session's read
     /// receipt and its saved draft.
@@ -2472,22 +2434,6 @@ impl ActiveChat {
         }
     }
 
-    /// The surfaces the last frame registered, for the selection engine.
-    pub fn frame_surfaces(&self) -> &FrameSurfaces {
-        self.state.frame_surfaces()
-    }
-
-    /// Keep a scrollbar gesture routed here even outside the chat pane.
-    pub fn transcript_scrollbar_dragging(&self) -> bool {
-        self.state.transcript_scrollbar_dragging()
-    }
-
-    /// Rows the composer wants at `width`: the wrapped input, up to three
-    /// queued-prompt previews, and the block's own border rows.
-    pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        self.state.desired_prompt_height(width)
-    }
-
     /// Draws the transcript and the composer into `regions`, for a host that
     /// owns the rest of the frame.
     ///
@@ -2516,56 +2462,6 @@ impl ActiveChat {
         self.state.footer_command_areas.borrow().clone()
     }
 
-    /// Whether the last frame's surfaces stand alone, because a modal owned
-    /// the frame.
-    pub fn frame_surfaces_exclusive(&self) -> bool {
-        self.state.frame_surfaces_exclusive()
-    }
-
-    /// Clears the screen geometry retained by chat components before a host
-    /// redraw. Focus and an in-flight pointer gesture remain owned by chat.
-    pub fn reset_component_geometry(&mut self) {
-        self.state.reset_component_geometry();
-    }
-
-    /// Whether a chat component owns this pointer event before host selection.
-    pub fn component_handles_mouse(&self, mouse: crossterm::event::MouseEvent) -> bool {
-        self.state.component_handles_mouse(mouse)
-    }
-
-    /// Whether a chat modal currently owns the frame.
-    pub fn component_modal_open(&self) -> bool {
-        self.state.component_modal_open()
-    }
-
-    /// Releases any pointer gesture held by a chat component.
-    pub fn cancel_component_pointer(&mut self) {
-        self.state.cancel_component_pointer();
-    }
-
-    /// The transcript text a finished selection covers.
-    pub fn transcript_selection_text(&mut self, range: &SelectionRange) -> Option<String> {
-        self.state.transcript_selection_text(range)
-    }
-
-    /// The message text a selection in the elicitation pane covers.
-    pub fn elicitation_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.elicitation_selection_text(range)
-    }
-
-    /// The text a selection in the reviewer pane covers. It is resolved
-    /// against that pane's own rows, so a drag there can never pick up the
-    /// primary transcript's text.
-    pub fn reviewer_selection_text(&self, range: &SelectionRange) -> Option<String> {
-        self.state.reviewer_selection_text(range)
-    }
-
-    /// Whether the transcript's selection row space stopped describing the
-    /// rows on screen since the last call.
-    pub fn transcript_selection_invalidated(&mut self) -> bool {
-        self.state.transcript_selection_invalidated()
-    }
-
     /// Scrolls the surface a drag is holding against one of its edges.
     /// `direction` is negative for up and positive for down.
     pub fn autoscroll_selection(&mut self, surface: SurfaceId, direction: i8) {
@@ -2586,6 +2482,22 @@ impl ActiveChat {
             }
             _ => {}
         }
+    }
+}
+
+/// A live chat is its [`ChatState`] plus the session plumbing around it, so
+/// every read and edit of the conversation reaches the state directly instead
+/// of through a wrapper per method. Methods that consult the session handle or
+/// the feed flags stay inherent on `ActiveChat` and take precedence.
+impl std::ops::Deref for ActiveChat {
+    type Target = ChatState;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for ActiveChat {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 

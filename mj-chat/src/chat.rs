@@ -1262,7 +1262,10 @@ impl ChatState {
         self.phase
     }
 
-    pub(super) fn acknowledge_render(&mut self) {
+    /// Records the time-dependent cells represented by the frame just drawn.
+    /// The next clock or animation tick can then request a redraw only after
+    /// its displayed value actually moves.
+    pub fn acknowledge_render(&mut self) {
         self.last_clock_text = Some(self.clock_text(epoch_seconds()));
         self.last_animation_frame = self.needs_animation().then(|| self.activity_spinner());
     }
@@ -1478,7 +1481,7 @@ impl ChatState {
         self.subagent_count
     }
 
-    pub(super) fn set_subagent_count(&mut self, count: usize) {
+    pub fn set_subagent_count(&mut self, count: usize) {
         if self.subagent_count != count {
             self.subagent_count = count;
             if count == 0 {
@@ -1655,7 +1658,8 @@ impl ChatState {
                 .is_some_and(|review| review.view.is_working())
     }
 
-    pub(super) fn clock_changed(&self) -> bool {
+    /// Whether the transcript or task clocks differ from the last drawn frame.
+    pub fn clock_changed(&self) -> bool {
         self.last_clock_text.as_deref() != Some(self.clock_text(epoch_seconds()).as_str())
     }
 
@@ -1693,7 +1697,8 @@ impl ChatState {
         text
     }
 
-    pub(super) fn animation_changed(&self) -> bool {
+    /// An animation tick changes the activity spinner while work is visible.
+    pub fn animation_changed(&self) -> bool {
         let frame = self.needs_animation().then(|| self.activity_spinner());
         self.last_animation_frame != frame
     }

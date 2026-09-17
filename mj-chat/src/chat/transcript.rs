@@ -475,7 +475,7 @@ impl TranscriptRenderCache {
 impl ChatState {
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
-    pub(super) fn transcript_scrollbar_dragging(&self) -> bool {
+    pub fn transcript_scrollbar_dragging(&self) -> bool {
         self.transcript_scrollbar.dragging && !self.transcript_scrollbar_modal_blocked()
     }
 
