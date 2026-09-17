@@ -107,27 +107,41 @@ fn an_empty_activity_clock_is_not_a_stall() {
     assert_eq!(stall_verdict(&facts, policy(10, 240), NOW), StallVerdict::Live);
 }
 
+/// What is in flight changes while the watchdog waits, so it never sleeps
+/// through to a bound it worked out from facts that have since moved on. This
+/// was a real bug: with a long bound the watchdog slept past a tool call
+/// opening and ending, and the tool-call bound never tripped at all.
 #[test]
-fn the_next_check_waits_for_the_bound_that_can_trip_first() {
+fn the_watchdog_never_sleeps_past_a_change_in_what_is_in_flight() {
     let with_tool = ActivityFacts {
         last_acp_activity_at_ms: Some(NOW - 9 * MINUTE as i64),
         tools_in_flight: vec![tool("build", NOW - 100 * MINUTE as i64)],
         ..ActivityFacts::default()
     };
-    // The silence bound does not apply while a tool runs, so the wait is the
-    // remainder of the tool bound, not the remainder of the silence bound.
-    assert_eq!(
-        policy(10, 240).next_check(&with_tool, NOW),
-        Duration::from_millis(140 * MINUTE)
-    );
-
     let silent = ActivityFacts {
         last_acp_activity_at_ms: Some(NOW - 9 * MINUTE as i64),
         ..ActivityFacts::default()
     };
+    for facts in [&with_tool, &silent, &ActivityFacts::default()] {
+        let wait = policy(10, 240).next_check(facts, NOW);
+        assert!(
+            wait >= StallPolicy::CHECK_FLOOR && wait <= StallPolicy::CHECK_CEILING,
+            "{facts:?} waited {wait:?}"
+        );
+    }
+
+    // A bound that is closer than the ceiling is waited on exactly.
+    let nearly_silent = ActivityFacts {
+        last_acp_activity_at_ms: Some(NOW - 9_800),
+        ..ActivityFacts::default()
+    };
     assert_eq!(
-        policy(10, 240).next_check(&silent, NOW),
-        Duration::from_millis(MINUTE)
+        StallPolicy {
+            silence: Some(Duration::from_secs(10)),
+            tool_call: None,
+        }
+        .next_check(&nearly_silent, NOW),
+        Duration::from_millis(200)
     );
 }
 
@@ -156,6 +170,14 @@ fn a_disconnected_daemon_never_reports_idle() {
     let was_idle = while_disconnected(MaterializedExecutionState::Idle, Some(NOW));
     assert!(!was_idle.is_idle(), "unknown is never confirmed idle");
     assert_eq!(was_idle.chat_phase(), RelayExecutionState::Idle);
+    // Even when the last thing known was idleness, the session may have
+    // started a turn since. Killing its worker or cutting a checkpoint
+    // against it could destroy work, so it still counts as holding some.
+    assert!(
+        was_idle.has_work_in_flight(),
+        "a session nobody can see is never safe to replace"
+    );
+    assert!(!was_idle.is_working(), "but it is not known to be computing");
 }
 
 /// A worker that is truly gone must still be recoverable: reporting `Unknown`

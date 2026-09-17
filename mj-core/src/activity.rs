@@ -193,13 +193,15 @@ impl ActivityState {
     /// Callers that hold the facts should ask [`has_work_in_flight`] instead,
     /// which also covers queued commands, open terminals and unsynchronized
     /// provider state. This is for a caller that has only a state.
+    ///
+    /// `Unknown` always counts, whatever was last known. A session nobody can
+    /// see may have started a turn since, so replacing its worker or taking a
+    /// checkpoint cut against it could destroy work. This does not block
+    /// recovering a worker that is truly gone: that session reports `Closed`,
+    /// not `Unknown`, because [`while_disconnected`] keeps the two apart.
     #[must_use]
     pub fn has_work_in_flight(&self) -> bool {
-        match self {
-            Self::Idle { .. } | Self::Closed => false,
-            Self::Unknown { last_known, .. } => last_known.has_work_in_flight(),
-            _ => true,
-        }
+        !matches!(self, Self::Idle { .. } | Self::Closed)
     }
 
     /// The four-valued phase the viewer and the API have always reported.
@@ -435,6 +437,10 @@ pub struct StallPolicy {
 }
 
 impl StallPolicy {
+    /// The shortest and longest a watchdog waits between two checks.
+    pub const CHECK_FLOOR: Duration = Duration::from_millis(50);
+    pub const CHECK_CEILING: Duration = Duration::from_secs(1);
+
     /// Whether either bound can ever trip.
     #[must_use]
     pub fn enabled(&self) -> bool {
@@ -443,12 +449,15 @@ impl StallPolicy {
 
     /// How long to wait before asking again, given what is in flight now.
     ///
-    /// Never zero: a caller sleeps on this in a loop, and a zero wait would
-    /// spin. The answer is recomputed after every sleep, so a tool call that
-    /// starts or ends in the meantime is picked up on the next pass.
+    /// Never zero, because a caller sleeps on this in a loop and a zero wait
+    /// would spin. Never longer than [`Self::CHECK_CEILING`] either: what is
+    /// in flight changes while the watchdog waits — a tool call opens or ends
+    /// — and a watchdog that had slept until the bound it computed from the
+    /// old facts would miss the change entirely. Waking once a second and
+    /// asking again costs nothing and is the only way the answer stays true
+    /// to what is happening.
     #[must_use]
     pub fn next_check(&self, facts: &ActivityFacts, now_ms: i64) -> Duration {
-        const FLOOR: Duration = Duration::from_millis(250);
         let remaining = match facts.tools_in_flight.first() {
             Some(oldest) => self
                 .tool_call
@@ -459,7 +468,9 @@ impl StallPolicy {
                 (None, _) => None,
             },
         };
-        remaining.unwrap_or(FLOOR).max(FLOOR)
+        remaining
+            .unwrap_or(Self::CHECK_CEILING)
+            .clamp(Self::CHECK_FLOOR, Self::CHECK_CEILING)
     }
 }
 

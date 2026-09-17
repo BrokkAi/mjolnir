@@ -1369,6 +1369,68 @@ fn idle(outcome: Option<MaterializedTurnOutcome>) -> WaitObservation {
     }
 }
 
+/// A wait must never conclude that a turn finished from a state that only
+/// says nobody can see the session. `mj wait` and the sub-agent wait share
+/// this one decision, and it reads the durable turn record: the activity
+/// state, which can be `Unknown` or `Unrecognized`, has no way in.
+#[test]
+fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
+    let request = WaitRequest::default();
+
+    // The #1025 window: the durable record says a turn is running and the
+    // daemon has no live view. The wait keeps waiting.
+    let running = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Live),
+        execution: MaterializedExecutionState::Running { started_at_ms: 1 },
+        active_turn: Some(MaterializedTurn {
+            command_id: "api-1".into(),
+            accepted_ordinal: Some(7),
+            turn_start_position: 8,
+            started_at_ms: 1,
+        }),
+        ..WaitObservation::default()
+    };
+    assert_eq!(resolve_wait(&running, &request), None);
+
+    // The projection lagging the other way: the flag says idle while the turn
+    // record is still open. "Newest turn" must not answer from that either.
+    let lagging = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        ..running.clone()
+    };
+    assert_eq!(resolve_wait(&lagging, &request), None);
+
+    // Queued work behind a finished turn is not an ending for "newest turn".
+    let queued = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        queued: 1,
+        last_turn_outcome: Some(completed(7, "end_turn")),
+        ..WaitObservation::default()
+    };
+    assert_eq!(resolve_wait(&queued, &request), None);
+
+    // And the states a session can report while unaccounted for are never
+    // idle and always hold work, so nothing downstream can read completion
+    // into them either.
+    for state in [
+        mj_core::activity::ActivityState::Unknown {
+            last_known: Box::new(mj_core::activity::ActivityState::Turn {
+                started_at_ms: Some(1),
+            }),
+            since_ms: Some(2),
+        },
+        mj_core::activity::ActivityState::Unknown {
+            last_known: Box::new(mj_core::activity::ActivityState::Idle { since_ms: None }),
+            since_ms: None,
+        },
+        mj_core::activity::ActivityState::Unrecognized,
+    ] {
+        assert!(!state.is_idle(), "{state:?}");
+        assert!(state.has_work_in_flight(), "{state:?}");
+    }
+}
+
 #[test]
 fn an_earlier_prompt_s_outcome_never_answers_a_later_prompt_s_wait() {
     let request = WaitRequest {

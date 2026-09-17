@@ -127,8 +127,10 @@ pub(super) async fn wait_for_checkpoint_barrier(
             }
             return Ok(snapshot);
         }
+        // A turn the execution flag has not caught up with still has to be
+        // cancelled, so this asks the shared state rather than the flag.
         if busy == BarrierBusyPolicy::InterruptWhileRunning
-            && snapshot.operational.execution == RelayExecutionState::Running
+            && snapshot.operational.activity_state().is_working()
             && !cancel_submitted
         {
             let cancel_command_id = new_command_id("checkpoint-cancel-turn")?;
@@ -219,7 +221,7 @@ pub(super) fn checkpoint_barrier_wait_ended(
     }
     // Close already asked to interrupt the active turn, so only a turn that
     // never settles after cancellation reaches the restart path.
-    if snapshot.operational.execution == RelayExecutionState::Running {
+    if snapshot.operational.activity_state().is_working() {
         return (out_of_time && cancel_submitted)
             .then(|| CheckpointBarrierUnreachable::cancel_timed_out(command_id).into());
     }

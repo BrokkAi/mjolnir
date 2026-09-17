@@ -2597,6 +2597,73 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
     bridge.abort();
 }
 
+/// The tool call's own bound is the upper limit that still ends a turn, so a
+/// bridge that dies leaving a tool card open cannot hold the turn forever.
+/// It could not be forced in a live session — Muse keeps emitting Reminder
+/// tool cards, which are activity — so it is covered here.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(silent_after_prompt_bridge(bridge_stream, observed_tx, true));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: Some(Duration::from_secs(3_600)),
+        tool_call: Some(Duration::from_millis(400)),
+    });
+    let tools = spec.tools_in_flight.clone();
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("build it"))],
+        })
+        .await
+        .unwrap();
+    let mut methods = Vec::new();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+    tools.open("long-build", mj_core::clock::epoch_millis());
+
+    let warning = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::Warning { .. })
+    })
+    .await;
+    let RuntimeEvent::Warning { message } = warning else {
+        panic!("expected the stall warning");
+    };
+    assert!(message.contains("long-build"), "names the tool call: {message}");
+    assert!(
+        message.contains("MJ_TURN_TOOL_STALL_TIMEOUT_MS"),
+        "names the knob that raises the limit: {message}"
+    );
+
+    let finished = wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::PromptFinished { .. })
+    })
+    .await;
+    let RuntimeEvent::PromptFinished { stop_reason, .. } = finished else {
+        panic!("expected the turn to be failed");
+    };
+    assert_eq!(stop_reason, TURN_STALLED_STOP_REASON);
+
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    bridge.abort();
+}
+
 /// The other half: a harness that really has gone quiet, with nothing in
 /// flight, still loses its turn, and the reason travels with the outcome
 /// instead of living only in the transcript.
