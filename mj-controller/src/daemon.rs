@@ -488,7 +488,11 @@ impl RuntimeState {
                 additional_mounts: request.additional_mounts,
                 resource_allocation: request.resource_allocation,
                 title: archived.title.clone(),
-                session_title_override: None,
+                // The harness names a session after its first message, and the
+                // first message here carries the hidden hand-off. Pinning the
+                // archived session's own title keeps that text out of every
+                // list the session appears in.
+                session_title_override: Some(archived.title.clone()),
             })
             .await?;
         let session_id = registered.session.id.clone();
@@ -606,8 +610,16 @@ impl RuntimeState {
         const POLL: Duration = Duration::from_millis(250);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30 * 60);
         loop {
+            // A session that is coming up moves through Disconnected and
+            // Checkpointing on its way; only a state it cannot leave ends the
+            // wait. This is the same set the API's first-prompt wait accepts.
             match self.session_state(session_id) {
-                Some(SessionState::Provisioning) | Some(SessionState::Running) => {}
+                Some(
+                    SessionState::Provisioning
+                    | SessionState::Running
+                    | SessionState::Disconnected
+                    | SessionState::Checkpointing,
+                ) => {}
                 Some(state) => bail!("session {session_id} is {state:?} before its hand-off"),
                 None => bail!("session {session_id} disappeared before its hand-off"),
             }
