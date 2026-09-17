@@ -177,6 +177,24 @@ impl<K: Copy + Eq> Dialog<K> {
         ButtonColumn::render_aligned(frame, area, &buttons, &mut dialog.form, align);
     }
 
+    /// Draws the action row without registering hitboxes.
+    ///
+    /// The row counterpart of [`Self::render_actions_stacked_inert`], for a
+    /// page that stays visible behind a popup.
+    pub fn render_actions_inert(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        buttons: &[(K, &str, bool)],
+        dialog: &Self,
+    ) {
+        let labels = dialog
+            .ordered_actions(buttons)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect::<Vec<_>>();
+        ButtonRow::render_inert(frame, area, &labels);
+    }
+
     /// Splits `area` into the page body and the action column beside it.
     ///
     /// Prefer this to [`ButtonColumn::split`] so the column is sized from the

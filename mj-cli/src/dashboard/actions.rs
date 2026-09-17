@@ -240,6 +240,26 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
+        DashboardAction::PreviewArchiveSpace {
+            generation,
+            older_than_days,
+        } => {
+            // Walks the sessions directory, so it belongs in the blocking
+            // pool; a stale answer is dropped by its days value.
+            spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                "estimating archive space",
+                context.dashboard_io_tx.clone(),
+                move |_cancelled| {
+                    mj_controller::sessionwiki::archive_space_preview(older_than_days)
+                },
+                move |result| DashboardIoUpdate::ArchiveSpacePreviewed {
+                    generation,
+                    older_than_days,
+                    result,
+                },
+            );
+        }
         DashboardAction::SaveSetup {
             generation,
             original,

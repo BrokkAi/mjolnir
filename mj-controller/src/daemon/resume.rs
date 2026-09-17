@@ -219,7 +219,7 @@ impl RuntimeState {
                     tracing::info!(
                         %session_id,
                         older_than_days,
-                        "archived a stopped session: SessionWiki keeps the conversation and the repository keeps the branch"
+                        "archived a stopped session: SessionWiki keeps the conversation, and the repository keeps the branch unless another branch already contains it"
                     );
                 }
                 Err(error) => tracing::warn!(
@@ -238,13 +238,14 @@ impl RuntimeState {
 
     /// Destroy a stopped session the way the archive job wants: the record,
     /// the checkpoint, and the attachments go, and the session's git branch
-    /// stays in the repository. The conversation itself stays searchable, and
-    /// restorable, through SessionWiki.
+    /// goes only when another branch already contains all of its commits.
+    /// The conversation itself stays searchable, and restorable, through
+    /// SessionWiki.
     async fn archive_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
         self.tear_down_stopped_session(
             session_id,
             LifecycleKind::ArchiveStopped,
-            BranchDisposition::Keep,
+            BranchDisposition::DeleteIfMerged,
         )
         .await
     }

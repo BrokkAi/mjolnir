@@ -51,7 +51,7 @@ mod codex;
 pub use codex::*;
 mod kimi;
 pub use kimi::*;
-mod claude;
+pub(crate) mod claude;
 pub use claude::*;
 mod transcripts;
 pub use transcripts::*;

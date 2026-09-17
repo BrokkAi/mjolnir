@@ -196,8 +196,9 @@ enum LifecycleKind {
     Move,
     ForceStop,
     DestroyStopped,
-    /// The archive job's destruction: the same teardown as `DestroyStopped`
-    /// with the session's git branch kept. Surfaces see it as a destroy.
+    /// The archive job's destruction: the same teardown as `DestroyStopped`,
+    /// with the session's git branch kept unless another branch already
+    /// contains every one of its commits. Surfaces see it as a destroy.
     ArchiveStopped,
     ForceDestroy,
     Cleanup,

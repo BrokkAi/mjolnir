@@ -10,7 +10,7 @@ it changes, and what has to happen before a Mjolnir release.
 
 - Fork: `https://github.com/jbellis/sessionwiki`, remote `origin` in the local
   checkout at `../sessionwiki`. Upstream is remote `upstream`.
-- Branch `mj-embed`: the three library changes on top of upstream `main` at
+- Branch `mj-embed`: the library changes on top of upstream `main` at
   version 0.28.0. This is what Mjolnir depends on.
 - Tag `v0.28.0-mj.1` (commit `529b8fe`): the first cut, with the three library
   changes.
@@ -24,7 +24,7 @@ it changes, and what has to happen before a Mjolnir release.
 A tag is created once and never moved after Mjolnir's `Cargo.lock` references
 it in a commit. A further library change gets a new `-mj.N` tag.
 
-## The three library changes
+## The library changes
 
 1. `src/index.rs`: `pub fn sync_with(conn, adapters, since)` holds what was the
    body of `sync_bounded`, and `sync_bounded` builds the standard adapter list
@@ -39,6 +39,12 @@ it in a commit. A further library change gets a new `-mj.N` tag.
 3. `src/commands.rs`: `pub fn brief_markdown(session, max_chars, include_tools)`
    exposes the existing private `brief_text` renderer so Mjolnir's preview pane
    and `/wiki/sessions/{id}/brief` produce the same briefing as the CLI.
+4. `src/adapters/codex.rs` and `src/adapters/claude_code.rs`:
+   `Codex::in_home(home)` and `ClaudeCode::in_home(home)` build an adapter for
+   one install root instead of the stock `~/.codex` and `~/.claude`. Each keeps
+   its tool name and reports a `reconcile_scope` covering only its own root, so
+   Mjolnir can index every configured profile home without one install's sync
+   archiving another's rows.
 
 Upstream pull request for the embedder hooks:
 <https://github.com/youdie006/sessionwiki/pull/26>. If it is merged, the fork
@@ -70,3 +76,8 @@ command should change to it.
 ## Published
 
 `brokk-sessionwiki` 0.28.0 was published to crates.io on 2026-09-17 from the fork's `publish` branch, commit 33f67f6, tagged `brokk-v0.28.0`. Mjolnir depends on it as `sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }`. To ship a fork change: commit on `mj-embed`, merge into `publish`, bump the version there, `cargo publish`, then bump the version in Mjolnir's root `Cargo.toml` and the install command in `docs/src/content/docs/sessions.md` in the same commit.
+
+`brokk-sessionwiki` 0.29.0 adds the `Codex::in_home` and `ClaudeCode::in_home`
+constructors described above. Mjolnir uses them to index every enabled Codex and
+Claude profile home instead of only the stock ones, so sessions started under a
+profile home such as `~/.codex3` are searchable.

@@ -1,5 +1,11 @@
 use super::*;
 
+use ratatui::style::Style;
+
+use mj_client::quota::API_LABEL;
+
+use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
+
 impl DashboardState {
     pub(crate) fn selected_session(&self) -> Option<&SessionRecord> {
         let selected = self.selected_session_id.as_deref()?;
@@ -262,23 +268,61 @@ impl DashboardState {
     }
 
     /// One row of the profile picker tables: the warning marker, the profile
-    /// id, the harness, and the quota. The picker pads the cells into aligned
-    /// columns and draws the marker's footnote below the table.
+    /// id, the harness, and the two quota percentages remaining. The picker
+    /// pads the cells into aligned columns and draws the marker's footnote
+    /// below the table.
     pub(crate) fn profile_choice(&self, id: &str, harness: HarnessKind) -> PickerChoice {
-        let quota = if self.quota_refreshing.contains(id) {
-            "refreshing".to_string()
-        } else {
-            self.quotas
-                .get(id)
-                .map(ProfileQuota::compact)
-                .unwrap_or_else(|| "refreshing".to_string())
-        };
+        let (weekly, five_hour) = self.profile_quota_cells(id);
         PickerChoice::table(vec![
             guardian_warning_marker(harness),
             PickerCell::text(id),
             PickerCell::text(harness.display_name()),
-            PickerCell::text(quota),
+            weekly,
+            five_hour,
         ])
+    }
+
+    /// The WEEKLY and 5H cells of a profile picker row, as percentages
+    /// remaining coloured by how much headroom they leave. The five-hour cell
+    /// stays blank whenever there is no five-hour figure worth reading: a
+    /// profile that is refreshing, failing, usage-priced, or out of weekly
+    /// quota altogether.
+    fn profile_quota_cells(&self, id: &str) -> (PickerCell, PickerCell) {
+        let plain = |text: &str| (PickerCell::text(text), PickerCell::blank());
+        if self.quota_refreshing.contains(id) {
+            return plain("refreshing");
+        }
+        let Some(quota) = self.quotas.get(id) else {
+            return plain("refreshing");
+        };
+        if quota.error.is_some() {
+            return plain(
+                &quota
+                    .error_label()
+                    .unwrap_or_else(|| "unavailable".to_string()),
+            );
+        }
+        if quota.is_usage_priced() {
+            return plain(API_LABEL);
+        }
+        let Some(weekly) = quota.weekly_window().and_then(quota_remaining_percent) else {
+            return plain("unavailable");
+        };
+        let five_hour = if weekly_quota_exhausted(quota) {
+            None
+        } else {
+            quota.five_hour_window().and_then(quota_remaining_percent)
+        };
+        let percent = |value: u8| {
+            PickerCell::styled(
+                format!("{value}%"),
+                Style::default().fg(headroom_color(value)),
+            )
+        };
+        (
+            percent(weekly),
+            five_hour.map_or_else(PickerCell::blank, percent),
+        )
     }
 
     /// The selected session, if its target template creates a container.

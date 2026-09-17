@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::{
-    buffer_lines, cell_column, config, dashboard_with_session, key, stopped_session,
+    buffer_lines, cell_column, config, dashboard_with_session, drawn, key, point, running_session,
+    stopped_session,
 };
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
@@ -677,8 +678,25 @@ fn action_labels(dashboard: &DashboardState) -> Vec<&'static str> {
         .collect()
 }
 
+/// The footer row's labels and the right-hand column's labels, in that order.
+fn split_action_labels(dashboard: &DashboardState) -> (Vec<&'static str>, Vec<&'static str>) {
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    let labels = |actions: Vec<(SetupControl, &'static str, bool)>| {
+        actions
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect::<Vec<_>>()
+    };
+    (
+        labels(dialog.footer_actions()),
+        labels(dialog.page_actions()),
+    )
+}
+
 #[test]
-fn setup_action_column_offers_only_the_controls_that_apply_to_the_page() {
+fn setup_actions_offer_only_the_controls_that_apply_to_the_page() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     assert_eq!(
@@ -686,11 +704,24 @@ fn setup_action_column_offers_only_the_controls_that_apply_to_the_page() {
         ["Save and Close"],
         "root: no Back, no item actions, and nothing to detect"
     );
+    assert_eq!(
+        split_action_labels(&dashboard),
+        (vec!["Save and Close"], Vec::new()),
+        "root: the footer commit alone, and no column beside the body"
+    );
     choose(&mut dashboard, "targets");
     assert_eq!(
         action_labels(&dashboard),
         ["Back", "Add", "Remove", "Detect machine", "Save and Close"],
         "machines: item actions and the detection only this page offers"
+    );
+    assert_eq!(
+        split_action_labels(&dashboard),
+        (
+            vec!["Back", "Save and Close"],
+            vec!["Add", "Remove", "Detect machine"]
+        ),
+        "machines: navigation in the footer, page actions in the column"
     );
     dashboard.handle_key(key(KeyCode::Backspace));
     choose(&mut dashboard, "bundles");
@@ -719,6 +750,11 @@ fn setup_action_column_offers_only_the_controls_that_apply_to_the_page() {
         ["Back", "Use default", "Apply"],
         "text editor"
     );
+    assert_eq!(
+        split_action_labels(&dashboard),
+        (vec!["Back"], vec!["Use default", "Apply"]),
+        "text editor: only Back in the footer, since there is nothing to save yet"
+    );
     activate(&mut dashboard, SetupControl::Back);
     dashboard.handle_key(key(KeyCode::Backspace));
     choose(&mut dashboard, "targets");
@@ -735,7 +771,7 @@ fn setup_action_column_offers_only_the_controls_that_apply_to_the_page() {
 }
 
 #[test]
-fn the_stacked_action_column_leaves_the_widest_row_its_full_width() {
+fn the_root_page_takes_the_full_width_and_shows_only_the_footer_action() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
@@ -747,8 +783,8 @@ fn the_stacked_action_column_leaves_the_widest_row_its_full_width() {
         panic!("settings");
     };
     // The root row is `{name:<32}  {summary}`, the widest line this config
-    // renders. The column sits beside the body, so a dialog sized without
-    // it would cut the summary off where the column begins.
+    // renders. The root page has no actions of its own, so the body keeps the
+    // whole width and nothing may clip that row.
     let summary = value_summary(
         &[],
         "targets",
@@ -761,18 +797,75 @@ fn the_stacked_action_column_leaves_the_widest_row_its_full_width() {
         .iter()
         .find(|line| line.contains("Machines and Runtimes"))
         .unwrap_or_else(|| panic!("missing the machines row in\n{}", lines.join("\n")));
-    assert!(
-        line.contains(&row),
-        "the action column clipped the page row: {line:?}"
+    assert!(line.contains(&row), "the page row was clipped: {line:?}");
+    let text = lines.join("\n");
+    // Save and Close is the only action the root page offers, and it sits in
+    // the footer row rather than a column beside the body.
+    for absent in ["  Back  ", "  Add  ", "  Remove  ", "  Detect machine  "] {
+        assert!(
+            !text.contains(absent),
+            "{absent:?} on the root page:\n{text}"
+        );
+    }
+    let (save_column, save_row) = point(&lines, "  Save and Close  ");
+    assert_eq!(
+        save_column,
+        cell_column(line, &row),
+        "the footer is not packed to the body's left edge:\n{text}"
     );
-    let save = lines
-        .iter()
-        .find(|line| line.contains("  Save and Close  "))
-        .unwrap_or_else(|| panic!("missing the save button in\n{}", lines.join("\n")));
-    let column = cell_column(save, "Save and Close");
+    let (_, body_row) = point(&lines, &row);
     assert!(
-        cell_column(line, &row) + row.chars().count() as u16 <= column,
-        "the row runs into the action column at {column}: {line:?}"
+        save_row > body_row,
+        "the footer is not below the body:\n{text}"
+    );
+}
+
+#[test]
+fn a_collection_page_stacks_its_own_actions_above_the_footer_row() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "targets");
+    let lines = drawn(&mut dashboard, 100, 30);
+    let text = lines.join("\n");
+    // Back and the commit share one left-packed row at the dialog's bottom.
+    let (back_column, back_row) = point(&lines, "  Back  ");
+    let (save_column, save_row) = point(&lines, "  Save and Close  ");
+    assert_eq!(back_row, save_row, "the footer buttons split rows:\n{text}");
+    assert!(
+        back_column < save_column,
+        "Back does not lead the footer row:\n{text}"
+    );
+    let body_column = point(&lines, "podman").0;
+    assert_eq!(
+        back_column, body_column,
+        "the footer is not packed to the body's left edge:\n{text}"
+    );
+    // The page's own actions stay stacked at the dialog's right edge, above
+    // the footer row.
+    let stacked = ["  Add  ", "  Remove  ", "  Detect machine  "].map(|label| point(&lines, label));
+    for (column, row) in stacked {
+        assert_eq!(
+            column, stacked[0].0,
+            "the page actions do not share a column:\n{text}"
+        );
+        assert!(
+            row < back_row,
+            "a page action sits on or below the footer row:\n{text}"
+        );
+        assert!(
+            column > save_column,
+            "a page action is not at the dialog's right edge:\n{text}"
+        );
+    }
+    assert!(
+        stacked[0].1 + 1 == stacked[1].1 && stacked[1].1 + 1 == stacked[2].1,
+        "the page actions are not stacked in order: {stacked:?}\n{text}"
+    );
+    // The widest button ends against the inner margin and the modal border.
+    let detect = &lines[usize::from(stacked[2].1)];
+    assert!(
+        detect.contains("Detect machine   │"),
+        "the column is not packed against the right edge: {detect:?}"
     );
 }
 
@@ -817,9 +910,9 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
         let lines = buffer_lines(terminal.backend().buffer());
         let text = lines.join("\n");
         assert!(text.contains("Settings › Machines and Runtimes"), "{text}");
-        // Every button keeps its own row in one column at the dialog's
+        // Every page action keeps its own row in one column at the dialog's
         // right edge, on top of each other rather than spread along a row.
-        let labels = ["Back", "Add", "Remove", "Detect machine", "Save and Close"];
+        let labels = ["Add", "Remove", "Detect machine"];
         let width = labels
             .iter()
             .map(|label| label.len())
@@ -859,13 +952,15 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
             rows.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0),
             "the stacked buttons leave gaps between them: {rows:?}\n{text}"
         );
-        let save_row = lines
-            .iter()
-            .find(|line| line.contains("Save and Close"))
-            .expect("save row");
-        let tail = &save_row[save_row.find("Save and Close").unwrap() + "Save and Close".len()..];
-        // Button padding, the inner margin, then the modal border.
-        assert!(tail.starts_with("   │"), "{save_row}");
+        // Back and the commit share the footer row below the column.
+        let (back_column, back_row) = point(&lines, "  Back  ");
+        let (save_column, save_row) = point(&lines, "  Save and Close  ");
+        assert_eq!(back_row, save_row, "{text}");
+        assert!(back_column < save_column, "{text}");
+        assert!(
+            rows.iter().all(|(row, _, _)| (*row as u16) < back_row),
+            "the column overlaps the footer row: {rows:?}\n{text}"
+        );
         assert!(!text.contains("Cancel"), "{text}");
         // Backspace from the root dismisses through the dirty guard.
         dashboard.handle_key(key(KeyCode::Backspace));
@@ -1196,5 +1291,120 @@ fn empty_archive_after_days_renders_as_never() {
             None,
         ),
         "Automatic / default"
+    );
+}
+
+#[test]
+fn the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim() {
+    use mj_core::state::ArchiveSpacePreview;
+    let used = ArchiveSpacePreview {
+        sessions: 40,
+        bytes: 5_153_960_755,
+        reclaimable_sessions: 0,
+        reclaimable_bytes: 0,
+    };
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "sessionwiki")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+
+    // Entering the page measures what sessions use now, exactly once.
+    let DashboardAction::PreviewArchiveSpace {
+        generation,
+        older_than_days: None,
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("entering the page must ask for the space sessions use");
+    };
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Down)),
+        DashboardAction::None
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    let mut rendered = |dashboard: &mut DashboardState| {
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        buffer_lines(terminal.backend().buffer()).join("\n")
+    };
+    assert!(rendered(&mut dashboard).contains("Resolving…"));
+
+    dashboard.archive_space_previewed(generation, None, Ok(used.clone()));
+    let never = rendered(&mut dashboard);
+    assert!(
+        never.contains("Never · sessions use 4.8G"),
+        "the row must report the space sessions use:\n{never}"
+    );
+
+    // Typing a number asks again for that number, keystroke by keystroke.
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "archive_after_days")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('3'))),
+        DashboardAction::PreviewArchiveSpace {
+            generation,
+            older_than_days: Some(3),
+        }
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('0'))),
+        DashboardAction::PreviewArchiveSpace {
+            generation,
+            older_than_days: Some(30),
+        }
+    );
+
+    // The answer for the value already typed past is dropped.
+    dashboard.archive_space_previewed(
+        generation,
+        Some(3),
+        Ok(ArchiveSpacePreview {
+            reclaimable_sessions: 39,
+            reclaimable_bytes: 5_000_000_000,
+            ..used.clone()
+        }),
+    );
+    let stale = rendered(&mut dashboard);
+    assert!(
+        !stale.contains("39 sessions"),
+        "an answer for a value typed past must not be shown:\n{stale}"
+    );
+
+    dashboard.archive_space_previewed(
+        generation,
+        Some(30),
+        Ok(ArchiveSpacePreview {
+            reclaimable_sessions: 12,
+            reclaimable_bytes: 1_288_490_188,
+            ..used
+        }),
+    );
+    // The open editor covers the page, so while typing the estimate sits
+    // under the input, without repeating the number being typed; closing the
+    // editor puts the estimate, with the value, back in the row.
+    let editing = rendered(&mut dashboard);
+    assert!(
+        editing.contains("would reclaim 1.2G of 4.8G (12 of 40 sessions)")
+            && !editing.contains("30 · would reclaim"),
+        "the editor must show what the typed value would reclaim:\n{editing}"
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    let reclaim = rendered(&mut dashboard);
+    assert!(
+        reclaim.contains("30 · would reclaim 1.2G of 4.8G (12 of 40 sessions)"),
+        "the row must report what the saved value would reclaim:\n{reclaim}"
     );
 }

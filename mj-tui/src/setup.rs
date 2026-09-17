@@ -107,6 +107,9 @@ pub(crate) struct SetupDialog {
     /// The host-resolved values behind the blank fields of the build cache
     /// page being viewed, keyed by the settings they were resolved from.
     build_cache_preview: Option<BuildCachePreviewState>,
+    /// What the SessionWiki page's archive window would reclaim, keyed by the
+    /// number of days it was measured for.
+    archive_space_preview: Option<ArchiveSpacePreviewState>,
     preferred_width: u16,
     preferred_height: u16,
 }
@@ -117,6 +120,21 @@ struct BuildCachePreviewState {
     /// edit that changes them starts a new resolution.
     key: Value,
     result: BuildCachePreviewResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveSpacePreviewState {
+    /// The `archive_after_days` value the answer is about; `None` is the
+    /// "Never" case, which still reports the space sessions use today.
+    key: Option<u32>,
+    result: ArchiveSpacePreviewResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArchiveSpacePreviewResult {
+    Resolving,
+    Ready(mj_core::state::ArchiveSpacePreview),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +249,12 @@ fn value_summary(
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
         Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path).to_owned()),
-        _ => schema::choice_label(&child_path, value),
+        // The archive window's live estimate carries the value itself, so it
+        // replaces the number as well as the "Never" placeholder.
+        _ => match automatic.filter(|_| key == "archive_after_days") {
+            Some(label) => label,
+            None => schema::choice_label(&child_path, value),
+        },
     };
     if !value.is_object()
         && !value.is_array()
@@ -315,20 +338,16 @@ fn preferred_size(draft: &Value) -> SetupSize {
     let mut max_width = 0usize;
     let mut max_height = 20;
     walk(&[], draft, draft, &mut max_width, &mut max_height);
-    // Actions stack in a column at the page's right edge, so the dialog is as
-    // wide as the widest page body plus that column, rather than the whole
-    // action set laid out in a row. Every label any page can show has to fit,
-    // rewrites included.
+    // The page's own actions stack in a column at its right edge, so the
+    // dialog is as wide as the widest page body plus that column. Back and the
+    // commit sit in the footer row instead and take no width here.
     let column = [
-        "Back",
         "Add",
         "Create",
         "Remove",
         "Detect machine",
         "Use default",
         "Apply",
-        "Save and Close",
-        "Saving…",
     ]
     .iter()
     .map(|label| Line::raw(*label).width() + 4)
@@ -341,7 +360,8 @@ fn preferred_size(draft: &Value) -> SetupSize {
         width: u16::try_from(max_width.saturating_add(4))
             .unwrap_or(u16::MAX)
             .clamp(64, 96),
-        height: max_height.clamp(20, 32),
+        // One extra row over the page body for the footer action row.
+        height: max_height.saturating_add(1).clamp(21, 33),
     }
 }
 
@@ -377,6 +397,7 @@ impl SetupDialog {
             discovering: false,
             notice: None,
             build_cache_preview: None,
+            archive_space_preview: None,
             preferred_width: preferred.width,
             preferred_height: preferred.height,
         };
@@ -461,6 +482,24 @@ impl SetupDialog {
             !self.saving,
         ));
         actions
+    }
+
+    /// The actions drawn in the dialog's footer row: the way back out of a
+    /// page and the commit that closes the dialog.
+    fn footer_actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
+        self.actions()
+            .into_iter()
+            .filter(|(id, _, _)| matches!(id, SetupControl::Back | SetupControl::Save))
+            .collect()
+    }
+
+    /// The actions that belong to the page itself, stacked in the column at
+    /// the dialog's right edge.
+    fn page_actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
+        self.actions()
+            .into_iter()
+            .filter(|(id, _, _)| !matches!(id, SetupControl::Back | SetupControl::Save))
+            .collect()
     }
 
     fn prepare(&mut self) {
@@ -741,6 +780,97 @@ impl SetupDialog {
             },
         };
         Some(label)
+    }
+
+    /// The `archive_after_days` value the SessionWiki page is showing right
+    /// now: the text being typed when that editor is open, otherwise the
+    /// saved value. The outer `None` means no SessionWiki page is showing, so
+    /// there is nothing to estimate.
+    fn archive_after_days_page(&self) -> Option<Option<u32>> {
+        if !self.path.iter().map(String::as_str).eq(["sessionwiki"]) {
+            return None;
+        }
+        if let Some(editor) = self.editor.as_ref().filter(|editor| {
+            editor
+                .path
+                .last()
+                .is_some_and(|key| key == "archive_after_days")
+        }) {
+            // A half-typed or cleared number means "Never" until it parses.
+            return Some(editor.input.to_string().trim().parse::<u32>().ok());
+        }
+        // The draft keeps an edited number as text until it is saved, so both
+        // shapes have to read the same.
+        Some(match &self.draft["sessionwiki"]["archive_after_days"] {
+            Value::String(text) => text.trim().parse::<u32>().ok(),
+            value => value.as_u64().and_then(|days| u32::try_from(days).ok()),
+        })
+    }
+
+    /// Start measuring what the SessionWiki page's current archive window
+    /// would reclaim, unless that value is already measured or in flight.
+    fn preview_archive_space_action(&mut self) -> DashboardAction {
+        let Some(older_than_days) = self.archive_after_days_page() else {
+            return DashboardAction::None;
+        };
+        if self
+            .archive_space_preview
+            .as_ref()
+            .is_some_and(|preview| preview.key == older_than_days)
+        {
+            return DashboardAction::None;
+        }
+        self.archive_space_preview = Some(ArchiveSpacePreviewState {
+            key: older_than_days,
+            result: ArchiveSpacePreviewResult::Resolving,
+        });
+        DashboardAction::PreviewArchiveSpace {
+            generation: self.generation,
+            older_than_days,
+        }
+    }
+
+    /// What the SessionWiki page shows in the value column of "Archive after
+    /// (days)": the value, then the space sessions use today and what that
+    /// value would reclaim. Replaces the plain number, not just the placeholder.
+    fn archive_space_automatic_label(&self, field: &str) -> Option<String> {
+        if field != "archive_after_days" {
+            return None;
+        }
+        let key = self.archive_after_days_page()?;
+        let estimate = self.archive_space_estimate()?;
+        Some(match key {
+            None => estimate,
+            Some(days) => format!("{days} · {estimate}"),
+        })
+    }
+
+    /// The estimate for the archive window the SessionWiki page is showing,
+    /// without the value itself: under the open editor the value is the text
+    /// being typed, so repeating it would only add noise.
+    fn archive_space_estimate(&self) -> Option<String> {
+        let key = self.archive_after_days_page()?;
+        let preview = self.archive_space_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        Some(match &preview.result {
+            ArchiveSpacePreviewResult::Resolving => "Resolving…".to_owned(),
+            ArchiveSpacePreviewResult::Failed(_) => "Unknown".to_owned(),
+            ArchiveSpacePreviewResult::Ready(preview) => match key {
+                None => format!(
+                    "Never · sessions use {}",
+                    crate::widgets::format_resource_bytes(preview.bytes)
+                ),
+                Some(_) => format!(
+                    "would reclaim {} of {} ({} of {} sessions)",
+                    crate::widgets::format_resource_bytes(preview.reclaimable_bytes),
+                    crate::widgets::format_resource_bytes(preview.bytes),
+                    preview.reclaimable_sessions,
+                    preview.sessions
+                ),
+            },
+        })
     }
 
     fn apply_editor(&mut self, clear: bool) -> Result<(), String> {
@@ -1304,6 +1434,9 @@ impl DashboardState {
         if action == DashboardAction::None {
             action = dialog.preview_build_cache_action();
         }
+        if action == DashboardAction::None {
+            action = dialog.preview_archive_space_action();
+        }
         dialog.prepare();
         self.mode = Mode::Setup(dialog);
         action
@@ -1350,6 +1483,40 @@ impl DashboardState {
             },
         });
         dialog.notice = Some(notice);
+        dialog.prepare();
+    }
+
+    /// Take the space an archive window would reclaim, dropping an answer the
+    /// user has already typed past.
+    pub fn archive_space_previewed(
+        &mut self,
+        generation: u64,
+        older_than_days: Option<u32>,
+        result: Result<mj_core::state::ArchiveSpacePreview, String>,
+    ) {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            return;
+        };
+        if dialog.generation != generation
+            || dialog
+                .archive_space_preview
+                .as_ref()
+                .is_none_or(|preview| preview.key != older_than_days)
+        {
+            return;
+        }
+        // The estimate itself is drawn beside the value; the notice line only
+        // carries a failure to measure.
+        if let Err(error) = &result {
+            dialog.notice = Some(format!("Could not measure what sessions use: {error}"));
+        }
+        dialog.archive_space_preview = Some(ArchiveSpacePreviewState {
+            key: older_than_days,
+            result: match result {
+                Ok(preview) => ArchiveSpacePreviewResult::Ready(preview),
+                Err(error) => ArchiveSpacePreviewResult::Failed(error),
+            },
+        });
         dialog.prepare();
     }
 
@@ -1512,22 +1679,27 @@ pub(crate) fn render_setup(
         frame.render_widget(theme::modal().title(title), popup);
         let layout = mj_chat::components::DialogShell::layout(inner, 0);
         // Too short for the page body: keep only the way out and the commit.
-        let actions = dialog
-            .actions()
+        let footer = dialog.footer_actions();
+        let page_actions = dialog
+            .page_actions()
             .into_iter()
-            .filter(|(id, _, _)| matches!(id, Back | Apply | Save))
+            .filter(|(id, _, _)| matches!(id, Apply))
             .collect::<Vec<_>>();
         let ColumnSplit {
             body: message,
             actions: column,
-        } = form.split_actions(layout.body, &actions);
+        } = split_page(&form, layout.body, &page_actions);
         frame.render_widget(
             Paragraph::new("Enlarge the terminal to edit these settings.")
                 .wrap(Wrap { trim: false }),
             message,
         );
-        let initial = actions.first().map_or(Save, |(id, _, _)| *id);
-        Dialog::render_actions_stacked(frame, column, &actions, &mut form, ColumnAlign::Right);
+        let initial = footer
+            .first()
+            .or(page_actions.first())
+            .map_or(Save, |(id, _, _)| *id);
+        Dialog::render_actions_stacked(frame, column, &page_actions, &mut form, ColumnAlign::Right);
+        Dialog::render_actions(frame, layout.actions, &footer, &mut form);
         form.end_frame(initial);
         return;
     }
@@ -1569,17 +1741,23 @@ pub(crate) fn render_setup(
         inner.width,
         inner.height.saturating_sub(7 + u16::from(nested)).max(1),
     );
+    // Back and the commit share the dialog's bottom row; the page's own
+    // actions stack in a column beside the body.
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    // The actions form a column beside the page body rather than a footer row,
-    // so the body gives up exactly the width that column needs.
+    let footer = dialog.footer_actions();
+    let page_actions = dialog.page_actions();
+    // The body gives up exactly the width the column needs, and the whole
+    // width on a page that has no actions of its own.
     let ColumnSplit {
         body,
         actions: column,
-    } = form.split_actions(band, &dialog.actions());
+    } = split_page(&form, band, &page_actions);
     let notice = dialog.notice.as_ref();
     // A column taller than the body may also use the rows the notice would
-    // occupy, but only while no notice is showing in them.
+    // occupy, but only while no notice is showing in them, and never the
+    // footer's row.
     let column = if notice.is_some() {
         column
     } else {
@@ -1587,7 +1765,7 @@ pub(crate) fn render_setup(
             column.x,
             column.y,
             column.width,
-            inner.bottom().saturating_sub(column.y),
+            footer_row.y.saturating_sub(column.y),
         )
     };
     let title = dismissible_modal_title(
@@ -1615,6 +1793,20 @@ pub(crate) fn render_setup(
         match &editor.input {
             EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
+        }
+        // The archive window's estimate follows the number as it is typed, so
+        // it sits right under the input rather than on the notice line.
+        if editor
+            .path
+            .last()
+            .is_some_and(|key| key == "archive_after_days")
+            && body.height > 2
+            && let Some(estimate) = dialog.archive_space_estimate()
+        {
+            frame.render_widget(
+                Paragraph::new(estimate).style(theme::muted()),
+                Rect::new(body.x, body.y + 2, body.width, 1),
+            );
         }
         initial = Field;
     } else {
@@ -1653,7 +1845,9 @@ pub(crate) fn render_setup(
                             key,
                             value,
                             &dialog.draft,
-                            dialog.build_cache_automatic_label(key),
+                            dialog
+                                .build_cache_automatic_label(key)
+                                .or_else(|| dialog.archive_space_automatic_label(key)),
                         )
                     } else {
                         String::new()
@@ -1680,23 +1874,20 @@ pub(crate) fn render_setup(
         initial = List;
     }
     if choice_editor {
-        // Inert copy of the column, built from the same list so it cannot
-        // drift from what the page shows when no popup covers it.
+        // Inert copies of the column and the footer, built from the same lists
+        // so they cannot drift from what the page shows when no popup covers
+        // them.
         Dialog::render_actions_stacked_inert(
             frame,
             column,
-            &dialog.actions(),
+            &page_actions,
             &form,
             ColumnAlign::Right,
         );
+        Dialog::render_actions_inert(frame, footer_row, &footer, &form);
     } else {
-        Dialog::render_actions_stacked(
-            frame,
-            column,
-            &dialog.actions(),
-            &mut form,
-            ColumnAlign::Right,
-        );
+        Dialog::render_actions_stacked(frame, column, &page_actions, &mut form, ColumnAlign::Right);
+        Dialog::render_actions(frame, footer_row, &footer, &mut form);
     }
     if choice_editor {
         let editor = dialog.editor.as_ref().expect("choice editor");
@@ -1746,6 +1937,24 @@ pub(crate) fn render_setup(
         );
     }
     form.end_frame(initial);
+}
+
+/// Splits a settings page into its body and the stacked column of `actions`.
+///
+/// A page with no actions of its own keeps the full width; splitting on an
+/// empty list would still surrender the body gap to an empty column.
+fn split_page(
+    form: &Dialog<SetupControl>,
+    area: Rect,
+    actions: &[(SetupControl, &'static str, bool)],
+) -> ColumnSplit {
+    if actions.is_empty() {
+        return ColumnSplit {
+            body: area,
+            actions: Rect::new(area.right(), area.y, 0, area.height),
+        };
+    }
+    form.split_actions(area, actions)
 }
 
 #[cfg(test)]

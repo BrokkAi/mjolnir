@@ -428,7 +428,7 @@ pub(super) fn git_branch_or_head(cwd: &Path) -> String {
         .unwrap_or_else(|| "HEAD".into())
 }
 
-pub(super) fn directory_size(path: &Path) -> Result<u64> {
+pub(crate) fn directory_size(path: &Path) -> Result<u64> {
     let mut size = 0_u64;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
