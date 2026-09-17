@@ -432,6 +432,21 @@ fn sync_target_actions_form(dialog: &mut TargetActionsDialog) {
     form.end_frame(DialogControl::TargetList);
 }
 
+/// What one event did to a text-prompt dialog: a modal holding a single text
+/// field with Cancel and Save.
+pub(crate) enum TextPromptOutcome {
+    /// Esc or Cancel. The dialog's owner decides where the cancel goes.
+    Cancel,
+    /// The dialog stays open, whether or not the event changed the value.
+    Edited,
+    /// Save was pressed on an empty value. The notice is already set; the
+    /// dialog stays open.
+    Rejected,
+    /// Save was pressed on a value the dialog can act on. The owner builds
+    /// its own action from it.
+    Submit,
+}
+
 fn clear_dialog_form_geometry(form: &mut Dialog<DialogControl>) {
     // Keep declarations available for keyboard input while the modal is
     // clipped, but discard hitboxes and any in-flight mouse gesture.
@@ -734,12 +749,16 @@ pub(crate) fn render_import_bundle_confirmation(
     form.end_frame(DialogControl::ImportContinue);
 }
 
-/// Editable per-session container provisioning inputs: the size overrides and
-/// the attached host directories. Nothing here is written to config.toml.
-pub(crate) fn render_rename_editor(
+/// Draws a one-field modal: a header line naming what is being renamed, the
+/// field itself, and a Cancel/Save footer. The rename editors are the two
+/// dialogs shaped this way.
+fn render_text_prompt(
     frame: &mut Frame,
     area: Rect,
-    editor: &RenameEditor,
+    form: &RefCell<Dialog<DialogControl>>,
+    value: &TextInput,
+    header: &str,
+    title: &str,
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 60, 8, area);
@@ -748,21 +767,20 @@ pub(crate) fn render_rename_editor(
         vertical: 1,
     });
     if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
+        clear_dialog_form_geometry(&mut form.borrow_mut());
         return;
     }
     frame.render_widget(
-        Paragraph::new(format!("Session: {}", editor.session_id)),
+        Paragraph::new(header),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
+    let mut form = form.borrow_mut();
     form.begin_frame();
-    let title =
-        dismissible_modal_title(&mut form, popup, "Rename session", theme::title(true), true);
+    let title = dismissible_modal_title(&mut form, popup, title, theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.title, &mut form, DialogControl::Field);
+    TextField::render(frame, field, value, &mut form, DialogControl::Field);
     Dialog::render_actions(
         frame,
         footer,
@@ -775,52 +793,38 @@ pub(crate) fn render_rename_editor(
     form.end_frame(DialogControl::Field);
 }
 
+pub(crate) fn render_rename_editor(
+    frame: &mut Frame,
+    area: Rect,
+    editor: &RenameEditor,
+    surfaces: &mut FrameSurfaces,
+) {
+    render_text_prompt(
+        frame,
+        area,
+        &editor.form,
+        &editor.title,
+        &format!("Session: {}", editor.session_id),
+        "Rename session",
+        surfaces,
+    );
+}
+
 pub(crate) fn render_config_id_editor(
     frame: &mut Frame,
     area: Rect,
     editor: &ConfigIdEditor,
     surfaces: &mut FrameSurfaces,
 ) {
-    let popup = centered_modal(frame, surfaces, 60, 8, area);
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    if inner.height == 0 {
-        clear_dialog_form_geometry(&mut editor.form.borrow_mut());
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Current {} ID: {}",
-            editor.kind.label(),
-            editor.old_id
-        )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    let mut form = editor.form.borrow_mut();
-    form.begin_frame();
-    let title = dismissible_modal_title(
-        &mut form,
-        popup,
-        format!("Rename {} ID", editor.kind.label()),
-        theme::title(true),
-        true,
-    );
-    frame.render_widget(theme::modal().title(title), popup);
-    TextField::render(frame, field, &editor.value, &mut form, DialogControl::Field);
-    Dialog::render_actions(
+    render_text_prompt(
         frame,
-        footer,
-        &[
-            (DialogControl::Cancel, "Cancel", true),
-            (DialogControl::Save, "Save", true),
-        ],
-        &mut form,
+        area,
+        &editor.form,
+        &editor.value,
+        &format!("Current {} ID: {}", editor.kind.label(), editor.old_id),
+        &format!("Rename {} ID", editor.kind.label()),
+        surfaces,
     );
-    form.end_frame(DialogControl::Field);
 }
 
 pub(crate) fn render_target_actions(
@@ -1823,49 +1827,76 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    /// Routes one event through a text-prompt dialog: the single text field,
+    /// Cancel, and Save with the empty-value check both dialogs make. The
+    /// caller keeps what only it knows: where a cancel goes and what a
+    /// submitted value means.
+    fn handle_text_prompt_event(
+        &self,
+        form: &mut Dialog<DialogControl>,
+        value: &mut TextInput,
+        event: &Event,
+        empty_message: &str,
+    ) -> TextPromptOutcome {
+        let result = form.handle(event);
+        self.last_event_consumed.set(result.consumed);
+        match result.action {
+            Some(Interaction::Cancel | Interaction::Activate(DialogControl::Cancel)) => {
+                TextPromptOutcome::Cancel
+            }
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(value, edit);
+                TextPromptOutcome::Edited
+            }
+            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
+                if value.trim().is_empty() {
+                    self.notices.set(empty_message);
+                    TextPromptOutcome::Rejected
+                } else {
+                    TextPromptOutcome::Submit
+                }
+            }
+            _ => TextPromptOutcome::Edited,
+        }
+    }
+
     pub(crate) fn handle_config_id_event(
         &mut self,
         event: Event,
         mut editor: ConfigIdEditor,
     ) -> DashboardAction {
-        let result = editor.form.get_mut().handle(&event);
-        self.last_event_consumed.set(result.consumed);
-        let interaction = result.action;
-        match interaction {
-            Some(Interaction::Cancel | Interaction::Activate(DialogControl::Cancel)) => {
+        let outcome = self.handle_text_prompt_event(
+            editor.form.get_mut(),
+            &mut editor.value,
+            &event,
+            "Configuration ID cannot be empty.",
+        );
+        match outcome {
+            TextPromptOutcome::Cancel => {
+                // This editor can be reached from the target actions dialog,
+                // which expects to come back when the rename is abandoned.
                 if let Some(parent) = editor.return_to.take() {
                     self.mode = Mode::TargetActions(*parent);
                 } else {
                     self.cancel_modal();
                 }
             }
-            Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                TextField::apply(&mut editor.value, edit);
+            TextPromptOutcome::Edited | TextPromptOutcome::Rejected => {
                 self.mode = Mode::ConfigId(editor);
             }
-            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
-                if editor.value.trim().is_empty() {
-                    self.notices.set("Configuration ID cannot be empty.");
-                    self.mode = Mode::ConfigId(editor);
-                } else {
-                    self.cancel_modal();
-                    match editor.kind {
-                        ConfigEntryKind::Profile => {
-                            return DashboardAction::RenameProfile {
-                                old_id: editor.old_id,
-                                new_id: editor.value.into_value(),
-                            };
-                        }
-                        ConfigEntryKind::Target => {
-                            return DashboardAction::RenameTarget {
-                                old_id: editor.old_id,
-                                new_id: editor.value.into_value(),
-                            };
-                        }
-                    }
-                }
+            TextPromptOutcome::Submit => {
+                self.cancel_modal();
+                return match editor.kind {
+                    ConfigEntryKind::Profile => DashboardAction::RenameProfile {
+                        old_id: editor.old_id,
+                        new_id: editor.value.into_value(),
+                    },
+                    ConfigEntryKind::Target => DashboardAction::RenameTarget {
+                        old_id: editor.old_id,
+                        new_id: editor.value.into_value(),
+                    },
+                };
             }
-            _ => self.mode = Mode::ConfigId(editor),
         }
         DashboardAction::None
     }
@@ -2140,31 +2171,27 @@ impl DashboardState {
         event: Event,
         mut editor: RenameEditor,
     ) -> DashboardAction {
-        let result = editor.form.get_mut().handle(&event);
-        self.last_event_consumed.set(result.consumed);
-        let interaction = result.action;
-        match interaction {
-            Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
-                self.cancel_modal();
-            }
-            Some(Interaction::Edit(DialogControl::Field, edit)) => {
-                TextField::apply(&mut editor.title, edit);
+        let outcome = self.handle_text_prompt_event(
+            editor.form.get_mut(),
+            &mut editor.title,
+            &event,
+            "Session name cannot be empty.",
+        );
+        match outcome {
+            TextPromptOutcome::Cancel => self.cancel_modal(),
+            TextPromptOutcome::Edited => self.mode = Mode::Rename(editor),
+            TextPromptOutcome::Rejected => {
+                // Put the caret back where the missing name has to be typed.
+                editor.form.get_mut().focus(DialogControl::Field);
                 self.mode = Mode::Rename(editor);
             }
-            Some(Interaction::Activate(DialogControl::Field | DialogControl::Save)) => {
-                if editor.title.trim().is_empty() {
-                    self.notices.set("Session name cannot be empty.");
-                    editor.form.get_mut().focus(DialogControl::Field);
-                    self.mode = Mode::Rename(editor);
-                } else {
-                    self.cancel_modal();
-                    return DashboardAction::RenameSession {
-                        session_id: editor.session_id,
-                        title: editor.title.into_value(),
-                    };
-                }
+            TextPromptOutcome::Submit => {
+                self.cancel_modal();
+                return DashboardAction::RenameSession {
+                    session_id: editor.session_id,
+                    title: editor.title.into_value(),
+                };
             }
-            _ => self.mode = Mode::Rename(editor),
         }
         DashboardAction::None
     }
