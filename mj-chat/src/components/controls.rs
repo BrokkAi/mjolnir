@@ -179,6 +179,38 @@ impl ButtonRow {
             start = end.saturating_add(1);
         }
     }
+
+    /// Draws the row as inert text, registering no hitboxes.
+    ///
+    /// A page that stays visible behind a popup draws this mirror so its
+    /// controls keep their places, while a click on the overlay covering them
+    /// cannot reach a control behind it.
+    pub fn render_inert(frame: &mut Frame<'_>, area: Rect, labels: &[&str]) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let mut start = 0usize;
+        for label in labels {
+            if start >= usize::from(area.width) {
+                return;
+            }
+            let width = usize::from(button_width(label));
+            let visible = width.min(usize::from(area.width) - start);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("  {label}  "),
+                    theme::muted(),
+                ))),
+                Rect::new(
+                    area.x.saturating_add(start as u16),
+                    area.y,
+                    visible as u16,
+                    1,
+                ),
+            );
+            start = start.saturating_add(width).saturating_add(1);
+        }
+    }
 }
 
 /// Which edge of its area a [`ButtonColumn`] packs against when it fits.
@@ -874,10 +906,14 @@ impl ChoiceList {
         } else {
             vec![true; rows.len()]
         };
+        // `len` counts items, not display rows: the host declares the list
+        // between frames with its item count, and a length that disagreed
+        // would read as a different list and drop the registered geometry.
+        let items = mapped.iter().flatten().count();
         form.register_with_rows(
             id,
             ControlKind::ChoiceList {
-                len: rows.len(),
+                len: items,
                 selected,
             },
             area,
