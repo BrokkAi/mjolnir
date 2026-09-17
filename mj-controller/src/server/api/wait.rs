@@ -120,6 +120,10 @@ pub(super) fn build_observation(
     let mut observation = WaitObservation {
         pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
+        resuming: session
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == crate::server::ViewerOperationKind::Resume),
         launch_failed: snapshot
             .launch_failures
             .iter()

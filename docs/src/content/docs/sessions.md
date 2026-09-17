@@ -130,6 +130,23 @@ Resume provisions a fresh target and restores the verified archive; it does not 
 
 Cross-harness resume is supported. When the new profile uses a different harness, Mjolnir condenses the canonical transcript into a size-bounded handoff. The repository state and visible conversation survive, but harness-private implementation details do not become portable history.
 
+### Resume from a script
+
+```text
+mj resume --session <id> [--profile <id>] [--target <id>] [--queue start|discard]
+mj wait --session <id>
+```
+
+`mj resume` runs the same operation as the wizard, without one. The session's
+own record supplies the profile and target when the command names none, so
+closing a session after capture and continuing it later is scriptable:
+`mj close --session <id>`, then `mj resume --session <id>` when you want it
+back. The command answers as soon as the daemon has taken the session; `mj wait`
+blocks while the resume runs and reports the reason if it fails. Afterwards
+`mj set-config` and `mj prompt` work as they do for any live session. The same
+operation is `POST /api/v1/sessions/{id}/resume` in the
+[HTTP API](/api-reference/#resume-a-stopped-session).
+
 ### Resume a local session into a container
 
 A session that runs the agent in a directory on this machine can resume on an

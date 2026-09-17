@@ -2048,3 +2048,155 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["outcome"], "input_required");
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
+
+/// Make the fixture session look the way `mj close` leaves one: stopped, with
+/// resume as the thing it can do next.
+fn make_stopped(snapshot: &mut ViewerSnapshot) {
+    snapshot.workspaces.push(super::super::ViewerWorkspace {
+        id: snapshot.sessions[0].workspace_id.clone(),
+        name: "default".into(),
+    });
+    let session = &mut snapshot.sessions[0];
+    session.state = "stopped".into();
+    session.lifecycle = ViewerLifecycleCategory::Stopped;
+    session.capabilities.resume = true;
+    session.capabilities.prompt = false;
+    session.incompatible_resume_targets.clear();
+    session.compatible_resume_targets = vec!["podman".into(), "raw".into()];
+}
+
+#[tokio::test]
+async fn resuming_a_stopped_session_uses_its_recorded_settings_and_answers_before_it_is_up() {
+    let (app, mut actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), make_stopped);
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            queue: mj_core::state::ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    // The route answers once the daemon has taken the session, so a caller's
+    // next `wait` cannot see it as plain stopped.
+    publish_resume_started(&snapshot_tx);
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["profile_id"], "codex-1");
+    assert_eq!(body["target_id"], "podman");
+}
+
+/// What the daemon publishes once its resume lifecycle owns the session.
+fn publish_resume_started(snapshot_tx: &watch::Sender<ViewerSnapshot>) {
+    snapshot_tx.send_modify(|snapshot| {
+        snapshot.sessions[0].state = "provisioning".into();
+        snapshot.sessions[0].lifecycle = ViewerLifecycleCategory::Starting;
+    });
+}
+
+#[tokio::test]
+async fn a_resume_request_chooses_its_own_target_and_queue_disposition() {
+    let (app, mut actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), make_stopped);
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target_id":"raw","queue":"discard"}"#))
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::Resume {
+        target_id, queue, ..
+    } = &request.action
+    else {
+        panic!("expected a resume action, got {:?}", request.action);
+    };
+    assert_eq!(target_id, "raw");
+    assert_eq!(*queue, mj_core::state::ResumeQueueDisposition::Discard);
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    publish_resume_started(&snapshot_tx);
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+}
+
+#[tokio::test]
+async fn resuming_a_running_session_is_refused_with_the_reason() {
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    let error = body["error"].as_str().unwrap().to_owned();
+    assert!(
+        error.contains("close it before resuming it"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[tokio::test]
+async fn resuming_an_unknown_session_is_not_found() {
+    let (app, _actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), make_stopped);
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-404/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn a_wait_follows_a_running_resume_and_reports_why_a_failed_one_stopped() {
+    // While the resume runs, the durable record still says stopped. Answering
+    // `stopped` there would tell a caller its session will never come up.
+    let mut observation = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Stopped),
+        resuming: true,
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+
+    // The resume failed and rolled the record back, leaving its reason there.
+    observation.resuming = false;
+    observation.launch_error = Some("resume failed: checkpoint archive is missing".into());
+    let decision = resolve_wait(&observation, &WaitRequest::default()).unwrap();
+    assert_eq!(decision.outcome, WaitOutcome::Stopped);
+    assert_eq!(
+        decision.message.as_deref(),
+        Some("resume failed: checkpoint archive is missing")
+    );
+}

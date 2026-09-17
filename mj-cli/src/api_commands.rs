@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::server::api::{
-    ExportKind, ExportRequest, RelayState, StartSessionRequest, WaitOutcome, WaitRequest,
-    WaitResponse,
+    ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest, WaitOutcome,
+    WaitRequest, WaitResponse,
 };
 
 use crate::api_client::{ApiClient, ExportResult};
@@ -341,6 +341,43 @@ pub(crate) struct CloseArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ResumeArgs {
+    /// Stopped, lost, or failed session to resume. It keeps its identity,
+    /// transcript, and work.
+    #[arg(long)]
+    session: String,
+    /// Profile to resume on. Defaults to the one the session last ran.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Target template to provision. Defaults to the session's own.
+    #[arg(long)]
+    target: Option<String>,
+    /// Workspace to resume into. Defaults to the session's own.
+    #[arg(long)]
+    workspace_id: Option<String>,
+    /// What to do with prompts queued when the session stopped.
+    #[arg(long, value_enum)]
+    queue: Option<ResumeQueueArg>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ResumeQueueArg {
+    Start,
+    Discard,
+}
+
+impl From<ResumeQueueArg> for mj_core::state::ResumeQueueDisposition {
+    fn from(queue: ResumeQueueArg) -> Self {
+        match queue {
+            ResumeQueueArg::Start => Self::Start,
+            ResumeQueueArg::Discard => Self::Discard,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ApiInfoArgs {
     #[arg(long)]
     json: bool,
@@ -639,6 +676,36 @@ pub(crate) async fn close(args: CloseArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Resume a stopped session from its checkpoint.
+///
+/// The API answers as soon as the daemon admits the resume, because restoring
+/// an archive onto a fresh target takes minutes. Follow it with
+/// `mj wait --session <id>`, which blocks while the resume runs and reports why
+/// it failed if it does.
+pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let response = client
+        .resume(
+            &args.session,
+            &ResumeSessionRequest {
+                profile_id: args.profile.clone(),
+                target_id: args.target.clone(),
+                workspace_id: args.workspace_id.clone(),
+                queue: args.queue.map(Into::into),
+            },
+        )
+        .await?;
+    if args.json {
+        return print_json(&response);
+    }
+    println!(
+        "resuming {} on profile {} and target {}",
+        response.session_id, response.profile_id, response.target_id
+    );
+    println!("watch it with `mj wait --session {}`", response.session_id);
+    Ok(())
 }
 
 pub(crate) async fn cancel_turn(args: SessionArgs) -> Result<()> {
@@ -971,8 +1038,42 @@ mod tests {
         };
         assert!(!args.force);
 
+        // Resume names the session and nothing else by default: the session's
+        // own record supplies the profile and target.
+        let cli = Cli::try_parse_from(["mj", "resume", "--session", "s1"]).unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.session, "s1");
+        assert_eq!(args.profile, None);
+        assert_eq!(args.target, None);
+        assert_eq!(args.queue, None);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "resume",
+            "--session",
+            "s1",
+            "--profile",
+            "deepseek",
+            "--target",
+            "localhost",
+            "--queue",
+            "discard",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.profile.as_deref(), Some("deepseek"));
+        assert_eq!(args.target.as_deref(), Some("localhost"));
+        assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
+        assert!(args.json);
+
         for (argv, matched) in [
             (vec!["mj", "diff", "--session", "s1"], "diff"),
+            (vec!["mj", "resume", "--session", "s1"], "resume"),
             (vec!["mj", "sessions", "--json"], "sessions"),
             (vec!["mj", "close", "--session", "s1"], "close"),
             (vec!["mj", "cancel-turn", "--session", "s1"], "cancel-turn"),

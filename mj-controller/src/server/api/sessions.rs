@@ -159,6 +159,124 @@ pub(super) async fn start_session(
     ))
 }
 
+/// Resume a stopped session from its checkpoint.
+///
+/// This is the same operation the terminal's Resume wizard and the viewer's
+/// resume card run: the request becomes [`ControllerAction::Resume`], which the
+/// daemon's one resume implementation performs, with its repository preflight,
+/// its conversions, and its cross-harness handoff. Nothing about resuming is
+/// reimplemented here.
+///
+/// Like creation, it answers as soon as the action is admitted: restoring an
+/// archive onto a fresh target takes minutes, so the caller's next call is a
+/// wait, not a held-open request.
+pub(super) async fn resume(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    request: Option<Json<ResumeSessionRequest>>,
+) -> Result<(StatusCode, Json<ResumeSessionResponse>), ApiFailure> {
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let (action, response) = {
+        let snapshot = state.snapshot_rx.borrow();
+        let session = require_session_record(&snapshot, &session_id)?;
+        if !session.capabilities.resume {
+            return Err(ApiFailure::conflict(resume_refusal(session)));
+        }
+        let resolved = |named: Option<String>, recorded: &str, field: &str| match named {
+            Some(value) => Ok(value),
+            None if !recorded.is_empty() => Ok(recorded.to_owned()),
+            None => Err(ApiFailure::bad_request(format!(
+                "this session records no {field}; name one in the request"
+            ))),
+        };
+        let workspace_id = resolved(request.workspace_id, &session.workspace_id, "workspace_id")?;
+        let profile_id = resolved(request.profile_id, &session.profile_id, "profile_id")?;
+        let target_id = resolved(request.target_id, &session.target_id, "target_id")?;
+        (
+            ControllerAction::Resume {
+                session_id: session_id.clone(),
+                workspace_id: workspace_id.clone(),
+                profile_id: profile_id.clone(),
+                target_id: target_id.clone(),
+                queue: request
+                    .queue
+                    .unwrap_or(mj_core::state::ResumeQueueDisposition::Start),
+                // Attached directories and resource sizing are not part of this
+                // request: the controller's resume inherits the session's own
+                // when they are absent, which is what a caller continuing a
+                // session wants.
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            ResumeSessionResponse {
+                session_id: session_id.clone(),
+                workspace_id,
+                profile_id,
+                target_id,
+            },
+        )
+    };
+    let status = send_action(&state, action).await?;
+    await_resume_started(&state, &session_id).await;
+    Ok((status, Json(response)))
+}
+
+/// How long the resume route waits for the daemon to take the session before
+/// answering anyway. Registering the operation costs one state load, so this is
+/// slack rather than a real wait.
+const RESUME_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait until the session is visibly a resume in progress.
+///
+/// Creation answers only once the controller has published its session, so a
+/// caller's next call always sees it. A resume has the same requirement for the
+/// opposite reason: until the daemon registers the operation, the session still
+/// reads as plain `stopped`, and a `wait` issued in between would answer
+/// `stopped` about a session that is on its way up. This waits for the
+/// operation to appear rather than making every client sleep.
+///
+/// It gives up quietly: the action is already accepted, and a resume that
+/// failed before it started is reported by the session's own state.
+async fn await_resume_started(state: &ServerState, session_id: &str) {
+    let mut snapshot_rx = state.snapshot_rx.clone();
+    let deadline = tokio::time::Instant::now() + RESUME_START_TIMEOUT;
+    loop {
+        {
+            let snapshot = snapshot_rx.borrow_and_update();
+            let started = snapshot
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .is_none_or(|session| {
+                    session.operation.is_some() || session.lifecycle.is_dashboard_visible()
+                });
+            if started {
+                return;
+            }
+        }
+        tokio::select! {
+            changed = snapshot_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => return,
+            () = state.shutdown.cancelled() => return,
+        }
+    }
+}
+
+/// Why a session cannot be resumed, in words the caller can act on.
+fn resume_refusal(session: &ViewerSession) -> String {
+    if session.lifecycle.is_dashboard_visible() {
+        return format!(
+            "this session is {}; close it before resuming it",
+            session.state
+        );
+    }
+    "this session has an operation running; wait for it to finish, then resume".to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // SessionWiki
 // ---------------------------------------------------------------------------

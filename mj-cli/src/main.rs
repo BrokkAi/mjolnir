@@ -124,6 +124,8 @@ enum Command {
     Sessions(api_commands::SessionsArgs),
     /// Close a session.
     Close(api_commands::CloseArgs),
+    /// Resume a stopped session from its checkpoint.
+    Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     CancelTurn(api_commands::SessionArgs),
     /// Print the API base URL and where its bearer token lives.
@@ -398,6 +400,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Export(_)) => "export",
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Close(_)) => "close",
+        Some(Command::Resume(_)) => "resume",
         Some(Command::CancelTurn(_)) => "cancel-turn",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
@@ -499,6 +502,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Close(args)) => api_commands::close(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Resume(args)) => api_commands::resume(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::CancelTurn(args)) => api_commands::cancel_turn(args)

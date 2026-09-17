@@ -101,10 +101,17 @@ impl ViewerSnapshot {
                     configuration_issue: session.configuration_issue(config),
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
-                    // the local diagnostic to learn why.
-                    launch_error: (session.state == SessionState::Error)
-                        .then(|| session.last_error.clone())
-                        .flatten(),
+                    // the local diagnostic to learn why. A failed resume rolls
+                    // the record back to stopped and leaves its reason in the
+                    // same field, so that state reports it too; every
+                    // successful transition clears `last_error`, so this never
+                    // reports a failure the session has since recovered from.
+                    launch_error: matches!(
+                        session.state,
+                        SessionState::Error | SessionState::Stopped
+                    )
+                    .then(|| session.last_error.clone())
+                    .flatten(),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),

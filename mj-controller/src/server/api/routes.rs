@@ -19,6 +19,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/usage", get(usage))
         .route("/sessions/{session_id}/wait", post(wait))
         .route("/sessions/{session_id}/close", post(close))
+        .route("/sessions/{session_id}/resume", post(resume))
         .route("/sessions/{session_id}/cancel-turn", post(cancel_turn))
         .route("/sessions/{session_id}/diff", get(diff))
         .route(

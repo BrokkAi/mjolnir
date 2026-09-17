@@ -24,6 +24,11 @@ pub struct WaitObservation {
     pub background_work: Option<ApiBackgroundWork>,
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
+    /// A resume operation owns this session now. Its durable record still says
+    /// stopped — it stays stopped until the archive has been verified — so
+    /// without this a wait would answer `stopped` for a session that is on its
+    /// way up.
+    pub resuming: bool,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
     /// Why the launch failed, when a reason was recorded.
@@ -99,6 +104,8 @@ impl WaitDecision {
 ///
 /// The rules run in order, and the order is the point:
 ///
+/// 0. A resume running for this session ends nothing: it is a session coming
+///    up, and its durable record says stopped until the archive is verified.
 /// 1. A stopped or stopping session ends the wait as `stopped`, superseding
 ///    any initialization result that raced with the close request.
 /// 2. A launch failure or failed initialization is reported before a turn; a durable
@@ -122,10 +129,24 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         observation.execution,
         MaterializedExecutionState::Closing | MaterializedExecutionState::Closed
     );
+    // A resume owns the session: nothing about it has settled yet, and its
+    // durable record still says stopped. The wait keeps waiting; its own
+    // deadline still bounds it.
+    if observation.resuming {
+        return None;
+    }
     if stopping {
         return Some(WaitDecision::simple(
             WaitOutcome::Stopped,
-            Some("the session is stopped or stopping".to_owned()),
+            // A resume that failed rolled the record back to stopped and left
+            // its reason there. Reporting it is the difference between "the
+            // session is stopped" and knowing why it did not come up.
+            Some(
+                observation
+                    .launch_error
+                    .clone()
+                    .unwrap_or_else(|| "the session is stopped or stopping".to_owned()),
+            ),
         ));
     }
     if observation.launch_failed {

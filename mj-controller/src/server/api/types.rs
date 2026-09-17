@@ -112,6 +112,39 @@ pub struct StartSessionRequest {
     pub prompt: Option<String>,
 }
 
+/// Resume a stopped, lost, or failed session. Every field is optional: the
+/// session's own record supplies what the caller does not name, which is what
+/// makes `POST .../resume` with no body the scriptable "continue this session"
+/// call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeSessionRequest {
+    /// Profile to resume on. Defaults to the one the session last ran.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// Target template to provision. Defaults to the session's own.
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// Workspace the resumed session belongs to. Defaults to its own.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Whether prompts queued when the session stopped are started or
+    /// discarded. Defaults to `start`, which is what the terminal's own resume
+    /// wizard defaults to.
+    #[serde(default)]
+    pub queue: Option<mj_core::state::ResumeQueueDisposition>,
+}
+
+/// What a resume was accepted as: the settings it will actually use, resolved
+/// from the request and the session's record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSessionResponse {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub target_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StartSessionResponse {
     pub session_id: String,
