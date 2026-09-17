@@ -269,8 +269,11 @@ large corpus. Until it finishes, the Resume search box cannot be typed into and
 reads **Indexing…**; the tabs and the list keep working, and the box opens by
 itself when the build finishes. What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
-project directory. Each Mjolnir instance indexes only its own sessions, and all
-of them share the tool name `mjolnir`, so one search covers every instance:
+project directory. Native sessions from every enabled profile home are indexed
+too, including Kimi Code, Grok Build, and Muse, under the tool names
+`kimi-code`, `grok-build`, and `muse`. Each Mjolnir instance indexes only its
+own sessions, and all of them share the tool name `mjolnir`, so one search
+covers every instance:
 
 ```sh
 sessionwiki search "flaky migration test"

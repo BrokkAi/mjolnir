@@ -3681,7 +3681,7 @@ fn api_quota_label_uses_the_black_bordered_chart_field() {
 }
 
 #[test]
-fn quota_render_hides_the_five_hour_bar_when_weekly_quota_is_exhausted() {
+fn quota_render_hides_five_hour_bar_and_reset_when_weekly_quota_is_exhausted() {
     let quota = ProfileQuota {
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3726,6 +3726,7 @@ fn quota_render_hides_the_five_hour_bar_when_weekly_quota_is_exhausted() {
 
     assert!(rendered.contains("0%"));
     assert!(!rendered.contains("70%"));
+    assert!(!rendered.contains("4h"));
 }
 
 #[test]
@@ -3815,7 +3816,7 @@ fn five_hour_reset_always_uses_minutes_above_one_hour() {
 }
 
 #[test]
-fn quota_render_uses_weekly_and_five_hour_percentage_columns() {
+fn quota_render_uses_weekly_five_hour_and_reset_columns() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -3860,11 +3861,11 @@ fn quota_render_uses_weekly_and_five_hour_percentage_columns() {
 
     assert!(rendered.contains("Weekly"));
     assert!(rendered.contains("5H"));
-    // The reset countdowns and their heading are gone; only percentages remain.
-    assert!(!rendered.contains("Resets"), "{rendered}");
+    assert_eq!(rendered.matches("Resets").count(), 2);
     assert!(rendered.contains("73%"));
     assert!(rendered.contains("70%"));
-    assert!(!rendered.contains("1h 5m"), "{rendered}");
+    assert!(rendered.contains("2d"));
+    assert!(rendered.contains("1h 5m"));
     assert!(!rendered.contains("09:00 Aug 20"));
 
     let row = lines
@@ -3874,14 +3875,16 @@ fn quota_render_uses_weekly_and_five_hour_percentage_columns() {
     assert!(row.contains("▕███████▎  ▏73%"), "{row:?}");
     assert!(row.contains("▕███████   ▏70%"), "{row:?}");
     let weekly_percent = cell_column(row, "73%");
+    let weekly_reset = cell_column(row, "2d");
     let five_hour_percent = cell_column(row, "70%");
-    // The 5H bar opens one border plus ten cells plus one border before its
-    // percentage, two cells after the weekly percentage ends.
-    assert_eq!(five_hour_percent - 12, weekly_percent + 3 + 2);
+    let five_hour_reset = cell_column(row, "1h 5m");
+    assert_eq!(weekly_reset, weekly_percent + 3 + 1);
+    assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
+    assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
 }
 
 #[test]
-fn quota_render_keeps_both_percentages_at_eighty_columns() {
+fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -3927,4 +3930,6 @@ fn quota_render_keeps_both_percentages_at_eighty_columns() {
         .expect("quota row");
     assert!(row.contains("73%"), "{row:?}");
     assert!(row.contains("70%"), "{row:?}");
+    assert!(row.contains("2d"), "{row:?}");
+    assert!(row.contains("1h 5m"), "{row:?}");
 }

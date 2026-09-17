@@ -9,6 +9,8 @@
 //! SessionWiki can parse, so the indexer enumerates sessions by key and asks
 //! this adapter to parse the ones whose checkpoint changed.
 
+mod harness_adapters;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +27,7 @@ use sessionwiki::model::{Message, Role, Session};
 
 use crate::controller::Controller;
 use crate::controller::checkpoint::managed_checkpoint_archive_name;
+use harness_adapters::HarnessAdapter;
 
 /// The tool name every Mjolnir instance publishes under. One name means one
 /// search partition; reconciliation is scoped per instance instead (see
@@ -593,39 +596,45 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
 
 /// The non-Mjolnir adapters this install indexes.
 ///
-/// Mjolnir's configured harness profiles decide which Codex and Claude homes
-/// are indexed, not the stock `~/.codex` and `~/.claude` locations. A user who
+/// Mjolnir's configured harness profiles decide which harness homes are
+/// indexed, not the stock `~/.codex` and `~/.claude` locations. A user who
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
 /// stock Codex and Claude adapters are dropped and one adapter per enabled
 /// profile home takes their place; every other built-in adapter is kept as is.
 ///
+/// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
+/// Mjolnir supplies one per enabled profile home of its own (see
+/// [`harness_adapters`]). Without them those sessions would never appear in
+/// the Resume dialog's search.
+///
 /// Each per-home adapter reports a reconcile scope covering only its own root,
 /// so a sync of one install never archives the rows of another.
 fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
-    let mut seen: BTreeSet<&Path> = BTreeSet::new();
+    use mj_core::config::HarnessKind;
+
+    // Two profiles may share one home, and two harnesses may share one home
+    // path without sharing sessions, so the kind is part of the identity.
+    let mut seen: BTreeSet<(HarnessKind, &Path)> = BTreeSet::new();
     let mut adapters: Vec<Box<dyn Adapter>> = Vec::new();
     for (_, profile) in config.enabled_profiles() {
-        if !matches!(
-            profile.kind,
-            mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude
-        ) {
+        // A second adapter for the same home would only walk it twice.
+        if !seen.insert((profile.kind, profile.home.as_path())) {
             continue;
         }
-        // Two profiles may share one home; a second adapter for the same root
-        // would only walk it twice.
-        if !seen.insert(profile.home.as_path()) {
-            continue;
-        }
-        if profile.kind == mj_core::config::HarnessKind::Codex {
-            adapters.push(Box::new(sessionwiki::adapters::Codex::in_home(
+        let adapter: Box<dyn Adapter> = match profile.kind {
+            HarnessKind::Codex => {
+                Box::new(sessionwiki::adapters::Codex::in_home(profile.home.clone()))
+            }
+            HarnessKind::Claude => Box::new(sessionwiki::adapters::ClaudeCode::in_home(
                 profile.home.clone(),
-            )));
-        } else {
-            adapters.push(Box::new(sessionwiki::adapters::ClaudeCode::in_home(
-                profile.home.clone(),
-            )));
-        }
+            )),
+            kind => match HarnessAdapter::in_home(kind, profile.home.clone()) {
+                Some(adapter) => Box::new(adapter),
+                None => continue,
+            },
+        };
+        adapters.push(adapter);
     }
     adapters.extend(
         sessionwiki::adapters::all()
@@ -2178,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn native_adapters_cover_every_enabled_codex_and_claude_profile_home() {
+    fn native_adapters_cover_every_enabled_profile_home() {
         use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
         fn profile(kind: HarnessKind, home: &str, enabled: bool) -> HarnessProfile {
@@ -2194,12 +2203,34 @@ mod tests {
 
         let mut config = Config::default();
         for (id, built) in [
-            ("codex", profile(HarnessKind::Codex, "/home/dev/.codex3", true)),
-            ("codex-ds", profile(HarnessKind::Codex, "/home/dev/.codex-ds", true)),
+            (
+                "codex",
+                profile(HarnessKind::Codex, "/home/dev/.codex3", true),
+            ),
+            (
+                "codex-ds",
+                profile(HarnessKind::Codex, "/home/dev/.codex-ds", true),
+            ),
             // A second profile on one home must not add a second adapter.
-            ("codex-alt", profile(HarnessKind::Codex, "/home/dev/.codex3", true)),
-            ("codex-off", profile(HarnessKind::Codex, "/home/dev/.codex-off", false)),
-            ("claude", profile(HarnessKind::Claude, "/home/dev/.claude4", true)),
+            (
+                "codex-alt",
+                profile(HarnessKind::Codex, "/home/dev/.codex3", true),
+            ),
+            (
+                "codex-off",
+                profile(HarnessKind::Codex, "/home/dev/.codex-off", false),
+            ),
+            (
+                "claude",
+                profile(HarnessKind::Claude, "/home/dev/.claude4", true),
+            ),
+            ("kimi", profile(HarnessKind::Kimi, "/home/dev/.kimi", true)),
+            ("grok", profile(HarnessKind::Grok, "/home/dev/.grok", true)),
+            ("muse", profile(HarnessKind::Muse, "/home/dev/muse", true)),
+            (
+                "muse-off",
+                profile(HarnessKind::Muse, "/home/dev/muse-off", false),
+            ),
         ] {
             config.profiles.insert(id.into(), built);
         }
@@ -2245,6 +2276,32 @@ mod tests {
             assert!(
                 !text.ends_with("/.codex/sessions") && !text.ends_with("/.claude/projects"),
                 "the stock homes are not indexed unless a profile names them: {roots:?}"
+            );
+        }
+
+        // SessionWiki has no adapter for these three, so Mjolnir supplies one
+        // per enabled profile home under its own tool name.
+        for (name, root) in [
+            ("kimi-code", PathBuf::from("/home/dev/.kimi/sessions")),
+            ("grok-build", PathBuf::from("/home/dev/.grok/sessions")),
+            (
+                "muse",
+                mj_checkpoint::native::muse_sessions_root(Path::new("/home/dev/muse")).unwrap(),
+            ),
+        ] {
+            let found: Vec<&Option<PathBuf>> = roots
+                .iter()
+                .filter(|(found, _)| *found == name)
+                .map(|(_, root)| root)
+                .collect();
+            assert_eq!(found, vec![&Some(root)], "one {name} adapter: {roots:?}");
+        }
+
+        for (_, root) in &roots {
+            let Some(root) = root else { continue };
+            assert!(
+                !root.to_string_lossy().contains("muse-off"),
+                "a disabled profile must not be indexed: {roots:?}"
             );
         }
 

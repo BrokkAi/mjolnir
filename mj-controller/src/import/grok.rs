@@ -144,7 +144,7 @@ pub fn scan_grok_sessions(
 
 /// Walk `sessions/<encoded-cwd>/<session-uuid>`. The sessions root also holds
 /// the shared search index and lock files, which are not sessions.
-fn grok_candidates(sessions: &Path) -> Result<Vec<KimiScanCandidate>> {
+pub(super) fn grok_candidates(sessions: &Path) -> Result<Vec<KimiScanCandidate>> {
     let mut candidates = Vec::new();
     for cwd_entry in fs::read_dir(sessions)? {
         let cwd_directory = cwd_entry?.path();
@@ -218,7 +218,7 @@ fn url_decode(value: &str) -> Option<String> {
 
 /// Listing title and cwd from `summary.json`. Never fails the whole scan: an
 /// unreadable session is listed with what could be recovered.
-fn grok_listing_metadata(session_path: &Path) -> (Option<String>, Option<PathBuf>) {
+pub(super) fn grok_listing_metadata(session_path: &Path) -> (Option<String>, Option<PathBuf>) {
     let summary = fs::read(session_path.join("summary.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())

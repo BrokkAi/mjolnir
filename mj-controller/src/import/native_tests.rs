@@ -10,12 +10,11 @@ use mj_core::config::{Config, HarnessKind, ProjectBundle, ProjectRepository, Tar
 use mj_core::state::{SessionState, State};
 
 use mj_core::relay::WorkerEvent;
-use serde_json::{Value, json};
 
 use super::tests::initialize_repository;
 use super::*;
 
-const MUSE_ID: &str = "01a08120-6536-7721-8ddf-e0df0e921c2c";
+use super::test_fixtures::{MUSE_ID, write_muse_session};
 
 #[derive(Debug)]
 struct NativeFixture {
@@ -93,74 +92,6 @@ fn fixture(root: &Path, kind: HarnessKind) -> NativeFixture {
         cwd,
         transcript,
     }
-}
-
-fn muse_record(id: &str, sequence: u64, payload_type: &str, payload: Value) -> Value {
-    json!({
-        "schema_version": 1,
-        "id": id,
-        "stream": {"kind": "session", "id": MUSE_ID},
-        "sequence": sequence,
-        "recorded_at": 1_788_872_000_000_000_i64 + sequence as i64,
-        "record_type": "event",
-        "durability": "durable",
-        "payload_type": payload_type,
-        "payload_schema_version": 1,
-        "payload": payload,
-    })
-}
-
-fn write_muse_session(path: &Path, id: &str, cwd: &Path) {
-    let records = [
-        muse_record(
-            "metadata-1",
-            1,
-            "runtime.session.metadata",
-            json!({"kind":"metadata","record":{"workspace_root":cwd,"provider_id":"test"}}),
-        ),
-        muse_record(
-            "metadata-2",
-            2,
-            "runtime.session.metadata",
-            json!({"kind":"metadata","record":{"workspace_root":cwd,"provider_id":"test"}}),
-        ),
-        muse_record(
-            "intent-1",
-            3,
-            "runtime.user_intent.accepted",
-            json!({"intent_id":"run-1","model_messages":[{"content":[{"kind":"text","text":"remember Muse import"}]}]}),
-        ),
-        muse_record(
-            "started-1",
-            4,
-            "runtime.session",
-            json!({"kind":"run","run_id":"run-1","event":{"kind":"started"}}),
-        ),
-        muse_record(
-            "tools-1",
-            5,
-            "runtime.session",
-            json!({"kind":"run","run_id":"run-1","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"id":"call-1","name":"write_file","args":"{\"path\":\"native-marker.txt\",\"content\":\"ok\"}"}]}}),
-        ),
-        muse_record(
-            "assistant-1",
-            6,
-            "runtime.session",
-            json!({"kind":"run","run_id":"run-1","event":{"kind":"assistant_message_committed","message_id":"message-1","text":"hello back"}}),
-        ),
-        muse_record(
-            "terminal-1",
-            7,
-            "runtime.session",
-            json!({"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"completed"}}),
-        ),
-    ];
-    let body = records
-        .into_iter()
-        .map(|record| serde_json::to_string(&record).unwrap() + "\n")
-        .collect::<String>();
-    assert_eq!(id, MUSE_ID);
-    fs::write(path, body).unwrap();
 }
 
 fn progress_control<'a>(cancelled: &'a AtomicBool) -> ImportControl<'a> {
