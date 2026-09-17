@@ -49,19 +49,71 @@ mid-turn must keep the session reporting `running`.
 
 ## Progress
 
-- [ ] (not started) Milestone 1: the mechanism in `mj-core`, pure and unit-tested, with no
-      call site changed yet.
-- [ ] Milestone 2: the worker produces the truth — one in-flight tool tracker, one idle
-      predicate, published in `RelayOperationalState`.
-- [ ] Milestone 3: the stall watchdog reads the mechanism; an in-flight tool call is
-      activity; a separate, longer, configurable bound applies to a tool call.
-- [ ] Milestone 4: a failed turn carries its reason to `mj wait`, the session summary and
-      the log.
-- [ ] Milestone 5: consumers read the published answer; a turn that spans a daemon restart
-      is never reported idle.
-- [ ] Milestone 6: delete the duplicates; every old predicate is a call into the mechanism.
+- [x] (2026-09-17 21:00Z) Milestone 1 (`abfe82af`): `mj-core/src/activity.rs` with
+      `ActivityFacts`, `ActivityState`, `classify`, `has_work_in_flight`, `is_quiet`,
+      `safe_to_replace`, `checkpoint_blocker`, `stall_verdict`, `while_disconnected`, the
+      shared `ToolsInFlight` tracker, and fourteen tests driven directly.
+- [x] (2026-09-17 21:20Z) Milestone 2 (`b3ce0f5b`): the worker's private tool map and its
+      private idle predicate are gone; `tools_in_flight` and `activity` are published in
+      `RelayOperationalState`, with a fallback in both directions for an older peer.
+- [x] (2026-09-17 21:35Z) Milestone 3 (`ca210226`): the watchdog reads `stall_verdict`; a
+      tool call is a sign of life; `MJ_TURN_TOOL_STALL_TIMEOUT_MS` bounds one tool call at
+      four hours by default; the failure carries the `harness_inactive` stop reason and a
+      diagnostic.
+- [x] (2026-09-17 21:45Z) Milestone 4 (`12441e49`): `mj wait` prints the diagnostic.
+      `ApiSession.error` was **not** widened: the daemon deliberately does not publish raw
+      runtime error text for a running session, and a turn's reason already travels in
+      `last_turn_diagnostic`. See the Decision Log.
+- [x] (2026-09-17 22:05Z) Milestone 5 (`381eb93a`): every session gets one activity state;
+      a session the daemon cannot see reports what was last known; `activity_state` is
+      published; `PROTOCOL_VERSION` is 24.
+- [x] (2026-09-17 22:15Z) Milestone 6 (`3da4eb51`): the checkpoint defer, the barrier wait
+      and the restart-readiness wait ask the shared predicate.
+- [x] (2026-09-17 22:40Z) Milestone 7, added during the work (`b4ada197`): two behaviour
+      tests drive the real ACP loop against a scripted silent bridge, and the daemon
+      carries the turn bounds to the workers it starts.
+- [ ] Remaining: a locally available harness the watchdog covers, so the two watchdog
+      scenarios can also be shown in a live session rather than against a scripted bridge
+      (completed: the scripted-bridge tests and the live restart evidence; remaining: a
+      live run on Muse, ZCode, DSH, Grok or Kimi).
 
 ## Surprises & Discoveries
+
+- Observation: the worker's idle clock runs on every journal append, so the facts it
+  decides with have to be cheap to assemble. Building a whole operational state there
+  would clone the session's configuration once per streamed chunk.
+  Evidence: `refresh_idle_clock` is called from `mj-worker/src/relay/journal.rs:740`, in
+  the append path. `DurableRelay::activity_facts` therefore assembles the facts directly,
+  and `worker_facts_match_the_published_state` in `mj-worker/src/relay/tests.rs` pins it
+  to `RelayOperationalState::facts`, which is what the daemon reads.
+
+- Observation: a bare `execution == Running` flag was already treated as *not* evidence of
+  work by the terminal, deliberately, and two tests said so. Making the shared classifier
+  treat it as a running turn broke both.
+  Evidence: `a_live_sdk_step_proves_work_but_an_idle_step_clock_does_not` and
+  `activity_indicators_ignore_stale_phases_and_questions_without_work` in
+  `mj-client/src/usage_format.rs`. The classifier now requires something live to
+  corroborate the flag, while `has_work_in_flight` still counts it, so the safety
+  predicates did not weaken.
+
+- Observation: publishing the answer alongside the facts means a test that edits the facts
+  by hand gets a stale answer.
+  Evidence: `a_live_sdk_step_proves_work_but_an_idle_step_clock_does_not` edits a snapshot
+  and had to clear `activity` first. In production the two always travel together.
+
+- Observation: `MJ_TURN_STALL_TIMEOUT_MS` could not reach a worker on a bare target at
+  all, so the documented way to shorten the watchdog for a test did nothing there.
+  Evidence: the worker re-execs with `env_clear()` in `mj-worker/src/main.rs:283`, keeping
+  only the login environment and `target_environment`, and `carries_image_variable` in
+  `mj-core/src/login_environment.rs` deliberately drops every `MJ_` name. The daemon now
+  carries the two turn bounds explicitly.
+
+- Observation: the durable `execution_state` column is what a restarted daemon reads, and
+  in a local live test it never showed `running` for a turn that was running.
+  Evidence: `materialized_sessions.execution_state` read straight from the instance
+  database stayed `idle` through a turn the daemon reported as running. The in-memory
+  cache the daemon keeps is current; the column it re-seeds from after a restart can lag.
+  The fallback is therefore only as fresh as that column, which is worth a follow-up.
 
 - Observation: the worker already tracks in-flight tool calls with their start times, in
   two places at once, and the stall watchdog can reach neither.
@@ -100,6 +152,68 @@ mid-turn must keep the session reporting `running`.
   (`mj-controller/src/server/api/types.rs:73` and `viewer_types.rs:104-108`).
 
 ## Decision Log
+
+- Decision: the tool-call bound defaults to four hours, not sixty minutes, and its knob is
+  `MJ_TURN_TOOL_STALL_TIMEOUT_MS` with `0` removing it.
+  Rationale: failing a healthy long tool call loses work silently — the run in #1020 was
+  ninety-seven minutes in — while a bound that is too long only delays a failure the user
+  can already end with a cancel. Confirmed in code that a bridge *process* that exits is
+  detected separately and at once, by the `child.wait()` arm of the select in
+  `mj-worker/src/acp.rs:335-359`, so the long bound delays nothing about a dead bridge.
+  Date/Author: 2026-09-17, reviewer's decision, recorded by the implementer.
+
+- Decision: `chat_phase` gains no new variant; `Unknown { last_known: Turn }` maps to
+  `running` and the richer state travels in the optional `activity_state` field.
+  Date/Author: 2026-09-17, reviewer's decision.
+
+- Decision: `SessionActivity` stays in `mj-client` for rendering; its predicates are gone.
+  It reads the worker's published state, and classifies its own facts with the same
+  `mj-core` function when a snapshot carried no answer.
+  Date/Author: 2026-09-17, reviewer's decision.
+
+- Decision: the published `activity` is the truth; `classify` is called only when an older
+  worker sent no answer, and it is the same function. A test asserts the two agree.
+  Date/Author: 2026-09-17, reviewer's decision.
+
+- Decision: `ActivityState` deserializes an unrecognized variant to a cautious
+  `Unrecognized` rather than failing.
+  Rationale: it is an internally tagged enum inside the snapshot a worker sends. A future
+  variant would otherwise fail deserialization in an older reader and take the whole
+  snapshot with it. `Unrecognized` is never idle and always work in flight.
+  Date/Author: 2026-09-17, reviewer's addition.
+
+- Decision: `Unknown` counts as work in flight, but a session whose last known state is
+  `Closed` is reported as `Closed`, not as unknown.
+  Rationale: a worker that is gone must still be recoverable; reporting it as unknown
+  would make the restart and checkpoint paths wait for work that no longer exists.
+  `a_lost_worker_is_still_recovered` covers it.
+  Date/Author: 2026-09-17, reviewer's addition.
+
+- Decision: `ApiSession.error` is **not** widened to carry `last_error`.
+  Rationale: the first attempt did widen it and broke three tests that exist to keep raw
+  runtime error text out of a running session's projection
+  (`api_session_exposes_a_launch_failure_reason_only_when_the_session_errored`,
+  `public_snapshot_omits_homes_environment_locators_and_raw_errors`,
+  `snapshot_endpoint_returns_only_public_projection`). A failed turn's reason reaches the
+  user through `mj wait`'s diagnostic and through `last_turn_diagnostic` on a
+  single-session query, which is what #1020 asked for, without publishing session error
+  text the daemon deliberately withholds.
+  Date/Author: 2026-09-17, implementer.
+
+- Decision: a running execution flag with nothing to corroborate it is not the agent
+  working, but it is still work in flight.
+  Rationale: the durable projection can lag behind a turn that has ended, and the terminal
+  already refused to animate on the flag alone. Killing a worker under it is a different
+  question with a different cost, so the safety predicate keeps counting it.
+  Date/Author: 2026-09-17, implementer.
+
+- Decision: the daemon carries `MJ_TURN_STALL_TIMEOUT_MS` and
+  `MJ_TURN_TOOL_STALL_TIMEOUT_MS` to the workers it starts.
+  Rationale: the worker re-execs with a cleared environment, so without this the knobs
+  reached only container targets that can name them in configuration, and the live test
+  the plan calls for was impossible on a local target. Six lines, alongside the existing
+  `MBX_*` passthrough, and no configuration schema change.
+  Date/Author: 2026-09-17, implementer.
 
 - Decision: put the mechanism in `mj-core`, not in `mj-client`.
   Rationale: `mj-worker`, `mj-controller`, `mj-client` and `mj-cli` all depend on `mj-core`
@@ -778,10 +892,38 @@ depend on `mj-client`. No new external dependency is required: `serde`,
 
 ## Outcomes & Retrospective
 
-Not yet started. To be written at the end of each milestone, comparing what was built
-against the purpose above: a turn blocked in a long tool call survives, a turn that really
-stalled says why, a turn that spans a daemon restart is never called idle, and one
-implementation answers the question for everybody.
+All seven milestones are implemented and committed on the working branch. Measured against
+the purpose:
+
+A turn blocked in a long tool call survives. `stall_verdict` does not apply the silence
+bound while a tool call is open, and `a_turn_blocked_in_a_long_tool_call_is_not_failed`
+drives the real ACP loop against a bridge that opens a tool call and then sends nothing.
+With the tool-call rule removed that test fails with the exact warning from the issue.
+
+A turn that really stalled says why. The stop reason is `harness_inactive` rather than the
+bare word "error", the outcome carries a diagnostic naming the silence or the tool call
+and the knob that raises the limit, and `mj wait` prints it.
+
+A turn that spans a daemon restart is never called idle. Every session gets one activity
+state; a session the daemon cannot see reports what was last known, which is never
+confirmed idle. Live evidence: with the worker gone, `mj sessions --session --json`
+reported `"chat_phase":"idle","is_idle":false,"activity_state":{"state":"unknown",
+"last_known":{"state":"idle"}}` — the daemon saying what it last knew and refusing to
+confirm idleness, where before the field was simply the default value of an enum.
+
+One implementation answers the question. `is_quiet`, `has_work_in_flight`,
+`safe_to_replace`, `checkpoint_background_blocker`, the worker's idle clock, the viewer's
+`chat_phase` and `is_idle`, the checkpoint defer, the barrier wait, the restart-readiness
+wait and the stall watchdog all go through `mj_core::activity`. The worker's private
+`activity_is_idle` and `foreground_tools`, and `mj-client`'s `is_idle`/`is_working`/`kind`
+bodies, are deleted.
+
+What remains: the two watchdog scenarios were proved against a scripted bridge rather than
+a live session, because the watchdog covers only harnesses that do not mark their own turn
+end and the only profiles available locally are Claude and Codex, both of which mark
+their own. The durable `execution_state` column a restarted daemon re-seeds from can lag
+behind the live turn, which bounds how much the disconnected fallback can say; that is a
+follow-up, not a regression.
 
 ---
 
@@ -791,3 +933,11 @@ phase of #1020 and #1025 and before any code change. It records the inventory of
 timestamp and #1025 to `chat_phase` defaulting to `Idle` when no live snapshot exists, and
 proposes one mechanism in `mj-core` that every consumer calls. The scope cuts are listed
 explicitly so a later contributor can tell what was deliberately left undone.
+
+
+Revision note (2026-09-17, after implementation): the living sections above were brought up
+to date at the end of the work. The plan's shape survived contact with the code; the four
+substantive departures from it are recorded in the Decision Log — the four-hour tool-call
+bound, `ApiSession.error` deliberately not widened, a running flag needing corroboration
+before it counts as the agent working, and the daemon carrying the turn bounds to its
+workers so the knobs work on a target that is not a container.
