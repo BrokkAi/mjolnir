@@ -358,6 +358,11 @@ pub(super) async fn run_daemon_runtime(
         "cancel daemon lifecycle operations",
         state.cancel_and_wait_lifecycles().await,
     );
+    record_daemon_cleanup(
+        &mut outcome,
+        "drain startup prompts",
+        state.cancel_and_join_startup_prompts().await,
+    );
     for interrupted_close_task in interrupted_close_tasks {
         record_daemon_cleanup(
             &mut outcome,
