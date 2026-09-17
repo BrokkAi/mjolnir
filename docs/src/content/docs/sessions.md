@@ -111,7 +111,9 @@ Select a live session, press `F2`, and choose **Stop session**. A normal stop:
 
 If checkpoint creation or verification fails, normal Stop refuses teardown. The failure dialog lets you retry. **Force stop** is offered only when an existing recovery archive is present and passes verification again; it then removes the current target without making a new checkpoint. Work newer than that archive may be lost, while the verified older archive remains resumable. If the existing archive cannot be verified, force stop changes nothing.
 
-**Force destroy session** is a different, irreversible action. It removes the target, managed worktree, recovery archive, and session record. Mjolnir requires the session's short ID as confirmation because nothing can be read or resumed afterward.
+**Force destroy session** is a different, irreversible action. It removes the target, managed worktree checkout, recovery archive, and session record. Mjolnir requires the session's short ID as confirmation because nothing can be read or resumed afterward.
+
+Destroying a session leaves the managed worktree's git branch in the source repository, so any commits you made there survive. Choose **Yes, delete branch** in the confirmation if you want Mjolnir to delete the branch as well.
 
 ## Resume on a fresh target
 

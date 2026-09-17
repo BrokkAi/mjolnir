@@ -166,7 +166,7 @@ mj diff --session <id> [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
-mj close --session <id> [--force]
+mj close --session <id> [--force] [--delete-branch]
 mj cancel-turn --session <id>
 mj api-info [--json]
 ```
@@ -177,6 +177,11 @@ the outcome, the turn number, the elapsed time, and the agent's final message,
 and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
+
+`mj close --force` destroys the session instead of checkpointing it. It removes
+the managed worktree's checkout but leaves its git branch in the source
+repository, so the commits survive. Add `--delete-branch` to delete the branch
+as well.
 
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;

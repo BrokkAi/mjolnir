@@ -22,7 +22,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             ..
         } => &["Keep importing", "Cancel import"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
-        Confirmation::DestroyStopped { .. } => &["No", "Yes"],
+        Confirmation::DestroyStopped { .. } => &["No", "Yes", "Yes, delete branch"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
         Confirmation::RecoverFailed {
@@ -40,7 +40,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             "Retry move",
             "Resume previous settings",
         ],
-        Confirmation::ForceDestroy { .. } => &["No", "Yes"],
+        Confirmation::ForceDestroy { .. } => &["No", "Yes", "Yes, delete branch"],
     }
 }
 
@@ -885,7 +885,8 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                     "Mjolnir will permanently destroy the recovery archive and session record.",
                 ),
                 Line::raw(
-                    "Any Mjolnir-managed worktree and generated branch will also be removed.",
+                    "Any Mjolnir-managed worktree will also be removed. Its git branch stays \
+                     in the repository unless you choose to delete it.",
                 ),
             ],
         ),
@@ -1002,6 +1003,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(format!("Session: {session_id}")),
                 Line::raw(""),
                 Line::raw("Delete this session, its worktree, and its recovery archive?"),
+                Line::raw("Its git branch stays in the repository unless you choose to delete it."),
                 Line::raw("Y: Yes    N / Esc: No"),
             ],
         ),

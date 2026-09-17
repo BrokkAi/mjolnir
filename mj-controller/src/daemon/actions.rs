@@ -483,12 +483,22 @@ pub(super) async fn handle_action(
             state.force_stop_session(session_id).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::DestroyStoppedSession { session_id } => {
-            state.destroy_stopped_session(session_id).await?;
+        DaemonAction::DestroyStoppedSession {
+            session_id,
+            delete_branch,
+        } => {
+            state
+                .destroy_stopped_session(session_id, branch_disposition(delete_branch))
+                .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::ForceDestroySession { session_id } => {
-            state.force_destroy_session(session_id).await?;
+        DaemonAction::ForceDestroySession {
+            session_id,
+            delete_branch,
+        } => {
+            state
+                .force_destroy_session(session_id, branch_disposition(delete_branch))
+                .await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::ForceDeleteWorkspace { workspace_id } => {
@@ -512,5 +522,15 @@ pub(super) async fn handle_action(
             cancellation.cancel();
             Ok(DaemonReply::Done)
         }
+    }
+}
+
+/// Destroy requests carry a flag, not a controller enum, so the wire protocol
+/// stays independent of the controller's types.
+fn branch_disposition(delete_branch: bool) -> BranchDisposition {
+    if delete_branch {
+        BranchDisposition::Delete
+    } else {
+        BranchDisposition::Keep
     }
 }

@@ -933,6 +933,7 @@ fn force_close_is_admitted_like_close() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
     let force_close = ControllerAction::ForceClose {
         session_id: "session-1".into(),
+        delete_branch: false,
     };
     // A full action pool and a session already busy with a stuck close
     // are both exactly when a force close has to get through.

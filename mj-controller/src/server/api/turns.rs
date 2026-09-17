@@ -131,7 +131,17 @@ pub(super) async fn close(
     }
     backend(&state)?.cancel_start(session_id.clone()).await?;
     if force {
-        return send_action(&state, ControllerAction::ForceClose { session_id }).await;
+        let delete_branch = request
+            .as_ref()
+            .is_some_and(|request| request.delete_branch);
+        return send_action(
+            &state,
+            ControllerAction::ForceClose {
+                session_id,
+                delete_branch,
+            },
+        )
+        .await;
     }
     send_action(&state, ControllerAction::Close { session_id }).await
 }
@@ -144,6 +154,10 @@ pub(super) struct CloseRequest {
     /// Destroy the session instead of checkpointing it. Irreversible.
     #[serde(default)]
     pub(super) force: bool,
+    /// Delete the managed worktree's branch along with the session. Only
+    /// meaningful with `force`; without it the branch stays in the repository.
+    #[serde(default)]
+    pub(super) delete_branch: bool,
 }
 
 pub(super) async fn cancel_turn(

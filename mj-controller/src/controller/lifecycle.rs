@@ -22,10 +22,11 @@ use super::{Controller, now, persist_session_record_transition_or_restore};
 /// What destroying a session does with its managed worktree's git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchDisposition {
-    /// Delete the branch with the rest of the session. What a destroy does.
+    /// Delete the branch with the rest of the session. Only for a branch
+    /// nobody has worked on, or when the user asks for it by name.
     Delete,
-    /// Leave the branch in the repository. What archiving does, because the
-    /// branch may hold work the user still wants.
+    /// Leave the branch in the repository. The default for every destroy,
+    /// because the branch may hold work the user still wants.
     Keep,
 }
 
@@ -562,16 +563,16 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        self.destroy_session_controlled_with(session_id, executor, BranchDisposition::Delete)
+        self.destroy_session_controlled_with(session_id, executor, BranchDisposition::Keep)
     }
 
     /// The same, with a say in what happens to the managed worktree's branch.
     ///
     /// A session that is already `Stopped` has had its checkout removed by
-    /// [`retire_managed_worktree`], so only the branch is left for
-    /// [`cleanup_managed_worktree`] to take. [`BranchDisposition::Keep`]
-    /// therefore just skips that call, which is what archiving wants: the
-    /// record, the checkpoint, and the attachments go, and the branch stays.
+    /// [`retire_managed_worktree`], so usually only the branch is left for
+    /// [`cleanup_managed_worktree`] to take. With [`BranchDisposition::Keep`]
+    /// the record, the checkpoint, and the attachments go and the branch
+    /// stays, which is what a destroy does unless the user asks otherwise.
     pub fn destroy_session_controlled_with(
         &mut self,
         session_id: &str,
@@ -587,10 +588,8 @@ impl Controller {
         if session.state.is_active() {
             bail!("refusing to destroy active session {session_id}");
         }
-        if branch == BranchDisposition::Delete
-            && let Some(worktree) = &session.managed_worktree
-        {
-            cleanup_managed_worktree(executor, worktree)
+        if let Some(worktree) = &session.managed_worktree {
+            cleanup_managed_worktree(executor, worktree, branch)
                 .context("remove managed raw-session worktree")?;
         }
         if let Some(checkpoint) = &session.checkpoint
@@ -622,19 +621,28 @@ impl Controller {
     /// verified close uses, so the owning process group dies before any files
     /// go. External cleanup happens before the durable record is dropped so
     /// failures stay visible and retryable; the recovery archive is removed,
-    /// which is what makes the destruction irreversible.
+    /// which is what makes the destruction irreversible. The managed
+    /// worktree's checkout always goes; its branch goes only when `branch`
+    /// says so.
     pub fn force_destroy_session(
         &mut self,
         session_id: &str,
         executor: &impl CommandExecutor,
+        branch: BranchDisposition,
     ) -> Result<()> {
-        self.force_destroy_session_with(session_id, executor, crate::database::delete_session)
+        self.force_destroy_session_with(
+            session_id,
+            executor,
+            branch,
+            crate::database::delete_session,
+        )
     }
 
     fn force_destroy_session_with(
         &mut self,
         session_id: &str,
         executor: &impl CommandExecutor,
+        branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
     ) -> Result<()> {
         let session = self
@@ -655,7 +663,7 @@ impl Controller {
             }
         }
         if let Some(worktree) = &session.managed_worktree {
-            cleanup_managed_worktree(executor, worktree)
+            cleanup_managed_worktree(executor, worktree, branch)
                 .context("remove managed raw-session worktree")?;
         }
         if let Some(checkpoint) = &session.checkpoint

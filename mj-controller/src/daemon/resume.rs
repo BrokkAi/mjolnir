@@ -165,13 +165,10 @@ impl RuntimeState {
     pub(super) async fn destroy_stopped_session(
         self: &Arc<Self>,
         session_id: String,
+        branch: BranchDisposition,
     ) -> Result<()> {
-        self.tear_down_stopped_session(
-            session_id,
-            LifecycleKind::DestroyStopped,
-            BranchDisposition::Delete,
-        )
-        .await
+        self.tear_down_stopped_session(session_id, LifecycleKind::DestroyStopped, branch)
+            .await
     }
 
     /// Archive every stopped session older than `older_than_days` whose
@@ -269,7 +266,9 @@ impl RuntimeState {
         })
         .await?;
         for child_id in children {
-            Box::pin(self.force_destroy_session(child_id.clone()))
+            // A sub-agent borrows its parent's worker and never owns a managed
+            // worktree, so it has no branch of its own to keep.
+            Box::pin(self.force_destroy_session(child_id.clone(), BranchDisposition::Keep))
                 .await
                 .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
@@ -354,8 +353,13 @@ impl RuntimeState {
 
     /// Permanently destroy a session from any state, cancelling whatever
     /// lifecycle operation holds it first. Data loss is the caller's confirmed
-    /// decision; see [`Controller::force_destroy_session`].
-    pub async fn force_destroy_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+    /// decision; see [`Controller::force_destroy_session`]. The session's git
+    /// branch survives unless `branch` says to delete it.
+    pub async fn force_destroy_session(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+    ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -367,7 +371,8 @@ impl RuntimeState {
         })
         .await?;
         for child_id in children {
-            Box::pin(self.force_destroy_session(child_id.clone()))
+            // Sub-agents borrow their parent's worker and own no branch.
+            Box::pin(self.force_destroy_session(child_id.clone(), BranchDisposition::Keep))
                 .await
                 .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
@@ -383,7 +388,7 @@ impl RuntimeState {
         self.run_lifecycle(
             session_id,
             LifecycleKind::ForceDestroy,
-            |state, session_id, cancelled| async move {
+            move |state, session_id, cancelled| async move {
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();
                     let session_id = session_id.clone();
@@ -401,7 +406,7 @@ impl RuntimeState {
                             state,
                             session_id.clone(),
                         );
-                        controller.force_destroy_session(&session_id, &executor)?;
+                        controller.force_destroy_session(&session_id, &executor, branch)?;
                         crate::controller::move_session::release_move_queue_hold(&session_id);
                         Ok(DaemonLifecycleResult::Done)
                     }
@@ -438,7 +443,12 @@ impl RuntimeState {
         })
         .await?;
         for (index, session_id) in sessions.iter().enumerate() {
-            if let Err(error) = self.force_destroy_session(session_id.clone()).await {
+            // Deleting a workspace removes Mjolnir's own copies, not the
+            // user's work: the branches stay in their source repositories.
+            if let Err(error) = self
+                .force_destroy_session(session_id.clone(), BranchDisposition::Keep)
+                .await
+            {
                 let remaining = sessions.len() - index - 1;
                 bail!(
                     "force-destroying session {session_id} failed: {error:#}; \

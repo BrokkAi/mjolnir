@@ -28,7 +28,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::RunShell { session_id, .. }
         | ControllerAction::CancelShell { session_id, .. }
         | ControllerAction::Close { session_id }
-        | ControllerAction::ForceClose { session_id }
+        | ControllerAction::ForceClose { session_id, .. }
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }
         | ControllerAction::Cancel { session_id }

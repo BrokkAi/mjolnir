@@ -514,9 +514,15 @@ pub enum DaemonAction {
     },
     DestroyStoppedSession {
         session_id: String,
+        /// Whether to delete the session's managed git branch as well. The
+        /// branch can hold work the user still wants, so destroying keeps it
+        /// unless the request asks for the deletion.
+        delete_branch: bool,
     },
     ForceDestroySession {
         session_id: String,
+        /// See [`DaemonAction::DestroyStoppedSession`].
+        delete_branch: bool,
     },
     ForceDeleteWorkspace {
         workspace_id: String,
@@ -1472,9 +1478,16 @@ impl DaemonClient {
         }
     }
 
-    pub async fn destroy_stopped_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn destroy_stopped_session(
+        &mut self,
+        session_id: String,
+        delete_branch: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::DestroyStoppedSession { session_id })
+            .request(DaemonAction::DestroyStoppedSession {
+                session_id,
+                delete_branch,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1482,9 +1495,16 @@ impl DaemonClient {
         }
     }
 
-    pub async fn force_destroy_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn force_destroy_session(
+        &mut self,
+        session_id: String,
+        delete_branch: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::ForceDestroySession { session_id })
+            .request(DaemonAction::ForceDestroySession {
+                session_id,
+                delete_branch,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1588,7 +1608,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

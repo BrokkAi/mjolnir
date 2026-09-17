@@ -237,9 +237,14 @@ pub enum DashboardAction {
     },
     DestroyStopped {
         session_id: String,
+        /// Whether the user asked for the session's managed git branch to go
+        /// with it. Destroying keeps the branch unless they did.
+        delete_branch: bool,
     },
     ForceDestroy {
         session_id: String,
+        /// See [`DashboardAction::DestroyStopped`].
+        delete_branch: bool,
     },
     RenameSession {
         session_id: String,

@@ -912,10 +912,15 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     let deleted = RefCell::new(Vec::new());
 
     controller
-        .force_destroy_session_with(session_id, &ProcessExecutor, |id| {
-            deleted.borrow_mut().push(id.to_owned());
-            Ok(())
-        })
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Delete,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(!worker_root.exists(), "local target must be removed");
@@ -928,6 +933,50 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     assert!(!checkpoint.archive_path.exists(), "archive must be removed");
     assert!(!controller.state.sessions.contains_key(session_id));
     assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+}
+
+#[test]
+fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut session = managed_worktree_session(repository.path(), session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    session.checkpoint = None;
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+
+    controller
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Keep,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    let worktree_root = repository.path().join(".mj/worktrees").join(session_id);
+    assert!(!worktree_root.exists(), "managed worktree must be removed");
+    assert!(
+        branch_exists(repository.path(), &format!("mj/{session_id}")),
+        "the session's branch must survive its destruction"
+    );
+    assert!(!controller.state.sessions.contains_key(session_id));
 }
 
 #[test]
@@ -947,10 +996,15 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
     let deleted = RefCell::new(Vec::new());
 
     controller
-        .force_destroy_session_with(session_id, &ProcessExecutor, |id| {
-            deleted.borrow_mut().push(id.to_owned());
-            Ok(())
-        })
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Delete,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(!controller.state.sessions.contains_key(session_id));
@@ -983,10 +1037,15 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
     let deleted = RefCell::new(Vec::new());
 
     let error = controller
-        .force_destroy_session_with(session_id, &FailingExecutor, |id| {
-            deleted.borrow_mut().push(id.to_owned());
-            Ok(())
-        })
+        .force_destroy_session_with(
+            session_id,
+            &FailingExecutor,
+            BranchDisposition::Delete,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
         .unwrap_err();
 
     assert!(
@@ -1022,7 +1081,12 @@ fn force_destroy_tolerates_a_missing_archive() {
     };
 
     controller
-        .force_destroy_session_with(session_id, &ProcessExecutor, |_| Ok(()))
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Delete,
+            |_| Ok(()),
+        )
         .unwrap();
 
     assert!(!controller.state.sessions.contains_key(session_id));

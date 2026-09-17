@@ -1053,6 +1053,7 @@ async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
         request.action,
         ControllerAction::ForceClose {
             session_id: "session-1".into(),
+            delete_branch: false,
         }
     );
     request
@@ -1100,6 +1101,36 @@ async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
         request.action,
         ControllerAction::ForceClose {
             session_id: "session-1".into(),
+            delete_branch: false,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |_| {});
+
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/close"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"force":true,"delete_branch":true}"#))
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::ForceClose {
+            session_id: "session-1".into(),
+            delete_branch: true,
         }
     );
     request

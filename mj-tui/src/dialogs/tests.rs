@@ -1231,14 +1231,17 @@ fn stop_and_restart_run_from_the_palette_without_a_modal() {
 }
 
 #[test]
-fn deleting_a_session_only_asks_yes_or_no() {
+fn deleting_a_session_keeps_its_branch_unless_asked() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
     let Mode::Confirm(dialog) = &dashboard.mode else {
         panic!("delete confirmation");
     };
-    assert_eq!(confirmation_buttons(&dialog.confirmation), &["No", "Yes"]);
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        &["No", "Yes", "Yes, delete branch"]
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('n'))),
         DashboardAction::None
@@ -1248,10 +1251,27 @@ fn deleting_a_session_only_asks_yes_or_no() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('y'))),
         DashboardAction::ForceDestroy {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            delete_branch: false,
         }
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn deleting_a_session_takes_its_branch_from_the_last_button() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
+    dashboard.handle_key(key(KeyCode::Right));
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::ForceDestroy {
+            session_id: "session-1".into(),
+            delete_branch: true,
+        }
+    );
 }
 
 #[test]
@@ -1319,7 +1339,10 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     let Mode::Confirm(dialog) = &dashboard.mode else {
         panic!("expected destroy confirmation");
     };
-    assert_eq!(confirmation_buttons(&dialog.confirmation), &["No", "Yes"]);
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        &["No", "Yes", "Yes, delete branch"]
+    );
     assert_eq!(
         dialog.form.borrow().focused(),
         Some(DialogControl::ConfirmButton(0))
@@ -1328,7 +1351,8 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::DestroyStopped {
-            session_id: "session-1".into()
+            session_id: "session-1".into(),
+            delete_branch: false,
         }
     );
     // Destroying from the dialog leaves the user in the dialog.

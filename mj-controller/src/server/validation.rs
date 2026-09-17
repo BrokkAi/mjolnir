@@ -365,7 +365,7 @@ pub(super) fn validate_action(
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
         | ControllerAction::Close { session_id }
-        | ControllerAction::ForceClose { session_id }
+        | ControllerAction::ForceClose { session_id, .. }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
