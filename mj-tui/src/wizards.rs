@@ -408,9 +408,27 @@ impl ResumeWizard {
     }
 }
 
+/// What the resume wizard will start.
+///
+/// The controls are the same either way — a profile, a target, attachments —
+/// but a record is resumed from its checkpoint while an archived SessionWiki
+/// session has no record and no checkpoint and is restored into a brand-new
+/// session carrying a summary of its transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeSource {
+    Session,
+    Archive,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeWizard {
+    /// The Mjolnir session being resumed or moved, or, for an archive, the
+    /// SessionWiki id being restored. `source` says which.
     pub(crate) session_id: String,
+    pub(crate) source: ResumeSource,
+    /// Shown in the wizard's title for an archive, which has no record to
+    /// read a title from.
+    pub(crate) title: String,
     /// Resuming stays in the workspace where the dialog was opened even if
     /// the visible tab changes before submission.
     pub(crate) workspace_id: String,
@@ -441,6 +459,8 @@ pub(crate) struct ResumeWizard {
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
+            && self.source == other.source
+            && self.title == other.title
             && self.workspace_id == other.workspace_id
             && self.moving == other.moving
             && self.preparation == other.preparation
@@ -2316,7 +2336,7 @@ pub(crate) fn render_resume_wizard(
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
         let profile_id = dashboard
-            .compatible_profiles(&wizard.session_id)
+            .resume_wizard_profiles(wizard)
             .get(wizard.profile)
             .map(|(id, _)| id.as_str())
             .unwrap_or("unknown");
@@ -2452,7 +2472,7 @@ pub(crate) fn render_resume_wizard(
     }
     let (title, choices, selected, help) = match wizard.step {
         WizardStep::Profile => {
-            let profiles = dashboard.compatible_profiles(&wizard.session_id);
+            let profiles = dashboard.resume_wizard_profiles(wizard);
             let session_harness = dashboard
                 .state
                 .sessions

@@ -279,6 +279,23 @@ pub enum DashboardAction {
         native_session_id: String,
         display_title: String,
     },
+    /// Search the SessionWiki index for the resume dialog. Answers can arrive
+    /// out of order, so the request id decides which one the dialog keeps.
+    SearchArchivedSessions {
+        request_id: u64,
+        query: String,
+    },
+    /// Fetch the briefing shown under the resume dialog's list.
+    LoadArchivedBrief {
+        wiki_id: String,
+    },
+    /// Start a new session carrying a summary of an archived transcript.
+    RestoreArchivedSession {
+        workspace_id: String,
+        wiki_id: String,
+        profile_id: String,
+        target_template_id: String,
+    },
     CancelImport,
     ConfirmImportBundle {
         create_managed_worktree: Option<bool>,

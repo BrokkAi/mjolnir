@@ -365,8 +365,13 @@ fn render_combined_themed(
         dashboard.end_surface_frame();
         return;
     }
-    dashboard.resume_sessions_area =
-        matches!(dashboard.mode, Mode::ResumeDialog(_)).then(|| resume_sessions_pane(area));
+    dashboard.resume_sessions_area = match &dashboard.mode {
+        Mode::ResumeDialog(dialog) => Some(resume_sessions_pane(
+            area,
+            dialog.preview_text(dashboard.resume_rows()).is_some(),
+        )),
+        _ => None,
+    };
     if dashboard.config_is_empty() && dashboard.state.sessions.is_empty() {
         render_onboarding_surface(frame, dashboard);
         return;

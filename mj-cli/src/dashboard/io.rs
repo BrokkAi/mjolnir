@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -131,6 +131,17 @@ pub(crate) enum DashboardIoUpdate {
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
+    },
+    /// One SessionWiki search result. The request id is the dialog's; an
+    /// answer for an older one is dropped there.
+    WikiRows {
+        request_id: u64,
+        result: std::result::Result<Vec<mj_client::daemon::WikiRow>, String>,
+    },
+    /// One archived session's briefing, for the resume dialog's preview.
+    WikiBrief {
+        wiki_id: String,
+        result: std::result::Result<String, String>,
     },
     WebListeners {
         generation: u64,
@@ -1582,6 +1593,120 @@ pub(crate) fn spawn_dashboard_create_session(
     });
 }
 
+/// Search the SessionWiki index for the resume dialog, 250 ms after the last
+/// keystroke.
+///
+/// The debounce is in the task rather than in a timer on the event loop: each
+/// keystroke starts one, and a task whose request id is no longer the newest
+/// when it wakes stops without asking the daemon. The dialog drops any answer
+/// that names an older request as well, because two searches can still overlap.
+pub(crate) fn spawn_wiki_search(
+    request_id: u64,
+    query: String,
+    newest_request: Arc<AtomicU64>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    newest_request.store(request_id, Ordering::Release);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if newest_request.load(Ordering::Acquire) != request_id {
+            return;
+        }
+        let result = async {
+            daemon::connect_or_start()
+                .await?
+                .wiki_search(query, WIKI_SEARCH_LIMIT)
+                .await
+        }
+        .await
+        .map_err(|error| format!("{error:#}"));
+        let _ = updates.send(DashboardIoUpdate::WikiRows { request_id, result });
+    });
+}
+
+/// How many archived sessions one search asks for.
+const WIKI_SEARCH_LIMIT: usize = 50;
+/// How much of an archived transcript the preview pane asks for. It is a few
+/// lines tall, so a whole briefing would be wasted work.
+const WIKI_BRIEF_CHARS: usize = 4_000;
+
+pub(crate) fn spawn_wiki_brief(wiki_id: String, updates: UnboundedSender<DashboardIoUpdate>) {
+    tokio::spawn(async move {
+        let result = async {
+            daemon::connect_or_start()
+                .await?
+                .wiki_brief(wiki_id.clone(), WIKI_BRIEF_CHARS)
+                .await
+        }
+        .await
+        .map_err(|error| format!("{error:#}"));
+        let _ = updates.send(DashboardIoUpdate::WikiBrief { wiki_id, result });
+    });
+}
+
+/// Start a session from an archived transcript and follow it through creation
+/// the same way a new session is followed.
+pub(crate) fn spawn_dashboard_restore_session(
+    request: mj_client::daemon::WikiRestoreRequest,
+    retry_launch: DashboardAction,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    lifecycle_updates: UnboundedSender<LifecycleUpdate>,
+    runtime: tokio::runtime::Handle,
+    tracker: CriticalOperationTracker,
+) {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = tracker.begin_cancellable("restoring archived session", cancelled.clone());
+    tokio::task::spawn_blocking(move || {
+        let registered = runtime.block_on(async {
+            daemon::connect_or_start()
+                .await?
+                .wiki_restore(request)
+                .await
+        });
+        let registered = match registered {
+            Ok(registered) => registered,
+            Err(error) => {
+                if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
+                    DashboardCreateSessionUpdate::Failed {
+                        retry_launch: Box::new(retry_launch),
+                        error: format!("{error:#}"),
+                    },
+                ))) {
+                    tracing::debug!(%error, "archive restore failure dropped after dashboard shutdown");
+                }
+                drop(guard);
+                return;
+            }
+        };
+        let session_id = registered.session.id.clone();
+        if let Err(error) = updates.send(DashboardIoUpdate::CreateSession(Box::new(
+            DashboardCreateSessionUpdate::Registered(Box::new(RegisteredDashboardSession {
+                retry_launch,
+                session: registered.session,
+                remembered_container_size: registered.remembered_container_size,
+                cancelled: cancelled.clone(),
+            })),
+        ))) {
+            tracing::debug!(%error, "restored session result dropped after dashboard shutdown");
+        }
+        let result = runtime
+            .block_on(async {
+                let mut daemon = daemon::connect_or_start().await?;
+                daemon.wait_create_session(session_id.clone()).await?;
+                Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
+            })
+            .map_err(|error| format!("{error:#}"));
+        if let Err(error) = lifecycle_updates.send(LifecycleUpdate {
+            session_id,
+            result,
+            deferred_cleanup: false,
+        }) {
+            tracing::debug!(%error, "restored session lifecycle result dropped after dashboard shutdown");
+        }
+        drop(guard);
+    });
+}
+
 impl DashboardContext {
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
@@ -2010,6 +2135,18 @@ impl DashboardContext {
                     self.dashboard.apply_web_access(access);
                 }
             }
+            DashboardIoUpdate::WikiRows { request_id, result } => match result {
+                Ok(rows) => self.dashboard.apply_wiki_search(request_id, rows),
+                Err(error) => self
+                    .dashboard
+                    .set_notice(format!("Archive search failed: {error}")),
+            },
+            DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
+                Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
+                Err(error) => self
+                    .dashboard
+                    .apply_wiki_brief(wiki_id, format!("Could not load the transcript: {error}")),
+            },
             DashboardIoUpdate::WebListeners { generation, result } => {
                 if generation == self.web_request_generation {
                     self.dashboard.apply_web_listeners(result);
