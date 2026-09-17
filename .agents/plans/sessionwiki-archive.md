@@ -19,7 +19,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-16 20:40Z) Milestone 2: fork branch `mj-embed` commit 529b8fe, tag `v0.28.0-mj.1` pushed to `jbellis/sessionwiki`, upstream PR https://github.com/youdie006/sessionwiki/pull/26; Mjolnir git dependency added, `cargo build` and `cargo about generate` pass.
 - [x] (2026-09-17 00:50Z) Milestone 3: `[sessionwiki]` config section (CONFIG_VERSION 10), `MjolnirAdapter`, `WikiIndexer` with close and hourly triggers; commit `60ed7bed`. Live check: two closed sessions listed by `sessionwiki list --tool mjolnir` and shown by `sessionwiki brief <id> --tools`.
 - [x] (2026-09-17 01:55Z) Milestone 4: fork tag `v0.28.0-mj.2` (commit `ef19d4c`) with quiet non-terminal progress and the tool-name fallback, plus the Mjolnir dependency bump; commits `90c91ca0`, `3b49cc4d` (API, client, restore), `857d10b3` (Archived tab), `fa082d58` (two fixes the live check found). Live check: the three routes answered, a hand-deleted checkpoint became an archived row, and a restored session's first reply quoted the earlier work.
-- [ ] Milestone 5: archive job driven by `archive_after_days`.
+- [x] (2026-09-17 02:20Z) Milestone 5: archive job driven by `archive_after_days`; commit `a9f0e473`. Live check: a two-day-old stopped session left `mj sessions`, its `.hel.zip` went, `mj/<id>` stayed in the repository, and `sessionwiki list --tool mjolnir` showed the row `[archived]`.
 - [ ] Milestone 6: web viewer parity.
 - [ ] Milestone 7: documentation; follow-up ticket for the in-session SessionWiki skill.
 - [ ] Milestone 8 (release gate, needs crates.io credentials): publish the fork as `brokk-sessionwiki` and switch the dependency from git to the registry.
@@ -52,6 +52,14 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: the milestone 4 brief transcript below now reads `Tool: mjolnir`.
 - Observation: The `zcode` profile named in the acceptance steps does not exist in the current `config.toml`; it survives only in a backup written by an older build, whose `kind = "zcode"` is not a `HarnessKind` this build accepts.
   Evidence: `~/.config/mjolnir/config.toml.bak-20260915T121000` line 52 against `HarnessKind` in `mj-core/src/config.rs`. The live check used `codex` and `deepseek` instead; `codex` was out of quota, so `deepseek` supplied the session with a tool call.
+- Observation: No fourth fork change was needed for the archive job's index check. `index::resolve` returns `SessionRow`s that already carry `path`, `msg_count`, and `archived`, so the job asks for the session id and keeps the row whose `path` is this instance's own key. `indexed_message_count` was not added and no `v0.28.0-mj.3` tag exists.
+  Evidence: `RESOLVE_COLS` and `map_resolve_row` in the fork's `src/index.rs` lines 1433-1453.
+- Observation: Adding `LifecycleKind::ArchiveStopped` costs one enum variant and one arm. The client-facing `RuntimeLifecycleKind` in `mj-client/src/daemon.rs` is a serialized protocol type, so the new kind maps onto `DestroyStopped` there instead of growing a variant an older client could not read; surfaces show archiving as a destroy, which is what it looks like to a user.
+  Evidence: `impl From<LifecycleKind> for RuntimeLifecycleKind` in `mj-controller/src/daemon.rs`.
+- Observation: A `Stopped` session's managed worktree really is only a branch by then, so keeping the branch is exactly "do not call `cleanup_managed_worktree`". `retire_managed_worktree` removed the checkout, pruned the metadata, and removed the empty `.mj/worktrees` directories at close; `cleanup_managed_worktree` repeats that work (all no-ops) and adds the `git branch -D`.
+  Evidence: `mj-controller/src/controller/worktree.rs` lines 1662-1745, and the live check: after `mj close` the project held no `.mj/worktrees` directory and still held `mj/79a8...`.
+- Observation: The attachment store leaves a marker directory behind. After archiving, `$MJ_DATA_DIR/sessions/<id>/` still exists holding empty `attachments.deleted` and `attachments.lock` files. This is `AttachmentStore::remove_session_data`'s own tombstone and destroy behaves the same way; the checkpoint archive itself is gone, and the adapter keys off `*.hel.zip`, so the row still archives.
+  Evidence: the milestone 5 live check below.
 - Observation: SessionWiki drops and rebuilds its entire cache when the SQLite `user_version` differs from the library's `SCHEMA_VERSION` constant.
   Evidence: `src/index.rs` lines 375-395. A `sessionwiki` binary at a different schema version than the library Mjolnir links would force a full re-index on every alternation. Documented in milestone 7.
 
@@ -103,6 +111,16 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - Decision: The search debounce lives in the spawned task, not in a timer on the dashboard's event loop.
   Rationale: Each keystroke starts a task that sleeps 250 ms and gives up if a later keystroke has replaced it; the dialog drops answers naming an older request. No new tick had to be added to the select loop, and the event loop never waits.
   Date/Author: 2026-09-17, Fable.
+
+- Decision: The archive pass skips a parent while any sub-agent child of its own is not being archived in the same pass, which is stricter than the plan's "no non-Stopped child".
+  Rationale: Archiving a parent force-destroys its children first, branch and all. A child that is stopped but not yet old enough would be destroyed without ever being archived. Waiting a pass costs nothing; the parent goes as soon as its children qualify. Children are ordered before parents so the pass archives them itself.
+  Date/Author: 2026-09-17, Fable with Opus.
+- Decision: `LifecycleKind::ArchiveStopped` is internal to the daemon and reported to clients as `DestroyStopped`.
+  Rationale: `RuntimeLifecycleKind` is serialized to every client, and a new variant would break older readers for no gain. The daemon still distinguishes the two internally, which is what the lifecycle log and the branch disposition need.
+  Date/Author: 2026-09-17, Fable with Opus.
+- Decision: When `archive_after_days` is set, the hourly tick runs the archive job in place of its plain full sync, in a background task that never overlaps with itself.
+  Rationale: The job begins with `sync_now(true)`, so a separate full sync on the same tick would only duplicate it. A pass over a large corpus can outlast the tick, and a second concurrent pass would only meet a busy index, so a tick that finds one running logs at debug and waits.
+  Date/Author: 2026-09-17, Fable with Opus.
 
 ## Outcomes & Retrospective
 
@@ -284,6 +302,42 @@ Verification, after the sync had run:
     SESSIONWIKI_DATA=$S/wiki /home/jonathan/Projects/sessionwiki/target/debug/sessionwiki list --tool mjolnir
     SESSIONWIKI_DATA=$S/wiki /home/jonathan/Projects/sessionwiki/target/debug/sessionwiki brief 1e0d61a75458ca85a9f040878e6aee8e --tools
 
+Milestone 5, run on 2026-09-17. A second isolated environment, because
+another agent was working in the milestone 3/4 one at the same time. Its
+SessionWiki index starts as a copy of the first, so the cold walk of every
+tool's store did not have to run again, and its web viewer binds a different
+port:
+
+    S=/tmp/claude-1000/-home-jonathan-Projects-hel3/68c2d9bc-4218-4756-9eaa-7d0de76bb3b9/scratchpad
+    M=$S/m5
+    mkdir -p $M/mj-config $M/mj-data $M/wiki $M/project
+    cp $S/mj-config/config.toml $M/mj-config/config.toml
+    cp -a $S/wiki/. $M/wiki/
+    sed -i 's/127.0.0.1:37650/127.0.0.1:37651/' $M/mj-config/config.toml
+    # and under [sessionwiki]: archive_after_days = 1
+    (cd $M/project && git init -q && echo hello > README.md && git add README.md &&
+     git -c user.email=a@b -c user.name=t commit -qm init)
+    export MJ_CONFIG_DIR=$M/mj-config MJ_DATA_DIR=$M/mj-data SESSIONWIKI_DATA=$M/wiki
+    ./target/debug/mj new --profile deepseek --target localhost \
+      --project-directory $M/project --workspace-id default \
+      "Read README.md and tell me the single word it contains."
+    ./target/debug/mj wait --session 79a818190728012e01a28d4c1ccea905
+    ./target/debug/mj close --session 79a818190728012e01a28d4c1ccea905
+
+Ageing the record, with the daemon stopped so it does not write over the row:
+
+    ./target/debug/mj daemon stop
+    sqlite3 $M/mj-data/mj.sqlite3 \
+      "UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 days')
+       WHERE session_id='79a818190728012e01a28d4c1ccea905';"
+
+Triggering the tick. `MJ_PRUNE_TICK_SECONDS` shortens the hourly interval and
+is read once per daemon; in practice the first tick fires as the daemon comes
+up, so restarting it is enough:
+
+    MJ_PRUNE_TICK_SECONDS=30 ./target/debug/mj sessions   # restarts the daemon
+    ./target/debug/mj daemon stop                          # afterwards
+
 Update this section with the exact commands and observed output as each milestone lands.
 
 ## Validation and Acceptance
@@ -461,6 +515,47 @@ passed, 0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt
 --check`. The fork's own `cargo test` (127 passing in the library alone) and
 `cargo clippy --all-targets -- -D warnings` pass at `v0.28.0-mj.2`.
 
+Milestone 5, 2026-09-17. Before the tick, one stopped session two days old,
+its checkpoint on disk and its branch in the repository:
+
+    $ ./target/debug/mj sessions
+    ID                                STATE    TITLE
+    79a818190728012e01a28d4c1ccea905  stopped  project via deepseek
+    $ ls $M/mj-data/sessions
+    79a818190728012e01a28d4c1ccea905-51-archive-55287db7464233f8a6f900dc95b76da4.hel.zip
+    $ git -C $M/project branch --list
+    * master
+      mj/79a818190728012e01a28d4c1ccea905
+
+Twenty seconds after the daemon restarted, all four things the milestone asks
+for:
+
+    $ ./target/debug/mj sessions
+    ID  STATE  TITLE
+    $ sqlite3 $M/mj-data/mj.sqlite3 "select count(*) from sessions;"
+    0
+    $ ls $M/mj-data/sessions
+    79a818190728012e01a28d4c1ccea905          # the attachment tombstone only
+    $ ls $M/mj-data/sessions/79a818190728012e01a28d4c1ccea905
+    attachments.deleted  attachments.lock
+    $ git -C $M/project branch --list
+    * master
+      mj/79a818190728012e01a28d4c1ccea905
+    $ SESSIONWIKI_DATA=$M/wiki .../sessionwiki list --tool mjolnir
+    ID            TOOL     WHEN     MSGS  PROJECT                  TITLE
+    79a818190728… mjolnir  1m ago      3  …/79a818190728012e01a28… project via deepseek  [archived]
+
+The one info line per archived session, from the daemon's own log in
+`$MJ_DATA_DIR/logs/` (`daemon.log` carries stderr, not tracing):
+
+    2026-09-17T02:14:45.507854Z  INFO mj_controller::daemon: archived a stopped
+      session: SessionWiki keeps the conversation and the repository keeps the
+      branch session_id=79a818190728012e01a28d4c1ccea905 older_than_days=1
+
+Workspace validation for this commit: `cargo build`, `cargo test` (3494
+passed, 0 failed), `cargo clippy --all-targets -- -D warnings`, `cargo fmt
+--check`.
+
 ## Interfaces and Dependencies
 
 SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.2`):
@@ -488,6 +583,10 @@ Mjolnir:
     pub struct WikiRestoreRequest { wiki_id, workspace_id, profile_id, target_template_id, project_directory, additional_mounts, resource_allocation }
     // mj-controller/src/controller/lifecycle.rs
     pub enum BranchDisposition { Delete, Keep }
+    impl Controller { pub fn destroy_session_controlled_with(&mut self, session_id: &str, executor: &impl CommandExecutor, branch: BranchDisposition) -> Result<()>; }
+    // mj-controller/src/sessionwiki.rs
+    pub fn sessions_ready_to_archive(sessions: &BTreeMap<String, SessionRecord>, subagents: &BTreeMap<String, SubagentRecord>, now: DateTime<Utc>, older_than_days: u32) -> Vec<String>;
+    pub fn indexed_with_messages(session_ids: &[String]) -> Result<BTreeSet<String>>;
     // mj-client/src/daemon.rs
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<Vec<WikiRow>>;
     pub async fn wiki_brief(&mut self, wiki_id: String, max_chars: usize) -> Result<String>;
