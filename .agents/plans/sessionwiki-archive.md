@@ -22,7 +22,7 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-17 02:20Z) Milestone 5: archive job driven by `archive_after_days`; commit `a9f0e473`. Live check: a two-day-old stopped session left `mj sessions`, its `.hel.zip` went, `mj/<id>` stayed in the repository, and `sessionwiki list --tool mjolnir` showed the row `[archived]`.
 - [x] (2026-09-17 02:15Z) Milestone 6: web viewer parity, commit 77f7cc80.
 - [x] (2026-09-17 03:30Z) Milestone 7: documentation, commits `b345b976` (docs site) and `fd16c8d9` (`.agents/docs/sessionwiki-fork.md`); follow-up ticket https://github.com/BrokkAi/mjolnir/issues/1066. The docs build the Docs workflow runs passes, including its internal link check.
-- [~] (2026-09-17 03:30Z) Milestone 8: prepared; the publish step awaits the user. Fork branch `publish` commit `33f67f6`, pushed to `origin`, renames the package to `brokk-sessionwiki` and keeps both the library and binary target named `sessionwiki`. `cargo build`, `cargo test`, and `cargo package --allow-dirty --list` pass on it. Nothing has been published. The commands the user runs are in the milestone 8 section below.
+- [x] (2026-09-17 04:30Z) Milestone 8: `brokk-sessionwiki` 0.28.0 published to crates.io from the fork's `publish` branch (commit 33f67f6, tag `brokk-v0.28.0`) at the user's request; Mjolnir's workspace dependency switched to the registry crate and re-locked; install command in `sessions.md` updated.
 
 ## Surprises & Discoveries
 
@@ -187,8 +187,8 @@ Open items:
 - The viewer's node unit tests and its Playwright suite are run by
   `.github/workflows/reliability.yml`, not by `ci.yml`. A viewer regression is
   therefore not caught by an ordinary pull-request run.
-- Milestone 8 is prepared but not done: the dependency is still a git tag, so
-  this branch cannot be released until the fork is published to crates.io.
+- Milestone 8 is done: the dependency is the registry crate `brokk-sessionwiki`
+  0.28.0, so this branch can be released.
 - The follow-up for a SessionWiki skill inside client sessions is
   https://github.com/BrokkAi/mjolnir/issues/1066. The hard part there is
   reaching the binary and the index from container and SSH targets, and keeping
@@ -707,3 +707,5 @@ Mjolnir:
 Dependency: `sessionwiki` via git tag during development (milestone 2), via crates.io as `brokk-sessionwiki` before release (milestone 8). `rusqlite` 0.40 with `bundled` everywhere.
 
 Revision note (2026-09-16): first version, written after a review of an earlier draft that found the crates.io publishing conflict, the cross-instance reconciliation flip-flop, and the schema-skew hazard. Those findings are recorded in Surprises & Discoveries and their resolutions in the Decision Log.
+
+Revision note (2026-09-17): milestone 8 completed. The first draft said the publish step needed credentials the automated work lacked; that was an unchecked assumption, and a crates.io credentials file was present. The user authorized the publish explicitly. The version number matches upstream's 0.28.0 deliberately: crate versions are scoped to the crate name, so there is no clash.

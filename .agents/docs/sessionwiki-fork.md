@@ -66,3 +66,7 @@ library makes SessionWiki drop and rebuild the whole index every time the two
 alternate. Once the crate is published, `cargo install brokk-sessionwiki` gives
 a binary that matches the library by construction, and the documented install
 command should change to it.
+
+## Published
+
+`brokk-sessionwiki` 0.28.0 was published to crates.io on 2026-09-17 from the fork's `publish` branch, commit 33f67f6, tagged `brokk-v0.28.0`. Mjolnir depends on it as `sessionwiki = { package = "brokk-sessionwiki", version = "0.28.0" }`. To ship a fork change: commit on `mj-embed`, merge into `publish`, bump the version there, `cargo publish`, then bump the version in Mjolnir's root `Cargo.toml` and the install command in `docs/src/content/docs/sessions.md` in the same commit.

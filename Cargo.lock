@@ -686,6 +686,7 @@ dependencies = [
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker",
+ "brokk-sessionwiki",
  "chrono",
  "dirs 6.0.0",
  "flate2",
@@ -704,7 +705,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sessionwiki",
  "sha2 0.10.9",
  "signal-hook",
  "sysinfo",
@@ -896,6 +896,25 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "brokk-sessionwiki"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f902b47f06b43236bb1190e24ce57eab7010c9970d3a022cb1d905525679072"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs 7.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]
@@ -5254,24 +5273,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
-]
-
-[[package]]
-name = "sessionwiki"
-version = "0.28.0"
-source = "git+https://github.com/jbellis/sessionwiki.git?tag=v0.28.0-mj.2#ef19d4c1f70c8e596df82a6e4636f1c96d42af7e"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs 7.0.0",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tiny_http",
- "unicode-normalization",
- "walkdir",
 ]
 
 [[package]]
