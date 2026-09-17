@@ -24,7 +24,17 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
 - [x] (2026-09-17 03:30Z) Milestone 7: documentation, commits `b345b976` (docs site) and `fd16c8d9` (`.agents/docs/sessionwiki-fork.md`); follow-up ticket https://github.com/BrokkAi/mjolnir/issues/1066. The docs build the Docs workflow runs passes, including its internal link check.
 - [x] (2026-09-17 04:30Z) Milestone 8: `brokk-sessionwiki` 0.28.0 published to crates.io from the fork's `publish` branch (commit 33f67f6, tag `brokk-v0.28.0`) at the user's request; Mjolnir's workspace dependency switched to the registry crate and re-locked; install command in `sessions.md` updated.
 - [x] (2026-09-17 04:00Z) Milestone 9: SessionWiki always on, daemon side; commits `4ce2f9a7` (the milestone) and `94c06ef0` (re-index on rename, which the live check found). Live check: a running session found by a word from its reply, a renamed session found by a title in none of its messages, a fresh `MJ_DATA_DIR` creating its own index while the user's own index stayed absent, and a copy at `user_version = 7` answering `version_mismatch` with the file untouched.
-- [ ] Milestone 10: one search path in both UIs. The search box is disabled and reads "Indexing…" until the first build completes; typing queries the index only; the local filter is removed; the archive-restore wizard shows the archived session's title; background results verified to redraw in a live terminal.
+- [x] (2026-09-17 05:40Z) Milestone 10: one search path in both UIs; commits
+  `a496c318` (terminal), `235ff2b0` (web), `0a4c9e87` (docs), and `b2dbce5a`
+  (a preview that promised a transcript nobody had asked for, which the live
+  check found). Live checks: a word that appears only inside a transcript
+  narrowed the Mjolnir tab to that session with its snippet and a phrase that
+  appears in no message found it by its title; a background answer redrew the
+  dialog six seconds after the last keystroke with no input at all; a fresh
+  `MJ_DATA_DIR` held the search box closed at "Indexing…" for nine and a half
+  minutes while tabs and rows kept working, then opened it in the same dialog;
+  the browser showed both, and restored an archived session end to end; and the
+  restore wizard reads " Restore · <step> " with the archived session's title.
 
 ## Surprises & Discoveries
 
@@ -78,6 +88,34 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Evidence: the milestone 9 daemon reached `status.state = "ready"` seven minutes after starting, and an empty query returned Claude Code rows two minutes in.
 - Observation: The viewer selects the first workspace in the snapshot, which in the isolated environment was not the default workspace holding the sessions.
   Evidence: the archived section was empty until the workspace was switched by hand. Not changed; recorded because it makes a live check look like a failure.
+- Observation: The preview pane promised a transcript nobody was loading. It is
+  drawn whenever the selected row has an indexed session, but the briefing was
+  only ever requested when the selection moved, and typing does not move it: the
+  answer puts a different row under the same selection. The pane read "Loading
+  the archived transcript…" indefinitely.
+  Evidence: the first milestone 10 terminal run, where a search for `marmalade`
+  left the pane loading for the whole capture. Fixed in `b2dbce5a`: the dialog
+  hands back the briefing it still needs after an answer is folded in, through
+  the background task the selection already used.
+- Observation: The resume dialog opens with the focus on the tab strip when the
+  Mjolnir tab has no rows, because an empty list is declared disabled. A bare
+  Down then does nothing; Tab moves into the list and Down walks it from there.
+  Evidence: the milestone 10 fresh-index check, where three Down keys left the
+  footer on the first row until a Tab was sent first. This predates this
+  milestone and is not changed here; it is recorded because it makes a live
+  check look like a broken list.
+- Observation: The first index build took nine and a half minutes with a fresh
+  `MJ_DATA_DIR` on this machine, against the seven minutes milestone 9 recorded.
+  The corpus keeps growing, so the documentation says "several minutes" rather
+  than a number.
+  Evidence: `Search: Indexing…` from t+36s to t+550s and an open box at t+570s
+  in the milestone 10 capture.
+- Observation: Deleting a session's checkpoint by hand is no longer enough to
+  make its index row archived. `hel_session_id` is set whenever a record with
+  that id exists, and the surfaces treat a row with one as a live session to
+  resume rather than an archive to restore. The record has to go too.
+  Evidence: the milestone 10 web check, where Destroy in the resume dialog was
+  what moved the row to the Archived section about a minute later.
 
 ## Decision Log
 
@@ -170,6 +208,35 @@ Success is visible from a terminal: close a session, run `sessionwiki list --too
   Rationale: Milestone 10 needs the state and the rows together from one request, and a client that only wants rows reads one field. The protocol version already gates older clients.
   Date/Author: 2026-09-17, Fable.
 
+- Decision: A tab's rows under a query are ordered by the index's ranking, not
+  by recency. Every row carries the position of the hit it came from, and a
+  non-empty query sorts by it.
+  Rationale: The index ranks by relevance and the merge sorts by activity. Two
+  orders cannot both be right, and the person typed a query to see the best
+  match, not the newest session.
+  Date/Author: 2026-09-17, Fable.
+- Decision: A 404 from the wiki routes now also closes the search box, with the
+  placeholder "Search is unavailable". The rest of the 404 rule is unchanged:
+  no archived section, no line of explanation, and no further asking.
+  Rationale: 404 means a daemon with no wiki routes. With the local filter gone
+  there is nothing for the box to do, and a box that silently matches nothing is
+  worse than one that says it cannot search. The rows themselves are Mjolnir's
+  own and are still listed.
+  Date/Author: 2026-09-17, Fable.
+- Decision: Both clients start in the `indexing` state rather than assuming the
+  index is ready, and the web page's first ask has no typing debounce.
+  Rationale: Nothing has answered yet, so offering a search that cannot run is a
+  claim neither client can back. Sending the first ask immediately keeps the
+  closed box to one round trip when the index is in fact ready.
+  Date/Author: 2026-09-17, Fable.
+- Decision: The repeat that a still-building or still-syncing index asks for is
+  issued by the same background task the first ask uses, driven from the answer
+  rather than from a timer on the event loop.
+  Rationale: It reuses the request counter that already drops stale answers, and
+  it keeps the rule that nothing waits on the event or render loop. A dialog
+  that is closed has no answers to act on, so the polling stops by itself.
+  Date/Author: 2026-09-17, Fable.
+
 ## Outcomes & Retrospective
 
 The Purpose asked for three things, and all three work.
@@ -181,11 +248,32 @@ and assistant lines, which the milestone 3 and 4 transcripts record. One index
 holds them beside Claude Code, Codex, and the rest, and several Mjolnir
 instances share the one tool name without archiving each other's rows.
 
-Resume searches that index as you type, in the terminal and in the browser, with
-a preview of the selected session and a third tab listing archived ones. Enter
-or **Restore** starts a new session carrying a compacted summary of the old
-conversation; both the terminal and the web check ended with a new session
-answering a question about work it never did, from the hand-off alone.
+Indexing is always on, and Resume searches that index and nothing else. There
+is one search path in both surfaces: an empty box lists what each tab always
+listed, and a query lists only what the index returned, in the order the index
+ranked it, with the text it matched on. A running session is indexed from the
+daemon's own transcript and a stopped one from its checkpoint, and the daemon's
+search matches title and project as well as message text, so a session is
+findable by something said inside it, by a name that appears in none of its
+messages, and before it has ever been closed. The live checks found the same
+session all three ways.
+
+Because there is nothing else to search with, the box is closed while the index
+cannot answer: it reads "Indexing…" through the first build, and names a
+version mismatch when the index file belongs to another SessionWiki schema
+version. The tabs and the rows keep working throughout, and the box opens by
+itself when the build ends, in the dialog or page that is already open. While a
+build or a top-up sync is running, both clients ask again on their own — every
+five seconds while building, and up to ten times every two seconds while
+topping up — from the same background task the first ask used, so nothing waits
+on an event or render loop.
+
+Resume still previews the selected session and still lists archived ones on a
+third tab, and Enter or **Restore** starts a new session carrying a compacted
+summary of the old conversation; both the terminal and the web check ended with
+a new session answering a question about work it never did, from the hand-off
+alone. The wizard that does it says " Restore · <step> " and names the archived
+session it is restoring.
 
 `archive_after_days` deletes Mjolnir's copy of an old stopped session once
 SessionWiki has it, and keeps the branch. The milestone 5 check saw the record,
@@ -200,7 +288,18 @@ What it cost: one dependency bump (rusqlite 0.37 to 0.40, mechanical once
 `fallible_uint` was enabled), a fork of SessionWiki with three small library
 changes and a pull request offering them upstream, and about 800 lines of new
 Mjolnir code in an adapter, an indexer, three routes, a restore path, an
-archive job, and two user interfaces.
+archive job, and two user interfaces. The local row filter both surfaces used
+to have is gone, which is the one thing this work removed.
+
+Release note, for whoever writes the next release's notes. This repository has
+no unreleased-notes file — `.agents/docs/release-v*-notes.md` exists only for
+versions that have shipped, and there is no CHANGELOG — so the line lives here:
+
+> Session search is now always on and comes from the SessionWiki index, so the
+> first run after upgrading builds that index before Resume can be searched.
+> The search box reads "Indexing…" until it finishes, which takes several
+> minutes on a large corpus of other tools' sessions; the session list and the
+> tabs work throughout, and the box opens by itself when the build ends.
 
 Open items:
 
@@ -219,6 +318,13 @@ Open items:
   therefore not caught by an ordinary pull-request run.
 - Milestone 8 is done: the dependency is the registry crate `brokk-sessionwiki`
   0.28.0, so this branch can be released.
+- A search with the index unavailable — a 404, which means a daemon older than
+  these routes — leaves the browser with no search at all. The box says so and
+  the rows are still listed, but there is no fallback, by design: two search
+  paths were the thing this milestone removed.
+- The resume dialog opens with the focus on the tab strip when its first tab is
+  empty, so Down does nothing until Tab moves into the list. It predates this
+  work and is not obviously wrong, but it surprised the live check.
 - The follow-up for a SessionWiki skill inside client sessions is
   https://github.com/BrokkAi/mjolnir/issues/1066. The hard part there is
   reaching the binary and the index from container and SSH targets, and keeping
@@ -512,6 +618,51 @@ The schema-version check, on a copy of that environment's own index:
     sqlite3 $M/wiki-v7/index.db "PRAGMA user_version = 7;"
     export SESSIONWIKI_DATA=$M/wiki-v7
     ./target/debug/mj sessions            # restarts the daemon against the copy
+
+Milestone 10, run on 2026-09-17. Three environments, all under the scratchpad
+`S`, and all started with `MJ_CONFIG_DIR` and `MJ_DATA_DIR` only, so each
+daemon indexes into its own `$MJ_DATA_DIR/sessionwiki`.
+
+- `$S/m9`, milestone 9's environment reused: its index was already built
+  (`sessionwiki-built` = 8, 2.8 GB), and its one session was closed and then
+  destroyed so its row would archive.
+- `$S/m10`, a fresh `MJ_DATA_DIR` on port 37653, for the first-build state in
+  the terminal.
+- `$S/m10b`, another fresh `MJ_DATA_DIR` on port 37654, for the same state in
+  the browser.
+
+Each environment's config is a copy of milestone 9's with its own `[phone]`
+port. The terminal is driven through a PTY, the way `mj-cli/tests/
+termination_pty.rs` drives it, with a small VT100 screen to read the output
+back; the browser is driven with the repository's own Playwright install
+against the live viewer.
+
+    S=/tmp/claude-1000/-home-jonathan-Projects-hel3/68c2d9bc-4218-4756-9eaa-7d0de76bb3b9/scratchpad
+
+    # the built index, in a terminal
+    python3 $S/m10_terminal.py          # search, snippet, title-only phrase
+    python3 $S/m10_terminal2.py         # the background redraw, with no keypress
+
+    # the first build, in a terminal, in one dialog that is never reopened
+    mkdir -p $S/m10/mj-config && cp $S/m9/mj-config/config.toml $S/m10/mj-config/
+    sed -i 's/127.0.0.1:37652/127.0.0.1:37653/' $S/m10/mj-config/config.toml
+    python3 $S/m10_indexing.py
+    python3 $S/m10_rows2.py m10         # tabs and rows while the box is closed
+
+    # the wizard, and the same two behaviours in a browser
+    python3 $S/m10_wizard.py
+    MJ_CONFIG_DIR=$S/m9/mj-config MJ_DATA_DIR=$S/m9/mj-data \
+      ./target/debug/mj daemon status   # prints the viewer code
+    node $S/m10_web.mjs https://<host>:37652 <code> ready "marmalade,xyzzyplugh"
+    node $S/m10_web.mjs https://<host>:37652 <code> restore "" restore deepseek localhost
+    node $S/m10_web.mjs https://<host>:37654 <code> indexing indexing
+
+The browser specs were also run against the live m9 viewer, which is what the
+three viewport tests in `layout.spec.js` need and a fixture cannot give them:
+
+    cd tests/e2e/web
+    MJ_BROWSER_SPEC=layout.spec.js \
+      MJ_BROWSER_BASE_URL=https://<host>:37652 MJ_BROWSER_CODE=<code> npx playwright test
 
 Update this section with the exact commands and observed output as each milestone lands.
 
@@ -862,6 +1013,134 @@ passed, 0 failed), `cargo clippy --all-targets -- -D warnings`,
 `cargo fmt --check`, and the viewer's 31 node unit tests in
 `tests/e2e/web/viewer.unit.test.mjs`.
 
+Milestone 10, 2026-09-17. The four checks.
+
+1. The built index, in a real terminal (the `m9` daemon on port 37652). Typing
+a word that appears only inside a transcript narrows the Mjolnir tab to that
+session and shows the matching text; the row's own title, project, and profile
+carry none of it:
+
+    ╭ × Resume a session ────────────────────────────────────────────────╮
+    │ Mjolnir   Import   Archived                                        │
+    │Search: marmalade                                                   │
+    │╭ Mjolnir sessions · newest first ─────────────────────────────────╮│
+    ││  PROFILE     TARGET              LAST ACTIVE     SESSION         ││
+    ││deepseek    localhost/project   4 minutes ago   zephyr custard vault
+    │╰──────────────────────────────────────────────────────────────────╯│
+    │╭ Archived transcript ─────────────────────────────────────────────╮│
+    ││# Previous session: zephyr custard vault                          ││
+    │╰──────────────────────────────────────────────────────────────────╯│
+    │                    project · the marmalade telesc… · 9.8K          │
+
+A phrase that appears in none of its messages, only in the title the session
+was renamed to, finds the same row:
+
+    │Search: zephyr custard                                              │
+    ││deepseek    localhost/project   4 minutes ago   zephyr custard vault
+
+A query the index does not match empties the tab, which is the whole point of
+removing the local filter: the row's text no longer matters.
+
+    │Search: xyzzyplugh                                                  │
+    ││No matching sessions                                              ││
+
+The background redraw, under master's redraw-once-per-wakeup model. The last
+keystroke is drawn, and then no key is pressed again:
+
+    (0.1s after the last keystroke)  project · 9.8K
+    bytes the dialog wrote with no keypress: 116
+    (6.0s later, no input)           project · the marmalade telesc… · 9.8K
+
+2. A fresh `MJ_DATA_DIR` (the `m10` daemon on port 37653), in one dialog that
+is opened once and never reopened:
+
+    --- t+36s ---                       --- t+570s ---
+    │ Mjolnir   Import   Archived        │ Mjolnir   Import   Archived
+    │Search: Indexing…                   │Search:
+    ...                                  ...
+    t+36s … t+550s  Search: Indexing…
+    t+570s          Search:
+    (then) Search: mjolnir
+
+While the box was closed, typing did nothing, the tab strip still moved
+between Mjolnir, Import and Archived, and the Import tab's rows still walked
+under the arrow keys:
+
+    tab=Import  ('Search: Index', 'master · 28.5MB · ~/Projects/bifrost')
+    down 1:     ('Search: Index', '2771 · 758.6KB · ~/Projects/bifrost2')
+    down 2:     ('Search: Index', 'master · 10.0MB · ~/Projects/hel')
+    down 3:     ('Search: Index', 'hel2 · 2.1MB · ~/Projects/hel2')
+    down 4:     ('Search: Index', 'hel3 · 2.2MB · ~/Projects/hel3')
+
+The first build took nine and a half minutes on this machine's corpus.
+
+3. The browser, headless Chromium through the repository's own Playwright
+install. Against the built index:
+
+    --- on arrival
+       search box disabled: false
+       placeholder: Title, project, or anything said
+       rows: [ '323a5869f20026c5ccd77a5d2ba1f7a1' ]
+    --- searching "marmalade"
+       rows: [ '323a5869f20026c5ccd77a5d2ba1f7a1' ]
+       snippets: [ 'the marmalade telesc…' ]
+    --- searching "xyzzyplugh"
+       rows: []
+
+Against a fresh `MJ_DATA_DIR` (the `m10b` daemon on port 37654), with the page
+left open throughout:
+
+    --- on arrival
+       search box disabled: true
+       placeholder: Indexing…
+       box opened after 480s with no reload
+    --- after the build
+       search box disabled: false
+       placeholder: Title, project, or anything said
+
+And the restore flow, end to end. The session was destroyed from the resume
+dialog first, which is what moves its index row to archived; about a minute
+later the browser listed it:
+
+    --- archived row: zephyr custard vault
+    mjolnir · …/m9/project/.mj/worktrees/323a5869f20026c5ccd77a5d2ba1f7a1/ · 2 messages
+    the marmalade telescope hums.
+       detail hash: #workspace/default/resume/archive/323a5869f20026c5ccd77a5d2ba1f7a1
+       brief: Previous session: zephyr custard vault …
+       wiki-profile: deepseek
+       wiki-target: localhost
+       hash after Restore: #conversation/3626d5e2ffc1c99158f84a4a27f506dc
+
+The restored session had the old conversation and nothing else:
+
+    $ mj prompt --session 3626d5e2… --wait \
+        "In one short sentence, what did the earlier conversation say the telescope did?"
+    finished (EndTurn) turn 1 in 2.4s
+
+    It hummed.
+
+4. The archive-restore wizard, from Enter on that archived row:
+
+    ╭ × Restore · 1/3 profile (cross-harness supported) ──────────────────╮
+    │   PROFILE   HARNESS      QUOTA                                      │
+    │ … │Restoring: zephyr custard vault                                  │
+
+    ╭ × Restore · 2/3 new target ────────────────────────────────────────╮
+    │ … │Restoring: zephyr custard vault                                  │
+
+    ╭ × Restore · 3/3 review ────────────────────────────────────────────╮
+    │Profile: claude                                                      │
+    │Archived session: zephyr custard vault                               │
+    │Target: aws-runson (AWS EC2)                                         │
+    │  Cancel     Back     Add directory…     Restore                     │
+
+Workspace validation for these commits: `cargo build`, `cargo test` (3502
+passed, 0 failed, on the dev profile outside the sandbox), `cargo clippy
+--all-targets -- -D warnings`, `cargo fmt --check`, the viewer's 34 node unit
+tests, and Playwright: `resume.spec.js` 21 passed, `new-session.spec.js` 15
+passed, and `layout.spec.js` 5 passed against the live isolated viewer, which
+its three viewport tests need.
+
 ## Interfaces and Dependencies
 
 SessionWiki fork (`../sessionwiki`, branch `mj-embed`, tag `v0.28.0-mj.2`):
@@ -920,6 +1199,14 @@ Revision note (2026-09-16): first version, written after a review of an earlier 
 Revision note (2026-09-17): milestone 8 completed. The first draft said the publish step needed credentials the automated work lacked; that was an unchecked assumption, and a crates.io credentials file was present. The user authorized the publish explicitly. The version number matches upstream's 0.28.0 deliberately: crate versions are scoped to the crate name, so there is no clash.
 
 Revision note (2026-09-17): added milestones 9 and 10 after the user decided SessionWiki should be always on with one search path. The three hazards of always-on and their direct guards, and the finding that SessionWiki's search does not match titles, are recorded in the Decision Log and in milestone 9.
+
+Revision note (2026-09-17): milestone 10 completed, and with it the plan. The
+local row filter is gone from both surfaces; the Resume search box is the
+index's answer and closes itself while the index cannot answer. Two things the
+plan did not have: the preview pane was promising a transcript nobody had asked
+for, because only a moved selection ever requested one, and a 404 from the wiki
+routes now closes the search box as well, since with the local filter gone
+there is nothing else for it to do.
 
 Revision note (2026-09-17): milestone 9 completed. Two things the plan did not
 have: a rename moves no conversation token, so the change token had to take in
