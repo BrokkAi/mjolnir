@@ -146,6 +146,13 @@ pub(crate) enum DashboardIoUpdate {
         wiki_id: String,
         result: std::result::Result<String, String>,
     },
+    /// One archived session's matching passages, for the resume dialog's
+    /// preview while a query is active.
+    WikiHits {
+        wiki_id: String,
+        query: String,
+        result: std::result::Result<Option<mj_client::daemon::WikiHitTranscript>, String>,
+    },
     WebListeners {
         generation: u64,
         result: Result<Vec<mj_tui::WebListenerProcess>, String>,
@@ -800,8 +807,14 @@ impl DashboardContext {
                     // A new answer can put a different row under an unmoved
                     // selection, and the preview pane is already promising
                     // that row's transcript.
-                    if let Some(wiki_id) = self.dashboard.next_wiki_brief() {
-                        spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
+                    match self.dashboard.next_wiki_preview() {
+                        DashboardAction::LoadArchivedBrief { wiki_id } => {
+                            spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
+                        }
+                        DashboardAction::LoadArchivedHits { wiki_id, query } => {
+                            spawn_wiki_hits(wiki_id, query, self.dashboard_io_tx.clone());
+                        }
+                        _ => {}
                     }
                     // An index that is still building, or still topping up,
                     // answers again by itself: the dialog says when and the
@@ -826,6 +839,26 @@ impl DashboardContext {
                 Err(error) => self
                     .dashboard
                     .apply_wiki_brief(wiki_id, format!("Could not load the transcript: {error}")),
+            },
+            DashboardIoUpdate::WikiHits {
+                wiki_id,
+                query,
+                result,
+            } => match result {
+                Ok(transcript) => self.dashboard.apply_wiki_hits(wiki_id, query, transcript),
+                // Shown in the pane the same way a failed briefing is, so the
+                // reason sits where the passages were promised.
+                Err(error) => self.dashboard.apply_wiki_hits(
+                    wiki_id,
+                    query,
+                    Some(mj_client::daemon::WikiHitTranscript {
+                        blocks: vec![mj_client::daemon::WikiHitBlock {
+                            text: format!("Could not load the matching passages: {error}"),
+                            ..Default::default()
+                        }],
+                        omitted_after: 0,
+                    }),
+                ),
             },
             DashboardIoUpdate::WebListeners { generation, result } => {
                 if generation == self.web_request_generation {

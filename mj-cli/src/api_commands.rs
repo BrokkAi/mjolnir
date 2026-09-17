@@ -332,6 +332,10 @@ pub(crate) struct CloseArgs {
     /// recovery archive removed, sub-agents destroyed first; irreversible.
     #[arg(long)]
     force: bool,
+    /// With --force, also delete the session's managed branch. Without it the
+    /// branch stays in the repository.
+    #[arg(long, requires = "force")]
+    delete_branch: bool,
     #[arg(long)]
     json: bool,
 }
@@ -618,7 +622,9 @@ pub(crate) async fn sessions(
 
 pub(crate) async fn close(args: CloseArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    client.close(&args.session, args.force).await?;
+    client
+        .close(&args.session, args.force, args.delete_branch)
+        .await?;
     match args.json {
         true => print_json(&serde_json::json!({
             "session_id": args.session,

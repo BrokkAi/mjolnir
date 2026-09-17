@@ -1101,7 +1101,7 @@ fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     assert_eq!(test_git(repository.path(), &["status", "--porcelain"]), "");
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "session\n").unwrap();
 
-    cleanup_managed_worktree(&ProcessExecutor, &worktree).unwrap();
+    cleanup_managed_worktree(&ProcessExecutor, &worktree, BranchDisposition::Delete).unwrap();
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());
     let output = Command::new("git")

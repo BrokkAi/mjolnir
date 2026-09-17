@@ -18,7 +18,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use mj_client::daemon::{WikiIndexState, WikiRow, WikiStatus};
+use mj_client::daemon::{WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiStatus};
 use mj_core::state::{SessionRecord, State};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::{Message, Role, Session};
@@ -825,6 +825,191 @@ pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>> {
     )))
 }
 
+/// The passages of one indexed session that match `query`, or `None` when the
+/// id names no indexed session.
+///
+/// Every matching message is returned with `context_messages` neighbours on
+/// each side; overlapping groups are merged and each group's first block says
+/// how many messages were skipped before it. Each block's text is capped at
+/// `per_message_chars` characters, keeping the window around its first match.
+pub fn transcript_hits(
+    id: &str,
+    query: &str,
+    context_messages: usize,
+    per_message_chars: usize,
+) -> Result<Option<WikiHitTranscript>> {
+    if !index_is_writable() {
+        return Ok(None);
+    }
+    let connection = open_readonly()?;
+    let Some(row) = row_by_id(&connection, id)? else {
+        return Ok(None);
+    };
+    let session = sessionwiki::index::session_from_index(&connection, &row)
+        .context("read an indexed session")?;
+    Ok(Some(hit_transcript(
+        &session,
+        query,
+        context_messages,
+        per_message_chars,
+    )))
+}
+
+/// The matching passages of one loaded session. Pure, so the excerpt rules can
+/// be tested without an index on disk.
+///
+/// Matching is a case-insensitive substring search over NFC-normalised,
+/// redacted text. That reproduces what the index found: its full-text table
+/// uses a trigram tokenizer, which is substring matching for queries of three
+/// or more characters, and shorter queries already go through a `LIKE` scan.
+/// Redaction is the same `sessionwiki::redact` pass `brief_markdown` makes, so
+/// a credential that never reaches a briefing never reaches a preview either.
+fn hit_transcript(
+    session: &Session,
+    query: &str,
+    context_messages: usize,
+    per_message_chars: usize,
+) -> WikiHitTranscript {
+    let needle = sessionwiki::util::nfc(query.trim()).to_lowercase();
+    if needle.is_empty() || session.messages.is_empty() {
+        return WikiHitTranscript::default();
+    }
+    let texts: Vec<String> = session
+        .messages
+        .iter()
+        .map(|message| {
+            sessionwiki::redact::redact(&sessionwiki::util::nfc(message.text.trim())).into_owned()
+        })
+        .collect();
+    let found: Vec<Vec<(usize, usize)>> =
+        texts.iter().map(|text| matches_in(text, &needle)).collect();
+
+    // Merge each match's context window into groups of consecutive messages.
+    // Windows one apart are merged too: "0 messages omitted" is noise.
+    let last = texts.len() - 1;
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for index in (0..texts.len()).filter(|index| !found[*index].is_empty()) {
+        let start = index.saturating_sub(context_messages);
+        let end = (index + context_messages).min(last);
+        match groups.last_mut() {
+            Some(previous) if start <= previous.1 + 1 => previous.1 = previous.1.max(end),
+            _ => groups.push((start, end)),
+        }
+    }
+    if groups.is_empty() {
+        return WikiHitTranscript::default();
+    }
+
+    let mut blocks: Vec<WikiHitBlock> = Vec::new();
+    let mut previous_end: Option<usize> = None;
+    for (start, end) in &groups {
+        let omitted = match previous_end {
+            Some(previous) => start - previous - 1,
+            None => *start,
+        };
+        for index in *start..=*end {
+            let (text, hits, truncated) = excerpt(&texts[index], &found[index], per_message_chars);
+            blocks.push(WikiHitBlock {
+                role: role_name(session.messages[index].role).to_owned(),
+                text,
+                hits,
+                omitted_before: if index == *start { omitted } else { 0 },
+                truncated,
+            });
+        }
+        previous_end = Some(*end);
+    }
+    WikiHitTranscript {
+        blocks,
+        omitted_after: last - previous_end.unwrap_or(last),
+    }
+}
+
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// Byte ranges of every non-overlapping case-insensitive occurrence of an
+/// already-lowercased needle.
+///
+/// Lowercasing can change a string's length (`İ` lowercases to two chars), so
+/// the search carries a map from each lowercased byte back to the byte that
+/// starts the character it came from. The returned ranges are therefore
+/// offsets into `text` itself, on character boundaries.
+fn matches_in(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let mut lowered = String::with_capacity(text.len());
+    let mut origin: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    for (index, character) in text.char_indices() {
+        let before = lowered.len();
+        lowered.extend(character.to_lowercase());
+        origin.resize(origin.len() + (lowered.len() - before), index);
+    }
+    origin.push(text.len());
+
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = lowered[from..].find(needle) {
+        let start = from + offset;
+        from = start + needle.len();
+        let begin = origin[start];
+        let mut end = origin[from];
+        if end <= begin {
+            // The whole match sat inside one character's lowercase expansion.
+            end = text[begin..]
+                .chars()
+                .next()
+                .map_or(begin, |character| begin + character.len_utf8());
+        }
+        hits.push((begin, end));
+    }
+    hits
+}
+
+/// One message capped at `per_message_chars` characters, keeping the window
+/// around its first match, with the hit ranges rebased onto what is kept.
+fn excerpt(
+    text: &str,
+    hits: &[(usize, usize)],
+    per_message_chars: usize,
+) -> (String, Vec<(usize, usize)>, bool) {
+    let total = text.chars().count();
+    if per_message_chars == 0 || total <= per_message_chars {
+        return (text.to_owned(), hits.to_vec(), false);
+    }
+    // A quarter of the budget of lead-in, so the hit reads in context rather
+    // than starting the excerpt.
+    let first = hits
+        .first()
+        .map_or(0, |(start, _)| text[..*start].chars().count());
+    let mut window_start = first.saturating_sub(per_message_chars / 4);
+    window_start = window_start.min(total - per_message_chars);
+    let begin = byte_of_char(text, window_start);
+    let end = byte_of_char(text, window_start + per_message_chars);
+    let kept = hits
+        .iter()
+        .filter_map(|(start, stop)| {
+            let start = (*start).max(begin);
+            let stop = (*stop).min(end);
+            if start < stop {
+                Some((start - begin, stop - begin))
+            } else {
+                None
+            }
+        })
+        .collect();
+    (text[begin..end].to_owned(), kept, true)
+}
+
+fn byte_of_char(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(offset, _)| offset)
+}
+
 /// What a restore needs from the index: the transcript as a snapshot the
 /// compaction pipeline accepts, plus the title and project of the session it
 /// came from.
@@ -1510,6 +1695,92 @@ mod tests {
             touched: Vec::new(),
             edits: Vec::new(),
         }
+    }
+
+    /// A hit is found whatever the case of the query or of the transcript, and
+    /// the reported range covers the matched text in the returned block.
+    #[test]
+    fn transcript_hits_locates_case_insensitive_matches() {
+        let session = indexed(vec![
+            (Role::User, "Make the Tests green"),
+            (Role::Assistant, "the tests are green now"),
+        ]);
+
+        let found = hit_transcript(&session, "TESTS", 0, 4_000);
+
+        assert_eq!(found.blocks.len(), 2, "both messages contain the query");
+        assert_eq!(found.blocks[0].role, "user");
+        let (start, end) = found.blocks[0].hits[0];
+        assert_eq!(&found.blocks[0].text[start..end], "Tests");
+        let (start, end) = found.blocks[1].hits[0];
+        assert_eq!(&found.blocks[1].text[start..end], "tests");
+        assert!(!found.blocks[0].truncated);
+        assert_eq!(found.omitted_after, 0);
+    }
+
+    /// Context messages come back around each hit, with the gap between two
+    /// groups counted rather than silently closed.
+    #[test]
+    fn transcript_hits_keeps_context_and_marks_omissions() {
+        let session = indexed(vec![
+            (Role::User, "zero"),
+            (Role::Assistant, "one needle one"),
+            (Role::Tool, "two"),
+            (Role::User, "three"),
+            (Role::Assistant, "four"),
+            (Role::Tool, "five"),
+            (Role::User, "six needle six"),
+            (Role::Assistant, "seven"),
+            (Role::User, "eight"),
+        ]);
+
+        let found = hit_transcript(&session, "needle", 1, 4_000);
+
+        let shown: Vec<(&str, &str, usize)> = found
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.role.as_str(),
+                    block.text.as_str(),
+                    block.omitted_before,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("user", "zero", 0),
+                ("assistant", "one needle one", 0),
+                ("tool", "two", 0),
+                ("tool", "five", 2),
+                ("user", "six needle six", 0),
+                ("assistant", "seven", 0),
+            ]
+        );
+        assert_eq!(found.omitted_after, 1, "the last message is not shown");
+        assert!(found.blocks[0].hits.is_empty(), "context has no hits");
+    }
+
+    /// A long message is cut down to the caller's budget around its first hit,
+    /// not from the start, so the match is always in what comes back.
+    #[test]
+    fn transcript_hits_window_keeps_the_first_hit() {
+        let filler = "x".repeat(4_000);
+        let session = indexed(vec![(Role::User, &format!("{filler} needle {filler}"))]);
+
+        let found = hit_transcript(&session, "needle", 0, 100);
+
+        let block = &found.blocks[0];
+        assert!(block.truncated);
+        assert_eq!(block.text.chars().count(), 100);
+        assert_eq!(block.hits.len(), 1, "the windowed text keeps its hit");
+        let (start, end) = block.hits[0];
+        assert_eq!(&block.text[start..end], "needle");
+        assert!(
+            start >= 20,
+            "the window keeps lead-in before the hit, got {start}"
+        );
     }
 
     /// The snapshot a restore hands to compaction has to satisfy the same

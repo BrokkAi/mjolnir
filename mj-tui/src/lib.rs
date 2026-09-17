@@ -245,9 +245,14 @@ pub enum DashboardAction {
     },
     DestroyStopped {
         session_id: String,
+        /// Whether the user asked for the session's managed git branch to go
+        /// with it. Destroying keeps the branch unless they did.
+        delete_branch: bool,
     },
     ForceDestroy {
         session_id: String,
+        /// See [`DashboardAction::DestroyStopped`].
+        delete_branch: bool,
     },
     RenameSession {
         session_id: String,
@@ -297,6 +302,12 @@ pub enum DashboardAction {
     /// Fetch the briefing shown under the resume dialog's list.
     LoadArchivedBrief {
         wiki_id: String,
+    },
+    /// Fetch the passages of one archived transcript that match the resume
+    /// dialog's query, which the preview pane shows in place of the briefing.
+    LoadArchivedHits {
+        wiki_id: String,
+        query: String,
     },
     /// Start a new session carrying a summary of an archived transcript.
     RestoreArchivedSession {
@@ -632,6 +643,11 @@ pub struct DashboardState {
     /// scans, and the dialog's own search. Rebuilt where those change and once
     /// a second for the activity labels; empty when no dialog is open.
     pub(crate) resume_rows: Vec<crate::resume::ResumeRow>,
+    /// How many rows the current query matched on each tab, indexed by
+    /// `ResumeTab::index`. All zero when nothing is typed. Rebuilt beside
+    /// `resume_rows`, from the same merge, so the tabs a person is not looking
+    /// at can still say where their hits are.
+    pub(crate) resume_hit_counts: [usize; 3],
     /// Row hitboxes for the Active pane, keyed by the row's index into the
     /// active session list. Each rect spans the summary line and every
     /// visible preview line beneath it, so a click anywhere on the row
@@ -784,6 +800,7 @@ impl DashboardState {
             session_action_focus: None,
             session_menu_ids: Vec::new(),
             resume_rows: Vec::new(),
+            resume_hit_counts: [0; 3],
             session_row_areas: Vec::new(),
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),

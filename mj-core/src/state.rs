@@ -1405,6 +1405,22 @@ impl Default for State {
 }
 
 impl State {
+    /// The session whose project identity names a row.
+    ///
+    /// A sub-agent child runs inside its parent's workspace and owns no
+    /// managed worktree, so its own `project_directory` is the parent's
+    /// worktree checkout, whose directory is named after the parent session
+    /// id. Reading the project identity from the parent instead keeps a child
+    /// under the same project heading and target label as the session it
+    /// belongs to.
+    #[must_use]
+    pub fn project_identity_session<'a>(&'a self, session: &'a SessionRecord) -> &'a SessionRecord {
+        self.subagents
+            .get(&session.id)
+            .and_then(|record| self.sessions.get(&record.parent_session_id))
+            .unwrap_or(session)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != STATE_VERSION {
             bail!(
@@ -1660,6 +1676,12 @@ pub struct RecoveryCandidate {
     /// the ownership marker. `None` means an older build left no stamp.
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// State of the session this resource is labelled for, when the
+    /// controller still tracks that session. A leftover resource the session
+    /// record no longer names can only be destroyed, never adopted, because
+    /// the session id is already taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_session: Option<SessionState>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

@@ -109,19 +109,19 @@ def stop_from_dashboard(client) -> None:
 
 
 def run_layout_matrix(lab: Lab, web_root: pathlib.Path, environment: dict[str, str]) -> None:
-    """Drive the layout and accessibility checks at three viewport widths.
+    """Run the deterministic Playwright project against the live daemon.
 
     This runs after the reliability scenario against the same live daemon, so
-    it costs one extra browser rather than a second lab, and it sees the real
-    pages with real sessions on them rather than an empty shell.
-    Quota and plan-mode interaction cases use controlled API fixtures without
-    contacting providers or using live authentication.
+    it costs one extra browser rather than a second lab. The layout and
+    accessibility checks at three viewport widths take the lab environment
+    from this call and see real pages with real sessions on them rather than
+    an empty shell; the quota and plan-mode interaction cases use controlled
+    API fixtures without contacting providers or using live authentication.
     """
     log = (lab.root / "layout.log").open("wb")
     matrix_environment = dict(environment)
-    matrix_environment["MJ_BROWSER_SPEC"] = "{layout,quota,plan-mode,new-session,project-groups,resume,attachments,voice}.spec.js"
     matrix = subprocess.Popen(
-        [str(web_root / "node_modules/.bin/playwright"), "test"],
+        [str(web_root / "node_modules/.bin/playwright"), "test", "--project", "deterministic"],
         cwd=web_root,
         env=matrix_environment,
         stdout=log,
@@ -178,7 +178,7 @@ def run(lab: Lab) -> None:
         }
     )
     browser = subprocess.Popen(
-        [str(web_root / "node_modules/.bin/playwright"), "test"],
+        [str(web_root / "node_modules/.bin/playwright"), "test", "--project", "lab"],
         cwd=web_root,
         env=environment,
         stdout=browser_log,

@@ -192,14 +192,7 @@ impl ElicitationDialog {
     /// capped by the caller to the space available on screen.
     pub(super) fn natural_height(&self, width: u16) -> u16 {
         let content_width = width.saturating_sub(2).max(1);
-        let focus = focus_content(self);
-        let focus_rows = u16::try_from(
-            Paragraph::new(focus.lines)
-                .wrap(Wrap { trim: false })
-                .line_count(content_width),
-        )
-        .unwrap_or(u16::MAX)
-        .max(1);
+        let focus_rows = focus_content(self).wrapped_height(content_width);
         let message_rows = u16::try_from(
             Paragraph::new(self.request.message.as_str())
                 .wrap(Wrap { trim: true })
@@ -970,9 +963,10 @@ fn render_elicitation_body(
     focus: FocusContent<'_>,
     focused_field: usize,
 ) {
-    let natural_focus_height = u16::try_from(
-        Paragraph::new(focus.lines.clone())
-            .wrap(Wrap { trim: false })
+    let natural_focus_height = focus.wrapped_height(inner.width);
+    let natural_message_height = u16::try_from(
+        Paragraph::new(dialog.request.message.as_str())
+            .wrap(Wrap { trim: true })
             .line_count(inner.width),
     )
     .unwrap_or(u16::MAX)
@@ -990,10 +984,14 @@ fn render_elicitation_body(
             .min(body_height);
         (body_height.saturating_sub(focus_height), focus_height)
     } else {
-        // Keep the answer controls inside tiny session areas too. The form
-        // body receives whatever remains after the two button rows and the
-        // footer; its own scroll keeps a focused option reachable.
-        let message_height = body_height.min(3).min(body_height.saturating_sub(1));
+        // The pane height budget already counts the message rows and the field
+        // rows, so the message takes only the rows it uses, up to its usual
+        // three. What is left goes to the field, which needs its pinned title
+        // as well as the control the title names: a bare checkbox or option
+        // does not say what is being answered.
+        let message_height = natural_message_height
+            .min(3)
+            .min(body_height.saturating_sub(natural_focus_height.min(2)));
         (message_height, body_height.saturating_sub(message_height))
     };
     let constraints = [
@@ -1048,12 +1046,32 @@ fn render_elicitation_body(
         usize::from(total_lines),
     ));
     surfaces.push(SurfaceFrame::fixed(SurfaceId::ModalBody, chunks[1]));
+    // The field title stays outside the scrolled field body, so scrolling to a
+    // control or a distant option can never hide the question it answers. A
+    // single remaining row belongs to the control itself.
+    let focus_area = match focus.title.as_ref().filter(|_| chunks[1].height >= 2) {
+        Some(title) => {
+            frame.render_widget(
+                Paragraph::new(title.clone()),
+                Rect {
+                    height: 1,
+                    ..chunks[1]
+                },
+            );
+            Rect {
+                y: chunks[1].y.saturating_add(1),
+                height: chunks[1].height.saturating_sub(1),
+                ..chunks[1]
+            }
+        }
+        None => chunks[1],
+    };
     let field_index = focused_field.min(dialog.display_fields.len().saturating_sub(1));
     {
         let mut form = dialog.form.borrow_mut();
         for (index, display) in dialog.display_fields.iter().copied().enumerate() {
             let field_area = if index == focused_field {
-                chunks[1]
+                focus_area
             } else {
                 Rect::default()
             };
@@ -1091,15 +1109,15 @@ fn render_elicitation_body(
     let focus_rows = u16::try_from(
         Paragraph::new(focus.lines.clone())
             .wrap(Wrap { trim: false })
-            .line_count(chunks[1].width),
+            .line_count(focus_area.width),
     )
     .unwrap_or(u16::MAX)
     .max(1);
-    let focus_max_scroll = focus_rows.saturating_sub(chunks[1].height);
+    let focus_max_scroll = focus_rows.saturating_sub(focus_area.height);
     let target_row = focus.focused_row.map_or(0, |line| {
         let prefix_rows = Paragraph::new(focus.lines[..line].to_vec())
             .wrap(Wrap { trim: false })
-            .line_count(chunks[1].width);
+            .line_count(focus_area.width);
         let cursor_row = focus
             .text_cursor
             .filter(|(cursor_line, _)| usize::from(*cursor_line) == line)
@@ -1110,7 +1128,7 @@ fn render_elicitation_body(
                     .grapheme_indices(true)
                     .nth(cursor_grapheme)
                     .map_or(text.len(), |(offset, _)| offset);
-                input_cursor_visual_position(&text, cursor_byte, usize::from(chunks[1].width)).1
+                input_cursor_visual_position(&text, cursor_byte, usize::from(focus_area.width)).1
             });
         prefix_rows.saturating_add(cursor_row)
     });
@@ -1118,9 +1136,9 @@ fn render_elicitation_body(
     let target_row = target_row.min(usize::from(u16::MAX)) as u16;
     if target_row < focus_scroll {
         focus_scroll = target_row;
-    } else if target_row >= focus_scroll.saturating_add(chunks[1].height) {
+    } else if target_row >= focus_scroll.saturating_add(focus_area.height) {
         focus_scroll = target_row
-            .saturating_sub(chunks[1].height.saturating_sub(1))
+            .saturating_sub(focus_area.height.saturating_sub(1))
             .min(focus_max_scroll);
     }
     dialog.focus_scroll.set(focus_scroll);
@@ -1130,7 +1148,7 @@ fn render_elicitation_body(
         if select_option_count(&dialog.request.fields[display.field]).is_some() {
             ChoiceList::render_wrapped(
                 frame,
-                chunks[1],
+                focus_area,
                 &focus.lines,
                 &focus.option_rows,
                 dialog.option_cursors[display.field],
@@ -1139,16 +1157,16 @@ fn render_elicitation_body(
                 id,
             );
         } else {
-            render_focus(frame, chunks[1], &focus, focus_scroll, focused);
+            render_focus(frame, focus_area, &focus, focus_scroll, focused);
         }
         if let Some((line, _)) = focus.text_cursor {
             let prefix = Paragraph::new(focus.lines[..usize::from(line)].to_vec())
                 .wrap(Wrap { trim: false })
-                .line_count(chunks[1].width);
+                .line_count(focus_area.width);
             // The editor is a single row; scrolling belongs to the field,
             // while the surrounding option descriptions keep their wrapping.
             let row = prefix.saturating_sub(usize::from(focus_scroll));
-            if row < usize::from(chunks[1].height) {
+            if row < usize::from(focus_area.height) {
                 let field = if matches!(dialog.values[display.field], FieldValue::Text(_)) {
                     display.field
                 } else {
@@ -1158,9 +1176,9 @@ fn render_elicitation_body(
                 };
                 if let FieldValue::Text(input) = &dialog.values[field] {
                     let area = Rect::new(
-                        chunks[1].x.saturating_add(2),
-                        chunks[1].y.saturating_add(row as u16),
-                        chunks[1].width.saturating_sub(2),
+                        focus_area.x.saturating_add(2),
+                        focus_area.y.saturating_add(row as u16),
+                        focus_area.width.saturating_sub(2),
                         1,
                     );
                     if select_option_count(&dialog.request.fields[display.field]).is_none() {
@@ -1182,11 +1200,11 @@ fn render_elicitation_body(
                 .focused_row
                 .unwrap_or(0)
                 .saturating_sub(usize::from(focus_scroll));
-            let area = if row < usize::from(chunks[1].height) {
+            let area = if row < usize::from(focus_area.height) {
                 Rect::new(
-                    chunks[1].x,
-                    chunks[1].y + row as u16,
-                    chunks[1].width.min(5),
+                    focus_area.x,
+                    focus_area.y + row as u16,
+                    focus_area.width.min(5),
                     1,
                 )
             } else {
@@ -1195,7 +1213,7 @@ fn render_elicitation_body(
             form.register(id, ControlKind::Checkbox, area, true);
         }
     } else {
-        render_focus(frame, chunks[1], &focus, focus_scroll, focused);
+        render_focus(frame, focus_area, &focus, focus_scroll, focused);
     }
     {
         let mut form = dialog.form.borrow_mut();
@@ -1268,11 +1286,28 @@ fn message_position_at_row(message: &str, width: u16, row: usize) -> (usize, usi
 }
 
 struct FocusContent<'a> {
+    /// The field position and title. It is pinned above the scrolling field
+    /// body so a control can never be shown without the question it answers.
+    title: Option<Line<'a>>,
     lines: Vec<Line<'a>>,
     text_cursor: Option<(u16, usize)>,
     focused_row: Option<usize>,
     centered: bool,
     option_rows: Vec<Option<usize>>,
+}
+
+impl FocusContent<'_> {
+    /// Rows the pinned title and the field body occupy at this width.
+    fn wrapped_height(&self, width: u16) -> u16 {
+        let body = u16::try_from(
+            Paragraph::new(self.lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width),
+        )
+        .unwrap_or(u16::MAX)
+        .max(1);
+        body.saturating_add(u16::from(self.title.is_some()))
+    }
 }
 
 fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
@@ -1284,6 +1319,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             _ => "Cancel this question",
         };
         return FocusContent {
+            title: None,
             lines: vec![Line::from(label)],
             text_cursor: None,
             focused_row: None,
@@ -1293,7 +1329,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     };
     let field = &dialog.request.fields[display.field];
     let required = if field.required { " (required)" } else { "" };
-    let mut lines = vec![Line::from(vec![
+    let title = Line::from(vec![
         Span::styled(
             format!("{}/{}  ", focus + 1, dialog.display_fields.len()),
             Style::default().fg(theme::palette().muted),
@@ -1302,7 +1338,8 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             format!("{}{}", field.title, required),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-    ])];
+    ]);
+    let mut lines = Vec::new();
     if let Some(description) = &field.description {
         lines.push(Line::styled(
             description.as_str(),
@@ -1321,11 +1358,11 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
             };
             lines.push(Line::raw(""));
             let input_line = lines.len() as u16;
+            focused_row = Some(lines.len());
             lines.push(Line::styled(
                 format!("> {shown}"),
                 Style::default().fg(theme::palette().accent),
             ));
-            focused_row = Some(2 + usize::from(field.description.is_some()));
             text_cursor = Some((
                 input_line,
                 value.value()[..value.cursor()].graphemes(true).count(),
@@ -1440,6 +1477,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
     }
     let focused_row = focused_row.or_else(|| text_cursor.map(|(line, _)| usize::from(line)));
     FocusContent {
+        title: Some(title),
         lines,
         text_cursor,
         focused_row,

@@ -143,7 +143,11 @@ Add the smallest regression test that would have caught the problem:
   need a process boundary — for example
   `tests/e2e/run-reliability.sh --scenario multi-client-happy-path --seed N <mj binary>`
   for multi-client daemon/dashboard reliability, `session_restart_chaos.sh`,
-  and the Playwright web checks under `tests/e2e/web/`.
+  and the Playwright web checks under `tests/e2e/web/`. There, `npm ci && npm
+  test` runs the unit tests and the self-contained `deterministic` Playwright
+  project, which needs no daemon; the `lab` project holds the live TUI/browser
+  convergence case and runs only through
+  `tests/e2e/run-browser-reliability.sh --seed N <mj binary>`.
 - Add negative controls for permission, protocol, persistence, cleanup, and
   terminal-lifecycle changes.
 - Update the embedded guides in `mj-controller/docs/`, `docs/SSH.md`,

@@ -18,7 +18,7 @@ use crate::targets::{
 pub(super) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
-use super::{Controller, execute_checked, now};
+use super::{BranchDisposition, Controller, execute_checked, now};
 
 impl Controller {
     /// Inspect in a supervised worker, never on a UI event loop.
@@ -337,7 +337,9 @@ impl Controller {
         else {
             return Ok(());
         };
-        cleanup_managed_worktree(executor, worktree)
+        // A session that never started has a branch Mjolnir just created and
+        // nobody has worked on, so the rollback takes the branch too.
+        cleanup_managed_worktree(executor, worktree, BranchDisposition::Delete)
     }
 
     pub(super) fn cleanup_new_session_worktree_after_failure(
@@ -1667,10 +1669,7 @@ pub(super) fn retire_managed_worktree(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
-    if !remove_managed_worktree_checkout(executor, worktree)? {
-        return Ok(());
-    }
-    remove_empty_managed_worktree_directories(executor, worktree)
+    cleanup_managed_worktree(executor, worktree, BranchDisposition::Keep)
 }
 
 /// Remove the checkout and prune its metadata. Returns whether the repository
@@ -1710,12 +1709,19 @@ fn remove_managed_worktree_checkout(
     Ok(true)
 }
 
+/// Remove a managed worktree's checkout, and its branch only when the caller
+/// asks for that. The branch can hold work the user still wants, so deleting
+/// it is always an explicit decision; see [`BranchDisposition`].
 pub(super) fn cleanup_managed_worktree(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
+    branch: BranchDisposition,
 ) -> Result<()> {
     if !remove_managed_worktree_checkout(executor, worktree)? {
         return Ok(());
+    }
+    if branch == BranchDisposition::Keep {
+        return remove_empty_managed_worktree_directories(executor, worktree);
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(

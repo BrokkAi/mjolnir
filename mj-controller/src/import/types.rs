@@ -94,7 +94,7 @@ pub(super) struct KimiScanCandidate {
     pub(super) cwd: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CodexSessionMetadata {
     pub(super) id: String,
     pub(super) cwd: PathBuf,

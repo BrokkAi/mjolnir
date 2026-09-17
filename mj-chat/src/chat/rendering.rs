@@ -520,7 +520,14 @@ pub(super) fn raw_lines(source: &str, style: Style) -> Vec<LogicalLine> {
         .collect()
 }
 
-pub(super) fn wrap_styled_line(
+/// Wrap a styled line to `width` terminal cells, keeping each span's style.
+///
+/// Wrapping is grapheme-aware and breaks on word boundaries, cutting a word
+/// only when it cannot fit a row on its own. Continuation rows are indented by
+/// `continuation_indent` cells; pass 0 for no indent. The returned rows are
+/// exactly the rows a renderer draws, so a caller can count them for a scroll
+/// clamp or a scrollbar.
+pub fn wrap_styled_line(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,

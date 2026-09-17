@@ -3,8 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "test": "node --test *.unit.test.mjs && playwright test",
-    "test:unit": "node --test *.unit.test.mjs"
+    "test": "node --test *.unit.test.mjs && playwright test --project deterministic",
+    "test:unit": "node --test *.unit.test.mjs",
+    "test:lab": "playwright test --project lab"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1"

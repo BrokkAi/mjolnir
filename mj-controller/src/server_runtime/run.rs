@@ -1224,7 +1224,7 @@ pub async fn run_server(
                     // A force close runs even while a graceful close for the
                     // same session is still in flight; that stuck close is
                     // exactly what it is meant to take over.
-                    if let ControllerAction::ForceClose { session_id } = &request.action {
+                    if let ControllerAction::ForceClose { session_id, .. } = &request.action {
                         request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         daemon_runtime.request_close(session_id);
                     }
@@ -1249,7 +1249,7 @@ pub async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
-                    if let ControllerAction::Close { session_id } | ControllerAction::ForceClose { session_id } = &action { closing_actions.insert(session_id.clone(), action_id); }
+                    if let ControllerAction::Close { session_id } | ControllerAction::ForceClose { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()

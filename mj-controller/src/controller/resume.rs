@@ -1576,9 +1576,12 @@ impl Controller {
                     previous,
                 ),
                 (Some(current), Some(previous)) if current == previous => Ok(()),
+                // The failed resume created this worktree and its branch, and
+                // no harness ever ran in it, so the rollback removes both.
                 (Some(worktree), _) => cleanup_managed_worktree(
                     &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
                     worktree,
+                    crate::controller::BranchDisposition::Delete,
                 ),
                 (None, _) => Ok(()),
             }

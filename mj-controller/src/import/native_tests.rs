@@ -218,7 +218,7 @@ fn native_dispatch_and_import_preserve_identity_and_source_for_muse() {
     );
 
     let mut listings = Vec::new();
-    scan_native_sessions(kind, &fixture.home, |progress| {
+    scan_native_sessions(kind, &fixture.home, &NativeScanCache::new(), |progress| {
         if let Some(session) = progress.session {
             listings.push(session);
         }

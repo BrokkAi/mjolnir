@@ -1304,13 +1304,21 @@ impl DashboardState {
                     self.restore_dismissed_mode(previous)
                 }
             }
-            (Confirmation::ForceDestroy { session_id }, 1) => {
+            // Button 1 destroys the session and leaves its branch alone;
+            // button 2 is the explicit opt-in to delete the branch too.
+            (Confirmation::ForceDestroy { session_id }, index @ (1 | 2)) => {
                 self.cancel_modal();
-                DashboardAction::ForceDestroy { session_id }
+                DashboardAction::ForceDestroy {
+                    session_id,
+                    delete_branch: index == 2,
+                }
             }
-            (Confirmation::DestroyStopped { session_id, reopen }, 1) => {
+            (Confirmation::DestroyStopped { session_id, reopen }, index @ (1 | 2)) => {
                 self.restore_after_confirmation(reopen);
-                DashboardAction::DestroyStopped { session_id }
+                DashboardAction::DestroyStopped {
+                    session_id,
+                    delete_branch: index == 2,
+                }
             }
             (Confirmation::CloseFailed { session_id, .. }, 1) => {
                 self.cancel_modal();

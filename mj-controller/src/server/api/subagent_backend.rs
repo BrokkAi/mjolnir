@@ -181,6 +181,18 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki briefings are unavailable") })
     }
 
+    /// The passages of one indexed session that match a query. `None` when the
+    /// index holds no session with that id.
+    fn wiki_hits(
+        &self,
+        _wiki_id: String,
+        _query: String,
+        _context_messages: usize,
+        _per_message_chars: usize,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::daemon::WikiHitTranscript>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki transcript hits are unavailable") })
+    }
+
     /// Start a session from an archived transcript, answering with its id, or
     /// `None` when the index holds no session with that id.
     fn wiki_restore(

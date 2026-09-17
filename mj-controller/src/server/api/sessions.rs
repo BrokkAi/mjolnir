@@ -167,6 +167,9 @@ pub(super) async fn start_session(
 /// gets.
 const DEFAULT_BRIEF_CHARS: usize = 24_000;
 const MAX_BRIEF_CHARS: usize = 400_000;
+/// How many messages of context a hit preview may ask for on either side.
+const MAX_HIT_CONTEXT: usize = 20;
+const DEFAULT_HIT_CHARS: usize = 2_000;
 
 pub(super) async fn wiki_search(
     State(state): State<ServerState>,
@@ -209,6 +212,35 @@ pub(super) async fn wiki_brief(
         })?
         .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
     Ok(Json(WikiBriefResponse { markdown }))
+}
+
+pub(super) async fn wiki_hits(
+    State(state): State<ServerState>,
+    Path(wiki_id): Path<String>,
+    Query(query): Query<WikiHitsQuery>,
+) -> Result<Json<mj_client::daemon::WikiHitTranscript>, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let context_messages = query
+        .context_messages
+        .unwrap_or(1)
+        .clamp(0, MAX_HIT_CONTEXT);
+    let per_message_chars = query
+        .per_message_chars
+        .unwrap_or(DEFAULT_HIT_CHARS)
+        .clamp(1, MAX_BRIEF_CHARS);
+    let transcript = backend
+        .wiki_hits(
+            wiki_id.clone(),
+            query.q,
+            context_messages,
+            per_message_chars,
+        )
+        .await
+        .map_err(|error| {
+            ApiFailure::unavailable(format!("SessionWiki transcript hits failed: {error:#}"))
+        })?
+        .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
+    Ok(Json(transcript))
 }
 
 pub(super) async fn wiki_restore(

@@ -257,17 +257,61 @@ pub(super) async fn set_session_config(
         select_contains(&option.kind, value),
         "{value:?} is not an available {key} value"
     );
+    let option_id = option.id.clone();
+    let previous = selector_current_value(&option.kind);
     let response = connection
         .send_request(SetSessionConfigOptionRequest::new(
             session_id.clone(),
-            option.id.clone(),
+            option_id.clone(),
             SessionConfigValueId::new(value.to_owned()),
         ))
         .block_task()
         .await
         .with_context(|| format!("set session {key} to {value}"))?;
     *options = response.config_options;
+    adopt_requested_value(options, &option_id, previous.as_deref(), value);
     Ok(())
+}
+
+fn selector_current_value(kind: &SessionConfigKind) -> Option<String> {
+    match kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.to_string()),
+        _ => None,
+    }
+}
+
+/// Record the value a successful set actually applied.
+///
+/// Codex and Kimi answer a successful `session/set_config_option` with the
+/// configuration they held before the change, so the selector this call just
+/// set still reports its previous value until the harness refreshes it after
+/// the next turn. The request succeeded, so the requested value is the applied
+/// one and the answer has to say so.
+///
+/// Only that one case is corrected. A harness that reports any other value has
+/// normalized or replaced the request, so its answer stands and the mismatch
+/// stays visible. Every other selector keeps what the harness reported too,
+/// because a model change can legitimately reset the rest of the configuration.
+fn adopt_requested_value(
+    options: &mut [SessionConfigOption],
+    option_id: &agent_client_protocol::schema::v1::SessionConfigId,
+    previous: Option<&str>,
+    value: &str,
+) {
+    let Some(applied) = options.iter_mut().find(|option| option.id == *option_id) else {
+        return;
+    };
+    if !select_contains(&applied.kind, value) {
+        return;
+    }
+    let SessionConfigKind::Select(select) = &mut applied.kind else {
+        return;
+    };
+    if select.current_value.to_string() != value
+        && previous.is_some_and(|previous| previous == select.current_value.to_string())
+    {
+        select.current_value = SessionConfigValueId::new(value.to_owned());
+    }
 }
 
 pub(super) async fn enforce_execution_mode(
@@ -281,6 +325,7 @@ pub(super) async fn enforce_execution_mode(
         option.category == Some(SessionConfigOptionCategory::Mode)
             && select_contains(&option.kind, desired)
     }) {
+        let option_id = option.id.to_string();
         let response = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
@@ -291,6 +336,14 @@ pub(super) async fn enforce_execution_mode(
             .await
             .with_context(|| format!("select required ACP execution mode {desired}"))?;
         *config_options = response.config_options;
+        // A harness can answer the request and still report another mode, so
+        // the session is only safe to use once it confirms the effective one.
+        let effective = surface::config_current_value(config_options, &option_id);
+        ensure!(
+            effective.as_deref() == Some(desired),
+            "the harness acknowledged execution mode {desired} but reports {}",
+            effective.map_or_else(|| "no mode".to_owned(), |mode| format!("{mode:?}"))
+        );
         if let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = desired.to_owned().into();
         }
@@ -310,6 +363,10 @@ pub(super) async fn enforce_execution_mode(
             .block_task()
             .await
             .with_context(|| format!("select required ACP execution mode {desired}"))?;
+        // `session/set_mode` answers with an empty result, so the only
+        // acknowledgement this path can check is that the request succeeded.
+        // Harnesses that report an effective value expose the mode as a
+        // config option, which the branch above verifies.
         if let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = desired.to_owned().into();
         }

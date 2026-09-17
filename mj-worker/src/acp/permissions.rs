@@ -42,16 +42,8 @@ pub(super) async fn restore_plan_execution_mode(
         &mut state.modes,
     )
     .await?;
-    for option in &state.config_options {
-        if option.category == Some(SessionConfigOptionCategory::Mode)
-            && let SessionConfigKind::Select(select) = &option.kind
-        {
-            ensure!(
-                select.current_value.to_string() == "bypassPermissions",
-                "Claude did not apply the required bypassPermissions mode"
-            );
-        }
-    }
+    // `enforce_execution_mode` checks that the harness reports the mode it
+    // was asked for, so a plan turn never resumes in the planning mode.
     Ok(state)
 }
 

@@ -1,5 +1,134 @@
 use super::*;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// What one scanned native session file parsed into, keyed by the file itself.
+#[derive(Debug, Clone)]
+enum CachedNativeMetadata {
+    /// `claude_native_metadata`, including its "filtered out" verdict.
+    Claude(Option<(String, PathBuf, String)>),
+    /// `codex_session_metadata`, including its "not interactive" verdict.
+    Codex(Option<CodexSessionMetadata>),
+}
+
+#[derive(Debug)]
+struct CachedNativeEntry {
+    modified_at: SystemTime,
+    size_bytes: u64,
+    metadata: CachedNativeMetadata,
+}
+
+#[derive(Debug, Default)]
+struct NativeScanCacheInner {
+    entries: HashMap<PathBuf, CachedNativeEntry>,
+    parsed_files: u64,
+}
+
+/// Remembers what each native session file parsed into, keyed by its path,
+/// modified time and size. The parsers are pure functions of a file's content,
+/// so an unchanged file never has to be opened again. One cache lives for the
+/// process, so reopening the resume dialog reparses only what changed.
+#[derive(Debug, Clone, Default)]
+pub struct NativeScanCache {
+    inner: Arc<Mutex<NativeScanCacheInner>>,
+}
+
+impl NativeScanCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many files this cache has actually parsed, for tests and diagnostics.
+    pub fn parsed_files(&self) -> u64 {
+        self.lock().parsed_files
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, NativeScanCacheInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn cached(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+    ) -> Option<CachedNativeMetadata> {
+        let inner = self.lock();
+        let entry = inner.entries.get(path)?;
+        (entry.modified_at == modified_at && entry.size_bytes == size_bytes)
+            .then(|| entry.metadata.clone())
+    }
+
+    fn store(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        metadata: CachedNativeMetadata,
+    ) {
+        let mut inner = self.lock();
+        inner.parsed_files = inner.parsed_files.saturating_add(1);
+        inner.entries.insert(
+            path.to_owned(),
+            CachedNativeEntry {
+                modified_at,
+                size_bytes,
+                metadata,
+            },
+        );
+    }
+
+    /// Claude metadata for one transcript, parsing only on a cache miss.
+    /// Errors are returned to the caller and never cached.
+    pub(super) fn claude_metadata(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        parse: impl FnOnce() -> Result<Option<(String, PathBuf, String)>>,
+    ) -> Result<Option<(String, PathBuf, String)>> {
+        if let Some(CachedNativeMetadata::Claude(metadata)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(metadata);
+        }
+        let metadata = parse()?;
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::Claude(metadata.clone()),
+        );
+        Ok(metadata)
+    }
+
+    /// Codex metadata for one rollout, parsing only on a cache miss.
+    pub(super) fn codex_metadata(
+        &self,
+        path: &Path,
+        modified_at: SystemTime,
+        size_bytes: u64,
+        parse: impl FnOnce() -> Result<Option<CodexSessionMetadata>>,
+    ) -> Result<Option<CodexSessionMetadata>> {
+        if let Some(CachedNativeMetadata::Codex(metadata)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(metadata);
+        }
+        let metadata = parse()?;
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::Codex(metadata.clone()),
+        );
+        Ok(metadata)
+    }
+}
+
 /// One native session located on disk, normalized across harnesses: the id
 /// `session/load` takes and the file or directory its transcript is read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +203,7 @@ pub fn read_native_transcript(
 pub fn scan_native_sessions(
     harness: HarnessKind,
     home: &Path,
+    cache: &NativeScanCache,
     mut report: impl FnMut(SessionScanProgress<NativeSessionListing>),
 ) -> Result<()> {
     let mut forward = |scanned, total, session| {
@@ -90,7 +220,7 @@ pub fn scan_native_sessions(
                 forward(progress.scanned, progress.total, progress.session);
             },
         ),
-        HarnessKind::Codex => scan_codex_sessions(home, |progress| {
+        HarnessKind::Codex => scan_codex_sessions(home, cache, |progress| {
             let session = progress.session.map(|session| NativeSessionListing {
                 unavailable_reason: session.history_mode.import_issue(),
                 native_session_id: session.native_session_id,
@@ -103,7 +233,7 @@ pub fn scan_native_sessions(
             });
             forward(progress.scanned, progress.total, session);
         }),
-        HarnessKind::Claude => scan_claude_sessions(home, |progress| {
+        HarnessKind::Claude => scan_claude_sessions(home, cache, |progress| {
             let session = progress.session.map(|session| NativeSessionListing {
                 native_session_id: session.native_session_id,
                 title: session.title,

@@ -127,7 +127,10 @@ impl DashboardContext {
             return;
         };
         let header = mj_chat::chat::SessionHeaderIdentity {
-            target: session_record
+            target: self
+                .controller
+                .state
+                .project_identity_session(&session_record)
                 .project_target(&self.controller.config, &session_record.target_template_id),
             profile: session_record.last_profile.clone(),
             title: if self.dashboard.go_mode().is_some() {

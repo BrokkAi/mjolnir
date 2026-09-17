@@ -159,6 +159,7 @@ impl DashboardState {
     }
 
     pub fn project_source(&self, session: &SessionRecord) -> ProjectSourceIdentity {
+        let session = self.state.project_identity_session(session);
         self.project_sources
             .get(&session.id)
             .cloned()

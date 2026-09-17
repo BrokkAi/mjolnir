@@ -388,3 +388,32 @@ jobs:
         run: bash scripts/build-linux-cli.sh ${{ matrix.target }}
       - name: Test CLI on older Linux distributions through tmux
         run: bash scripts/test-linux-cli-runtime.sh ${{ matrix.target }}
+
+  web-viewer:
+    name: Web viewer unit and deterministic browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/web/package-lock.json
+      - name: Install dependencies and Chromium
+        run: |
+          npm ci --prefix tests/e2e/web
+          npx --prefix tests/e2e/web playwright install --with-deps chromium
+      # No MJ_BROWSER_* variables here: this selection must pass without the
+      # provisioned lab, which .github/workflows/reliability.yml still runs.
+      - name: Run unit and self-contained browser tests
+        working-directory: tests/e2e/web
+        run: npm test
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-viewer-deterministic
+          path: tests/e2e/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1624,7 +1624,7 @@ fn codex_scan_reports_progress_and_emits_newest_first() {
         .unwrap();
     }
     let mut updates = Vec::new();
-    scan_codex_sessions(directory.path(), |progress| {
+    scan_codex_sessions(directory.path(), &NativeScanCache::new(), |progress| {
         updates.push((
             progress.scanned,
             progress.total,
@@ -1732,6 +1732,87 @@ fn claude_first_user_message_is_not_used_as_a_session_name_fallback() {
 
     let (title, _, _) = claude_native_metadata(&rollout).unwrap().unwrap();
     assert_eq!(title, "Untitled session");
+}
+
+#[test]
+fn claude_lookup_by_id_finds_a_session_the_picker_hides() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    let rollout = project.join("printed.jsonl");
+    fs::write(
+        &rollout,
+        r#"{"type":"user","entrypoint":"sdk","cwd":"/work/app","message":{"content":"printed run"}}"#,
+    )
+    .unwrap();
+
+    assert!(list_claude_sessions(directory.path()).unwrap().is_empty());
+    let located = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("printed".into()),
+    )
+    .unwrap();
+    assert_eq!(located.native_session_id, "printed");
+    assert_eq!(located.jsonl_path, rollout);
+}
+
+#[test]
+fn claude_lookup_by_id_reports_a_symlinked_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    let stored = directory.path().join("stored.jsonl");
+    fs::write(
+        &stored,
+        r#"{"type":"user","entrypoint":"cli","cwd":"/work/app","message":{"content":"stored"}}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&stored, project.join("linked.jsonl")).unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("linked".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn claude_lookup_by_id_reports_a_transcript_without_a_cwd() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("projects/work");
+    fs::create_dir_all(&project).unwrap();
+    // Filtered out of the listing, so the lookup takes the by-id path.
+    fs::write(
+        project.join("homeless.jsonl"),
+        r#"{"type":"user","entrypoint":"sdk","message":{"content":"no cwd anywhere"}}"#,
+    )
+    .unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("homeless".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("has no cwd"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn claude_lookup_by_id_still_reports_a_missing_session_as_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("projects/work")).unwrap();
+
+    let error = locate_claude_session(
+        directory.path(),
+        &ClaudeSessionSelection::NativeSessionId("absent".into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
 }
 
 #[test]
@@ -2140,4 +2221,99 @@ fn detached_import_uses_the_selected_nonorigin_remote_baseline() {
     run_git(&app, &["checkout", "--detach"]);
     let baseline = import_delta_base(&app, "https://github.com/example/app.git").unwrap();
     assert!(!baseline.is_empty());
+}
+
+/// One Claude transcript whose title record sits on the last line, after
+/// enough chatter to make the line prefilter matter.
+fn claude_scan_fixture(path: &Path, title: &str) {
+    let mut lines = vec![
+        r#"{"type":"user","entrypoint":"cli","cwd":"/work/app","gitBranch":"feature","message":{"content":"start"}}"#
+            .to_owned(),
+    ];
+    for index in 0..200 {
+        lines.push(format!(
+            r#"{{"type":"assistant","uuid":"line-{index}","message":{{"content":"chatter {index}"}}}}"#
+        ));
+    }
+    lines.push(format!(
+        r#"{{"type":"custom-title","customTitle":"{title}"}}"#
+    ));
+    fs::write(path, lines.join("\n")).unwrap();
+}
+
+fn scan_claude_titles(home: &Path, cache: &NativeScanCache) -> Vec<String> {
+    let mut titles = Vec::new();
+    scan_claude_sessions(home, cache, |progress| {
+        if let Some(session) = progress.session {
+            titles.push(session.title);
+        }
+    })
+    .unwrap();
+    titles
+}
+
+#[test]
+fn unchanged_claude_transcripts_are_not_reopened_on_a_second_scan() {
+    let directory = tempfile::tempdir().unwrap();
+    let rollout = directory
+        .path()
+        .join("projects/work/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    claude_scan_fixture(&rollout, "First title");
+    let stamp = fs::metadata(&rollout).unwrap().modified().unwrap();
+
+    let cache = NativeScanCache::new();
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+    assert_eq!(cache.parsed_files(), 1);
+
+    // Rewrite the file with different content of the same length and restore
+    // its modified time. A second scan that opened the file would see the new
+    // title; a cached scan cannot.
+    claude_scan_fixture(&rollout, "Later title");
+    fs::File::options()
+        .write(true)
+        .open(&rollout)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+    assert_eq!(cache.parsed_files(), 1);
+}
+
+#[test]
+fn a_changed_modified_time_reparses_the_claude_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let rollout = directory
+        .path()
+        .join("projects/work/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    claude_scan_fixture(&rollout, "First title");
+    let stamp = fs::metadata(&rollout).unwrap().modified().unwrap();
+
+    let cache = NativeScanCache::new();
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["First title"]
+    );
+
+    claude_scan_fixture(&rollout, "Later title");
+    fs::File::options()
+        .write(true)
+        .open(&rollout)
+        .unwrap()
+        .set_modified(stamp + Duration::from_secs(10))
+        .unwrap();
+
+    assert_eq!(
+        scan_claude_titles(directory.path(), &cache),
+        ["Later title"]
+    );
+    assert_eq!(cache.parsed_files(), 2);
 }

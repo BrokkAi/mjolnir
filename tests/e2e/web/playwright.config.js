@@ -1,13 +1,21 @@
 const { defineConfig } = require('@playwright/test');
 
+const { LAB_SPECS } = require('./lab-env');
+
 module.exports = defineConfig({
   testDir: '.',
-  testMatch: process.env.MJ_BROWSER_SPEC || 'reliability.spec.js',
   fullyParallel: false,
   workers: 1,
   timeout: 150_000,
   expect: { timeout: 15_000 },
   reporter: [['line']],
+  projects: [
+    // The default selection: no daemon, no lab, no network.
+    { name: 'deterministic', testMatch: '*.spec.js', testIgnore: LAB_SPECS },
+    // The live TUI/browser convergence case, selected by
+    // `tests/e2e/run-browser-reliability.sh`.
+    { name: 'lab', testMatch: LAB_SPECS },
+  ],
   use: {
     browserName: process.env.MJ_BROWSER_ENGINE || 'chromium',
     headless: true,

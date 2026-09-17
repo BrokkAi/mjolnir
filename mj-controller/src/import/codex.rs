@@ -66,7 +66,7 @@ pub(super) fn locate_unindexed_codex_session(
 /// List native Codex sessions newest first.
 pub fn list_codex_sessions(home: &Path) -> Result<Vec<LocatedCodexSession>> {
     let mut sessions = Vec::new();
-    scan_codex_sessions(home, |progress| {
+    scan_codex_sessions(home, &NativeScanCache::new(), |progress| {
         if let Some(session) = progress.session {
             sessions.push(session);
         }
@@ -77,6 +77,7 @@ pub fn list_codex_sessions(home: &Path) -> Result<Vec<LocatedCodexSession>> {
 /// Scan native Codex sessions newest first, reporting after every candidate file.
 pub fn scan_codex_sessions(
     home: &Path,
+    cache: &NativeScanCache,
     mut report: impl FnMut(SessionScanProgress<LocatedCodexSession>),
 ) -> Result<()> {
     if let Some(sessions) = codex_indexed_sessions(home)? {
@@ -118,23 +119,30 @@ pub fn scan_codex_sessions(
         session: None,
     });
     for (index, candidate) in candidates.into_iter().enumerate() {
-        let session = codex_session_metadata(&candidate.path)?.map(|metadata| {
-            let session_id = metadata.id;
-            LocatedCodexSession {
-                natively_archived: false,
-                title: titles
-                    .get(&session_id)
-                    .cloned()
-                    .unwrap_or_else(|| session_id.clone()),
-                native_session_id: session_id,
-                jsonl_path: candidate.path,
-                modified_at: candidate.modified_at,
-                cwd: metadata.cwd,
-                git_branch: metadata.git_branch,
-                size_bytes: candidate.size_bytes,
-                history_mode: metadata.history_mode,
-            }
-        });
+        let session = cache
+            .codex_metadata(
+                &candidate.path,
+                candidate.modified_at,
+                candidate.size_bytes,
+                || codex_session_metadata(&candidate.path),
+            )?
+            .map(|metadata| {
+                let session_id = metadata.id;
+                LocatedCodexSession {
+                    natively_archived: false,
+                    title: titles
+                        .get(&session_id)
+                        .cloned()
+                        .unwrap_or_else(|| session_id.clone()),
+                    native_session_id: session_id,
+                    jsonl_path: candidate.path,
+                    modified_at: candidate.modified_at,
+                    cwd: metadata.cwd,
+                    git_branch: metadata.git_branch,
+                    size_bytes: candidate.size_bytes,
+                    history_mode: metadata.history_mode,
+                }
+            });
         report(SessionScanProgress {
             scanned: index + 1,
             total,

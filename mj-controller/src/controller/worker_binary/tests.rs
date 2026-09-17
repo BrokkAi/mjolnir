@@ -67,7 +67,6 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
 #[cfg(unix)]
 #[test]
 fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
-    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
     let profile = HarnessProfile {
         enabled: true,
@@ -88,9 +87,11 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         )
     };
     let write_tool = |name: &str, body: &str| {
-        let path = directory.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::controller::test_support::install_fake_command(
+            directory.path(),
+            name,
+            &format!("#!/bin/sh\n{body}\n"),
+        );
     };
     assert!(format!("{:#}", check().unwrap_err()).contains("Node.js is missing"));
     write_tool("node", "exit 1");

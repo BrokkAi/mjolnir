@@ -69,7 +69,11 @@ impl ViewerSnapshot {
                     .cloned()
                     .collect::<Vec<_>>();
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
-                let source = session.project_source(config);
+                // A sub-agent child works in its parent's checkout and owns no
+                // worktree, so its project identity has to come from the
+                // parent; its own record would name the parent's session id.
+                let project = state.project_identity_session(session);
+                let source = project.project_source(config);
                 let subagent = state.subagents.get(&session.id);
                 let subagent_session_ids = state
                     .subagents
@@ -117,7 +121,7 @@ impl ViewerSnapshot {
                         .collect(),
                     project_label: source.short,
                     project_key: project_key(&source.key),
-                    display_location: session.project_target(config, &session.target_template_id),
+                    display_location: project.project_target(config, &session.target_template_id),
                     lifecycle,
                     transitioning: session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,

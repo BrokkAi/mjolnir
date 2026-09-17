@@ -19,7 +19,7 @@ use mj_core::state::{SessionRecord, State};
 use mj_controller::controller::Controller;
 use mj_controller::import::{
     BundleResolution, ClaudeSessionSelection, ClaudeTranscript, ImportArchiveProgress,
-    ImportControl, ImportedClaudeSession, NativeImportRequest, SessionEditTargets,
+    ImportControl, ImportedClaudeSession, NativeImportRequest, NativeScanCache, SessionEditTargets,
     import_native_session, import_safety_issues, locate_native_session, read_native_transcript,
     resolve_bundle, scan_native_sessions, session_edit_targets,
 };
@@ -314,10 +314,17 @@ pub(crate) struct DashboardImportRequest {
     pub(crate) cancelled: Arc<AtomicBool>,
 }
 
+/// How often a running scan publishes the profile it is building. Publishing
+/// after every file clones the whole growing list each time, which is
+/// quadratic in the session count; the dialog cannot show more than a few
+/// updates a second anyway.
+const SCAN_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
+
 pub(crate) fn discover_import_profile(
     profile_id: String,
     harness_kind: mj_core::config::HarnessKind,
     home: PathBuf,
+    cache: &NativeScanCache,
     mut publish: impl FnMut(&ImportProfileOption),
 ) -> ImportProfileOption {
     let mut profile = ImportProfileOption {
@@ -327,17 +334,22 @@ pub(crate) fn discover_import_profile(
         scan_progress: None,
         error: None,
     };
-    let discovered = scan_native_sessions(harness_kind, &home, |progress| {
+    let mut last_publish: Option<Instant> = None;
+    let discovered = scan_native_sessions(harness_kind, &home, cache, |progress| {
         profile.scan_progress = Some((progress.scanned, progress.total));
         if let Some(session) = progress.session {
             profile.sessions.push(import_session_option(session));
         }
-        publish(&profile);
+        if last_publish.is_none_or(|last| last.elapsed() >= SCAN_PUBLISH_INTERVAL) {
+            last_publish = Some(Instant::now());
+            publish(&profile);
+        }
     });
     if let Err(error) = discovered {
         profile.error = Some(format!("{error:#}"));
-        publish(&profile);
     }
+    // The last state always reaches the dialog, whatever the throttle skipped.
+    publish(&profile);
     profile
 }
 

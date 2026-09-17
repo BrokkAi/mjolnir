@@ -1255,6 +1255,16 @@ async fn recover(args: RecoverArgs) -> Result<()> {
                     } else {
                         "v1 resource; profile and bundle unknown"
                     };
+                    // A resource left behind by a session Hel still tracks
+                    // cannot be adopted under that session id, so say which
+                    // of the two recovery actions applies to it.
+                    let metadata = match candidate.tracked_session {
+                        Some(state) => format!(
+                            "left by tracked session in state {}; destroy only",
+                            state.as_str()
+                        ),
+                        None => metadata.to_owned(),
+                    };
                     println!(
                         "{}\t{}\t{}\t{}",
                         candidate.session_id, candidate.target_template_id, instance, metadata

@@ -942,7 +942,16 @@ impl ActiveChat {
     /// A record the daemon no longer publishes leaves the open-time copy in
     /// place: disappearing from the list is not a reason to lose the last
     /// known context. A chat opened without a context stays without one.
-    pub fn refresh_context(&mut self, config: &Config, session: Option<&SessionRecord>) {
+    ///
+    /// `project` is the session whose project identity names the location, so
+    /// a sub-agent child can be named after the parent whose checkout it works
+    /// in. `None` uses the session's own record.
+    pub fn refresh_context(
+        &mut self,
+        config: &Config,
+        session: Option<&SessionRecord>,
+        project: Option<&SessionRecord>,
+    ) {
         let Some(context) = self.context.as_mut() else {
             return;
         };
@@ -955,8 +964,8 @@ impl ActiveChat {
         // only the former leaves the pane title naming the pre-move target and
         // profile. Re-derive the canonical display identity from the refreshed
         // record while keeping all transcript and composer state in place.
-        let target = context
-            .session
+        let target = project
+            .unwrap_or(&context.session)
             .project_target(config, &context.session.target_template_id);
         let profile = context.session.last_profile.clone();
         let title = context.session.display_title().to_owned();

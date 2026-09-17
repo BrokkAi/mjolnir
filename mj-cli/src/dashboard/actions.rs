@@ -402,6 +402,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::LoadArchivedBrief { wiki_id } => {
             crate::dashboard::io::spawn_wiki_brief(wiki_id, context.dashboard_io_tx.clone());
         }
+        DashboardAction::LoadArchivedHits { wiki_id, query } => {
+            crate::dashboard::io::spawn_wiki_hits(wiki_id, query, context.dashboard_io_tx.clone());
+        }
         action @ DashboardAction::RestoreArchivedSession { .. } => {
             let DashboardAction::RestoreArchivedSession {
                 workspace_id,
@@ -991,7 +994,10 @@ pub(crate) async fn apply_dashboard_action(
                 },
             );
         }
-        DashboardAction::DestroyStopped { session_id } => {
+        DashboardAction::DestroyStopped {
+            session_id,
+            delete_branch,
+        } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
             mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
@@ -1002,14 +1008,17 @@ pub(crate) async fn apply_dashboard_action(
                     tokio::runtime::Handle::current().block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .destroy_stopped_session(session_id)
+                            .destroy_stopped_session(session_id, delete_branch)
                             .await
                     })?;
                     Ok(LifecycleSuccess::DestroyedStopped)
                 },
             );
         }
-        DashboardAction::ForceDestroy { session_id } => {
+        DashboardAction::ForceDestroy {
+            session_id,
+            delete_branch,
+        } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
             mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
@@ -1020,7 +1029,7 @@ pub(crate) async fn apply_dashboard_action(
                     tokio::runtime::Handle::current().block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .force_destroy_session(session_id)
+                            .force_destroy_session(session_id, delete_branch)
                             .await
                     })?;
                     Ok(LifecycleSuccess::ForceDestroyed)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::controller::BranchDisposition;
 
 pub(super) fn phone_action_capacity_available(active_actions: usize) -> bool {
     active_actions < MAX_CONCURRENT_PHONE_ACTIONS
@@ -247,10 +248,19 @@ pub(super) async fn apply_phone_action(
         ControllerAction::Close { session_id } => {
             services.daemon_runtime.close_session(session_id).await
         }
-        ControllerAction::ForceClose { session_id } => {
+        ControllerAction::ForceClose {
+            session_id,
+            delete_branch,
+        } => {
+            // The branch stays unless the request explicitly asked for it.
+            let branch = if delete_branch {
+                BranchDisposition::Delete
+            } else {
+                BranchDisposition::Keep
+            };
             services
                 .daemon_runtime
-                .force_destroy_session(session_id)
+                .force_destroy_session(session_id, branch)
                 .await
         }
         ControllerAction::Resume {

@@ -110,6 +110,13 @@ fn buffer_row(buffer: &Buffer, row: u16, start: u16, end: u16) -> String {
         .collect()
 }
 
+fn buffer_text(buffer: &Buffer) -> String {
+    (buffer.area.y..buffer.area.bottom())
+        .map(|row| buffer_row(buffer, row, buffer.area.x, buffer.area.right()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
     for (indent, old_width, new_width) in [
@@ -748,6 +755,126 @@ fn required_text_blocks_submit_until_answered() {
     assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
     assert_eq!(dialog.focus_index(), 0);
     assert_eq!(dialog.error.as_deref(), Some("Architecture is required"));
+}
+
+fn component_form() -> ElicitationRequest {
+    ElicitationRequest {
+        id: "ask-component".into(),
+        message: "Component form: edit the label and choose the options.".into(),
+        title: None,
+        description: None,
+        fields: vec![
+            ElicitationField {
+                id: "label".into(),
+                title: "Label".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Text {
+                    default: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                    format: None,
+                },
+            },
+            ElicitationField {
+                id: "enabled".into(),
+                title: "Enabled".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Boolean {
+                    default: Some(false),
+                },
+            },
+            ElicitationField {
+                id: "choice".into(),
+                title: "Choice".into(),
+                description: None,
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::SingleSelect {
+                    options: vec![
+                        ElicitationOption {
+                            value: "one".into(),
+                            title: "One".into(),
+                            description: None,
+                            preview: None,
+                        },
+                        ElicitationOption {
+                            value: "two".into(),
+                            title: "Two".into(),
+                            description: None,
+                            preview: None,
+                        },
+                    ],
+                    default: None,
+                },
+            },
+        ],
+    }
+}
+
+#[test]
+fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
+    let mut dialog = ElicitationDialog::new(component_form());
+    dialog.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(dialog.focus_index(), 1);
+
+    let width = 78;
+    for height in [dialog.natural_height(width), 10, 8, 6] {
+        let text = buffer_text(&rendered_in_pane(&dialog, width, height));
+        assert!(
+            text.contains("Enabled"),
+            "field title missing at height {height}:\n{text}"
+        );
+        assert!(
+            text.contains("☐ No"),
+            "boolean control missing at height {height}:\n{text}"
+        );
+    }
+
+    // A pane with a single field row keeps the control it cannot label.
+    let text = buffer_text(&rendered_in_pane(&dialog, width, 5));
+    assert!(text.contains("☐ No"), "boolean control missing:\n{text}");
+}
+
+#[test]
+fn a_scrolled_option_list_keeps_showing_the_field_it_answers() {
+    let options = (0..12)
+        .map(|index| ElicitationOption {
+            value: format!("option-{index}"),
+            title: format!("Option {index}"),
+            description: None,
+            preview: None,
+        })
+        .collect::<Vec<_>>();
+    let mut dialog = ElicitationDialog::new(request(
+        ElicitationFieldKind::SingleSelect {
+            options,
+            default: None,
+        },
+        false,
+    ));
+    for _ in 0..11 {
+        dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    }
+    let text = buffer_text(&rendered_in_pane(&dialog, 78, 12));
+    assert!(
+        text.contains("Architecture"),
+        "field title missing while the last option is focused:\n{text}"
+    );
+    assert!(
+        text.contains("Option 11"),
+        "focused option missing:\n{text}"
+    );
 }
 
 #[test]

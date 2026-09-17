@@ -15,16 +15,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use mj_chat::chat::wrap_styled_line;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use mj_client::daemon::{WikiIndexState, WikiRow, WikiSearchPage, WikiStatus};
+use mj_client::daemon::{
+    WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
+};
 use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{MoveOperation, SessionRecord, SessionState, State};
 
@@ -45,11 +48,19 @@ pub(crate) const LOCAL_ORIGIN: &str = "local";
 /// How long the dialog waits before asking again while the first index build
 /// is still running.
 pub(crate) const WIKI_INDEXING_POLL: Duration = Duration::from_secs(5);
-/// How long it waits before repeating the current query while a top-up sync
-/// is running.
-pub(crate) const WIKI_TOP_UP_POLL: Duration = Duration::from_secs(2);
-/// How many times one query is repeated for a running top-up sync.
-pub(crate) const WIKI_TOP_UP_LIMIT: u32 = 10;
+/// How long the dialog waits before repeating the current query while a top-up
+/// sync is running. The wait grows and then settles, so a short sync is
+/// followed closely and a long one is still followed rather than abandoned.
+pub(crate) const WIKI_TOP_UP_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(10),
+];
+
+/// How many rows one wheel notch moves the preview pane, matching the chat
+/// transcript's step.
+const PREVIEW_SCROLL_ROWS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeFocus {
@@ -225,13 +236,35 @@ pub(crate) struct ResumeDialog {
     /// at all, and whether a sync is adding to it right now.
     pub(crate) wiki_status: WikiStatus,
     /// How many times the current query has been re-issued because a sync was
-    /// still running. Bounded so a long sync cannot poll forever.
+    /// still running. It picks the wait before the next repeat.
     pub(crate) wiki_top_ups: u32,
+    /// Whether a search answer is still outstanding, so the list can say it is
+    /// searching rather than showing an empty list as a finished answer.
+    pub(crate) wiki_pending: bool,
     /// Briefings already fetched, by SessionWiki id, for the dialog's life.
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
     pub(crate) preview_pending: Option<String>,
+    /// Matching passages already fetched, by SessionWiki id and query. A
+    /// different query over the same session is a different answer.
+    pub(crate) hits: Arc<BTreeMap<PreviewKey, WikiHitTranscript>>,
+    /// The passages being fetched now, so one selection asks only once.
+    pub(crate) hits_pending: Option<PreviewKey>,
+    /// First wrapped row the preview pane shows.
+    pub(crate) preview_scroll: usize,
+    /// Which hit of the shown transcript the pane is sitting on, so `n` and
+    /// `N` move from where the reader is.
+    pub(crate) preview_hit: usize,
+    /// The SessionWiki session and query the scroll offset belongs to. Either
+    /// one changing starts the pane at the top, or at the new query's first
+    /// hit.
+    pub(crate) preview_key: Option<PreviewKey>,
 }
+
+/// What the preview pane is showing: a SessionWiki session, and the query
+/// whose passages are shown in it. The query is empty when the pane is
+/// showing the briefing instead.
+pub(crate) type PreviewKey = (String, String);
 
 impl ResumeDialog {
     pub(crate) fn focused(&self) -> ResumeFocus {
@@ -325,18 +358,66 @@ impl ResumeDialog {
             )
     }
 
-    /// The briefing to show under the list for the selected row: the cached
-    /// text, or a line saying it is on its way. `None` when the row has no
-    /// SessionWiki session behind it, and the pane is then not drawn at all.
-    pub(crate) fn preview_text(&self, rows: &[ResumeRow]) -> Option<String> {
+    /// The SessionWiki session the preview pane is showing, which is the one
+    /// behind the selected row. `None` when the row has none, and the pane is
+    /// then not drawn at all.
+    pub(crate) fn preview_wiki_id<'rows>(&self, rows: &'rows [ResumeRow]) -> Option<&'rows str> {
         let index = selected_index(self, rows.len())?;
-        let wiki_id = rows.get(index)?.wiki_id()?;
-        Some(
-            self.previews
-                .get(wiki_id)
-                .cloned()
-                .unwrap_or_else(|| "Loading the archived transcript…".to_owned()),
-        )
+        rows.get(index)?.wiki_id()
+    }
+
+    /// Whether the dialog has a preview pane this frame.
+    pub(crate) fn has_preview(&self, rows: &[ResumeRow]) -> bool {
+        self.preview_wiki_id(rows).is_some()
+    }
+
+    /// The query the pane is previewing passages for, or `None` when there is
+    /// nothing typed and the pane shows the briefing instead.
+    pub(crate) fn active_query(&self) -> Option<String> {
+        let query = self.search.to_string();
+        (!query.trim().is_empty()).then_some(query)
+    }
+
+    /// The preview body as logical lines of spans, before wrapping, together
+    /// with the logical line each hit starts on so the pane can be opened on a
+    /// hit before the lines are wrapped.
+    ///
+    /// The body is the query's matching passages while a query is active, and
+    /// the cached briefing otherwise, or one line saying it is on its way.
+    /// Spans rather than a string because a hit preview highlights the matched
+    /// words inside a line.
+    pub(crate) fn preview_body(
+        &self,
+        rows: &[ResumeRow],
+    ) -> Option<(Vec<Line<'static>>, Vec<usize>)> {
+        let wiki_id = self.preview_wiki_id(rows)?;
+        let muted = Style::default().fg(theme::palette().muted);
+        let Some(query) = self.active_query() else {
+            let Some(brief) = self.previews.get(wiki_id) else {
+                return Some((
+                    vec![Line::styled("Loading the archived transcript…", muted)],
+                    Vec::new(),
+                ));
+            };
+            // The briefing's first line is the SessionWiki crate's own
+            // `# Previous session: <title>` heading, which repeats the title
+            // of the row the pane sits under.
+            return Some((
+                brief
+                    .lines()
+                    .skip(1)
+                    .map(|line| Line::raw(line.to_owned()))
+                    .collect(),
+                Vec::new(),
+            ));
+        };
+        let Some(transcript) = self.hits.get(&(wiki_id.to_owned(), query)) else {
+            return Some((
+                vec![Line::styled("Loading the matching passages…", muted)],
+                Vec::new(),
+            ));
+        };
+        Some(hit_transcript_lines(transcript))
     }
 
     pub(crate) fn errors(&self) -> Vec<String> {
@@ -607,9 +688,22 @@ fn build_resume_rows(
     state: &State,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
-) -> Vec<ResumeRow> {
+) -> (Vec<ResumeRow>, [usize; 3]) {
     let searching = !dialog.search.is_empty();
-    let mut rows = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki)
+    let merged = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki);
+    // Counted before the tab filter: the other tabs' hits are already ranked
+    // here, and throwing them away is what hid where a query matched.
+    let mut hits = [0usize; 3];
+    if searching {
+        for row in merged.iter().filter(|row| row.wiki_rank.is_some()) {
+            for tab in [ResumeTab::Hel, ResumeTab::Import, ResumeTab::Archive] {
+                if tab.includes(row) {
+                    hits[tab.index()] += 1;
+                }
+            }
+        }
+    }
+    let mut rows = merged
         .into_iter()
         .filter(|row| dialog.tab.includes(row))
         .filter(|row| !searching || row.wiki_rank.is_some())
@@ -633,7 +727,7 @@ fn build_resume_rows(
         // not the answer's order and would hide the best hit below the rest.
         rows.sort_by_key(|row| row.wiki_rank.unwrap_or(usize::MAX));
     }
-    rows
+    (rows, hits)
 }
 
 impl DashboardState {
@@ -644,14 +738,17 @@ impl DashboardState {
     pub fn rebuild_resume_rows(&mut self) {
         let Mode::ResumeDialog(dialog) = &self.mode else {
             self.resume_rows.clear();
+            self.resume_hit_counts = [0; 3];
             return;
         };
-        self.resume_rows = build_resume_rows(
+        let (rows, hits) = build_resume_rows(
             &self.config,
             &self.state,
             dialog,
             &self.checkpoint_archive_sizes,
         );
+        self.resume_rows = rows;
+        self.resume_hit_counts = hits;
         self.resume_rows.retain(|row| {
             row.session_id().is_none_or(|id| {
                 self.session_operations
@@ -692,7 +789,11 @@ impl DashboardState {
         let dialog_animates = match &self.mode {
             Mode::Importing(_) => true,
             Mode::TargetActions(dialog) => dialog.testing.is_some(),
-            Mode::ResumeDialog(dialog) => dialog.is_scanning(),
+            // The scan notice lives on the Import tab, so it animates only
+            // while that tab is the one on screen.
+            Mode::ResumeDialog(dialog) => {
+                (dialog.is_scanning() && dialog.tab == ResumeTab::Import) || dialog.wiki_pending
+            }
             Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
             _ => false,
         };
@@ -737,8 +838,14 @@ impl DashboardState {
             wiki_request_id: 0,
             wiki_status: WikiStatus::default(),
             wiki_top_ups: 0,
+            wiki_pending: false,
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
+            hits: Arc::new(BTreeMap::new()),
+            hits_pending: None,
+            preview_scroll: 0,
+            preview_hit: 0,
+            preview_key: None,
         });
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
@@ -786,6 +893,9 @@ impl DashboardState {
         if dialog.wiki_request_id != request_id {
             return;
         }
+        // Only the answer to the outstanding request ends the wait. A late
+        // answer to a query the person has typed past leaves it running.
+        dialog.wiki_pending = false;
         // The status moves even when the rows do not: a build that finished
         // between two identical answers is what re-enables the search box.
         dialog.wiki_status = page.status;
@@ -798,17 +908,39 @@ impl DashboardState {
         self.resync_resume_selection();
     }
 
-    /// The briefing the open dialog still needs for the row under its
-    /// selection, if any.
+    /// The preview the open dialog still needs for the row under its
+    /// selection: the query's matching passages while a query is active, and
+    /// the briefing otherwise. [`DashboardAction::None`] when it has it
+    /// already, or has asked for it.
     ///
     /// Moving the selection asks for one. A search answer can also put a
     /// different row under an unmoved selection, and that row's transcript is
     /// what the preview pane is already promising, so it is asked for here.
-    pub fn next_wiki_brief(&mut self) -> Option<String> {
-        match self.wiki_preview_action() {
-            DashboardAction::LoadArchivedBrief { wiki_id } => Some(wiki_id),
-            _ => None,
+    pub fn next_wiki_preview(&mut self) -> DashboardAction {
+        let wiki_id = self
+            .selected_resume_row()
+            .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        let Some(wiki_id) = wiki_id else {
+            return DashboardAction::None;
+        };
+        let Some(query) = dialog.active_query() else {
+            if dialog.previews.contains_key(&wiki_id)
+                || dialog.preview_pending.as_deref() == Some(wiki_id.as_str())
+            {
+                return DashboardAction::None;
+            }
+            dialog.preview_pending = Some(wiki_id.clone());
+            return DashboardAction::LoadArchivedBrief { wiki_id };
+        };
+        let key = (wiki_id.clone(), query.clone());
+        if dialog.hits.contains_key(&key) || dialog.hits_pending.as_ref() == Some(&key) {
+            return DashboardAction::None;
         }
+        dialog.hits_pending = Some(key);
+        DashboardAction::LoadArchivedHits { wiki_id, query }
     }
 
     /// The query to re-issue, and how long to wait first, after an answer said
@@ -817,8 +949,10 @@ impl DashboardState {
     /// Two reasons to ask again. The first build has not finished, so the
     /// whole answer will change: poll every five seconds until it is ready,
     /// which also re-enables the search box without reopening the dialog. Or a
-    /// top-up sync is running, so this query may gain rows: repeat it every
-    /// two seconds, at most ten times, and then leave it alone.
+    /// top-up sync is running, so this query may gain rows: repeat it on the
+    /// [`WIKI_TOP_UP_BACKOFF`] schedule for as long as the sync runs, so a long
+    /// sync is followed to its end instead of leaving the pane promising rows
+    /// that never arrive.
     pub fn next_wiki_refresh(&mut self) -> Option<(u64, String, Duration)> {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return None;
@@ -827,14 +961,18 @@ impl DashboardState {
             WikiIndexState::VersionMismatch => return None,
             WikiIndexState::Indexing => WIKI_INDEXING_POLL,
             WikiIndexState::Ready => {
-                if !dialog.wiki_status.topping_up || dialog.wiki_top_ups >= WIKI_TOP_UP_LIMIT {
+                if !dialog.wiki_status.topping_up {
                     return None;
                 }
-                dialog.wiki_top_ups += 1;
-                WIKI_TOP_UP_POLL
+                let step = usize::try_from(dialog.wiki_top_ups)
+                    .unwrap_or(usize::MAX)
+                    .min(WIKI_TOP_UP_BACKOFF.len() - 1);
+                dialog.wiki_top_ups = dialog.wiki_top_ups.saturating_add(1);
+                WIKI_TOP_UP_BACKOFF[step]
             }
         };
         dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
+        dialog.wiki_pending = true;
         Some((dialog.wiki_request_id, dialog.search.to_string(), delay))
     }
 
@@ -849,25 +987,86 @@ impl DashboardState {
         Arc::make_mut(&mut dialog.previews).insert(wiki_id, markdown);
     }
 
-    /// Ask for the briefing of the selected row, unless it is cached or
-    /// already in flight.
-    fn wiki_preview_action(&mut self) -> DashboardAction {
-        let wiki_id = self
-            .selected_resume_row()
-            .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
+    /// Fold one query's matching passages into the open dialog's cache. `None`
+    /// means the index no longer holds that session, which the pane shows the
+    /// same way as a session with no match.
+    pub fn apply_wiki_hits(
+        &mut self,
+        wiki_id: String,
+        query: String,
+        transcript: Option<WikiHitTranscript>,
+    ) {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return DashboardAction::None;
+            return;
         };
-        let Some(wiki_id) = wiki_id else {
-            return DashboardAction::None;
-        };
-        if dialog.previews.contains_key(&wiki_id)
-            || dialog.preview_pending.as_deref() == Some(wiki_id.as_str())
-        {
-            return DashboardAction::None;
+        let key = (wiki_id, query);
+        if dialog.hits_pending.as_ref() == Some(&key) {
+            dialog.hits_pending = None;
         }
-        dialog.preview_pending = Some(wiki_id.clone());
-        DashboardAction::LoadArchivedBrief { wiki_id }
+        let showing = dialog.preview_key.as_ref() == Some(&key);
+        Arc::make_mut(&mut dialog.hits).insert(key, transcript.unwrap_or_default());
+        if showing {
+            // The passages are what the pane is already showing, so open it on
+            // the first match rather than at the top of the excerpt.
+            self.focus_preview_hit(0);
+        }
+    }
+
+    /// Move the preview pane onto hit `index`, reporting whether there was
+    /// such a hit. The lines are wrapped here with the width the pane was last
+    /// drawn at, so the stored offset is the row the reader will see.
+    fn focus_preview_hit(&mut self, index: usize) -> bool {
+        let surface = self
+            .frame_surfaces
+            .surface(SurfaceId::ResumePreview)
+            .copied();
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return false;
+        };
+        let Some((lines, hit_lines)) = dialog.preview_body(&self.resume_rows) else {
+            return false;
+        };
+        let Some(&logical) = hit_lines.get(index) else {
+            return false;
+        };
+        let scroll = match surface {
+            Some(surface) => {
+                let width = usize::from(surface.rect.width);
+                let viewport = usize::from(surface.rect.height);
+                let total = wrap_preview_lines(&lines, width).len();
+                wrap_preview_lines(&lines[..logical], width)
+                    .len()
+                    .min(total.saturating_sub(viewport))
+            }
+            // The pane has not been drawn yet, so its width is unknown; the
+            // next frame shows the excerpt from its top.
+            None => 0,
+        };
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return false;
+        };
+        dialog.preview_hit = index;
+        dialog.preview_scroll = scroll;
+        true
+    }
+
+    /// Move `step` hits from the one the pane is on, stopping at either end,
+    /// and report whether the keystroke belonged to the pane.
+    fn step_preview_hit(&mut self, step: isize) -> bool {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return false;
+        };
+        let Some((_, hit_lines)) = dialog.preview_body(&self.resume_rows) else {
+            return false;
+        };
+        if hit_lines.is_empty() {
+            return false;
+        }
+        let next = dialog
+            .preview_hit
+            .saturating_add_signed(step)
+            .min(hit_lines.len() - 1);
+        self.focus_preview_hit(next)
     }
 
     /// Ask for a new search after the query changed. The debounce and the
@@ -889,8 +1088,9 @@ impl DashboardState {
             return None;
         };
         dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
-        // A new query gets its own top-up budget; the old one's is spent.
+        // A new query starts the backoff again; the old one's is spent.
         dialog.wiki_top_ups = 0;
+        dialog.wiki_pending = true;
         Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
@@ -912,6 +1112,34 @@ impl DashboardState {
         dialog.row_index = index;
         dialog.selected = key;
         dialog.prepare(&self.resume_rows);
+        self.sync_resume_preview_key();
+    }
+
+    /// Keeps the preview's scroll offset with the excerpt it was made for. A
+    /// different transcript, or the same one under a new query, opens at its
+    /// top and then on its first hit.
+    fn sync_resume_preview_key(&mut self) {
+        let key = {
+            let Mode::ResumeDialog(dialog) = &self.mode else {
+                return;
+            };
+            dialog.preview_wiki_id(&self.resume_rows).map(|wiki_id| {
+                (
+                    wiki_id.to_owned(),
+                    dialog.active_query().unwrap_or_default(),
+                )
+            })
+        };
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return;
+        };
+        if dialog.preview_key == key {
+            return;
+        }
+        dialog.preview_key = key;
+        dialog.preview_scroll = 0;
+        dialog.preview_hit = 0;
+        self.focus_preview_hit(0);
     }
 
     fn switch_resume_tab(&mut self, tab: ResumeTab) -> bool {
@@ -937,6 +1165,7 @@ impl DashboardState {
         dialog.row_index = index;
         dialog.selected = key;
         dialog.prepare(&self.resume_rows);
+        self.sync_resume_preview_key();
     }
 
     /// The row the open dialog points at.
@@ -949,12 +1178,103 @@ impl DashboardState {
         rows.get(index).cloned()
     }
 
+    /// Moves the preview pane when a wheel notch lands on it or a page key is
+    /// pressed with the list focused, and reports whether it took the event.
+    ///
+    /// The pane registers a scrollable surface every frame, so the last frame's
+    /// registration carries both the hitbox and the wrapped line count the
+    /// offset clamps against.
+    fn scroll_resume_preview(&mut self, event: &Event, focused: ResumeFocus) -> bool {
+        let showing = match &self.mode {
+            // The registration is last frame's, so a selection that has just
+            // moved to a row without a transcript must not keep the pane's
+            // keys and hitbox until the next frame.
+            Mode::ResumeDialog(dialog) => dialog.has_preview(&self.resume_rows),
+            _ => false,
+        };
+        if !showing {
+            return false;
+        }
+        let Some(surface) = self
+            .frame_surfaces
+            .surface(SurfaceId::ResumePreview)
+            .copied()
+        else {
+            return false;
+        };
+        let viewport = usize::from(surface.rect.height);
+        let step = match event {
+            Event::Mouse(mouse)
+                if surface
+                    .rect
+                    .contains(Position::new(mouse.column, mouse.row)) =>
+            {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => -(PREVIEW_SCROLL_ROWS as isize),
+                    MouseEventKind::ScrollDown => PREVIEW_SCROLL_ROWS as isize,
+                    _ => return false,
+                }
+            }
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.modifiers.is_empty()
+                    && focused == ResumeFocus::Sessions =>
+            {
+                match key.code {
+                    KeyCode::PageUp => -(viewport.max(1) as isize),
+                    KeyCode::PageDown => viewport.max(1) as isize,
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        };
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return false;
+        };
+        let maximum = surface.total_rows.saturating_sub(viewport);
+        let next = dialog
+            .preview_scroll
+            .saturating_add_signed(step)
+            .min(maximum);
+        let moved = next != dialog.preview_scroll;
+        dialog.preview_scroll = next;
+        // The gesture belongs to the pane whether or not it had room to move,
+        // so a wheel at the end of the text does not fall through to the list.
+        self.last_event_consumed.set(moved);
+        true
+    }
+
     pub(crate) fn handle_resume_dialog_event(&mut self, event: Event) -> DashboardAction {
         use ResumeFocus::*;
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
             return DashboardAction::None;
         };
         let focused = dialog.focused();
+        if self.scroll_resume_preview(&event, focused) {
+            return DashboardAction::None;
+        }
+        // Moving between the query's matches, with the list focused. `N` comes
+        // with Shift, so these cannot sit under the modifier-free block below.
+        if let Event::Key(key) = &event
+            && key.kind == KeyEventKind::Press
+            && focused == ResumeFocus::Sessions
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            let step = match key.code {
+                KeyCode::Char('n') | KeyCode::Char(']') => Some(1),
+                KeyCode::Char('N') | KeyCode::Char('[') => Some(-1),
+                _ => None,
+            };
+            if let Some(step) = step
+                && self.step_preview_hit(step)
+            {
+                self.last_event_consumed.set(true);
+                return DashboardAction::None;
+            }
+        }
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
         if let Event::Key(key) = &event
             && key.kind == KeyEventKind::Press
             && key.modifiers.is_empty()
@@ -981,7 +1301,7 @@ impl DashboardState {
                         let step = if key.code == KeyCode::Left { 2 } else { 1 };
                         let next = ResumeTab::from_index((dialog.tab.index() + step) % 3);
                         self.switch_resume_tab(next);
-                        return self.wiki_preview_action();
+                        return self.next_wiki_preview();
                     }
                     _ => {}
                 }
@@ -1011,11 +1331,11 @@ impl DashboardState {
             }
             Some(Interaction::Select(Tabs, index)) => {
                 self.switch_resume_tab(ResumeTab::from_index(index));
-                return self.wiki_preview_action();
+                return self.next_wiki_preview();
             }
             Some(Interaction::Select(Sessions, index)) => {
                 self.select_resume_row(index);
-                return self.wiki_preview_action();
+                return self.next_wiki_preview();
             }
             Some(Interaction::Activate(Search | Tabs)) => {
                 dialog.form.get_mut().focus(Sessions);
@@ -1127,8 +1447,15 @@ fn native_project_target(project_directory: &str) -> String {
         )
 }
 
-/// How tall the preview pane under the list is when the dialog shows one.
-const PREVIEW_HEIGHT: u16 = 6;
+/// The least room the preview pane is worth drawing in: a border plus four
+/// rows of text.
+const PREVIEW_MINIMUM_HEIGHT: u16 = 6;
+
+/// How tall the preview pane under the list is when the dialog shows one: two
+/// fifths of the body, and never less than [`PREVIEW_MINIMUM_HEIGHT`].
+fn preview_height(inner: Rect) -> u16 {
+    PREVIEW_MINIMUM_HEIGHT.max(inner.height * 2 / 5)
+}
 
 /// The dialog body split into its bands: tabs, search, list, preview, footer.
 /// The preview band is present only when the dialog has something to show in
@@ -1140,7 +1467,7 @@ fn resume_bands(inner: Rect, preview: bool) -> std::rc::Rc<[Rect]> {
         Constraint::Min(5),
     ];
     if preview {
-        constraints.push(Constraint::Length(PREVIEW_HEIGHT));
+        constraints.push(Constraint::Length(preview_height(inner)));
     }
     constraints.push(Constraint::Length(4));
     Layout::default()
@@ -1166,14 +1493,8 @@ pub(crate) fn render_resume_dialog(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 84, 24, area);
-    let (scanned, total) = dialog.scan_progress();
-    let title = if dialog.is_scanning() {
-        format!(" Resume a session · scanning {scanned}/{total} ")
-    } else {
-        " Resume a session ".to_owned()
-    };
     let inner = theme::modal().inner(popup);
-    let preview = dialog.preview_text(dashboard.resume_rows());
+    let preview = dialog.preview_body(dashboard.resume_rows());
     let bands = resume_bands(inner, preview.is_some());
     let rows = bands.as_ref();
     // The footer is the last band whether or not a preview sits above it.
@@ -1181,13 +1502,19 @@ pub(crate) fn render_resume_dialog(
 
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    let title_line =
-        dismissible_modal_title(&mut form, popup, title.trim(), theme::title(true), true);
+    let title_line = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Resume a session",
+        theme::title(true),
+        true,
+    );
     frame.render_widget(theme::modal().title(title_line), popup);
+    let tab_labels = resume_tab_labels(dashboard, dialog);
     TabStrip::render(
         frame,
         rows[0],
-        &[" Mjolnir ", " Import ", " Archived "],
+        &tab_labels.iter().map(String::as_str).collect::<Vec<_>>(),
         dialog.tab.index(),
         &mut form,
         ResumeFocus::Tabs,
@@ -1242,11 +1569,11 @@ pub(crate) fn render_resume_dialog(
     }
     let list_rows = dashboard.resume_rows();
     let sessions_focused = form.is_focused(ResumeFocus::Sessions);
-    let block = theme::panel(sessions_focused || search_focused).title(match dialog.tab {
-        ResumeTab::Hel => " Mjolnir sessions · newest first ",
-        ResumeTab::Import => " Importable sessions · newest first ",
-        ResumeTab::Archive => " Archived sessions · newest first ",
-    });
+    let block = theme::panel(sessions_focused || search_focused).title(resume_list_title(
+        dashboard,
+        dialog,
+        list_rows.len(),
+    ));
     let list_area = block.inner(rows[2]);
     // Registered after the dialog body so a drag over the rows selects the
     // list rather than the popup around it.
@@ -1268,11 +1595,11 @@ pub(crate) fn render_resume_dialog(
     let now = chrono::Local::now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
-            (ResumeTab::Import, true, _) => "Scanning native sessions…",
-            (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions",
-            (ResumeTab::Import, _, true) => "No importable sessions",
-            (ResumeTab::Archive, _, true) => "No archived sessions",
-            _ => "No matching sessions",
+            (ResumeTab::Import, true, _) => "Scanning native sessions…".to_owned(),
+            (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
+            (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
+            (ResumeTab::Archive, _, true) => "No archived sessions".to_owned(),
+            _ => empty_search_message(dashboard, dialog),
         };
         frame.render_widget(Line::raw(message), list_area);
         form.register(
@@ -1306,21 +1633,36 @@ pub(crate) fn render_resume_dialog(
         usize::from(list_area.height).max(1),
     );
 
-    if let Some(preview) = preview {
+    if let Some((preview, hit_lines)) = preview {
         let preview_band = rows[3];
-        let block = theme::panel(false).title(" Archived transcript ");
+        let title = match (dialog.active_query(), hit_lines.len()) {
+            (None, _) => " Archived transcript ".to_owned(),
+            (Some(_), 0) => " Transcript · no hits ".to_owned(),
+            (Some(_), hits) => format!(
+                " Transcript · hit {}/{hits} ",
+                dialog.preview_hit.min(hits - 1) + 1
+            ),
+        };
+        let block = theme::panel(false).title(title);
         let body = block.inner(preview_band);
         frame.render_widget(block, preview_band);
+        // Wrapped here rather than by the paragraph, so the scroll offset, the
+        // clamp and the scrollbar all count the same rows.
+        let wrapped = wrap_preview_lines(&preview, usize::from(body.width));
+        let viewport = usize::from(body.height);
+        let length = wrapped.len();
+        let offset = dialog.preview_scroll.min(length.saturating_sub(viewport));
+        surfaces.push(SurfaceFrame::scrollable(
+            SurfaceId::ResumePreview,
+            body,
+            offset,
+            length.max(viewport),
+        ));
         frame.render_widget(
-            Paragraph::new(
-                preview
-                    .lines()
-                    .map(|line| Line::raw(line.to_owned()))
-                    .collect::<Vec<_>>(),
-            )
-            .wrap(Wrap { trim: false }),
+            Paragraph::new(wrapped).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
             body,
         );
+        render_session_scrollbar(frame, preview_band, length, offset, viewport.max(1));
     }
     let selected = selected_index(dialog, list_rows.len()).and_then(|index| list_rows.get(index));
     let mut footer = Vec::new();
@@ -1392,23 +1734,209 @@ pub(crate) fn render_resume_dialog(
     ));
     Dialog::render_actions(frame, button_area, &buttons, &mut form);
     form.end_frame(ResumeFocus::Sessions);
-    if dialog.is_scanning() {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                mj_chat::spinner::compact_span(
-                    dashboard.config.spinner,
-                    dialog.opened_at.elapsed().as_millis(),
-                ),
-                Span::styled(" Scanning…", theme::muted()),
-            ])),
-            Rect::new(
-                note_area.right().saturating_sub(14).max(note_area.x),
-                note_area.y,
-                note_area.width.min(14),
-                note_area.height.min(1),
-            ),
+}
+
+/// The tab labels, carrying the scan progress on Import and, while a query is
+/// active, how many rows each tab matched.
+fn resume_tab_labels(dashboard: &DashboardState, dialog: &ResumeDialog) -> Vec<String> {
+    let hits = dashboard.resume_hit_counts;
+    let searching = !dialog.search.is_empty();
+    let (scanned, total) = dialog.scan_progress();
+    [
+        (ResumeTab::Hel, "Mjolnir"),
+        (ResumeTab::Import, "Import"),
+        (ResumeTab::Archive, "Archived"),
+    ]
+    .into_iter()
+    .map(|(tab, name)| {
+        let mut label = format!(" {name}");
+        if searching {
+            label.push_str(&format!(" · {}", hits[tab.index()]));
+        }
+        if tab == ResumeTab::Import && dialog.is_scanning() {
+            label.push_str(&format!(" · scanning {scanned}/{total}"));
+        }
+        label.push(' ');
+        label
+    })
+    .collect()
+}
+
+/// The list panel's title: what the tab lists, how the current search is
+/// going, and, on Import, whether the native scan is still running.
+fn resume_list_title(
+    dashboard: &DashboardState,
+    dialog: &ResumeDialog,
+    rows: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    if dialog.search.is_empty() {
+        spans.push(Span::raw(match dialog.tab {
+            ResumeTab::Hel => "Mjolnir sessions · newest first",
+            ResumeTab::Import => "Importable sessions · newest first",
+            ResumeTab::Archive => "Archived sessions · newest first",
+        }));
+    } else if dialog.wiki_status.state == WikiIndexState::Indexing {
+        spans.push(Span::raw("Index building…"));
+    } else if dialog.wiki_pending && rows == 0 {
+        spans.push(mj_chat::spinner::compact_span(
+            dashboard.config.spinner,
+            dialog.opened_at.elapsed().as_millis(),
+        ));
+        spans.push(Span::raw(" Searching…"));
+    } else if dialog.wiki_status.topping_up && rows > 0 {
+        spans.push(Span::raw(format!(
+            "{rows} matches · index syncing, more may arrive"
+        )));
+    } else {
+        spans.push(Span::raw(format!("{rows} matches")));
+    }
+    if dialog.tab == ResumeTab::Import && dialog.is_scanning() {
+        let (scanned, total) = dialog.scan_progress();
+        spans.push(Span::raw(" · "));
+        spans.push(mj_chat::spinner::compact_span(
+            dashboard.config.spinner,
+            dialog.opened_at.elapsed().as_millis(),
+        ));
+        spans.push(Span::raw(format!(" scanning {scanned}/{total}")));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// What an empty list says while a query is running: where the query's hits
+/// are, when they are on another tab. The dialog never switches tabs by
+/// itself, so the message has to say where to look.
+fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> String {
+    let hits = dashboard.resume_hit_counts;
+    let elsewhere = [
+        (ResumeTab::Hel, "Mjolnir"),
+        (ResumeTab::Import, "Import"),
+        (ResumeTab::Archive, "Archived"),
+    ]
+    .into_iter()
+    .filter(|(tab, _)| *tab != dialog.tab && hits[tab.index()] > 0)
+    .map(|(tab, name)| format!("{} on {name}", hits[tab.index()]))
+    .collect::<Vec<_>>();
+    if elsewhere.is_empty() {
+        return "No matching sessions".to_owned();
+    }
+    format!("No matches here · {}", elsewhere.join(", "))
+}
+
+/// The label a matching message carries. The roles are the briefing's own:
+/// anything else, such as the one-line message an error is shown as, carries
+/// no label.
+fn hit_role_label(role: &str) -> Option<&'static str> {
+    match role {
+        "user" => Some("User: "),
+        "assistant" => Some("Assistant: "),
+        "tool" => Some("[tool] "),
+        _ => None,
+    }
+}
+
+fn omitted_marker(messages: usize) -> String {
+    let plural = if messages == 1 { "message" } else { "messages" };
+    format!("*[… {messages} {plural} omitted …]*")
+}
+
+/// One matching message as lines of spans, with the matched ranges styled and
+/// the logical line each match starts on collected for hit navigation.
+///
+/// `hits` are byte ranges into the whole message, so a match that straddles a
+/// newline is split across the lines it covers and only its first line counts
+/// as the hit's position.
+fn hit_block_lines(
+    block: &WikiHitBlock,
+    lines: &mut Vec<Line<'static>>,
+    hit_lines: &mut Vec<usize>,
+) {
+    let hit_style = Style::default()
+        .fg(theme::palette().accent)
+        .add_modifier(Modifier::BOLD);
+    let mut prefix = hit_role_label(&block.role)
+        .map(|label| Span::styled(label, Style::default().fg(theme::palette().muted)));
+    let mut start = 0usize;
+    for text in block.text.split('\n') {
+        let end = start + text.len();
+        let mut spans = Vec::new();
+        if let Some(prefix) = prefix.take() {
+            spans.push(prefix);
+        }
+        let mut cursor = start;
+        for &(hit_start, hit_end) in &block.hits {
+            let from = hit_start.max(cursor);
+            let to = hit_end.min(end);
+            if from >= to {
+                continue;
+            }
+            if from > cursor {
+                spans.push(Span::raw(block.text[cursor..from].to_owned()));
+            }
+            if hit_start >= start {
+                hit_lines.push(lines.len());
+            }
+            spans.push(Span::styled(block.text[from..to].to_owned(), hit_style));
+            cursor = to;
+        }
+        if cursor < end {
+            spans.push(Span::raw(block.text[cursor..end].to_owned()));
+        }
+        lines.push(Line::from(spans));
+        // Past the newline that ended this line.
+        start = end + 1;
+    }
+    if block.truncated {
+        lines.push(Line::styled(
+            "[… truncated …]",
+            Style::default().fg(theme::palette().muted),
+        ));
+    }
+}
+
+/// The matching passages as logical lines of spans, with the logical line each
+/// hit starts on.
+fn hit_transcript_lines(transcript: &WikiHitTranscript) -> (Vec<Line<'static>>, Vec<usize>) {
+    let muted = Style::default().fg(theme::palette().muted);
+    if transcript.blocks.is_empty() {
+        return (
+            vec![Line::styled("No matching passages", muted)],
+            Vec::new(),
         );
     }
+    let mut lines = Vec::new();
+    let mut hit_lines = Vec::new();
+    for (index, block) in transcript.blocks.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(String::new()));
+        }
+        if block.omitted_before > 0 {
+            lines.push(Line::styled(omitted_marker(block.omitted_before), muted));
+        }
+        hit_block_lines(block, &mut lines, &mut hit_lines);
+    }
+    if transcript.omitted_after > 0 {
+        lines.push(Line::styled(
+            omitted_marker(transcript.omitted_after),
+            muted,
+        ));
+    }
+    (lines, hit_lines)
+}
+
+/// Wrap preview lines to `width` cells, keeping each span's style.
+///
+/// The pane wraps its own text so the wrapped row count is exact: the scroll
+/// offset, the clamp and the scrollbar all count the rows the renderer draws.
+/// Continuation rows are not indented, so a wrapped passage stays flush with
+/// the pane's left edge.
+fn wrap_preview_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    lines
+        .iter()
+        .flat_map(|line| wrap_styled_line(line.clone(), width, 0))
+        .collect()
 }
 
 fn resume_header_line(layout: &RowLayout) -> Line<'static> {

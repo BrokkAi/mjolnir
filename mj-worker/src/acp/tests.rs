@@ -2033,6 +2033,113 @@ async fn claude_selects_auto_for_guardian_and_bypass_when_unconstrained() {
     }
 }
 
+/// A harness that answers the mode request while still reporting another mode
+/// has not applied the policy, so the session must fail instead of running
+/// prompts under the permissions the operator did not ask for.
+async fn stubborn_mode_bridge(stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mode_option = serde_json::json!({
+        "id": "interaction_mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        // Never moves, whatever is selected.
+        "currentValue": "default",
+        "options": [
+            {"value": "default", "name": "Default"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    });
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+        let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = message.get("id").cloned().unwrap_or_default();
+        let result = match method {
+            "initialize" => serde_json::json!({"protocolVersion": 1}),
+            "session/new" => serde_json::json!({
+                "sessionId": "scripted",
+                "configOptions": [mode_option.clone()]
+            }),
+            "session/set_config_option" => {
+                serde_json::json!({"configOptions": [mode_option.clone()]})
+            }
+            _ => serde_json::json!({}),
+        };
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(stubborn_mode_bridge(bridge_stream));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let spec = LaunchSpec {
+        subagent_mcp_socket: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Claude,
+        execution_policy: ExecutionPolicy::Unconstrained,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+        .await
+        .expect("the session must stop instead of waiting for prompts")
+        .expect("the driver task must not panic")
+        .expect_err("an unapplied execution mode must fail the session");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("acknowledged execution mode bypassPermissions")
+            && message.contains("default"),
+        "the failure must name the requested and the reported mode: {message}"
+    );
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(
+            !matches!(event, RuntimeEvent::SessionStarted { .. }),
+            "no session may be reported once the mode was refused"
+        );
+    }
+    drop(request_tx);
+    bridge.abort();
+}
+
 #[tokio::test]
 async fn a_grok_effort_change_goes_out_as_a_legacy_set_model_request() {
     let request = config_change_request(HarnessKind::Grok, true, "effort", "low").await;

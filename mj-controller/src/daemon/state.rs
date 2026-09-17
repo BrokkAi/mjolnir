@@ -108,6 +108,26 @@ impl RuntimeState {
         blocking(move || crate::sessionwiki::brief(&wiki_id, max_chars)).await
     }
 
+    /// The passages of one indexed session that match a query, or `None` when
+    /// the index holds no session with that id.
+    pub async fn wiki_hits(
+        &self,
+        wiki_id: String,
+        query: String,
+        context_messages: usize,
+        per_message_chars: usize,
+    ) -> Result<Option<WikiHitTranscript>> {
+        blocking(move || {
+            crate::sessionwiki::transcript_hits(
+                &wiki_id,
+                &query,
+                context_messages,
+                per_message_chars,
+            )
+        })
+        .await
+    }
+
     /// Start a new session carrying a hand-off compacted from an archived one.
     ///
     /// The session starts like any other; the hand-off is installed in the

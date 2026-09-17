@@ -118,6 +118,9 @@ pub enum ControllerAction {
     #[serde(skip)]
     ForceClose {
         session_id: String,
+        /// Whether the managed worktree's branch goes with the session.
+        /// Destruction keeps it unless the request asks for the deletion.
+        delete_branch: bool,
     },
     Cancel {
         session_id: String,

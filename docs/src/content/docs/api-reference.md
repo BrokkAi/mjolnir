@@ -364,7 +364,9 @@ the session's own state is where you see it take effect.
 `close` also takes an optional body, `{"force": true}`. A forced close destroys
 the session instead of checkpointing it: there is no checkpoint, the live target
 is torn down, the recovery archive is removed, and sub-agent children are
-destroyed first. This cannot be undone. Afterwards `GET /sessions/{id}` and
+destroyed first. The managed worktree's git branch stays in the source
+repository unless the body also sets `{"delete_branch": true}`. This cannot be
+undone. Afterwards `GET /sessions/{id}` and
 `mj sessions --session <id>` answer `404`, because the session row is deleted. A
 forced close also takes over a graceful close that is stuck, so it is the way
 out when a close failed and left the session in `error`.

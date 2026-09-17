@@ -120,7 +120,9 @@ impl DashboardState {
         let session = self.state.sessions.get(session_id);
         let header = SessionHeaderIdentity {
             target: session.as_ref().map_or(String::new(), |session| {
-                session.project_target(&self.config, &session.target_template_id)
+                self.state
+                    .project_identity_session(session)
+                    .project_target(&self.config, &session.target_template_id)
             }),
             profile: session
                 .as_ref()

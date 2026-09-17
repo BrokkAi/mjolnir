@@ -230,8 +230,8 @@ fn value_summary(
             if *value { "☑" } else { "☐" }.to_owned()
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
-        Value::Null => automatic.unwrap_or_else(|| "Automatic / default".to_owned()),
-        _ => schema::choice_label(value),
+        Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path).to_owned()),
+        _ => schema::choice_label(&child_path, value),
     };
     if !value.is_object()
         && !value.is_array()
@@ -1715,13 +1715,13 @@ pub(crate) fn render_setup(
         let rows = editor
             .choices
             .iter()
-            .map(|value| Line::raw(schema::choice_label(value)))
+            .map(|value| Line::raw(schema::choice_label(&editor.path, value)))
             .collect::<Vec<_>>();
         let selected = editor.combo.selection(Choices, editor.selected);
         let value = editor
             .choices
             .get(selected)
-            .map(schema::choice_label)
+            .map(|value| schema::choice_label(&editor.path, value))
             .unwrap_or_default();
         ComboBox::render(
             frame,

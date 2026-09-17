@@ -3262,9 +3262,9 @@ fn fake_docker_environment() -> tempfile::TempDir {
     let state = home.join("fake-docker");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    let docker = bin.join("docker");
-    std::fs::write(
-        &docker,
+    crate::controller::test_support::install_fake_command(
+        &bin,
+        "docker",
         r#"#!/bin/sh
 set -eu
 state="$HOME/fake-docker"
@@ -3367,11 +3367,7 @@ volume)
     ;;
 esac
 "#,
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&docker, permissions).unwrap();
+    );
     root
 }
 

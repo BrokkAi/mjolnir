@@ -264,6 +264,63 @@ fn session_records_written_before_container_overrides_still_load() {
 }
 
 #[test]
+fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
+    let config = sample_config();
+    let mut parent = sample_session();
+    parent.id = "parent-session".into();
+    parent.managed_worktree = Some(ManagedWorktree {
+        source_project_directory: PathBuf::from("/home/test/Projects/source"),
+        source_repository: PathBuf::from("/home/test/Projects/source"),
+        worktree_root: PathBuf::from("/worktrees/parent-session"),
+        branch: "mj/parent-session".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
+    // A child is launched into the parent's worktree checkout, which is named
+    // after the parent session, and owns no worktree of its own.
+    let mut child = sample_session();
+    child.id = "child-session".into();
+    child.managed_worktree = None;
+    child.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
+
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Inspect parser".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the parser".into(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+
+    assert_eq!(child.project_name(&config), "parent-session");
+    assert_eq!(
+        state
+            .project_identity_session(&child)
+            .project_source(&config)
+            .key,
+        parent.project_source(&config).key,
+        "a child groups under the project its parent works in"
+    );
+    assert_eq!(
+        state.project_identity_session(&parent).id,
+        parent.id,
+        "a session that is not a sub-agent keeps its own project identity"
+    );
+}
+
+#[test]
 fn container_size_history_rejects_invalid_keys_and_values() {
     let mut state = State::default();
     state.container_sizes.insert(

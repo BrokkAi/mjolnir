@@ -1108,7 +1108,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
 
     let mut reloaded = Config::default();
     reloaded.review.profile = Some("reviewer-b".into());
-    chat.refresh_context(&reloaded, None);
+    chat.refresh_context(&reloaded, None, None);
 
     assert_eq!(chat.state.review_config(), &reloaded.review);
 }
@@ -1227,7 +1227,7 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
         ("claude-1", HarnessKind::Claude),
     ]);
     let moved = context_session_record("session-refresh", "workspace-moved");
-    chat.refresh_context(&reloaded, Some(&moved));
+    chat.refresh_context(&reloaded, Some(&moved), Some(&moved));
 
     assert_eq!(
         chat.reviewer_profiles()
@@ -1245,7 +1245,7 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
 
     // Another session's record is not this session's, so it is ignored.
     let other = context_session_record("session-other", "workspace-other");
-    chat.refresh_context(&reloaded, Some(&other));
+    chat.refresh_context(&reloaded, Some(&other), Some(&other));
     assert_eq!(
         chat.context
             .as_ref()
@@ -1264,7 +1264,7 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
         String::new(),
         Notices::default(),
     );
-    bare.refresh_context(&reloaded, None);
+    bare.refresh_context(&reloaded, None, None);
     assert!(bare.reviewer_profiles().is_empty());
 }
 
@@ -1308,7 +1308,7 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
     moved.harness_kind = HarnessKind::Claude;
     moved.acp_session_title = Some("Harness session title".into());
     moved.session_title_override = Some("Renamed session".into());
-    chat.refresh_context(&reloaded, Some(&moved));
+    chat.refresh_context(&reloaded, Some(&moved), Some(&moved));
 
     assert_eq!(chat.draft(), "keep this draft");
     assert!(
