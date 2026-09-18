@@ -18,7 +18,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::{DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS};
+use mj_core::subagent::DEFAULT_WAIT_SECONDS;
 
 use crate::quota::ProfileQuota;
 
@@ -308,6 +308,7 @@ impl ApiBackend {
         request: &mj_core::subagent::SubagentToolRequest,
     ) -> Result<serde_json::Value> {
         use mj_core::subagent::SubagentToolAction;
+        let request_created_at_ms = request.created_at_ms;
         match &request.action {
             SubagentToolAction::ListProfiles => {
                 let parent = self
@@ -508,12 +509,25 @@ impl ApiBackend {
                     self.require_owned_child(parent_session_id, child_id)
                         .await?;
                 }
-                let deadline = tokio::time::Instant::now()
-                    + Duration::from_secs(
-                        timeout_seconds
-                            .unwrap_or(DEFAULT_WAIT_SECONDS)
-                            .clamp(1, MAX_WAIT_SECONDS),
-                    );
+                // The budget runs from when the caller made the request, not
+                // from when this daemon picked it up. A request that is
+                // executed again — after a daemon restart, or after a result
+                // could not be handed back — then still answers at the
+                // caller's original deadline instead of starting over.
+                let started = tokio::time::Instant::now();
+                let remaining = mj_core::subagent::remaining_subagent_wait(
+                    request_created_at_ms,
+                    *timeout_seconds,
+                    mj_core::clock::epoch_millis(),
+                );
+                tracing::info!(
+                    parent_session_id,
+                    children = child_session_ids.len(),
+                    requested_seconds = timeout_seconds.unwrap_or(DEFAULT_WAIT_SECONDS),
+                    remaining_seconds = remaining.as_secs(),
+                    "starting a sub-agent wait"
+                );
+                let deadline = started + remaining;
                 loop {
                     let ids = child_session_ids.clone();
                     let summaries = tokio::task::spawn_blocking(move || {
@@ -552,16 +566,49 @@ impl ApiBackend {
                             .into_iter()
                             .map(|(id, summary)| {
                                 let record = self.exports.session_record(&id);
-                                let (state, output, _) = subagent_status(
+                                let (state, output, finished) = subagent_status(
                                     record.as_ref(),
                                     summary.as_ref(),
                                     starts.get(&id),
                                     reports.get(&id).and_then(Option::as_deref),
                                 );
-                                serde_json::json!({"child_session_id":id,"state":state,"output":output})
+                                serde_json::json!({
+                                    "child_session_id":id,
+                                    "state":state,
+                                    "finished":finished,
+                                    "output":output,
+                                })
                             })
                             .collect::<Vec<_>>();
-                        return Ok(serde_json::json!({"agents":agents,"timed_out":!complete}));
+                        let total = agents.len();
+                        let unfinished = agents
+                            .iter()
+                            .filter(|agent| agent["finished"] != serde_json::Value::Bool(true))
+                            .count();
+                        let waited_seconds = started.elapsed().as_secs();
+                        tracing::info!(
+                            parent_session_id,
+                            complete,
+                            waited_seconds,
+                            "answering a sub-agent wait"
+                        );
+                        // A deadline reached is an answer, not a failure: the
+                        // shape says which children are still running and what
+                        // the caller should do next.
+                        return Ok(serde_json::json!({
+                            "status": if complete {
+                                mj_core::subagent::WAIT_STATUS_COMPLETE
+                            } else {
+                                mj_core::subagent::WAIT_STATUS_STILL_RUNNING
+                            },
+                            "waited_seconds": waited_seconds,
+                            "agents": agents,
+                            "next_action": mj_core::subagent::next_action(
+                                complete,
+                                unfinished,
+                                total,
+                            ),
+                        }));
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
