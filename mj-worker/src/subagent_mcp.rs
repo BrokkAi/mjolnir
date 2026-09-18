@@ -9,13 +9,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use mj_core::subagent::{
-    DEFAULT_WAIT_SECONDS, FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction,
-    SubagentToolRequest,
+    FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction, SubagentToolRequest,
 };
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
-const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. The user can see every child in the Sub-agents workspace.";
+const SERVER_INSTRUCTIONS: &str = "Delegate work to Mjolnir child sessions in this target. spawn starts a child and returns its child_session_id immediately; the child runs independently while you continue other work. Collect a child's result only by calling wait, which blocks until the named children finish their current turn or the timeout. Every wait answers: status complete means the children finished and their reports are in output; status still_running means the timeout came first, which is not a failure - call wait again with the same child_session_ids. A child may take longer than any single wait. The user can see every child in the Sub-agents workspace.";
 
 /// The degraded answer when the daemon has not completed the request within
 /// the socket ceiling. The request stays queued; the model must collect the
@@ -33,9 +32,10 @@ fn pending_reply(request_id: &str) -> Value {
 /// child session) and complete it back to the worker.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Slack added to a `wait` call's own timeout so the daemon's bounded wait
-/// can finish and be relayed before the shim gives up.
-const WAIT_REPLY_GRACE: Duration = Duration::from_secs(60);
+/// Slack added to a `wait` call's own timeout. The worker answers a `wait` at
+/// the caller's deadline itself, so this only covers the hop back from the
+/// worker; it is not the timer the answer depends on.
+const WAIT_REPLY_GRACE: Duration = Duration::from_secs(30);
 
 /// How long the shim waits for the worker to answer `action`. A `wait` blocks
 /// for as long as the caller asked plus grace; everything else is bounded by
@@ -44,27 +44,83 @@ fn reply_timeout(action: &SubagentToolAction) -> Duration {
     match action {
         SubagentToolAction::WaitAgents {
             timeout_seconds, ..
-        } => {
-            Duration::from_secs(
-                timeout_seconds
-                    .unwrap_or(DEFAULT_WAIT_SECONDS)
-                    .clamp(1, MAX_WAIT_SECONDS),
-            ) + WAIT_REPLY_GRACE
-        }
+        } => mj_core::subagent::subagent_wait_timeout(*timeout_seconds) + WAIT_REPLY_GRACE,
         _ => REPLY_TIMEOUT,
     }
 }
 
-/// The tool error when the worker never answered within the budget. The
-/// request may still be queued, so the model is told how to collect it.
-fn unanswered_reply(request_id: &str, waited: Duration) -> Value {
-    json!({
-        "request_id": request_id,
-        "error": format!(
-            "Mjolnir did not answer this request within {} seconds. It may still be queued; repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated.",
-            waited.as_secs()
-        )
-    })
+/// The answer when the worker itself never replied. For a `wait` this is the
+/// same "still running, ask again" answer the worker and the daemon give, so
+/// the model reads one rule whatever went slow; for anything else it is a tool
+/// error, because there is no honest answer to give.
+fn unanswered_reply(
+    request_id: &str,
+    action: &SubagentToolAction,
+    waited: Duration,
+) -> (Value, bool) {
+    if let SubagentToolAction::WaitAgents {
+        child_session_ids, ..
+    } = action
+    {
+        let mut payload = mj_core::subagent::still_running_payload(
+            child_session_ids,
+            waited.as_secs(),
+            Some(
+                "Mjolnir did not answer this wait in time, so these children's state is unknown \
+                 rather than observed. They are still running; call wait again to collect them.",
+            ),
+        );
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("request_id".into(), json!(request_id));
+        }
+        return (payload, false);
+    }
+    (
+        json!({
+            "request_id": request_id,
+            "error": format!(
+                "Mjolnir did not answer this request within {} seconds. It may still be queued; repeat this call with the same request_key to collect its result. If this was a spawn without a request_key, check list_agents before spawning again so the child is not duplicated.",
+                waited.as_secs()
+            )
+        }),
+        true,
+    )
+}
+
+/// What the model reads for one answer. The daemon and the worker both put the
+/// answer's own JSON into `SubagentToolResult.message`, so handing the envelope
+/// back would leave the model parsing JSON out of a string inside a wrapper.
+/// Unwrap it, keeping `request_id` alongside the answer for retry advice.
+fn model_facing(request_id: &str, result: &Value) -> Value {
+    let Some(message) = result.get("message").and_then(Value::as_str) else {
+        return result.clone();
+    };
+    match serde_json::from_str::<Value>(message) {
+        Ok(Value::Object(mut payload)) => {
+            payload
+                .entry("request_id".to_owned())
+                .or_insert_with(|| json!(request_id));
+            Value::Object(payload)
+        }
+        _ => result.clone(),
+    }
+}
+
+/// What a progress notification says while a `wait` is open. A client that
+/// shows it to a person, or to a model, should learn something from it.
+fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Option<String> {
+    let SubagentToolAction::WaitAgents {
+        child_session_ids, ..
+    } = action
+    else {
+        return None;
+    };
+    Some(format!(
+        "waiting for {} child session(s) to finish their turn: {}; {}s elapsed",
+        child_session_ids.len(),
+        child_session_ids.join(", "),
+        elapsed.as_secs()
+    ))
 }
 
 pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
@@ -75,7 +131,11 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
 /// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
 /// dispatched concurrently, each on its own socket connection, so a long
 /// `wait` never blocks a cheap `list_agents` queued after it.
-fn run<R: BufRead, W: Write + Send + 'static>(reader: R, writer: W, socket: &Path) -> Result<()> {
+fn run<R: BufRead, W: Write + Send + Sync + 'static>(
+    reader: R,
+    writer: W,
+    socket: &Path,
+) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
         reader,
@@ -85,7 +145,10 @@ fn run<R: BufRead, W: Write + Send + 'static>(reader: R, writer: W, socket: &Pat
             instructions: SERVER_INSTRUCTIONS,
             tools: tool_definitions(),
             dispatch: crate::mcp_stdio::Dispatch::Concurrent,
-            call: move |params: Option<&Value>| call(&socket, params),
+            progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
+            call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
+                call(&socket, params, progress)
+            },
         },
     )
 }
@@ -131,8 +194,12 @@ struct WaitArgs {
     timeout_seconds: Option<u64>,
 }
 
-fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
-    call_with_budget(socket, params, reply_timeout)
+fn call(
+    socket: &Path,
+    params: Option<&Value>,
+    progress: &crate::mcp_stdio::Progress,
+) -> Result<(Value, bool)> {
+    call_with_budget(socket, params, progress, reply_timeout)
 }
 
 /// Answer one tool call, waiting for the worker as long as `budget` allows
@@ -140,6 +207,7 @@ fn call(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
 fn call_with_budget(
     socket: &Path,
     params: Option<&Value>,
+    progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
@@ -206,12 +274,12 @@ fn call_with_budget(
         created_at_ms: mj_core::clock::epoch_millis(),
         action,
     };
-    let Some(reply) = send(socket, &request, timeout)? else {
-        return Ok((unanswered_reply(&request_id, timeout), true));
+    let Some(reply) = send(socket, &request, timeout, progress)? else {
+        return Ok(unanswered_reply(&request_id, &request.action, timeout));
     };
     if let Some(result) = reply.get("result").filter(|value| !value.is_null()) {
         return Ok((
-            result.clone(),
+            model_facing(&request_id, result),
             result
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -221,9 +289,55 @@ fn call_with_budget(
     Ok((pending_reply(&request_id), false))
 }
 
-/// `None` means the worker did not answer within `timeout`.
-fn send(socket: &Path, request: &SubagentToolRequest, timeout: Duration) -> Result<Option<Value>> {
-    crate::mcp_stdio::socket_request(socket, request, "sub-agent", timeout)
+/// Send the request and wait for the worker's answer, reporting progress while
+/// it is outstanding. `None` means the worker did not answer within `timeout`.
+///
+/// The exchange runs on its own thread so this one can keep reporting: a
+/// silent call is what makes a harness abandon a long `wait`, and the answer
+/// itself may legitimately be a long time coming.
+fn send(
+    socket: &Path,
+    request: &SubagentToolRequest,
+    timeout: Duration,
+    progress: &crate::mcp_stdio::Progress,
+) -> Result<Option<Value>> {
+    let started = std::time::Instant::now();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let exchange = {
+        let socket = socket.to_path_buf();
+        let request = request.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(crate::mcp_stdio::socket_request(
+                &socket,
+                &request,
+                "sub-agent",
+                timeout,
+            ));
+        })
+    };
+    let total = match &request.action {
+        SubagentToolAction::WaitAgents {
+            timeout_seconds, ..
+        } => Some(mj_core::subagent::subagent_wait_timeout(*timeout_seconds).as_secs()),
+        _ => None,
+    };
+    let answer = loop {
+        match receiver.recv_timeout(progress.interval()) {
+            Ok(answer) => break answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(message) = wait_progress_message(&request.action, started.elapsed()) {
+                    progress.notify(started.elapsed().as_secs(), total, &message);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("the sub-agent socket thread ended without a result")
+            }
+        }
+    };
+    if exchange.join().is_err() {
+        anyhow::bail!("the sub-agent socket thread panicked");
+    }
+    answer
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -260,7 +374,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "wait",
-            "Block until the named child sessions finish their current turn, or until the timeout, then return each child's latest output. Spawn agents, do other work, then wait to collect results. timeout_seconds defaults to 300 and is capped at 3600.",
+            "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. timeout_seconds defaults to 300 and is capped at 3600; a child may run far longer than that, so expect to call wait more than once.",
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
@@ -335,7 +449,7 @@ mod tests {
         );
         assert_eq!(
             reply_timeout(&wait(None)),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
+            Duration::from_secs(mj_core::subagent::DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
         );
         assert_eq!(
             reply_timeout(&wait(Some(MAX_WAIT_SECONDS * 2))),
@@ -368,11 +482,13 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let (value, is_error) =
-            call_with_budget(&socket, Some(&json!({"name": "list_agents"})), |_| {
-                Duration::from_millis(200)
-            })
-            .unwrap();
+        let (value, is_error) = call_with_budget(
+            &socket,
+            Some(&json!({"name": "list_agents"})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_millis(200),
+        )
+        .unwrap();
         assert!(
             started.elapsed() < Duration::from_millis(1500),
             "the call must give up at its budget, took {:?}",
@@ -388,6 +504,75 @@ mod tests {
             error.contains("did not answer") && error.contains("request_key"),
             "{error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unanswered_wait_is_a_still_running_answer_rather_than_a_failure() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        // Fake worker: take the request and never answer it.
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            let _ = reader.into_inner().read(&mut [0u8; 1]);
+        });
+
+        let (value, is_error) = call_with_budget(
+            &socket,
+            Some(&json!({
+                "name": "wait",
+                "arguments": {"child_session_ids": ["c1", "c2"], "timeout_seconds": 5}
+            })),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_millis(200),
+        )
+        .unwrap();
+
+        assert!(
+            !is_error,
+            "a deadline reached is an answer, not a tool error: {value}"
+        );
+        assert_eq!(
+            value["status"],
+            mj_core::subagent::WAIT_STATUS_STILL_RUNNING
+        );
+        assert_eq!(value["agents"][1]["child_session_id"], "c2");
+        assert_eq!(value["agents"][1]["finished"], false);
+        assert!(
+            !value["request_id"].as_str().unwrap_or_default().is_empty(),
+            "{value}"
+        );
+        let next = value["next_action"].as_str().expect("next_action text");
+        assert!(next.contains("Call wait again"), "{next}");
+    }
+
+    #[test]
+    fn the_models_answer_is_the_payload_itself_not_the_result_envelope() {
+        let envelope = json!({
+            "request_id": "r-1",
+            "completed_at_ms": 7,
+            "is_error": false,
+            "message": "{\"status\":\"complete\",\"agents\":[]}"
+        });
+        let value = model_facing("r-1", &envelope);
+        assert_eq!(value["status"], "complete");
+        assert_eq!(value["request_id"], "r-1");
+        assert!(
+            value.get("message").is_none(),
+            "the payload must not stay wrapped in a stringified message: {value}"
+        );
+
+        // A message that is not JSON, such as an error string, is left alone.
+        let plain = json!({"request_id":"r-2","is_error":true,"message":"child not found"});
+        assert_eq!(model_facing("r-2", &plain), plain);
     }
 
     #[test]

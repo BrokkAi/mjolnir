@@ -23,15 +23,79 @@ pub enum Dispatch {
     Concurrent,
 }
 
+/// How often a long call reports that it is still working, when the client
+/// asked to be kept informed. Claude Code abandons a stdio MCP call that sends
+/// neither a response nor a progress notification for 1800 seconds, so a call
+/// that reports every half minute never runs into that limit.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct McpServer<F> {
     pub name: &'static str,
     pub instructions: &'static str,
     pub tools: Vec<Value>,
     pub dispatch: Dispatch,
+    /// How often an in-flight call may report progress. Tests shorten it; in
+    /// production it is [`PROGRESS_INTERVAL`].
+    pub progress_interval: Duration,
     /// Answer one `tools/call`: the structured result and whether it is a tool
     /// error the model can correct. `Err` becomes a JSON-RPC invalid-params
-    /// error.
+    /// error. The [`Progress`] handle reports that a slow call is still
+    /// working; a handler with nothing useful to say ignores it.
     pub call: F,
+}
+
+/// Reports that one in-flight `tools/call` is still working.
+///
+/// MCP only allows progress for a request whose caller asked for it, by
+/// putting a `progressToken` in the call's `_meta`. Without that token this
+/// handle does nothing, so a client that never asked is never sent anything it
+/// did not expect.
+pub struct Progress {
+    token: Option<Value>,
+    interval: Duration,
+    emit: Box<dyn Fn(&Value) + Send + Sync>,
+}
+
+impl Progress {
+    /// How often [`Self::notify`] should be called while a call is in flight.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// A handle that reports nothing, for tests that call a handler directly
+    /// with no client behind it.
+    #[cfg(test)]
+    pub fn silent(interval: Duration) -> Self {
+        Self {
+            token: None,
+            interval,
+            emit: Box::new(|_| {}),
+        }
+    }
+
+    /// Send one `notifications/progress`. `elapsed` is how long the call has
+    /// been running and `total` is the deadline it is working towards, both in
+    /// seconds, so a client can show how far along the call is.
+    pub fn notify(&self, elapsed: u64, total: Option<u64>, message: &str) {
+        let Some(token) = &self.token else {
+            return;
+        };
+        let mut params = json!({
+            "progressToken": token,
+            "progress": elapsed,
+            "message": message,
+        });
+        if let Some(total) = total
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("total".into(), json!(total));
+        }
+        (self.emit)(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": params,
+        }));
+    }
 }
 
 /// Serve `server` over `reader` and `writer` until the reader closes, then let
@@ -39,8 +103,8 @@ pub struct McpServer<F> {
 pub fn serve<R, W, F>(reader: R, writer: W, server: McpServer<F>) -> Result<()>
 where
     R: BufRead,
-    W: Write + Send + 'static,
-    F: Fn(Option<&Value>) -> Result<(Value, bool)> + Send + Sync + 'static,
+    W: Write + Send + Sync + 'static,
+    F: Fn(Option<&Value>, &Progress) -> Result<(Value, bool)> + Send + Sync + 'static,
 {
     let output = Arc::new(Mutex::new(writer));
     let call = Arc::new(server.call);
@@ -75,13 +139,22 @@ where
             "tools/list" => rpc_result(id, json!({"tools": server.tools})),
             "tools/call" => {
                 let params = request.get("params").cloned();
+                let token = params
+                    .as_ref()
+                    .and_then(|params| params.pointer("/_meta/progressToken"))
+                    .cloned();
                 match server.dispatch {
-                    Dispatch::Sequential => tool_response(id, call(params.as_ref())),
+                    Dispatch::Sequential => {
+                        let progress = progress_handle(&output, token, server.progress_interval);
+                        tool_response(id, call(params.as_ref(), &progress))
+                    }
                     Dispatch::Concurrent => {
                         let output = Arc::clone(&output);
                         let call = Arc::clone(&call);
+                        let interval = server.progress_interval;
                         calls.push(std::thread::spawn(move || {
-                            let response = tool_response(id, call(params.as_ref()));
+                            let progress = progress_handle(&output, token, interval);
+                            let response = tool_response(id, call(params.as_ref(), &progress));
                             if let Err(error) = write_line(&output, &response) {
                                 tracing::warn!(%error, "could not write an MCP tool response");
                             }
@@ -100,6 +173,26 @@ where
         }
     }
     Ok(())
+}
+
+/// Bind a progress handle to this server's output stream. Every notification
+/// it writes goes through the same lock as a response, so lines never
+/// interleave.
+fn progress_handle<W: Write + Send + Sync + 'static>(
+    output: &Arc<Mutex<W>>,
+    token: Option<Value>,
+    interval: Duration,
+) -> Progress {
+    let output = Arc::clone(output);
+    Progress {
+        token,
+        interval,
+        emit: Box::new(move |value| {
+            if let Err(error) = write_line(&output, value) {
+                tracing::warn!(%error, "could not write an MCP progress notification");
+            }
+        }),
+    }
 }
 
 fn tool_response(id: Value, result: Result<(Value, bool)>) -> Value {
@@ -231,6 +324,102 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::time::Instant;
+
+    /// Collects everything the server writes, so a test can read it after
+    /// `serve` has consumed the writer.
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("shared writer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Serve one request with a tool that sleeps for `work`, reporting
+    /// progress on every tick, and return everything the server wrote.
+    fn serve_a_slow_call(request: Value, interval: Duration, work: Duration) -> Vec<Value> {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let input = format!("{request}\n");
+        serve(
+            input.as_bytes(),
+            SharedWriter(Arc::clone(&buffer)),
+            McpServer {
+                name: "test",
+                instructions: "test",
+                tools: vec![json!({"name": "slow", "inputSchema": {"type": "object"}})],
+                dispatch: Dispatch::Concurrent,
+                progress_interval: interval,
+                call: move |_params: Option<&Value>, progress: &Progress| {
+                    let started = Instant::now();
+                    while started.elapsed() < work {
+                        std::thread::sleep(progress.interval());
+                        progress.notify(started.elapsed().as_secs(), Some(60), "still working");
+                    }
+                    Ok((json!({"done": true}), false))
+                },
+            },
+        )
+        .expect("the server serves the request");
+        written_lines(&buffer)
+    }
+
+    fn written_lines(buffer: &Arc<Mutex<Vec<u8>>>) -> Vec<Value> {
+        let bytes = buffer.lock().expect("buffer poisoned").clone();
+        String::from_utf8(bytes)
+            .expect("utf8 output")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one JSON message"))
+            .collect()
+    }
+
+    #[test]
+    fn a_call_with_a_progress_token_gets_progress_lines_before_its_response() {
+        let lines = serve_a_slow_call(
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                   "params":{"name":"slow","arguments":{},"_meta":{"progressToken":"tok-7"}}}),
+            Duration::from_millis(20),
+            Duration::from_millis(120),
+        );
+        let notifications = lines
+            .iter()
+            .filter(|line| line["method"] == "notifications/progress")
+            .collect::<Vec<_>>();
+        assert!(
+            notifications.len() >= 2,
+            "a slow call must report more than once: {lines:?}"
+        );
+        assert_eq!(notifications[0]["params"]["progressToken"], "tok-7");
+        assert_eq!(notifications[0]["params"]["total"], 60);
+        assert_eq!(notifications[0]["params"]["message"], "still working");
+        assert!(
+            lines.last().expect("a response")["result"]["structuredContent"]["done"] == true,
+            "the response must come last: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_progress_token_is_answered_with_no_notifications() {
+        let lines = serve_a_slow_call(
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                   "params":{"name":"slow","arguments":{}}}),
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+        );
+        assert!(
+            lines.iter().all(|line| line["method"].is_null()),
+            "a client that asked for no progress must be sent none: {lines:?}"
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+    }
 
     /// Accept one connection, read the request line, then run `answer` on
     /// the stream and hold it open until the client goes away.
