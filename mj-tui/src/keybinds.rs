@@ -143,6 +143,7 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::FocusPaneUp => CommandId::FocusPaneUp,
         KeyAction::FocusPaneRight => CommandId::FocusPaneRight,
         KeyAction::Zoom => CommandId::ZoomPane,
+        KeyAction::LastPane => CommandId::FocusLastPane,
         KeyAction::ResizePaneLeft => CommandId::ResizePaneLeft,
         KeyAction::ResizePaneDown => CommandId::ResizePaneDown,
         KeyAction::ResizePaneUp => CommandId::ResizePaneUp,

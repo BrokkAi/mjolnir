@@ -197,6 +197,7 @@ The default bindings:
 | `focus_pane_up` | `prefix+k` | Move the keyboard to the pane above |
 | `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
 | `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
+| `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
 | `stop_session` | unbound | Stop the selected session |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |

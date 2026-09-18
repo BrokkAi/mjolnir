@@ -401,6 +401,7 @@ key_actions! {
     FocusPaneUp / focus_pane_up = "prefix+k",
     FocusPaneRight / focus_pane_right = "prefix+l",
     Zoom / zoom = "prefix+z",
+    LastPane / last_pane = "prefix+;",
     StopSession / stop_session = "",
     RestartSession / restart_session = "",
     MoveSession / move_session = "",

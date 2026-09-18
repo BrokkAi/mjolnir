@@ -20,8 +20,8 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 - [x] M2: split-open notices for a session that is already open. Done 2026-09-18T11:34-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] M3: wheel routes to the pane under the pointer; focused transcript border. Done 2026-09-18T12:26-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`). Done 2026-09-18T13:20-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean. Docs text for zoom and the moved `pane_size` updated; screenshots still to regenerate.
-- [ ] M5: last pane on `prefix+;`.
-- [ ] Docs and screenshot regeneration for the key changes.
+- [x] M5: last pane on `prefix+;`. Done 2026-09-18T14:05-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
+- [x] Docs and screenshot regeneration for the key changes. Done 2026-09-18T14:05-05:00; `terminal-surface.mdx` and `configuration.md` cover the chips, the notices, the wheel, zoom, last pane, and the moved `pane_size`; the four captures under `docs/src/assets/screenshots/` were regenerated and the palette shows **Zoom pane** (`ctrl+b z`) and **Focus last pane** (`ctrl+b ;`).
 - [ ] End-to-end check against the lab, then push.
 
 ## Surprises & Discoveries
@@ -78,6 +78,18 @@ measurement before the band allocation and the pane loop itself. Both now call
 hit-testing follows the zoom without a separate change. `focus_pane_toward`
 still reads the full layout on purpose.
 
+`prev_focus` cannot dangle. `TileLayout::close_focused` clears it outright and
+`close_pane` clears it when the pane it names is the one being closed, so
+`previous_focus()` never points at a pane that has gone. `focus_last_pane_command`
+still checks membership in `pane_ids()` before moving, because the guard costs
+one walk of a tree with a handful of leaves and the alternative is a silent
+`focus_pane` that does nothing while the command reports a move.
+
+`format_key_combo` prints `;` for the semicolon key, not the `semicolon` alias
+it accepts on the way in, so the default is written `"prefix+;"` — the same
+shape as `split_horizontal = "prefix+-"`, where `minus` is likewise only an
+input alias.
+
 `cargo build --workspace` fails in this checkout because `mj-desktop` needs
 GTK development packages that are not installed. The workspace's
 `default-members` exclude `mj-desktop`, so the three validation commands in
@@ -108,7 +120,31 @@ this plan are unaffected: they build and test the default members only.
 ## Outcomes & Retrospective
 
 
-(to be written at completion)
+All five milestones landed, and the surface now does what the Purpose asked
+for. A `×` chip on every conversation pane's title row closes that pane from
+the mouse, wherever the keyboard is. Asking to split out a session that is
+already on screen no longer leaves a blank pane: it either moves the keyboard
+to the pane that has it or says the pane you are in already shows it, with a
+notice either way. The wheel scrolls the transcript it is over rather than the
+focused one. The focused pane's transcript border is drawn in the accent
+colour, but only when there is a second pane to tell it apart from, so the
+single-pane surface is unchanged. `prefix+z` zooms the focused pane to fill the
+band and back, with a `Z` chip beside the `×`; `prefix+;` returns to the
+previous pane; `pane_size` moved to `prefix+shift+z` to make room.
+
+What the work taught, beyond the entries above: the pane list is read in one
+place for drawing and in one place for measuring, and every hitbox is derived
+from the drawing pass, so zoom needed no separate hit-testing change. The
+conversation band's state divides cleanly into what is stored (the tile tree
+and which session each pane holds) and what is not (the zoom), and keeping the
+zoom out of `export_conversation_layout` was enough to make a restart come back
+unzoomed with no schema work. The key table's resolution order meant moving a
+default binding needed no config migration, which is worth remembering the next
+time a default key moves.
+
+Two things are deliberately left: the close chip lands on a split chat's
+reviewer half rather than teaching `mj-chat` about host chips per half, and the
+end-to-end check against the fake-harness lab is still to run.
 
 ## Context and Orientation
 

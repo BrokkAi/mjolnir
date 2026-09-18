@@ -201,6 +201,25 @@ impl DashboardState {
         }
     }
 
+    /// Move the keyboard back to the pane it was in before this one.
+    ///
+    /// There is nothing to go back to before the first focus move, and
+    /// closing a pane forgets it, so the command says so rather than moving
+    /// the keyboard somewhere the user did not ask for.
+    pub(crate) fn focus_last_pane_command(&mut self) -> DashboardAction {
+        let previous = self
+            .conversation_layout
+            .previous_focus()
+            .filter(|pane| *pane != self.conversation_layout.focused())
+            .filter(|pane| self.conversation_layout.pane_ids().contains(pane));
+        let Some(previous) = previous else {
+            self.set_notice("No previous pane");
+            return DashboardAction::None;
+        };
+        self.focus_pane(previous);
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    }
+
     /// Move the focused pane's border toward `nav` by one step.
     pub(crate) fn resize_pane_command(&mut self, nav: NavDirection) -> DashboardAction {
         self.resize_focused_pane(nav);

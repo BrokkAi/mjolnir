@@ -2790,6 +2790,67 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
     assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
+/// The last-pane key returns the keyboard to the pane it came from, and says
+/// so when there is no pane to go back to.
+#[test]
+fn the_last_pane_key_returns_to_the_pane_the_keyboard_came_from() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    dashboard.focus_prompt();
+
+    // Nothing has moved yet, so there is nothing to go back to.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
+    assert_eq!(dashboard.focused_pane(), first);
+
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_pane(first);
+    dashboard.focus_pane(second);
+    dashboard.focus_prompt();
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+    assert_eq!(dashboard.focused_pane(), first);
+
+    // It is a toggle: running it again goes back to where it just came from.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+    assert_eq!(dashboard.focused_pane(), second);
+}
+
+/// Closing a pane forgets it as the place to go back to, so the key never
+/// moves the keyboard into a pane that is gone.
+#[test]
+fn closing_a_pane_leaves_no_previous_pane_to_return_to() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_pane(first);
+    dashboard.focus_prompt();
+
+    dashboard.close_pane(second);
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
+    assert_eq!(dashboard.focused_pane(), first);
+}
+
 /// Zoom fills the conversation band with the focused pane: the other panes
 /// keep their place in the arrangement but are neither drawn nor pointed at,
 /// and the zoom toggles back off.

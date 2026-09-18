@@ -129,6 +129,12 @@ impl TileLayout {
         self.focus
     }
 
+    /// The pane focused before this one, while it is still in the layout.
+    /// Closing a pane forgets it rather than leaving a stale id behind.
+    pub fn previous_focus(&self) -> Option<PaneId> {
+        self.prev_focus
+    }
+
     pub fn pane_count(&self) -> usize {
         count_panes(&self.root)
     }
