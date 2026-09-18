@@ -106,13 +106,17 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
   the end of the list, and the existing Up/Down arms now call it with `times` of 1
   rather than repeating their own `find`.
 
-- Observation: giving the palette `ctrl+u` for list paging takes it away from the
-  query field, where it was readline's kill-to-line-start.
+- Observation: giving the palette `ctrl+u` and `ctrl+d` for list paging took them
+  away from the query field, where they were readline's kill-to-line-start and
+  delete-forward. That contradicts this milestone's own rule that a focused text
+  field keeps these keys as text.
   Evidence: `handle_palette_event` in `mj-tui/src/palette.rs` chooses `browse`
-  before the form sees the key, so the `TextField` never receives it.
-  Consequence: accepted, because the plan asks for exactly the two ctrl keys here
-  and Backspace still clears a short query; if this turns out to be missed, the
-  fix is to take `ctrl+u` only while the query is empty.
+  before the form sees the key, so the `TextField` never received it.
+  Consequence: `browse` takes the two chords only while `palette.query.is_empty()`,
+  where readline would do nothing anyway; with text in the query they fall through
+  to the field. `palette_ctrl_u_and_ctrl_d_edit_the_query_until_it_is_empty` holds
+  both halves: Ctrl-D at the start of `rename` leaves `ename` with the selection
+  unmoved, and the same chord on an empty query pages the list.
 
 - Observation: the help overlay's filter line cannot be part of the scrolled
   paragraph, because scrolling would carry it off the top of the frame.
@@ -545,7 +549,7 @@ M4, `cargo test` (dev profile, outside the sandbox), the crates this milestone
 touched:
 
     mj_chat  test result: ok. 529 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.59s
-    mj_tui   test result: ok. 507 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.22s
+    mj_tui   test result: ok. 508 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.23s
 
 The PTY suite, run on its own afterwards:
 

@@ -261,9 +261,13 @@ impl DashboardState {
                     KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
                         Some(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
                     }
-                    // The query owns every letter, so the list only borrows
-                    // the two paging chords, which no text edit claims here.
-                    KeyCode::Char('d' | 'u') if key.modifiers == KeyModifiers::CONTROL => {
+                    // The query is a text field, so Ctrl-U and Ctrl-D stay
+                    // readline's kill-to-line-start and delete-forward while
+                    // there is text to edit. The list borrows them for paging
+                    // only once the query is empty and they would do nothing.
+                    KeyCode::Char('d' | 'u')
+                        if key.modifiers == KeyModifiers::CONTROL && palette.query.is_empty() =>
+                    {
                         Some(*key)
                     }
                     _ => None,
@@ -563,6 +567,48 @@ mod tests {
     /// The row of a drawn palette, or `None` when the text is not on screen.
     fn row_of(lines: &[String], needle: &str) -> Option<usize> {
         lines.iter().position(|line| line.contains(needle))
+    }
+
+    /// The query is a text field, so readline's Ctrl-U and Ctrl-D keep editing
+    /// it while there is text to edit. The list borrows them for paging only
+    /// once the query is empty, where they would otherwise do nothing.
+    #[test]
+    fn palette_ctrl_u_and_ctrl_d_edit_the_query_until_it_is_empty() {
+        let ctrl = |character: char| KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+        let query = |dashboard: &DashboardState| {
+            let Mode::Palette(palette) = &dashboard.mode else {
+                panic!("the palette stays open");
+            };
+            (palette.query.value().to_owned(), palette.selected)
+        };
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "rename");
+        drawn(&mut dashboard, 120, 30);
+        let (_, selected) = query(&dashboard);
+
+        // Ctrl-D deletes forward within the text rather than paging the list.
+        dashboard.handle_key(key(KeyCode::Home));
+        dashboard.handle_key(ctrl('d'));
+        assert_eq!(query(&dashboard), ("ename".to_owned(), selected));
+
+        // Ctrl-U kills back to the start of the line, and the selection stays
+        // where the shortened query puts it rather than jumping eight rows.
+        dashboard.handle_key(key(KeyCode::End));
+        dashboard.handle_key(ctrl('u'));
+        let (text, selected) = query(&dashboard);
+        assert_eq!(text, "");
+        drawn(&mut dashboard, 120, 30);
+
+        // With nothing left to edit, the same chord pages the list.
+        dashboard.handle_key(ctrl('d'));
+        let (text, paged) = query(&dashboard);
+        assert_eq!(text, "");
+        assert_ne!(paged, selected, "ctrl+d must page an empty palette");
+        dashboard.handle_key(ctrl('u'));
+        assert_eq!(query(&dashboard), ("".to_owned(), selected));
     }
 
     #[test]
