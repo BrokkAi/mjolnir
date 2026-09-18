@@ -50,6 +50,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
+        machines: Default::default(),
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {

@@ -153,7 +153,7 @@ impl TargetBuildCache {
         self == &Self::default()
     }
 
-    fn validate(&self, template_id: &str) -> Result<()> {
+    pub(super) fn validate(&self, template_id: &str) -> Result<()> {
         if let Some(directory) = &self.directory
             && !directory.is_absolute()
         {
@@ -172,14 +172,14 @@ impl TargetBuildCache {
 
 /// Whether a target carries no build cache overrides, so an unchanged target
 /// is not rewritten with an empty section.
-fn is_default_target_build_cache(value: &Option<TargetBuildCache>) -> bool {
+pub(super) fn is_default_target_build_cache(value: &Option<TargetBuildCache>) -> bool {
     value.as_ref().is_none_or(TargetBuildCache::is_default)
 }
 
 /// "No overrides" has one representation. A section with every field unset,
 /// which both a hand-written file and the setup editor can produce, reads back
 /// as no section at all.
-fn deserialize_target_build_cache<'de, D>(
+pub(super) fn deserialize_target_build_cache<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<TargetBuildCache>, D::Error>
 where
@@ -346,6 +346,24 @@ pub(super) fn default_named_machine_prefix() -> PathBuf {
     PathBuf::from(".local/share/hel/workspaces")
 }
 
+/// Rejects a remote workspace directory that would escape the login home or
+/// name the home itself. Shared by SSH machines and the targets that resolve
+/// from them so both report the same rule.
+pub(super) fn validate_workspace_prefix(
+    id: &str,
+    workspace_prefix: &std::path::Path,
+) -> Result<()> {
+    if workspace_prefix.as_os_str().is_empty()
+        || workspace_prefix
+            .components()
+            .any(|part| part == Component::ParentDir)
+        || matches!(workspace_prefix.to_str(), Some("/" | "." | "~" | "~/"))
+    {
+        bail!("{id:?} has an unsafe workspace prefix");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TargetTemplate {
@@ -474,15 +492,7 @@ impl TargetTemplate {
                 ..
             } => {
                 ssh.validate(id)?;
-                if workspace_prefix.as_os_str().is_empty()
-                    || workspace_prefix
-                        .components()
-                        .any(|part| part == Component::ParentDir)
-                    || matches!(workspace_prefix.to_str(), Some("/" | "." | "~" | "~/"))
-                {
-                    bail!("target template {id:?} has an unsafe workspace prefix");
-                }
-                Ok(())
+                validate_workspace_prefix(&format!("target template {id}"), workspace_prefix)
             }
             Self::SshDocker { ssh, container } => {
                 ssh.validate(id)?;

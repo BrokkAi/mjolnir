@@ -388,6 +388,7 @@ fn sample_config() -> Config {
         subagents: SubagentConfig::default(),
         build_cache: BuildCacheConfig::default(),
         legacy_startup: (),
+        machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),
             HarnessProfile {
@@ -706,7 +707,7 @@ fn config_toml_round_trip_is_atomic() {
     assert_eq!(
         fs::read_to_string(path)
             .unwrap()
-            .matches("kind = \"local-podman\"")
+            .matches("kind = \"podman\"")
             .count(),
         1
     );
@@ -1117,7 +1118,7 @@ fn local_docker_target_round_trips_with_its_public_kind() {
     config.save_to(&path).unwrap();
 
     let rendered = fs::read_to_string(&path).unwrap();
-    assert!(rendered.contains("kind = \"local-docker\""), "{rendered}");
+    assert!(rendered.contains("kind = \"docker\""), "{rendered}");
     assert_eq!(Config::load_from(&path).unwrap(), config);
 }
 
@@ -1206,6 +1207,22 @@ fn raw_ssh_permissions_are_required_and_podman_rejects_them() {
     assert!(body.contains("permissions = \"guardian\""), "{body}");
     assert!(body.contains("permissions = \"yolo\""), "{body}");
     assert_eq!(body.matches("permissions = ").count(), 2, "{body}");
+    // Saving names the host the three runtimes share, so the file that comes
+    // back has the machine the in-memory config never spelled out.
+    config.machines.insert(
+        "builder".into(),
+        Machine::Ssh {
+            ssh: SshConnection {
+                host: "builder".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            workspace_prefix: default_named_machine_prefix(),
+            build_cache: None,
+        },
+    );
+    assert_eq!(body.matches("[machines.builder]").count(), 1, "{body}");
     assert_eq!(Config::load_from(&path).unwrap(), config);
 
     fs::write(
@@ -1222,7 +1239,7 @@ fn raw_ssh_permissions_are_required_and_podman_rejects_them() {
     )
     .unwrap();
     let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(error.contains("only valid for ssh-bare"), "{error}");
+    assert!(error.contains("only applies to a bare runtime"), "{error}");
 }
 
 #[test]
@@ -1756,4 +1773,329 @@ fn instance_directories_nest_under_instances_and_reject_escapes() {
     // caller skips startup validation: it falls back to the base directory.
     assert_eq!(with_instance_dir(base.clone(), Some("../evil")), base);
     assert_eq!(with_instance_dir(base.clone(), Some("")), base);
+}
+
+fn full_container(build_cache: Option<TargetBuildCache>) -> ContainerTemplate {
+    ContainerTemplate {
+        image: "example.invalid/agent:latest".into(),
+        pull_policy: ImagePullPolicy::Newer,
+        platform: Some("linux/amd64".into()),
+        cpus: Some("4".into()),
+        memory: Some("8g".into()),
+        environment: BTreeMap::from([("RUST_LOG".into(), "debug".into())]),
+        workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
+        build_cache,
+    }
+}
+
+fn every_kind_config() -> Config {
+    let local_cache = TargetBuildCache {
+        enabled: Some(true),
+        directory: Some(PathBuf::from("/var/cache/mbx")),
+        max_size: Some("50GiB".into()),
+    };
+    let builder_cache = TargetBuildCache {
+        enabled: Some(false),
+        directory: Some(PathBuf::from("/srv/cache/mbx")),
+        max_size: Some("20GB".into()),
+    };
+    let ssh = SshConnection {
+        host: "builder.example.com".into(),
+        user: Some("dev".into()),
+        identity_file: Some(PathBuf::from("/keys/builder")),
+        extra_args: vec!["-p".into(), "2222".into()],
+    };
+    let aws = |ssh_args: Vec<String>| TargetTemplate::AwsEc2 {
+        aws_profile: Some("work".into()),
+        region: "us-east-1".into(),
+        launch_template: "lt-0123".into(),
+        launch_template_version: Some("7".into()),
+        ssh_user: "ubuntu".into(),
+        address_source: AwsAddressSource::PrivateIp,
+        identity_file: Some(PathBuf::from("/keys/fleet")),
+        ssh_args,
+    };
+    let TargetTemplate::AwsEc2 {
+        aws_profile,
+        region,
+        launch_template,
+        launch_template_version,
+        ssh_user,
+        address_source,
+        identity_file,
+        ssh_args,
+    } = aws(vec!["-o".into(), "StrictHostKeyChecking=no".into()])
+    else {
+        unreachable!()
+    };
+    let mut podman_storage = full_container(Some(local_cache.clone()));
+    podman_storage.workspace_storage = PodmanWorkspaceStorage::HostHelper {
+        root: PathBuf::from("/srv/mj-workspaces"),
+        helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
+    };
+    Config {
+        machines: BTreeMap::from([
+            (
+                "local".into(),
+                Machine::Local {
+                    build_cache: Some(local_cache.clone()),
+                },
+            ),
+            (
+                "builder".into(),
+                Machine::Ssh {
+                    ssh: ssh.clone(),
+                    workspace_prefix: PathBuf::from("work/spaces"),
+                    build_cache: Some(builder_cache.clone()),
+                },
+            ),
+            (
+                "fleet".into(),
+                Machine::AwsEc2 {
+                    aws_profile,
+                    region,
+                    launch_template,
+                    launch_template_version,
+                    ssh_user,
+                    address_source,
+                    identity_file,
+                    ssh_args,
+                },
+            ),
+        ]),
+        targets: BTreeMap::from([
+            ("localhost".into(), TargetTemplate::LocalBare),
+            (
+                "podman".into(),
+                TargetTemplate::LocalPodman {
+                    container: podman_storage,
+                },
+            ),
+            (
+                "docker".into(),
+                TargetTemplate::LocalDocker {
+                    container: full_container(Some(local_cache.clone())),
+                },
+            ),
+            (
+                "apple".into(),
+                TargetTemplate::AppleContainer {
+                    container: full_container(Some(local_cache)),
+                },
+            ),
+            (
+                "builder-bare".into(),
+                TargetTemplate::SshBare {
+                    ssh: ssh.clone(),
+                    permissions: PermissionMode::Yolo,
+                    workspace_prefix: PathBuf::from("work/spaces"),
+                },
+            ),
+            (
+                "builder-podman".into(),
+                TargetTemplate::SshPodman {
+                    ssh: ssh.clone(),
+                    container: full_container(Some(builder_cache.clone())),
+                },
+            ),
+            (
+                "builder-docker".into(),
+                TargetTemplate::SshDocker {
+                    ssh,
+                    container: full_container(Some(builder_cache)),
+                },
+            ),
+            (
+                "fleet-bare".into(),
+                aws(vec!["-o".into(), "StrictHostKeyChecking=no".into()]),
+            ),
+        ]),
+        ..sample_config()
+    }
+}
+
+#[test]
+fn every_machine_and_runtime_kind_survives_the_stored_shape() {
+    let config = every_kind_config();
+    config.validate().unwrap();
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Config>(json).unwrap(),
+        config,
+        "the JSON the settings screen edits must rebuild the same config"
+    );
+    let text = toml::to_string_pretty(&config).unwrap();
+    assert_eq!(toml::from_str::<Config>(&text).unwrap(), config, "{text}");
+    // The EC2 machine's own fields, not the runtime's, carry the launch
+    // template, and the runtime is a plain bare harness on it.
+    assert!(text.contains("[machines.fleet]"), "{text}");
+    assert!(text.contains("launch_template = \"lt-0123\""), "{text}");
+    assert!(
+        !text.contains("build_cache") || text.matches("build_cache").count() == 2,
+        "build caches belong to the two machines that have them: {text}"
+    );
+}
+
+/// The version 10 file from the plan's acceptance step, and what saving it
+/// writes back.
+const VERSION_TEN_CONFIG: &str = r#"version = 10
+
+[targets.localhost]
+kind = "local-bare"
+
+[targets.podman]
+kind = "local-podman"
+image = "example.invalid/agent:latest"
+
+[targets.podman.build_cache]
+max_size = "50GiB"
+
+[targets.docker]
+kind = "local-docker"
+image = "example.invalid/agent:latest"
+
+[targets.builder]
+kind = "ssh-bare"
+host = "builder.example.com"
+permissions = "guardian"
+
+[targets.builder-podman]
+kind = "ssh-podman"
+host = "builder.example.com"
+image = "example.invalid/agent:latest"
+
+[targets.aws]
+kind = "aws-ec2"
+region = "us-east-1"
+launch_template = "lt-0123"
+ssh_user = "ubuntu"
+"#;
+
+#[test]
+fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, VERSION_TEN_CONFIG).unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.version, CONFIG_VERSION);
+    assert_eq!(
+        config.machines.keys().collect::<Vec<_>>(),
+        ["aws", "builder.example.com", "local"]
+    );
+    let cache = TargetBuildCache {
+        enabled: None,
+        directory: None,
+        max_size: Some("50GiB".into()),
+    };
+    assert_eq!(
+        config.machines["local"],
+        Machine::Local {
+            build_cache: Some(cache.clone())
+        }
+    );
+    // Both local container runtimes now share the one host cache.
+    for id in ["podman", "docker"] {
+        let (TargetTemplate::LocalPodman { container } | TargetTemplate::LocalDocker { container }) =
+            &config.targets[id]
+        else {
+            panic!("{id} changed kind")
+        };
+        assert_eq!(container.build_cache.as_ref(), Some(&cache));
+    }
+    assert_eq!(config.targets["localhost"], TargetTemplate::LocalBare);
+    assert!(matches!(
+        config.targets["builder"],
+        TargetTemplate::SshBare {
+            permissions: PermissionMode::Guardian,
+            ..
+        }
+    ));
+    assert!(matches!(
+        config.targets["aws"],
+        TargetTemplate::AwsEc2 { .. }
+    ));
+
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    println!("{saved}");
+    assert!(saved.starts_with("version = 11"), "{saved}");
+    for expected in [
+        "[machines.local]",
+        "[machines.local.build_cache]",
+        "max_size = \"50GiB\"",
+        "[machines.\"builder.example.com\"]",
+        "kind = \"ssh\"",
+        "host = \"builder.example.com\"",
+        "[machines.aws]",
+        "kind = \"aws-ec2\"",
+        "[targets.localhost]\nkind = \"bare\"\n",
+        "[targets.podman]\nkind = \"podman\"\n",
+        "machine = \"builder.example.com\"",
+    ] {
+        assert!(saved.contains(expected), "missing {expected:?} in {saved}");
+    }
+    assert!(!saved.contains("local-podman"), "{saved}");
+    assert_eq!(saved.matches("build_cache").count(), 1, "{saved}");
+    // A second load of the rewritten file is the same configuration.
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+}
+
+#[test]
+fn a_version_eleven_config_refuses_the_old_fused_kinds() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "version = 11\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n",
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(error.contains("\"podman\""), "{error}");
+    assert!(error.contains("local-podman"), "{error}");
+    assert!(error.contains("machine"), "{error}");
+}
+
+#[test]
+fn a_runtime_must_name_a_machine_that_exists() {
+    let error = format!(
+        "{:#}",
+        toml::from_str::<Config>(
+            "version = 11\n[targets.remote]\nkind = \"podman\"\nmachine = \"builder\"\nimage = \"a:1\"\n"
+        )
+        .unwrap_err()
+    );
+    assert!(error.contains("which is not defined"), "{error}");
+}
+
+#[test]
+fn settings_that_belong_to_a_machine_are_refused_on_a_runtime() {
+    for (body, expected) in [
+        (
+            "[targets.here]\nkind = \"bare\"\npermissions = \"yolo\"\n",
+            "only applies to a bare runtime",
+        ),
+        (
+            "[machines.fleet]\nkind = \"aws-ec2\"\nregion = \"us-east-1\"\nlaunch_template = \"lt-1\"\nssh_user = \"ubuntu\"\n\
+             [targets.fleet-podman]\nkind = \"podman\"\nmachine = \"fleet\"\nimage = \"a:1\"\n",
+            "bare harness only",
+        ),
+        (
+            "[targets.podman]\nkind = \"podman\"\nimage = \"a:1\"\n[targets.podman.build_cache]\nmax_size = \"1GiB\"\n",
+            "belongs to [machines.local]",
+        ),
+        (
+            "[machines.one]\nkind = \"ssh\"\nhost = \"builder\"\n[machines.two]\nkind = \"ssh\"\nhost = \"builder\"\n",
+            "describe the same host",
+        ),
+    ] {
+        let error = format!(
+            "{:#}",
+            toml::from_str::<Config>(&format!("version = 11\n{body}"))
+                .map_err(anyhow::Error::from)
+                .and_then(|config| config.validate())
+                .unwrap_err()
+        );
+        assert!(error.contains(expected), "expected {expected:?}: {error}");
+    }
 }

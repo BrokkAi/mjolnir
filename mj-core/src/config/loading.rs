@@ -11,24 +11,6 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::{CONFIG_VERSION, PRODUCT_DIR};
 
-pub(super) fn reject_non_bare_permissions(contents: &str) -> Result<()> {
-    let value: toml::Value = contents.parse().context("parse Mjolnir config TOML")?;
-    let Some(targets) = value.get("targets").and_then(toml::Value::as_table) else {
-        return Ok(());
-    };
-    for (id, target) in targets {
-        let Some(target) = target.as_table() else {
-            continue;
-        };
-        if target.contains_key("permissions")
-            && target.get("kind").and_then(toml::Value::as_str) != Some("ssh-bare")
-        {
-            bail!("target {id:?} sets `permissions`, which is only valid for ssh-bare targets");
-        }
-    }
-    Ok(())
-}
-
 /// The config version in `document` when it is above this build's.
 pub(super) fn newer_version(document: &toml::Value) -> Option<u32> {
     let version = document.get("version")?.as_integer()?;
