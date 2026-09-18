@@ -56,7 +56,7 @@ impl RuntimeState {
     }
 
     pub(super) async fn persist_missing_target(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
         detail: String,
         observed_updated_at: String,
@@ -76,7 +76,14 @@ impl RuntimeState {
         .await?;
         if changed.is_some() {
             self.reload_controller().await?;
-            self.push_notice(session_id, detail);
+            // A lost session has no checkpoint and no target, so its record
+            // offers nothing but Destroy. Report it once and discard it
+            // instead of leaving a tombstone behind.
+            if changed == Some(SessionState::Lost) {
+                self.discard_lost_session(session_id.to_owned()).await;
+            } else {
+                self.push_notice(session_id, detail);
+            }
         }
         Ok(())
     }

@@ -225,6 +225,21 @@ pub(super) async fn run_daemon_runtime(
             })
         })
     };
+    // Rows left as tombstones by an older build, or by a discard that could
+    // not finish before the daemon stopped. The list comes from the startup
+    // snapshot, so a session that becomes lost after this is handled by the
+    // view watcher instead.
+    let tombstone_sweep = {
+        let tombstones = tombstone_session_ids(&controller);
+        (!tombstones.is_empty()).then(|| {
+            let state = state.clone();
+            tokio::spawn(async move {
+                for session_id in tombstones {
+                    state.discard_lost_session(session_id).await;
+                }
+            })
+        })
+    };
     let mut phone_publisher: Option<RemoteSessionPublisher> = None;
     let mut phone_task = None;
     let mut remote_request_bridge = None;
@@ -461,6 +476,13 @@ pub(super) async fn run_daemon_runtime(
             reconciliation.await.map_err(anyhow::Error::new),
         );
     }
+    if let Some(tombstone_sweep) = tombstone_sweep {
+        record_daemon_cleanup(
+            &mut outcome,
+            "join lost-session discard sweep",
+            tombstone_sweep.await.map_err(anyhow::Error::new),
+        );
+    }
     for interrupted_close_task in interrupted_close_tasks {
         record_daemon_cleanup(
             &mut outcome,
@@ -475,6 +497,24 @@ pub(super) async fn run_daemon_runtime(
         manager_shutdown.shutdown().await,
     );
     outcome
+}
+
+/// Sessions whose record is nothing but a tombstone: they ended without a
+/// target and without a checkpoint, so the record offers no action but its own
+/// removal. `DestroyedWithDataLoss` only ever comes from an older build.
+pub(super) fn tombstone_session_ids(controller: &Controller) -> Vec<String> {
+    controller
+        .state
+        .sessions
+        .values()
+        .filter(|session| {
+            matches!(
+                session.state,
+                SessionState::Lost | SessionState::DestroyedWithDataLoss
+            )
+        })
+        .map(|session| session.id.clone())
+        .collect()
 }
 
 pub(super) fn remove_daemon_metadata(path: &Path) -> Result<()> {

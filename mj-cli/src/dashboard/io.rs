@@ -516,32 +516,53 @@ impl DashboardContext {
                         },
                         Ok(WorkerRecordPersistenceOutcome::TargetMissing(state)),
                     ) => {
-                        if let Some(session) = self.controller.state.sessions.get_mut(&session_id)
-                            && matches!(
-                                session.state,
-                                SessionState::Provisioning
-                                    | SessionState::Running
-                                    | SessionState::Disconnected
-                                    | SessionState::Error
-                            )
-                        {
-                            session.state = state;
-                            session.last_error = Some(detail);
-                            session.updated_at = updated_at;
+                        let applies = self
+                            .controller
+                            .state
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|session| {
+                                matches!(
+                                    session.state,
+                                    SessionState::Provisioning
+                                        | SessionState::Running
+                                        | SessionState::Disconnected
+                                        | SessionState::Error
+                                )
+                            });
+                        if applies {
+                            let notice = match state {
+                                SessionState::Error => {
+                                    let session = self
+                                        .controller
+                                        .state
+                                        .sessions
+                                        .get_mut(&session_id)
+                                        .expect("the record was just checked");
+                                    session.state = state;
+                                    session.last_error = Some(detail);
+                                    session.updated_at = updated_at;
+                                    format!(
+                                        "Session {} cannot reach its managed target; its last verified checkpoint is ready to resume",
+                                        short_id(&session_id)
+                                    )
+                                }
+                                // The daemon discards a lost session's record
+                                // rather than keeping a tombstone, so this
+                                // view of the store has to drop it too.
+                                SessionState::Lost => {
+                                    self.controller.state.sessions.remove(&session_id);
+                                    self.controller.state.subagents.remove(&session_id);
+                                    format!(
+                                        "Session {} was lost because its managed target no longer exists; its record was removed.",
+                                        short_id(&session_id)
+                                    )
+                                }
+                                _ => unreachable!("a missing target persisted as {state:?}"),
+                            };
                             self.dashboard.set_state(self.controller.state.clone());
                             self.drop_warm_chat_for(&session_id);
                             self.refresh_poll_targets();
-                            let notice = match state {
-                                SessionState::Error => format!(
-                                    "Session {} cannot reach its managed target; its last verified checkpoint is ready to resume",
-                                    short_id(&session_id)
-                                ),
-                                SessionState::Lost => format!(
-                                    "Session {} is lost because its managed target no longer exists",
-                                    short_id(&session_id)
-                                ),
-                                _ => unreachable!("a missing target persisted as {state:?}"),
-                            };
                             self.dashboard.set_notice(notice);
                         }
                     }

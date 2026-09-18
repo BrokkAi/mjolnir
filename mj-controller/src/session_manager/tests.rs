@@ -2135,3 +2135,56 @@ async fn a_terminal_session_retires_its_relay_actor() {
         "the last view must say why the session ended: {reported}"
     );
 }
+
+/// The controller discards the record of a session whose managed target is
+/// gone. Its relay actor must read the missing record as the end of the
+/// session, not as an unanswered question, or it reconnects forever to a
+/// socket that no longer exists.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_discarded_session_retires_its_relay_actor() {
+    const DISCARDED_ACTOR_CHILD: &str = "MJ_TEST_DISCARDED_ACTOR_CHILD";
+    if std::env::var_os(DISCARDED_ACTOR_CHILD).is_none() {
+        run_in_isolated_child(
+            DISCARDED_ACTOR_CHILD,
+            "a_discarded_session_retires_its_relay_actor",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    crate::database::delete_session(LEASED_RELAY_SESSION).unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(LEASED_RELAY_SESSION),
+        "the test needs a session the store no longer holds"
+    );
+
+    let target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.to_owned(),
+        // A worker that is never coming back: every connection attempt fails.
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]).purpose("unreachable test relay worker"),
+        worker_recovery: None,
+        project_memory: None,
+    };
+    let (_commands_tx, commands_rx) = mpsc::channel(4);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, _view_rx) = watch::channel(ManagedSessionView::default());
+    let (updates_tx, _updates_rx) = coalesced_update_channel();
+    let actor = tokio::spawn(run_session_actor(
+        target,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates_tx,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(30), actor)
+        .await
+        .expect("the actor of a discarded session must stop reconnecting")
+        .expect("the actor must not panic");
+}
