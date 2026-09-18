@@ -92,14 +92,17 @@ impl CredentialSyncCoordinator {
                     }
                     busy.insert(trigger.profile_id.clone());
                     let completed_tx = completed_tx.clone();
-                    let handle = tokio::runtime::Handle::current();
-                    // The blocking join is awaited so a panicked reconcile is
-                    // reported and its profile always leaves the busy set.
+                    // The join is awaited so a panicked reconcile is reported
+                    // and its profile always leaves the busy set. The reconcile
+                    // runs as an ordinary task, never as `Handle::block_on` on
+                    // a blocking thread: the scheduler cancels tasks before it
+                    // shuts the timer driver, whereas a blocking thread keeps
+                    // polling its connect timeouts through runtime shutdown
+                    // and panics with "A Tokio 1.x context was found, but it
+                    // is being shutdown".
                     tokio::spawn(async move {
-                        let joined = tokio::task::spawn_blocking(move || {
-                            handle.block_on(reconcile_profile(&targets))
-                        })
-                        .await;
+                        let joined =
+                            tokio::spawn(async move { reconcile_profile(&targets).await }).await;
                         let (failure, outcomes) = match joined {
                             Ok(outcomes) => (None, outcomes),
                             Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
@@ -161,11 +164,17 @@ impl CredentialSyncCoordinator {
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
 ) -> Vec<CredentialSyncOutcome> {
-    let github_token = targets
-        .iter()
-        .any(|target| target.sync_github_token)
-        .then(crate::controller::controller_github_token)
-        .flatten();
+    // The token lookup may run `gh auth token`, a synchronous child process,
+    // so it goes to the blocking pool rather than stalling a scheduler thread.
+    let github_token = match targets.iter().any(|target| target.sync_github_token) {
+        true => tokio::task::spawn_blocking(crate::controller::controller_github_token)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("github token lookup task stopped: {error}");
+                None
+            }),
+        false => None,
+    };
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
