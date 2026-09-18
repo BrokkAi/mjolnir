@@ -3076,8 +3076,9 @@ fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
         "a remote source is a URL and does not stop existing"
     );
 
-    let never_pinned: Result<WorkerBinaryAvailability> =
-        Err(anyhow::anyhow!("no Linux worker for x86_64-unknown-linux-musl"));
+    let never_pinned: Result<WorkerBinaryAvailability> = Err(anyhow::anyhow!(
+        "no Linux worker for x86_64-unknown-linux-musl"
+    ));
     assert!(
         !pinned_source_is_usable(&never_pinned, &exists),
         "a source that never resolved must be tried again, not repeated back"
