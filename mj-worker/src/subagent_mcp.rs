@@ -8,9 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mj_core::subagent::{
-    FileSourceRanges, MAX_WAIT_SECONDS, SubagentToolAction, SubagentToolRequest,
-};
+use mj_core::config::HarnessKind;
+use mj_core::subagent::{FileSourceRanges, SubagentToolAction, SubagentToolRequest};
 
 /// Server instructions stating the spawn/wait contract: results reach the
 /// model only as the `wait` tool call's own answer, never as a push.
@@ -123,18 +122,20 @@ fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Opti
     ))
 }
 
-pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
+pub fn run_mcp_stdio(socket: &Path, harness: Option<HarnessKind>) -> Result<()> {
     let stdin = std::io::stdin();
-    run(stdin.lock(), std::io::stdout(), socket)
+    run(stdin.lock(), std::io::stdout(), socket, harness)
 }
 
 /// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
 /// dispatched concurrently, each on its own socket connection, so a long
-/// `wait` never blocks a cheap `list_agents` queued after it.
+/// `wait` never blocks a cheap `list_agents` queued after it. `harness` is the
+/// parent's own harness, whose client decides how long one call may stay open.
 fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     reader: R,
     writer: W,
     socket: &Path,
+    harness: Option<HarnessKind>,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
@@ -143,11 +144,11 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
         crate::mcp_stdio::McpServer {
             name: "mj-agents",
             instructions: SERVER_INSTRUCTIONS,
-            tools: tool_definitions(),
+            tools: tool_definitions(harness),
             dispatch: crate::mcp_stdio::Dispatch::Concurrent,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call(&socket, params, progress)
+                call(&socket, harness, params, progress)
             },
         },
     )
@@ -196,16 +197,18 @@ struct WaitArgs {
 
 fn call(
     socket: &Path,
+    harness: Option<HarnessKind>,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
 ) -> Result<(Value, bool)> {
-    call_with_budget(socket, params, progress, reply_timeout)
+    call_with_budget(socket, harness, params, progress, reply_timeout)
 }
 
 /// Answer one tool call, waiting for the worker as long as `budget` allows
 /// for the call's action.
 fn call_with_budget(
     socket: &Path,
+    harness: Option<HarnessKind>,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
@@ -244,10 +247,15 @@ fn call_with_budget(
         }
         "wait" => {
             let args: WaitArgs = serde_json::from_value(params.arguments)?;
+            // Apply the harness's own ceiling once, here, so the worker and the
+            // daemon work to the same deadline the caller will be answered at.
             (
                 SubagentToolAction::WaitAgents {
                     child_session_ids: args.child_session_ids,
-                    timeout_seconds: args.timeout_seconds,
+                    timeout_seconds: Some(
+                        mj_core::subagent::subagent_wait_timeout_for(harness, args.timeout_seconds)
+                            .as_secs(),
+                    ),
                 },
                 None,
             )
@@ -340,7 +348,9 @@ fn send(
     answer
 }
 
-fn tool_definitions() -> Vec<Value> {
+fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
+    let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
+    let default_wait = mj_core::subagent::DEFAULT_WAIT_SECONDS.min(ceiling);
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     vec![
         tool(
@@ -374,8 +384,10 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "wait",
-            "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. timeout_seconds defaults to 300 and is capped at 3600; a child may run far longer than that, so expect to call wait more than once.",
-            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":MAX_WAIT_SECONDS}},"required":["child_session_ids"],"additionalProperties":false}),
+            &format!(
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when the timeout came first. still_running is not a failure and says nothing about whether the work is going well: call wait again with the same child_session_ids, or do other work first and call wait later. timeout_seconds defaults to {default_wait} and is capped at {ceiling} in this session; a child may run far longer than that, so expect to call wait more than once."
+            ),
+            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling}},"required":["child_session_ids"],"additionalProperties":false}),
         ),
         tool(
             "interrupt",
@@ -402,13 +414,13 @@ mod tests {
 
     #[test]
     fn wait_advertises_the_shared_runtime_timeout_limit() {
-        let wait = tool_definitions()
+        let wait = tool_definitions(None)
             .into_iter()
             .find(|tool| tool["name"] == "wait")
             .expect("wait definition");
         assert_eq!(
             wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
-            MAX_WAIT_SECONDS
+            mj_core::subagent::MAX_WAIT_SECONDS
         );
     }
 
@@ -452,8 +464,8 @@ mod tests {
             Duration::from_secs(mj_core::subagent::DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
         );
         assert_eq!(
-            reply_timeout(&wait(Some(MAX_WAIT_SECONDS * 2))),
-            Duration::from_secs(MAX_WAIT_SECONDS) + WAIT_REPLY_GRACE
+            reply_timeout(&wait(Some(mj_core::subagent::MAX_WAIT_SECONDS * 2))),
+            Duration::from_secs(mj_core::subagent::MAX_WAIT_SECONDS) + WAIT_REPLY_GRACE
         );
         assert_eq!(
             reply_timeout(&SubagentToolAction::ListAgents),
@@ -484,6 +496,7 @@ mod tests {
         let started = std::time::Instant::now();
         let (value, is_error) = call_with_budget(
             &socket,
+            None,
             Some(&json!({"name": "list_agents"})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(200),
@@ -527,6 +540,7 @@ mod tests {
 
         let (value, is_error) = call_with_budget(
             &socket,
+            None,
             Some(&json!({
                 "name": "wait",
                 "arguments": {"child_session_ids": ["c1", "c2"], "timeout_seconds": 5}
@@ -577,7 +591,7 @@ mod tests {
 
     #[test]
     fn spawn_documents_its_idempotency_key() {
-        let spawn = tool_definitions()
+        let spawn = tool_definitions(None)
             .into_iter()
             .find(|tool| tool["name"] == "spawn")
             .expect("spawn definition");
@@ -589,7 +603,7 @@ mod tests {
 
     #[test]
     fn spawn_documents_how_a_working_directory_resolves() {
-        let spawn = tool_definitions()
+        let spawn = tool_definitions(None)
             .into_iter()
             .find(|tool| tool["name"] == "spawn")
             .expect("spawn definition");
@@ -666,7 +680,13 @@ mod tests {
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}),
         );
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        run(input.as_bytes(), SharedWriter(Arc::clone(&buffer)), &socket).unwrap();
+        run(
+            input.as_bytes(),
+            SharedWriter(Arc::clone(&buffer)),
+            &socket,
+            None,
+        )
+        .unwrap();
 
         let written = buffer.lock().unwrap();
         let first: Value = serde_json::from_str(

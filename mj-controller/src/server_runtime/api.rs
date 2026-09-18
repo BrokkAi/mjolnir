@@ -585,7 +585,14 @@ impl ApiBackend {
                             .iter()
                             .filter(|agent| agent["finished"] != serde_json::Value::Bool(true))
                             .count();
-                        let waited_seconds = started.elapsed().as_secs();
+                        // What the caller has waited, not what this execution
+                        // has: a request picked up late, or executed again
+                        // after a restart, already spent part of its budget.
+                        let waited_seconds =
+                            (mj_core::subagent::subagent_wait_timeout(*timeout_seconds)
+                                - remaining
+                                + started.elapsed())
+                            .as_secs();
                         tracing::info!(
                             parent_session_id,
                             complete,

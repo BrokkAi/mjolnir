@@ -104,6 +104,10 @@ enum WorkerCommand {
     SubagentMcp {
         #[arg(long)]
         socket: PathBuf,
+        /// The parent's harness, whose MCP client decides how long a single
+        /// `wait` may stay open. Omitted means no harness-specific ceiling.
+        #[arg(long)]
+        harness: Option<mj_core::config::HarnessKind>,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -412,7 +416,9 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
-        WorkerCommand::SubagentMcp { socket } => mj_worker::subagent_mcp::run_mcp_stdio(&socket),
+        WorkerCommand::SubagentMcp { socket, harness } => {
+            mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness)
+        }
         WorkerCommand::Diff {
             repository,
             base,

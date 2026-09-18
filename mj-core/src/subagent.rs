@@ -18,15 +18,51 @@ pub const WAIT_STATUS_COMPLETE: &str = "complete";
 /// `wait` again.
 pub const WAIT_STATUS_STILL_RUNNING: &str = "still_running";
 
+/// The longest `wait` a Codex parent can be given. Codex abandons a `tools/call`
+/// after 300 seconds of total elapsed time, and progress notifications do not
+/// reset that timer, so a Codex parent's wait has to fit underneath it: measured
+/// on 2026-09-18 with `codex` 0.60.0, where a call asking for 3600 seconds came
+/// back at 303 seconds with "timed out awaiting tools/call after 300s". The
+/// answer must be written well before that, so the cap leaves room for the
+/// worker's five-second grace and the trip back.
+///
+/// Claude Code's limit is on silence rather than on elapsed time, and the
+/// progress notifications this server sends break that silence, so a Claude
+/// parent keeps the full [`MAX_WAIT_SECONDS`].
+pub const MAX_CODEX_WAIT_SECONDS: u64 = 240;
+
+/// The answer to a capped wait, plus every grace on top of it, must still be
+/// written before the client gives up.
+const _: () = assert!(MAX_CODEX_WAIT_SECONDS + 30 < 300);
+
+/// The longest single `wait` this harness's own MCP client will hold open.
+pub fn max_wait_seconds_for(harness: Option<crate::config::HarnessKind>) -> u64 {
+    match harness {
+        Some(crate::config::HarnessKind::Codex) => MAX_CODEX_WAIT_SECONDS,
+        _ => MAX_WAIT_SECONDS,
+    }
+}
+
 /// How long one `wait` call blocks, from what the caller asked for. The shim,
 /// the worker and the daemon all resolve the caller's request through this one
-/// function so the three cannot disagree about when the answer is due.
+/// function so the three cannot disagree about when the answer is due. The
+/// harness-specific ceiling is applied once, where the request is built, so the
+/// three see the same number.
 pub fn subagent_wait_timeout(requested: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_secs(
         requested
             .unwrap_or(DEFAULT_WAIT_SECONDS)
             .clamp(1, MAX_WAIT_SECONDS),
     )
+}
+
+/// What a `wait` from this harness may actually ask for.
+pub fn subagent_wait_timeout_for(
+    harness: Option<crate::config::HarnessKind>,
+    requested: Option<u64>,
+) -> std::time::Duration {
+    let ceiling = max_wait_seconds_for(harness);
+    std::time::Duration::from_secs(requested.unwrap_or(DEFAULT_WAIT_SECONDS).clamp(1, ceiling))
 }
 
 /// What is left of a `wait` call's budget, counted from when the caller made
@@ -263,6 +299,30 @@ mod tests {
         );
         assert_eq!(
             subagent_wait_timeout(Some(MAX_WAIT_SECONDS * 2)),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn a_codex_parents_wait_fits_under_that_clients_own_three_hundred_second_limit() {
+        use crate::config::HarnessKind;
+        use std::time::Duration;
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Codex), Some(3_600)),
+            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
+        );
+        // The default wait is longer than Codex allows, so it is capped too.
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Codex), None),
+            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
+        );
+        // Claude's limit is on silence, which progress notifications break.
+        assert_eq!(
+            subagent_wait_timeout_for(Some(HarnessKind::Claude), Some(3_600)),
+            Duration::from_secs(MAX_WAIT_SECONDS)
+        );
+        assert_eq!(
+            subagent_wait_timeout_for(None, Some(3_600)),
             Duration::from_secs(MAX_WAIT_SECONDS)
         );
     }

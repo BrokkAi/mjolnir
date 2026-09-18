@@ -173,6 +173,10 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
                 "subagent-mcp".into(),
                 "--socket".into(),
                 socket.to_string_lossy().into_owned(),
+                // The server bounds a `wait` by what this harness's own MCP
+                // client will hold open.
+                "--harness".into(),
+                spec.harness.id().to_owned(),
             ]),
         ));
     }
