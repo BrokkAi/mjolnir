@@ -304,6 +304,13 @@ impl Controller {
         )?;
         launch.subagent_tools =
             subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        // Capturing the working tree is only ever useful to a turn review, so
+        // it is spent only on a session a review can run for: one whose
+        // configuration names a reviewer, and that is not a child. A child
+        // works in its parent's tree, and reviewing it would report the
+        // parent's work as the child's.
+        launch.review_capture =
+            self.config.review.reviewer_profile().is_some() && subagent.is_none();
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -584,6 +591,7 @@ pub(super) fn worker_launch_config(
             run_mode: Default::default(),
             session_id: session_id.to_string(),
             subagent_tools: false,
+            review_capture: false,
             harness: profile.kind,
             // The staged home mirrors the profile home, so the controller's
             // marker file name is the one the worker must check.

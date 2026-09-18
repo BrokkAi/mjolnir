@@ -861,3 +861,57 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
 
     assert!(relaunch.subagent_tools);
 }
+
+/// Capturing the working tree is only ever useful to a turn review, so it is
+/// armed only when the configuration names a reviewer. A session started with
+/// no reviewer must do no Git work at startup at all (#1065).
+#[test]
+fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() {
+    const MARKER: &str = "MJ_TEST_LAUNCH_REVIEW_CAPTURE_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "reviewable",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let backend = crate::targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "container".into(),
+        workspace_storage: Default::default(),
+    };
+
+    assert!(
+        !controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .review_capture,
+        "with no [review] profile there is nothing a capture could serve"
+    );
+
+    controller.config.review.profile = Some("codex".into());
+
+    assert!(
+        controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .review_capture,
+        "a session a review can run for takes a baseline"
+    );
+}

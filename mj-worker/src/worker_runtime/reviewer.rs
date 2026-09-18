@@ -110,6 +110,10 @@ pub struct ReviewerPlacement {
     pub worker_executable: PathBuf,
     /// Reviewers inherit the primary worker's harness ownership policy.
     pub harness_runtime: HarnessRuntimePolicy,
+    /// Whether this session took a review baseline when it started. A session
+    /// started without one cannot be reviewed: with no record of what the tree
+    /// held before the turn, every file would be reported as new work.
+    pub review_capture: bool,
 }
 
 impl ReviewerPlacement {
@@ -555,6 +559,13 @@ impl ReviewerRole {
         &mut self,
         baselines: std::collections::BTreeMap<PathBuf, String>,
     ) -> Result<RelayResponseBody> {
+        anyhow::ensure!(
+            self.placement.review_capture,
+            "this session was started without a review baseline, so a review \
+             cannot tell its work from what the working tree already held; \
+             sub-agent children are never reviewed, and an ordinary session \
+             needs `[review] profile` set in config.toml before it starts"
+        );
         let repositories = self.review_repositories();
         let repositories = tokio::task::spawn_blocking(move || {
             crate::review::capture::capture_repository_deltas(

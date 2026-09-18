@@ -122,7 +122,11 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // different: replacing a missing baseline then could hide changes from a
     // review that was interrupted. A restored relay has no state file yet, so
     // its restored worktree is a safe fresh-session boundary.
-    if !relay_state_exists && !checkpoint_only {
+    // Only a session a review can run for pays for a baseline. For every other
+    // session, and for every sub-agent child, startup runs no Git command at
+    // all: the capture exists solely to tell a later review what the turn
+    // changed.
+    if !relay_state_exists && !checkpoint_only && config.review_capture {
         super::record_startup_step(&root, "review-baseline");
         let mut workspace_roots = vec![config.cwd.clone()];
         workspace_roots.extend(config.additional_directories.iter().cloned());
@@ -318,6 +322,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         additional_directories: config.additional_directories.clone(),
         worker_executable: worker_executable.clone(),
         harness_runtime: config.harness_runtime,
+        review_capture: config.review_capture,
     }));
     // The review supervisor's dispatch tool talks to this worker over its own
     // socket inside the reviewer directory: an MCP server started by a harness

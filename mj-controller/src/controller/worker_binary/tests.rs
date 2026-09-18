@@ -2733,6 +2733,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -2832,6 +2833,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -2916,6 +2918,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
     };
     let mut launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
