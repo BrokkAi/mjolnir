@@ -947,11 +947,11 @@ fn worker_check_for_an_ssh_docker_target_hints_at_remote_architecture() {
 #[test]
 fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("claude-home");
+    let home = directory.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let profile = HarnessProfile {
         enabled: true,
-        kind: HarnessKind::Claude,
+        kind: HarnessKind::Codex,
         home,
         environment: std::collections::BTreeMap::new(),
         context_window_bytes: None,
@@ -978,6 +978,54 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     assert!(
         remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
         "{remediation}"
+    );
+}
+
+/// A home Mjolnir cannot point the harness at must be reported, not used
+/// silently. Only macOS has such a case today, so only macOS asserts it.
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_reports_a_claude_home_macos_cannot_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("claude-work");
+    std::fs::create_dir_all(&home).unwrap();
+    let config = Config {
+        profiles: [(
+            "work".to_owned(),
+            HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Claude,
+                home: home.clone(),
+                environment: std::collections::BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Config::default()
+    };
+
+    let executor = FakeExecutor::new([]);
+    let checks = harness_checks(Some(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    assert!(
+        checks[0].detail.contains("is ignored on macOS")
+            && checks[0].detail.contains("CLAUDE_CONFIG_DIR"),
+        "{}",
+        checks[0].detail
+    );
+    let default_home = dirs::home_dir().unwrap().join(".claude");
+    assert!(
+        checks[0]
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains(&default_home.to_string_lossy().into_owned()),
+        "{:?}",
+        checks[0].remediation
     );
 }
 

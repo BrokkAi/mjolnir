@@ -563,9 +563,11 @@ pub(super) fn worker_launch_config(
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.clone());
-    profile
-        .kind
-        .configure_home_environment(Path::new(&target_profile_home), &mut environment);
+    profile.kind.configure_home_environment(
+        Path::new(&target_profile_home),
+        backend.harness_host(),
+        &mut environment,
+    );
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
@@ -593,6 +595,7 @@ pub(super) fn worker_launch_config(
             subagent_tools: false,
             review_capture: false,
             harness: profile.kind,
+            harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the controller's
             // marker file name is the one the worker must check.
             authentication_marker: profile

@@ -3307,15 +3307,20 @@ fn removable_profile_root_names_only_per_session_profile_directories() {
         workspace_storage: Default::default(),
     };
 
-    // Claude always runs from a staged private copy under the worker root.
-    assert_eq!(
-        removable_profile_root(
-            &local,
-            SESSION,
-            &profile(HarnessKind::Claude, "/home/dev/.claude")
-        ),
-        Some(format!("{worker_root}/profile"))
+    // Claude runs from a staged private copy under the worker root wherever
+    // CLAUDE_CONFIG_DIR is what points it there. On macOS the variable scopes
+    // nothing, so the session uses the user's own home and has no per-session
+    // profile directory to delete.
+    let claude = removable_profile_root(
+        &local,
+        SESSION,
+        &profile(HarnessKind::Claude, "/home/dev/.claude"),
     );
+    if cfg!(target_os = "macos") {
+        assert_eq!(claude, None);
+    } else {
+        assert_eq!(claude, Some(format!("{worker_root}/profile")));
+    }
     // A plain Codex profile reads and writes the user's own home, which is not
     // the session's to delete.
     assert_eq!(

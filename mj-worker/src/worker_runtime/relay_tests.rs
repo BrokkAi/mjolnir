@@ -51,6 +51,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         run_mode: Default::default(),
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,
+        harness_home: profile_home.into(),
         authentication_marker: None,
         bridge_command: "codex-acp".into(),
         bridge_args: Vec::new(),
@@ -745,9 +746,12 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     let mut config = launch_config("unused");
     config.harness = mj_core::config::HarnessKind::Muse;
     config.environment.clear();
-    config
-        .harness
-        .configure_home_environment(Path::new("profiles/session/muse"), &mut config.environment);
+    config.harness_home = "profiles/session/muse".into();
+    config.harness.configure_home_environment(
+        Path::new("profiles/session/muse"),
+        mj_core::config::HarnessHost::Other,
+        &mut config.environment,
+    );
     resolve_relative_harness_home(&mut config, Path::new("/home/remote"));
     let endpoint = credential_endpoint(&config).unwrap();
     assert_eq!(
@@ -789,8 +793,24 @@ fn enforcing_the_policy_upgrades_a_persisted_muse_guardian_config() {
 }
 
 #[test]
+fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
+    let mut config = launch_config("/profile");
+    config.harness = HarnessKind::Claude;
+    config.harness_home = "/home/user/.claude".into();
+    // Claude on macOS is launched with no CLAUDE_CONFIG_DIR at all, so the
+    // stated home is the only thing that can locate its credentials.
+    config.environment.clear();
+
+    let endpoint = credential_endpoint(&config).unwrap();
+
+    assert_eq!(endpoint.home, Path::new("/home/user/.claude"));
+    assert_eq!(endpoint.marker, endpoint.home.join(".credentials.json"));
+}
+
+#[test]
 fn a_launch_config_without_a_harness_home_cannot_serve_credentials() {
     let mut config = launch_config("/profile");
+    config.harness_home = PathBuf::new();
     config.environment.clear();
 
     let error = credential_endpoint(&config).unwrap_err();

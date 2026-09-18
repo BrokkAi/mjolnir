@@ -1185,6 +1185,21 @@ pub(crate) fn requires_private_profile_home(profile: &mj_core::config::HarnessPr
     profile.codex_provider().ok().flatten().is_some()
 }
 
+/// Whether a Claude session on a local bare target runs from a private staged
+/// home. It can only do so where `CLAUDE_CONFIG_DIR` is what points Claude at
+/// that home; on macOS the variable scopes nothing, so a private copy would be
+/// a home Claude never reads. See
+/// [`HarnessKind::scopes_home_with_environment`](mj_core::config::HarnessKind::scopes_home_with_environment).
+fn claude_takes_a_private_home(
+    profile: &mj_core::config::HarnessProfile,
+    locator: &targets::TargetLocator,
+) -> bool {
+    profile.kind == mj_core::config::HarnessKind::Claude
+        && profile
+            .kind
+            .scopes_home_with_environment(locator.harness_host())
+}
+
 /// Where this session's harness reads and writes its profile inside the target.
 ///
 /// Every case but one is the per-session root `removable_profile_root` names; a
@@ -1229,7 +1244,7 @@ pub(super) fn removable_profile_root(
                         .to_string_lossy()
                         .into_owned(),
                 )
-            } else if profile.kind == mj_core::config::HarnessKind::Claude
+            } else if claude_takes_a_private_home(profile, locator)
                 || requires_private_profile_home(profile)
             {
                 Some(

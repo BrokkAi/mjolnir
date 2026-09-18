@@ -252,11 +252,19 @@ pub struct CredentialEndpoint {
 fn credential_endpoint(
     config: &WorkerLaunchConfig,
 ) -> std::result::Result<CredentialEndpoint, String> {
-    let key = config.harness.home_env();
-    let home = config.environment.get(key).ok_or_else(|| {
-        format!("worker launch config has no {key} entry, so it cannot locate harness credentials")
-    })?;
-    let home = config.harness.home_from_environment(home);
+    let home = if config.harness_home.as_os_str().is_empty() {
+        // A config persisted before the home was stated outright. Those
+        // releases always set the harness home variable.
+        let key = config.harness.home_env();
+        let value = config.environment.get(key).ok_or_else(|| {
+            format!(
+                "worker launch config has no harness home and no {key} entry, so it cannot locate harness credentials"
+            )
+        })?;
+        config.harness.home_from_environment(value)
+    } else {
+        config.harness_home.clone()
+    };
     let marker = match config.authentication_marker.as_deref() {
         Some(name) => home.join(name),
         // Configs persisted before the controller stated the marker.
@@ -283,6 +291,9 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
         if path.is_relative() {
             *value = base.join(path).to_string_lossy().into_owned();
         }
+    }
+    if config.harness_home.is_relative() && !config.harness_home.as_os_str().is_empty() {
+        config.harness_home = base.join(&config.harness_home);
     }
     if let Some(memory) = config.project_memory.as_mut() {
         if memory.root.is_relative() {

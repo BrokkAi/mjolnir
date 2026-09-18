@@ -1697,15 +1697,25 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         fs::read(checkout.join("untracked.txt")).unwrap(),
         b"agent work"
     );
-    assert!(
-        !worker_root.join("profile").join("source-only.txt").exists(),
-        "the previous profile home must be gone"
-    );
-    assert_eq!(
-        fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
-        br#"{"profile":"destination"}"#,
-        "the destination profile must be staged in its place"
-    );
+    // A Claude session only owns a staged profile home where CLAUDE_CONFIG_DIR
+    // can point it at one. On macOS it reads Claude's own home instead, so the
+    // worker root has no per-session profile for the move to replace.
+    if cfg!(target_os = "macos") {
+        assert!(
+            worker_root.join("profile").join("source-only.txt").exists(),
+            "a session that owns no staged profile home must not have one removed"
+        );
+    } else {
+        assert!(
+            !worker_root.join("profile").join("source-only.txt").exists(),
+            "the previous profile home must be gone"
+        );
+        assert_eq!(
+            fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
+            br#"{"profile":"destination"}"#,
+            "the destination profile must be staged in its place"
+        );
+    }
     assert!(destination_home.join("settings.json").is_file());
     let ownership: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("ownership.json")).unwrap()).unwrap();
