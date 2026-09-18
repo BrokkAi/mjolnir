@@ -16,7 +16,7 @@ command -v sessionwiki
 ```
 
 If it is missing, say so once and continue without it. It installs with
-`cargo install --locked brokk-sessionwiki@0.29.0`.
+`cargo install --locked brokk-sessionwiki@0.30.0`.
 
 Commands sync the index before they read it, which is usually right. If a
 scheduled `sessionwiki sync` already keeps the index current, `--no-sync`
@@ -42,19 +42,22 @@ sessionwiki grep --json "retry budget" <id>
 ```
 
 Every hit in that session, as one JSON object per line: `{id, i, role, ts,
-text}`, where `text` is a bounded window around the match. `-c` counts hits per
-session and `-m N` caps them.
+text, matches, omitted_before}`, where `text` is a window of `--chars N` total
+characters (240 by default) around the match, and `matches` locates the match
+inside it. `-c` prints `id:count` per session, `-m N` caps matches per session,
+and `-A N`, `-B N`, `-C N` add neighbouring messages.
 
 **3. Read around a hit.** Message `42` and its neighbours, truncated:
 
 ```sh
-sessionwiki show <id> --jsonl | sed -n '40,45p' \
+sessionwiki show <id> --jsonl | sed -n '41,46p' \
   | jq -r '.role + ": " + .text[:400]'
 ```
 
-`show --jsonl` prints one message per line in order, so `sed -n` selects by
-message index and `jq` decides how much of each message you read. Never pipe a
-whole session into your context.
+`show --jsonl` prints one message per line in order as `{i, role, ts, text}`.
+`i` counts from 0, so message `i` is line `i+1`: `sed -n` selects the range and
+`jq` decides how much of each message you read. Never pipe a whole session into
+your context.
 
 **4. Outline a session** before reading it, by its user turns:
 

@@ -333,6 +333,14 @@ sessionwiki search "flaky migration test"
 sessionwiki list --tool mjolnir
 ```
 
+Search finds the session; two commands read inside one, which is how an agent
+works through a hit without pulling a whole transcript into its context.
+`sessionwiki grep --json "<text>" <id>` prints one JSON line per matching
+message, each with its index and a bounded window of text around the match.
+`sessionwiki show <id> --jsonl` prints the whole session as one JSON object per
+message, in order, so `sed` and `jq` can select and truncate the part worth
+reading.
+
 ### Session metadata in the index
 
 Mjolnir tags each of its own indexed sessions with the target template it ran
@@ -403,11 +411,11 @@ differs from the one the program expects, so two programs at different versions
 re-index everything each time you alternate between them — on a large corpus
 that is tens of minutes per switch.
 
-This build links the `brokk-sessionwiki` crate, version 0.29.0. Install the
+This build links the `brokk-sessionwiki` crate, version 0.30.0. Install the
 matching tool, which is still named `sessionwiki`, with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.29.0
+cargo install --locked brokk-sessionwiki@0.30.0
 ```
 
 ## Recover an orphaned worker

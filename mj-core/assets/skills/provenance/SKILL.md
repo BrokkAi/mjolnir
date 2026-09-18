@@ -16,7 +16,7 @@ command -v sessionwiki
 ```
 
 If it is missing, say so once and continue without it. It installs with
-`cargo install --locked brokk-sessionwiki@0.29.0`.
+`cargo install --locked brokk-sessionwiki@0.30.0`.
 
 Commands sync the index before they read it, which is usually right. If a
 scheduled `sessionwiki sync` already keeps the index current, `--no-sync`
@@ -38,10 +38,11 @@ sessionwiki blame src/relay/frame.rs --json
 sessionwiki blame src/relay/frame.rs -L 120,160 --json
 ```
 
-Line attribution, best effort. Rows marked `ambiguous` or `unattributed` are
-normal: a line may have been written by several sessions, or by a hand edit
-that no session recorded. Treat the result as a lead, not a verdict, and use
-`-L` to keep the output small.
+One row per line range, with a `status` of `confident`, `ambiguous` or
+`unattributed`. Blame reads git, so run it from inside the repository; outside
+one it falls back to `trace`. The unsure statuses are normal: a range may fit
+several sessions, or a commit no session recorded. Treat the result as a lead,
+not a verdict, and use `-L` to keep the output small.
 
 ## What one session changed
 
@@ -49,8 +50,8 @@ that no session recorded. Treat the result as a lead, not a verdict, and use
 sessionwiki files --json <id>
 ```
 
-The files a session edited. Use it to judge whether a session found by `trace`
-is the one that matters before you read any of it.
+A JSON array of the absolute paths a session edited. Use it to judge whether a
+session found by `trace` is the one that matters before you read any of it.
 
 ## Then read the session
 
