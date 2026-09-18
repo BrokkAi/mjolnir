@@ -1510,6 +1510,39 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
         (WaitOutcome::Error, Some("refusal".to_owned())),
         "an unrecognized ending must not be reported as success"
     );
+    // A prompt the harness ended without answering is an error a script can
+    // recognize by name, not a finished turn (#970).
+    assert_eq!(
+        map_stop_reason("prompt_unanswered"),
+        (WaitOutcome::Error, Some("prompt_unanswered".to_owned()))
+    );
+}
+
+/// A turn the worker failed because the harness produced nothing must reach
+/// `mj wait` as an error carrying both the name and the explanation, the same
+/// way a stalled turn does.
+#[test]
+fn an_unanswered_turn_reaches_wait_as_a_named_error() {
+    let mut outcome = completed(7, "prompt_unanswered");
+    outcome.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "ACP prompt returned no session updates: Claude Code ended the turn without \
+                  producing any message, thought or tool call"
+            .into(),
+        code: Some("prompt_unanswered".into()),
+        http_status: None,
+        reset_at: None,
+    });
+    let decision = WaitDecision::from_outcome(&outcome);
+    assert_eq!(decision.outcome, WaitOutcome::Error);
+    assert_eq!(decision.stop_reason.as_deref(), Some("prompt_unanswered"));
+    assert!(
+        decision
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("without producing any message")),
+        "{:?}",
+        decision.message
+    );
 }
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {

@@ -246,6 +246,25 @@ impl PlanProbe {
             .await;
     }
 
+    /// Finish a prompt the way a working harness does: one line of answer,
+    /// then the result. A turn that produces nothing at all is reported as
+    /// unanswered rather than finished (#970).
+    async fn answered(&mut self, request: &Value) {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "plan-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "done"},
+                },
+            },
+        }))
+        .await;
+        self.result(request, json!({"stopReason": "end_turn"})).await;
+    }
+
     async fn event(&mut self) -> RuntimeEvent {
         tokio::time::timeout(Duration::from_secs(5), self.events.recv())
             .await
@@ -378,9 +397,7 @@ async fn approved_plan_waits_for_turn_and_mode_ack_then_continues_once_in_same_s
         .unwrap();
     assert!(text.starts_with("The user approved"));
     assert!(text.ends_with(&plan));
-    probe
-        .result(&continuation, json!({"stopReason": "end_turn"}))
-        .await;
+    probe.answered(&continuation).await;
     assert_eq!(probe.finished().await, "EndTurn");
     probe.no_message().await;
     probe.close().await;
@@ -645,9 +662,7 @@ async fn config_mode_restoration_checks_the_mode_returned_by_claude() {
         if returned_mode == "bypassPermissions" {
             let continuation = probe.message().await;
             assert_eq!(continuation["method"], "session/prompt");
-            probe
-                .result(&continuation, json!({"stopReason": "end_turn"}))
-                .await;
+            probe.answered(&continuation).await;
             assert_eq!(probe.finished().await, "EndTurn");
         } else {
             assert_eq!(probe.finished().await, "error");

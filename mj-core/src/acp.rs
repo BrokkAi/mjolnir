@@ -298,6 +298,48 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
     )
 }
 
+/// The progress text an ACP bridge streams while it compacts a session's
+/// context, verbatim from the bridges Mjolnir pins.
+///
+/// `@agentclientprotocol/claude-agent-acp` emits these as ordinary assistant
+/// text (`dist/acp-agent.js`, the `status` handler keyed on `compacting` and
+/// `compact_result`), so they are indistinguishable from an answer unless they
+/// are named. Compaction is not in the ACP schema this build compiles against,
+/// which is why there is nothing better to match on. See issue #970.
+const COMPACTION_BANNERS: &[&str] = &["compacting...", "compacting completed.", "compacting failed"];
+
+/// Whether this update is a bridge's own compaction progress text rather than
+/// anything the agent produced by working.
+///
+/// A turn carrying only these compacted the context; it did not act on the
+/// prompt. Recognizing them is what lets Mjolnir see a prompt that was
+/// swallowed during compaction, which is the loss reported in #970.
+pub fn session_update_is_compaction_banner(update: &SessionUpdate) -> bool {
+    let chunk = match update {
+        SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => chunk,
+        _ => return false,
+    };
+    let ContentBlock::Text(text) = &chunk.content else {
+        return false;
+    };
+    let text = text.text.trim().to_lowercase();
+    COMPACTION_BANNERS
+        .iter()
+        .any(|banner| text.starts_with(banner))
+}
+
+/// Whether this prompt is Mjolnir forwarding a request to compact the context.
+///
+/// A turn that answers this prompt with nothing but compaction banners did
+/// exactly what was asked, so it must not be reported as unanswered. Only
+/// Mjolnir's own outgoing text is inspected, never the harness's.
+pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
+    let Some(ContentBlock::Text(first)) = prompt.first() else {
+        return false;
+    };
+    first.text.trim_start().to_lowercase().starts_with("/compact")
+}
+
 /// Whether this update is the agent doing the work a prompt asked for.
 ///
 /// This is how Mjolnir tells "the harness answered" from "the harness ended
@@ -319,7 +361,7 @@ pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool {
             | SessionUpdate::CurrentModeUpdate(_)
             | SessionUpdate::SessionInfoUpdate(_)
             | SessionUpdate::UsageUpdate(_)
-    )
+    ) && !session_update_is_compaction_banner(update)
 }
 
 /// The stable part of Codex's refusal to resume a thread it never wrote to
@@ -848,5 +890,40 @@ mod agent_output_tests {
                 "{value} must count as the agent answering"
             );
         }
+    }
+
+    /// The exact shape issue #970 reported: the bridge streams its compaction
+    /// progress into the swallowed prompt's turn, so counting every message
+    /// would hide the loss.
+    #[test]
+    fn compaction_progress_text_is_not_an_answer() {
+        for text in [
+            "Compacting...",
+            "\n\nCompacting completed.",
+            "Compacting failed: out of memory.",
+        ] {
+            let banner = update(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }));
+            assert!(session_update_is_compaction_banner(&banner), "{text}");
+            assert!(!session_update_is_agent_output(&banner), "{text}");
+        }
+        let answer = update(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Compacting the loop saves two allocations."},
+        }));
+        assert!(!session_update_is_compaction_banner(&answer));
+        assert!(session_update_is_agent_output(&answer));
+    }
+
+    #[test]
+    fn only_a_prompt_that_asks_to_compact_is_answered_by_compacting() {
+        let text = |value: &str| vec![ContentBlock::Text(TextContent::new(value))];
+        assert!(prompt_requests_compaction(&text("/compact")));
+        assert!(prompt_requests_compaction(&text("  /compact keep the plan")));
+        assert!(!prompt_requests_compaction(&text("compact the loop")));
+        assert!(!prompt_requests_compaction(&text("/context")));
+        assert!(!prompt_requests_compaction(&[]));
     }
 }

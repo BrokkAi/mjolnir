@@ -960,7 +960,7 @@ fn an_auth_required_prompt_failure_carries_the_credential_marker() {
 }
 
 #[test]
-fn only_non_cancelled_prompts_without_updates_need_an_empty_response_warning() {
+fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
     assert!(prompt_returned_without_updates(&StopReason::EndTurn, 7, 7));
     assert!(!prompt_returned_without_updates(&StopReason::EndTurn, 7, 8));
     assert!(!prompt_returned_without_updates(
@@ -968,6 +968,18 @@ fn only_non_cancelled_prompts_without_updates_need_an_empty_response_warning() {
         7,
         7
     ));
+    // A turn that ended for a reason of its own already reports that reason.
+    // Relabelling it "unanswered" would hide why it really ended.
+    for stop_reason in [
+        StopReason::MaxTokens,
+        StopReason::MaxTurnRequests,
+        StopReason::Refusal,
+    ] {
+        assert!(
+            !prompt_returned_without_updates(&stop_reason, 7, 7),
+            "{stop_reason:?} must keep its own stop reason"
+        );
+    }
 }
 
 /// Answers `initialize` and `session/new`, then fails the first
@@ -2312,9 +2324,14 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             _ => {}
         }
     };
+    // The bridge called this turn a success and produced nothing, so it is
+    // reported under its own stop reason rather than as a finished turn (#970).
     assert_eq!(
         (&completed.0, &completed.1),
-        (&"second".to_owned(), &"EndTurn".to_owned())
+        (
+            &"second".to_owned(),
+            &PROMPT_UNANSWERED_STOP_REASON.to_owned()
+        )
     );
     let usage = completed
         .2
@@ -2322,7 +2339,12 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     assert_eq!(usage.total_tokens, 30);
     assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
     assert_eq!(usage.thought_tokens, None);
-    assert_eq!(empty_warning.as_deref(), Some(PROMPT_EMPTY_RESPONSE_MARKER));
+    let empty_warning = empty_warning.expect("an unanswered turn must warn");
+    assert!(
+        empty_warning.contains(PROMPT_EMPTY_RESPONSE_MARKER),
+        "{empty_warning}"
+    );
+    assert!(empty_warning.contains("may never have been acted on"), "{empty_warning}");
 
     request_tx
         .send(CommandRequest::Prompt {
