@@ -28,6 +28,15 @@ a worker will no longer be able to die or stall before it has written anything, 
 the readiness wait will watch the worker process and its recorded startup progress rather
 than only a clock.
 
+There is a second, equally important outcome. Starting a session stops doing expensive and
+destructive things to the user's Git repository. Today a session start reads, hashes and
+writes a Git object for every untracked file in the working directory, into the user's own
+`.git`, and pins them with two refs so garbage collection cannot remove them; one abandoned
+attempt left 243 MiB of unreachable objects and a 70 MB stray index file in a real
+repository (see `Artifacts and Notes`). After this work, starting a session reads no file
+the session has not changed, and Mjolnir writes no object and no ref into the user's
+repository at all, at start, at review, or at diff.
+
 You can see the difference with one command pair. Before the change, spawning a child whose
 working directory is a repository with a very large untracked working tree fails after 35
 seconds with an unexplained timeout. After the change, the same spawn succeeds, and a
@@ -47,7 +56,17 @@ fails in under a second with the loader error as its reason.
       has never completed a review-baseline pin, and the reported succeeding workspace has.
 - [ ] Milestone 1: worker startup breadcrumbs, so a worker can never die or stall silently.
 - [ ] Milestone 2: readiness wait that watches the process and the breadcrumbs.
-- [ ] Milestone 3: take the review-baseline capture off the pre-socket critical path.
+- [x] (2026-09-18 01:10Z) After maintainer review of e5b11913: established what the review
+      baseline is for and who reads it, measured the object-store cost, listed every other
+      whole-tree walk, and replaced the bounding approach with a root-cause design.
+- [x] (2026-09-18 01:20Z) Reproduced the object-store growth on the unfixed build: a scratch
+      repository with 3,000 untracked files gained 3,002 objects and two `refs/hel` refs from
+      one session start.
+- [ ] Milestone 3a: capture writes objects into a worker-owned object directory, never the
+      user's repository; the two `refs/hel` refs are replaced by `review-baselines.json`.
+- [ ] Milestone 3b: startup baseline costs one stat-walk plus the dirty tracked files.
+- [ ] Milestone 3c: review-time capture costs only the turn's changed paths.
+- [ ] Milestone 3d: a sub-agent child records its own baseline (falls out of 3a).
 - [ ] Milestone 4: carry the real reason back to the parent model.
 - [ ] Milestone 5: bounded automatic retry, and a child the parent can act on.
 - [ ] Milestone 6: retire the relay actor of a session that reached a terminal state.
@@ -92,6 +111,24 @@ fails in under a second with the loader error as its reason.
   (`mj-controller/src/controller/worker_binary/process.rs:212`), but the readiness loop
   throws that part away.
 
+- Observation: the capture writes Git objects into the user's own repository and pins them
+  so garbage collection cannot remove them.
+  Evidence: `capture_worktree_tree` (`mj-checkpoint/src/archive/git.rs:327`) redirects only
+  the index, with `GIT_INDEX_FILE`. It sets no `GIT_OBJECT_DIRECTORY`, so every blob that
+  `git add -A` hashes and every tree that `git write-tree` builds lands in the repository's
+  real object store. It then calls `pin_review_tree(runner, repository, REVIEW_CAPTURE_REF,
+  &tree)`, which runs `git update-ref refs/hel/review-capture <tree>` in the user's
+  repository. Measured at controlled small scale: one session start in a scratch repository
+  with 3,000 untracked files took its object store from 3 objects and 12 KiB to 3,005
+  objects and 11.8 MiB, and created `refs/hel/review-baseline` and `refs/hel/review-capture`.
+
+- Observation: the expensive part is untracked files, not tracked ones.
+  Evidence: `capture_worktree_tree` copies the repository's real index into the scratch
+  index before running `git add -A`, so Git's stat cache lets it skip re-hashing unchanged
+  tracked files. Tracked files cost one `stat` each; untracked files cost a full read, hash
+  and object write each. In the reported workspace that is 566,005 cheap entries and
+  424,715 expensive ones. This is what makes a cheap baseline possible at all.
+
 - Observation: the real cause is computed and stored, then discarded on the way to the
   parent model.
   Evidence: `provision_subagent_session_controlled`
@@ -120,13 +157,30 @@ fails in under a second with the loader error as its reason.
   to the user's workspace and not to anything Mjolnir controls.
   Date/Author: 2026-09-17, plan author.
 
-- Decision: keep the review baseline, but stop letting it gate the control socket.
-  Rationale: the baseline exists so a later review can tell this turn's work from what was
-  already in the checkout. The invariant it needs is "pinned before the harness can edit
-  anything", not "pinned before the controller can connect". The harness starts strictly
-  later than the socket bind, so the capture can run concurrently with the rest of startup
-  and be awaited at the point where the first prompt is dispatched.
+- Decision (superseded on 2026-09-18, kept for the record): keep the review baseline as it
+  is, but stop letting it gate the control socket, run it concurrently and bound it at 120
+  seconds.
+  Rationale at the time: the invariant the baseline needs is "pinned before the harness can
+  edit anything", not "pinned before the controller can connect".
+  Why it was wrong: it leaves a session start that runs `git add -A -- .` over the user's
+  working tree. That walk hashes and **writes** a Git object for every untracked
+  non-ignored file into the user's own repository, and pins them against garbage collection
+  with two refs. Moving it off the critical path hides the cost; it does not remove it. The
+  maintainer's review named this directly: spawn does potentially pathologically bad Git
+  things, and the root cause has to be fixed rather than bounded.
   Date/Author: 2026-09-17, plan author.
+
+- Decision: session start must not walk or stage the whole working tree, and Mjolnir must
+  never write objects into the user's repository.
+  Rationale: measured on the workspace in the report, one abandoned capture left 243 MiB of
+  unreachable loose objects, a 70 MB scratch index file, and an abandoned temporary object
+  inside `/home/jonathan/Projects/brokkbench/.git` (see `Artifacts and Notes`). At session
+  start, all the baseline actually needs is the pre-turn content of files the turn can
+  change, which is the dirty tracked set, plus a record of which untracked paths already
+  existed. Both are proportional to the session's changes, not to the tree. Objects that
+  capture does need go into a worker-owned object directory with the repository's own
+  object store as a read-only alternate, so the user's store never grows.
+  Date/Author: 2026-09-18, plan author, after maintainer review of e5b11913.
 
 - Decision: put the diagnostics commits first and the behaviour fixes after.
   Rationale: every later failure becomes explainable the moment the breadcrumbs and the
@@ -296,6 +350,96 @@ child cannot be re-prompted: `still_starting` refuses, so the parent's `wait` re
   panic hook and by `main` when `run_worker` returns an error.
 * The daemon log holds nothing about sub-agent startup at the default level.
 
+## What the review baseline is for
+
+Turn review is the feature that tells the user what the agent changed during a turn. It has
+two consumers and both want Git *tree objects*, not a list of paths:
+
+* The textual diff. `capture_repository_deltas`
+  (`mj-worker/src/review/capture.rs:22`) captures the current worktree as a tree, picks a
+  baseline tree, and calls `diff_between_trees` to produce the patch, the diffstat and the
+  changed-line count that end up in the `RepoDelta` on the relay protocol
+  (`mj-core/src/relay/protocol.rs:232`).
+* The semantic analysis. The reviewer sidecar's `analyze_delta`
+  (`mj-worker/src/worker_runtime/reviewer.rs:598`) builds
+  `mj_review::bifrost::AnalyzeRequest { base_tree, target_tree }` from the same pair. A
+  repository with no baseline is analysed against its own empty tree, which Bifrost reads as
+  "everything here is new".
+
+The question the baseline answers is: *what did this turn change, relative to the workspace
+as it stood when the session started, or when the last review finished?* Two refs carry it,
+both in the user's repository today:
+
+* `refs/hel/review-baseline` (`REVIEW_BASELINE_REF`, `mj-checkpoint/src/archive/git.rs:317`)
+  points at the tree the last completed review reviewed through. It is written at session
+  start by `initialize_review_baselines` (`mj-worker/src/review/capture.rs:69`), and moved
+  forward after each completed review by `advance_baselines`
+  (`mj-worker/src/review/capture.rs:127`), reached from the controller through
+  `advance_review_baseline` (`mj-controller/src/worker_client/reviewer.rs:214`) and the
+  session actor (`mj-controller/src/session_manager/actor.rs:954`).
+* `refs/hel/review-capture` (`REVIEW_CAPTURE_REF`) exists only to keep the most recent
+  capture's objects reachable so a `git gc` between two reviews cannot collect them.
+
+A third caller of the same capture is `session_diff`
+(`mj-checkpoint/src/archive/git.rs:1249`), which backs `mj-worker worker diff`, the command
+that shows a session's work. It diffs the recorded session base against a fresh full capture
+of the worktree, so it pays the same cost as a review.
+
+Which sessions pin a baseline at start: every session whose worker runs `run_daemon` without
+an existing relay state file, which is every fresh session, parent or child, on every target
+kind. A resumed or restarted worker skips it, because `relay_state_exists` is true. A
+container session normally pays little, because its workspace is a fresh clone with almost
+nothing untracked; a `local-bare` session pointed at a real project directory pays the full
+price.
+
+A sub-agent child is the worst case and the least justified one. Its `cwd` is its parent's
+workspace (`session_launch_config` in
+`mj-controller/src/controller/worker_binary/launch.rs` sets `launch.cwd` from the parent's
+launch config), so the child re-captures a tree the parent already captured. When the
+parent's pin is still present, `pinned_review_baseline` makes the child's capture a no-op;
+when the child's `working_directory` points at a different repository, as in #1065, the
+child pays a first full capture in a repository no session has ever captured.
+
+## Other places that walk or stage the working tree
+
+The fix must not leave a second walk on the same path. These are every walk found, with its
+cost class. "Stat-walk" means one `stat` or `readdir` per entry and no file contents read.
+"Hash-and-write" means every file's content is read, hashed, and written as a Git object
+into the repository's object store.
+
+* `initialize_review_baselines` at session start
+  (`mj-worker/src/worker_runtime/unix.rs:131`) → `capture_worktree_tree`: **hash-and-write,
+  on the startup critical path**. This is the defect.
+* `capture_repository_deltas` at every turn review
+  (`mj-worker/src/worker_runtime/reviewer.rs:560`) → `capture_worktree_tree`:
+  **hash-and-write, once per review.** Same cost, on a path the user triggers rather than
+  one that gates startup, but just as pathological in a large workspace. The fix must cover
+  this one too.
+* `session_diff` (`mj-checkpoint/src/archive/git.rs:1249`) → `capture_worktree_tree`:
+  **hash-and-write**, on `mj-worker worker diff`.
+* `collect_git_snapshot` for checkpoint export
+  (`mj-checkpoint/src/archive/git.rs:604`): `ls-files --others --exclude-standard` followed
+  by `build_untracked_tar`, which copies every untracked file into the archive.
+  **Stat-walk plus a full copy**, but only when `include_untracked` is set, which comes from
+  an explicit user choice in the import dialog (`mj-tui/src/dialogs.rs:1141`,
+  `mj-cli/src/import.rs:640`). Leave it alone: the user asked for those bytes.
+* `ensure_primary_checkout` when creating a managed raw worktree
+  (`mj-controller/src/controller/worktree.rs:1401`):
+  `status --porcelain=v1 --untracked-files=all`. **Stat-walk**, only for sessions that
+  create a managed worktree; a sub-agent child sets `create_managed_worktree: Some(false)`
+  so it never runs there.
+* `dirty_file_counts` and `untracked_bytes`
+  (`mj-controller/src/controller/worktree.rs:977` and `:1020`): **stat-walk**, in the
+  worktree-conversion confirmation that shows the user what an archive would carry.
+* `import::safety` (`mj-controller/src/import/safety.rs:8`): **stat-walk**, on import.
+* `reject_dirty_submodules` (`mj-checkpoint/src/checkpoint.rs:331`): **stat-walk**, scoped
+  to submodules, on checkpoint.
+
+Only the first three are hash-and-write, and all three are the same function. Fixing
+`capture_worktree_tree` and its callers fixes all of them at once; nothing else on a session
+start, checkpoint, close, export or move path reads whole-file contents without the user
+having asked for it.
+
 ## Failure inventory
 
 Each entry is marked **confirmed** (evidence on current master), **likely** (strong
@@ -305,13 +449,16 @@ indirect evidence), or **possible** (mechanism exists, not observed).
    #1065. `initialize_review_baselines` runs `git add -A -- .` against the session's working
    tree before `control.sock` is bound. In the workspace named in the report,
    `/home/jonathan/Projects/brokkbench`, `git ls-files --others --exclude-standard` reports
-   424,715 untracked files and `git ls-files` reports 566,005 tracked files, in a 524 GB
-   working tree with a 43 GB `.git`. Measured hashing throughput there is 15,085 files in 30
-   seconds with `git hash-object --stdin-paths` (which does not even write objects), so the
-   capture needs at least fourteen minutes. The repository has no `refs/hel/review-baseline`
-   ref at all, meaning the pin has never once completed there; the sibling child that
-   succeeded ran in `/home/jonathan/Projects/assay`, which has 19 untracked files and does
-   have the ref. Reproduced directly: see `Artifacts and Notes`.
+   424,715 untracked files, in a 524 GB working tree with a 43 GB `.git`. Tracked files are
+   cheap, because the scratch index is seeded from the real one and Git's stat cache applies;
+   the 424,715 untracked files are not, because each is read, hashed, and written as a new
+   Git object. Measured hashing throughput there is 15,085 files in 30 seconds with
+   `git hash-object --stdin-paths`, which does not even write the objects, so the capture
+   needs at least fourteen minutes and writes hundreds of thousands of objects into the
+   user's repository. The repository has no `refs/hel/review-baseline` ref at all, meaning
+   the pin has never once completed there; the sibling child that succeeded ran in
+   `/home/jonathan/Projects/assay`, which has 19 untracked files and does have the ref.
+   Reproduced directly, and the object-store damage measured: see `Artifacts and Notes`.
 
 2. **The readiness wait cannot tell "slow" from "dead". Confirmed.** `connect_to_starting_worker`
    only short-circuits on an exit record. A worker killed by a signal, or one that is
@@ -495,38 +642,129 @@ attempt interval with the step name in the message; a worker stuck on one step f
 the grace with that step named. Use `#[tokio::test(start_paused = true)]` as the existing
 tests do.
 
-### Milestone 3: take the review baseline off the pre-socket critical path
+### Milestone 3: a baseline whose cost is the session's changes, not the tree
 
-Goal: nothing that scans the user's workspace can delay the control socket.
+Goal: session start never reads the content of a file the session has not changed, never
+writes an object into the user's repository, and never creates a ref there. Turn review and
+`worker diff` get the same guarantee, because they share the same function.
 
-In `mj-worker/src/worker_runtime/unix.rs`, `run_daemon`: move the
-`initialize_review_baselines` block from before `DurableRelay::open` to after the socket is
-bound, and start it as a `tokio::task::spawn_blocking` handle that is *not* awaited there.
-Await it at the single point where the first harness work can begin: immediately before the
-ACP supervisor is started, which is after `harness::resolve`. The harness cannot touch the
-workspace before that point, so the invariant the baseline needs is preserved.
+This milestone has three parts. Do them as three commits in this order; each is separately
+testable and the first two are useful on their own.
 
-Bound the capture. Add a constant `REVIEW_BASELINE_CAPTURE_TIMEOUT` of 120 seconds in
-`mj-worker/src/review/capture.rs` and pass it down so the Git commands run under
-`mj_core::targets::BoundedProcessExecutor`, the same helper `login_environment::discover`
-already uses. On timeout, do not fail the session: record the failure in the relay as a
-session notice with the text
-`review baseline unavailable for <path>: the working tree is too large to capture in <n>s;
-turn review will report no baseline for this repository`, and continue. A session that runs
-is worth more than a review baseline, and today's behaviour trades the session for the
-baseline.
+**3a. Stop writing into the user's object store.** In
+`mj-checkpoint/src/archive/git.rs`, `capture_worktree_tree` already redirects the index with
+`GIT_INDEX_FILE`. Redirect the objects the same way. Give the function a parameter naming a
+Mjolnir-owned object directory, and set two more variables in the `scratch` environment it
+already passes to every Git command:
 
-Change `initialize_review_baselines` to report per-repository outcomes rather than failing
-the whole call on the first error, so one enormous repository among several does not cost
-the baselines of the others.
+    GIT_OBJECT_DIRECTORY=<worker root>/review-objects
+    GIT_ALTERNATE_OBJECT_DIRECTORIES=<repository>/.git/objects
 
-Tests: a behaviour test in `mj-worker/src/review/capture.rs` using a temporary repository
-with a `clean` filter configured to `sleep`, which is exactly the fixture this plan used to
-reproduce #1065 (see `Artifacts and Notes`). Assert that `initialize_review_baselines`
-returns within the bound and reports the repository as not captured, rather than blocking.
-Add a relay test asserting the worker binds its socket while that capture is still running:
-point the launch config's `cwd` at the blocking repository and assert `control.sock` exists
-within a few seconds.
+`GIT_OBJECT_DIRECTORY` is where Git writes new objects. `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+is a list of extra stores Git may read from. With both set, `git add`, `git write-tree`,
+`git diff-tree` and Bifrost all read the repository's real history and write only into the
+worker's directory. Nothing lands in the user's `.git`.
+
+Every command that later reads a captured tree must carry the same two variables, or it will
+not find the tree: `diff_between_trees`, `empty_tree_id`, the `cat-file -e` in `tree_exists`
+(`mj-worker/src/review/capture.rs:111`), and the Bifrost analysis requests built in
+`analyze_delta` (`mj-worker/src/worker_runtime/reviewer.rs:598`). Carry the pair in one small
+struct, defined once in `mj-checkpoint/src/archive/git.rs`, so no call site can forget it.
+
+With the objects outside the repository, the two refs lose their purpose and become harmful:
+`refs/hel/review-capture` exists only to protect objects from the user's `git gc`, which can
+no longer reach them, and `refs/hel/review-baseline` is a ref in someone else's repository
+holding Mjolnir's own bookkeeping. Delete both. Record the baseline and capture tree ids in
+a small JSON file in the worker root instead, `review-baselines.json`, keyed by repository
+path. `pin_review_tree` and the `REVIEW_CAPTURE_REF` / `REVIEW_BASELINE_REF` constants go
+away with them.
+
+Note what this changes for a resumed session on a fresh target: the worker's object directory
+is part of the worker root, so a moved or restored session loses its captured trees and
+starts from no baseline, exactly as a repository whose `refs/hel/*` had been garbage
+collected does today. That is the same outcome, reached more predictably.
+
+**3b. Make the startup baseline proportional to the dirty set.** Replace
+`initialize_review_baselines` with a function that does no content reading beyond the files
+that are already dirty:
+
+1. Read `git status --porcelain=v1 --untracked-files=all -z` once. This is a stat-walk: one
+   `stat` per tracked file and a `readdir` per directory, and it reads no file contents. On
+   the reported 524 GB workspace the equivalent untracked listing takes 1.8 seconds warm.
+2. Build the baseline tree from HEAD plus only the dirty tracked paths: `read-tree HEAD`
+   into the scratch index, then `git add --` with those paths as an explicit pathspec. A
+   clean checkout, which is the normal case, adds nothing and the baseline tree is simply
+   HEAD's tree.
+3. Do **not** put pre-existing untracked files in the baseline tree. Instead record their
+   paths, sizes and modification times in `review-baselines.json` as the
+   `untracked_at_start` list, so review can later tell a file created during the turn from
+   one that already existed.
+4. Bound the untracked list at 50,000 paths. Past that, record
+   `"untracked_at_start": "unbounded"` and let review say that untracked files are not
+   covered in this repository. Recording half a list would be worse than recording none,
+   because review would mislabel the rest.
+
+Cost at session start becomes one stat-walk and the hashing of the dirty tracked files,
+which is what the user has already changed by hand. In a clean checkout it is a walk and
+nothing else. Keep it where it is in `run_daemon`, before the socket bind: at this cost there
+is no reason to move it, and keeping it there preserves the invariant that the baseline
+exists before the harness can edit anything, with no concurrency to reason about. Bound it
+anyway with `mj_core::targets::BoundedProcessExecutor` at 120 seconds, as a backstop against
+a pathological filesystem rather than as the design, and on timeout record the repository as
+uncovered and continue rather than failing the session.
+
+**3c. Make the review-time capture proportional too.** `capture_repository_deltas` has the
+same problem: it captures the whole worktree as a tree on every review. Change it to capture
+only what changed:
+
+1. Read `git status --porcelain=v1 --untracked-files=all -z` again.
+2. The changed set is: every tracked path `status` reports, plus every untracked path that
+   is not in `untracked_at_start`, plus every untracked path that is in it with a different
+   size or modification time.
+3. Build the current tree from the baseline tree plus those paths: `read-tree <baseline>`
+   into the scratch index, then `git add --` with the changed paths, then `write-tree`.
+   Hashing is bounded by the turn's own changes.
+4. Diff baseline against current as today.
+
+A repository whose `untracked_at_start` is `"unbounded"` falls back to "tracked changes
+only", and the delta carries a flag so the review output can say so in one line.
+
+**What review loses.** One thing: for an untracked file that already existed when the session
+started and that the turn modified, the baseline holds no content, so the diff shows the
+whole file as an addition rather than as a modification. The `untracked_at_start` record
+means review still knows it is not a new file and can label it. Everything else is
+unchanged: tracked modifications, additions, deletions and renames all keep exact before and
+after content, and files created during the turn are exact.
+
+Two alternatives were considered and rejected. Deferring all capture to review time and
+bounding it there keeps the pathological hash-and-write, only later, and it cannot
+reconstruct the pre-turn state at all, so it loses more, not less. Recording only HEAD and
+a path list with no tree, and synthesising trees entirely at review time, is very nearly the
+design above but has no way to represent a checkout that was already dirty at session start,
+which is the common case for a `local-bare` session on a real project directory.
+
+Tests. In `mj-checkpoint/src/archive/git.rs`: a test that captures a worktree in a temporary
+repository with an object directory set, then asserts `git count-objects -v` in the
+repository is unchanged and the tree still resolves with the alternates set. In
+`mj-worker/src/review/capture.rs`: a test with one dirty tracked file and several untracked
+files, asserting the startup baseline hashes only the dirty tracked file (assert on the
+object count in the worker's object directory) and that a later review of a turn that
+modified one untracked file reports it with `untracked_at_start` set. A test with more than
+the bound of untracked paths asserting the list is recorded as unbounded and review reports
+tracked changes only. Keep the blocking-filter fixture from Part A as a regression test that
+startup does not block.
+
+**3d. What a sub-agent child does.** A child that borrows its parent's worktree takes its
+own baseline, and this falls out of 3a for free: baselines now live in
+`<worker root>/review-baselines.json`, and a child has its own worker root, so it records
+its own starting point without any special case. That is also the correct answer on the
+merits. Today the child finds the parent's `refs/hel/review-baseline` already pinned,
+`pinned_review_baseline` makes its capture a no-op, and the child then inherits a baseline
+from before the parent started working, so the parent's in-progress changes are attributed
+to the child's first review. Per-worker baselines fix that silently. The cost of the extra
+baseline is one stat-walk, which is what makes this affordable at all; under today's design
+it would be a second full hash of the parent's tree, which is why the current code avoids
+it. Do not add an inheritance path: it would be more code and a worse answer.
 
 ### Milestone 4: carry the real reason back to the parent model
 
@@ -684,8 +922,43 @@ Expected before the change (this is the #1065 signature, reproduced):
     -rw-r--r-- 1 user user   0 … worker.log
 
 Expected after Milestone 1: `worker-startup.json` exists and names the step. Expected after
-Milestone 3: `worker.pid` and `control.sock` exist within a few seconds, while the baseline
-capture is still blocked, and `worker-startup.json` reports `serving`.
+Milestone 3: the worker never runs the blocking filter at all, because it never stages a
+file the session has not changed, so `worker.pid` and `control.sock` exist within a second
+and `worker-startup.json` reports `serving`.
+
+Then the volume half of Part A, which is the acceptance the maintainer asked for. Build a
+scratch repository with half a million untracked files. Do **not** use
+`/home/jonathan/Projects/brokkbench` for this; it is a real 524 GB workspace and this test
+must be disposable:
+
+    mkdir /tmp/bigrepo && cd /tmp/bigrepo
+    git init -q . && git config user.email t@t && git config user.name t
+    printf 'seed\n' > README.md && git add README.md && git commit -qm init
+    python3 - <<'PY'
+    import os
+    for d in range(500):
+        os.makedirs('data/%03d' % d, exist_ok=True)
+        for f in range(1000):
+            open('data/%03d/f%04d.txt' % (d, f), 'w').write('x' * 256)
+    PY
+    git count-objects -v > /tmp/before.txt
+
+Start one session whose working directory is `/tmp/bigrepo`, on the `local-bare` target,
+then check both halves of the acceptance:
+
+    git -C /tmp/bigrepo count-objects -v > /tmp/after.txt
+    diff /tmp/before.txt /tmp/after.txt        # must report no change
+    git -C /tmp/bigrepo for-each-ref refs/hel  # must print nothing
+    ls /tmp/bigrepo/.git | grep hel-review-index  # must print nothing
+
+The session's control socket must appear within seconds, and `count-objects` must be
+identical before and after. On the unfixed build both fail: the socket does not appear
+within 30 seconds, and the object count grows by roughly the number of untracked files.
+Measure the same before-and-after on the second and third turns of a review to confirm 3c:
+a turn that changes three files must add a handful of objects, not half a million, and all
+of them in the worker's `review-objects` directory rather than in `/tmp/bigrepo/.git`.
+
+Remove `/tmp/bigrepo` afterwards; it is about 1 GB of inodes.
 
 ### Part B: injected failures, one specific reason each
 
@@ -748,11 +1021,16 @@ The one irreversible thing to avoid: do not run `git add -A` inside
 thousands of objects into that repository's 43 GB object store. The measurements in this
 plan used `git hash-object --stdin-paths` without `-w`, which writes nothing.
 
-If a milestone changes the daemon protocol, bump `PROTOCOL_VERSION` in
-`mj-client/src/daemon.rs` by one and say so in the commit message. As specified, none of the
-seven milestones changes the protocol: the startup record is a file in the worker root that
-the controller reads over the existing command channel, not a relay message. There is no
-database migration.
+One protocol change: Milestone 3c adds `untracked_coverage` to `RepoDelta`. Bump
+`PROTOCOL_VERSION` in `mj-client/src/daemon.rs` by one in that commit, and expect the number
+to be renumbered by a merge if another agent bumps it too. Nothing else here changes the
+protocol: the startup record is a file in the worker root that the controller reads over the
+existing command channel, not a relay message. There is no database migration.
+
+Milestone 3a stops writing `refs/hel/review-baseline` and `refs/hel/review-capture` into user
+repositories, but it does not remove refs that earlier releases already wrote. They are inert
+once nothing reads them; an existing ref only keeps some objects reachable. Leaving them is
+safe, and question 7 below asks whether to clean them up.
 
 ## Artifacts and Notes
 
@@ -787,6 +1065,49 @@ Evidence that the reported workspace is the cause rather than a coincidence:
     f93e3a1a1525fb5b91020da86e44810c87a2d7bc                              # pinned, so fast
     $ git ls-files --others --exclude-standard | wc -l
     19
+
+Damage already done to that repository by abandoned captures. The capture writes objects into
+the user's own store, and a capture killed partway leaves them behind unreachable:
+
+    $ cd /home/jonathan/Projects/brokkbench && git count-objects -v
+    warning: garbage found: .git/objects/7d/tmp_obj_jhwCL5
+    count: 5264
+    size: 958592          # KiB, so about 936 MiB of loose objects
+    in-pack: 3043145
+    garbage: 1
+
+    $ ls -la .git/hel-review-index-*
+    -rw-r--r-- 1 jonathan jonathan 69939358 Sep 16 19:35 .git/hel-review-index-gyX0Gx
+    $ ls -la .git/objects/7d/tmp_obj_jhwCL5
+    -r--r--r-- 1 jonathan jonathan  6750208 Sep 16 19:35 .git/objects/7d/tmp_obj_jhwCL5
+
+    # objects written on the day of the incident, all unreachable: refs/hel is empty
+    $ find .git/objects -type f -path '*/??/*' -newermt '2026-09-16 00:00' \
+        ! -newermt '2026-09-17 00:00' -printf '%s\n' | awk '{s+=$1} END {print NR, s}'
+    2331 254574868          # 243 MiB
+
+So one abandoned capture on 2026-09-16 left 243 MiB of unreachable loose objects, a 70 MB
+scratch index file, and a 6.75 MB abandoned temporary object inside the user's repository.
+`refs/hel/review-baseline` and `refs/hel/review-capture` do not exist there, which confirms
+the capture never completed and those objects will never be used.
+
+Controlled reproduction of the object growth, at small scale, on `e3e1d1fc`. A scratch
+repository with 3,000 untracked files, one session start with the real worker:
+
+    $ git count-objects -v        # before
+    count: 3
+    size: 12
+    $ ./target/debug/mj-worker worker run --root …/wroot2 --config …/launch.json
+    $ git count-objects -v        # after
+    count: 3005
+    size: 12092
+    $ git for-each-ref refs/hel
+    e399ce1d… tree refs/hel/review-baseline
+    e399ce1d… tree refs/hel/review-capture
+
+3,002 objects and about 11.8 MiB written into a repository the user did not ask Mjolnir to
+write to, and two refs pinning them against garbage collection. Scaled to the reported
+workspace that is 424,715 objects.
 
 Throughput measurement in that workspace, read-only (no objects written):
 
@@ -840,27 +1161,79 @@ and replace the single `WORKER_STARTUP_CONNECT_TIMEOUT` with three constants:
 `WORKER_STARTUP_PROGRESS_GRACE` (60 seconds), and `WORKER_STARTUP_CONNECT_CEILING` (300
 seconds).
 
+In `mj-checkpoint/src/archive/git.rs`, add the object-redirection pair and thread it through
+every command that writes or reads a captured tree:
+
+    /// Where capture puts the objects it creates, and where it may read from.
+    /// Mjolnir never writes into the user's repository; `store` is a directory
+    /// in the worker root and `alternates` is the repository's own objects.
+    pub struct CaptureObjects {
+        pub store: PathBuf,
+        pub alternates: PathBuf,
+    }
+
+    impl CaptureObjects {
+        /// GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES.
+        pub fn env(&self) -> Vec<(OsString, OsString)>;
+    }
+
+    pub fn capture_paths(
+        runner: &dyn GitCommandRunner,
+        repository: &Path,
+        objects: &CaptureObjects,
+        base: CaptureBase,       // HEAD, or an existing tree id
+        paths: &[PathBuf],       // explicit pathspec; never `.`
+    ) -> Result<String>;
+
+`capture_worktree_tree` goes away, and with it `pin_review_tree`, `REVIEW_CAPTURE_REF` and
+`REVIEW_BASELINE_REF`. `diff_between_trees`, `empty_tree_id` and `session_diff` all take a
+`&CaptureObjects`.
+
 In `mj-worker/src/review/capture.rs`, change:
+
+    /// What a repository looked like when the session started: the tree of
+    /// HEAD plus the files that were already dirty, and a record of which
+    /// untracked paths already existed so a later review can tell a file the
+    /// turn created from one it modified.
+    pub struct RepositoryBaseline {
+        pub tree: String,
+        pub untracked_at_start: UntrackedAtStart,  // Recorded(Vec<UntrackedEntry>) | Unbounded
+    }
 
     pub fn initialize_review_baselines(
         git: &dyn GitCommandRunner,
+        objects: &CaptureObjects,
         repositories: &[PathBuf],
         timeout: Duration,
-    ) -> Vec<(PathBuf, Result<()>)>;
+    ) -> Vec<(PathBuf, Result<RepositoryBaseline>)>;
 
-so one repository's failure or timeout cannot cost the others their baseline, and so the
-caller decides what a failure means. No new crate is needed anywhere in this plan; use
-`mj_core::targets::BoundedProcessExecutor` for the bound and
-`mj_core::config::atomic_write` for the startup record.
+returning per repository, so one repository's failure or timeout cannot cost the others their
+baseline. The results are persisted as `<worker root>/review-baselines.json` with
+`mj_core::config::atomic_write`.
+
+No new crate is needed anywhere in this plan; use `mj_core::targets::BoundedProcessExecutor`
+for the bounds and `mj_core::config::atomic_write` for both JSON records.
+
+`RepoDelta` in `mj-core/src/relay/protocol.rs` gains one field,
+`untracked_coverage: UntrackedCoverage`, so the review output can say when untracked files
+are not covered. That is a relay protocol change: bump `PROTOCOL_VERSION` in
+`mj-client/src/daemon.rs` by one for the commit that adds it, and note in the commit message
+that an older worker omits the field and is read as "covered", which is what it was.
 
 ## Decisions that belong to the maintainer
 
-1. **When a workspace is too large to capture, what should happen?** Recommendation: bound
-   the capture at 120 seconds, continue the session, and record a notice that turn review
-   has no baseline for that repository. The alternative, failing the session, is today's
-   behaviour and is what #1065 is. A third option is to skip capture entirely above a file
-   count threshold, which is cheaper to detect but adds a number that will be wrong for
-   someone.
+1. **Is the loss of untracked-file before-content acceptable?** Under the recommended
+   design, an untracked file that existed at session start and was modified during the turn
+   shows in review as a whole-file addition rather than as a modification, labelled as
+   pre-existing. Recommendation: accept it. The alternative is to hash pre-existing
+   untracked files at session start, which is exactly the cost being removed. A middle
+   option is to hash them lazily on first modification, which needs a filesystem watcher
+   and is a much larger change for a narrow gain.
+
+1b. **What is the right bound on the recorded untracked list?** Recommendation: 50,000
+   paths, past which the repository records "unbounded" and review says untracked files are
+   not covered there. The list is paths, sizes and modification times only, so 50,000
+   entries is a few megabytes of JSON.
 
 2. **Should a failed spawn be retried automatically?** Recommendation: yes, exactly once,
    and only when the worker provably never bound its socket. The alternative is to return
@@ -889,7 +1262,34 @@ caller decides what a failure means. No new crate is needed anywhere in this pla
    item 2 (CLI/daemon protocol mismatch) out; it has a clear message already and belongs
    with #1039.
 
+7. **Should Mjolnir clean up what earlier releases wrote into user repositories?** There is
+   243 MiB of unreachable loose objects, a 70 MB stray `hel-review-index-*` file and an
+   abandoned temporary object in `brokkbench` right now, and every repository a session has
+   ever run in has two `refs/hel/*` refs. Recommendation: add a `mj doctor` check that
+   reports stray `hel-review-index-*` files and `refs/hel/*` refs per repository with the
+   exact `git update-ref -d` and `git gc --prune=now` commands to clear them, and do not
+   delete anything automatically. Deleting refs and running `gc` in someone's repository
+   without asking is the same class of mistake as writing to it without asking. An
+   alternative is to delete only the refs Mjolnir itself created, on session close, which is
+   safe but does nothing for repositories whose sessions are long gone.
+
 ---
+
+Revision note (2026-09-18, second revision, after maintainer review of e5b11913): Milestone 3
+was replaced. The first version moved the review-baseline capture off the startup critical
+path, ran it concurrently and bounded it at 120 seconds. The maintainer rejected that,
+because it leaves a session start that runs `git add -A -- .` over the user's working tree,
+which is the defect itself and not merely its timing. Investigating the cost showed the
+capture also writes a Git object per untracked file into the user's own repository and pins
+them with two refs, and that one abandoned capture had already left 243 MiB of unreachable
+objects and a 70 MB stray index file in a real repository. Milestone 3 is now three commits:
+redirect capture's objects into a worker-owned store with the repository as a read-only
+alternate and drop the two refs; make the startup baseline cost one stat-walk plus the
+already-dirty tracked files; and make the review-time capture cost only the turn's changed
+paths. The sections `What the review baseline is for` and `Other places that walk or stage
+the working tree` are new, acceptance Part A gained a half-million-file object-count test,
+and the artifacts gained the measured object-store damage and a controlled reproduction of
+it. Milestones 1, 2, 4, 5, 6 and 7 are unchanged.
 
 Revision note (2026-09-18): first version of this plan. Written after mapping the spawn path,
 reproducing the #1065 signature with the real worker binary against a repository whose
