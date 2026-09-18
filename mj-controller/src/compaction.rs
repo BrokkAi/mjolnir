@@ -9,7 +9,8 @@ use serde_json::Value;
 
 use mj_checkpoint::archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
 
-pub const DEFAULT_CONTEXT_BYTES: usize = 256 * 1024;
+pub use mj_core::config::DEFAULT_CONTEXT_BYTES;
+
 /// Opening sentence of every handoff this module writes. Generation and
 /// detection share it so a later resume can always recognize its own prior
 /// handoff turns.

@@ -145,9 +145,10 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::OpenConfig => context.dashboard.begin_setup(),
-        DashboardAction::DiscoverSetup { generation } => {
+        DashboardAction::DiscoverSetup { generation, scope } => {
             super::io::spawn_setup_discovery(
                 generation,
+                scope,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

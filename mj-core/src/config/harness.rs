@@ -527,6 +527,11 @@ pub struct HarnessProfile {
     pub guardian_review_model: Option<String>,
 }
 
+/// The transcript budget a profile without an explicit `context_window_bytes`
+/// runs under. It lives beside the setting so compaction and the settings
+/// screen read one number.
+pub const DEFAULT_CONTEXT_BYTES: usize = 256 * 1024;
+
 /// The `guardian_review_model` value that picks the newest flash model.
 pub const GUARDIAN_REVIEW_NEWEST_FLASH: &str = "newest-flash";
 /// The `guardian_review_model` value that leaves reviews to the session model.
