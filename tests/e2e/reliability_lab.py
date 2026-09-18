@@ -1227,13 +1227,26 @@ kind = "local-bare"
         self.write_trace()
 
     def submit_prompt(self, session_id: str, text: str) -> None:
-        status, _ = self.request(
-            "POST",
-            "/api/actions",
-            {"action": "prompt", "session_id": session_id, "text": text},
+        # A session reports "running" before it can take a prompt: the worker
+        # is still configuring its harness, and a prompt sent into that window
+        # is refused with 409. Wait for an idle chat phase, then retry the
+        # refusal for as long as the scenario's own timeout allows.
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            "session ready for a prompt",
         )
-        if status != 202:
-            raise ScenarioFailure(f"prompt action returned {status}")
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            status, _ = self.request(
+                "POST",
+                "/api/actions",
+                {"action": "prompt", "session_id": session_id, "text": text},
+            )
+            if status == 202:
+                break
+            if status != 409 or time.monotonic() >= deadline:
+                raise ScenarioFailure(f"prompt action returned {status}")
+            time.sleep(0.2)
         self.record_action("prompt", session_id=session_id, text=text)
 
 
