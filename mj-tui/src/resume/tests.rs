@@ -811,12 +811,10 @@ fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
 /// halves of the target-naming rule can both be seen.
 fn config_with_bare_target() -> Config {
     let mut config = config();
-    config
-        .targets
-        .insert(
-            "localhost".into(),
-            mj_core::config::TargetTemplate::LocalBare,
-        );
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
     config
 }
 
@@ -848,7 +846,10 @@ fn archived_row_shows_indexed_target_and_profile() {
     };
 
     let bare = archived(tagged_wiki_row("bare", "localhost", "codex-2"));
-    assert_eq!(bare.profile_id, "codex-2", "the indexed profile, not the tool");
+    assert_eq!(
+        bare.profile_id, "codex-2",
+        "the indexed profile, not the tool"
+    );
     assert_eq!(bare.origin, "localhost/project");
 
     let container = archived(tagged_wiki_row("container", "podman", "codex-2"));
@@ -926,7 +927,11 @@ fn an_unknown_indexed_profile_leaves_the_restore_wizard_on_its_first_choice() {
     let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
     dashboard.apply_wiki_search(
         request_id,
-        ready_page(vec![tagged_wiki_row("gone", "was-a-target", "was-a-profile")]),
+        ready_page(vec![tagged_wiki_row(
+            "gone",
+            "was-a-target",
+            "was-a-profile",
+        )]),
     );
     select_the_archived_row(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Enter));

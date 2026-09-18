@@ -143,8 +143,7 @@ impl MjolnirAdapter {
                 (
                     session_id.clone(),
                     tags::MjTags {
-                        target: Some(record.target_template_id.clone())
-                            .filter(|id| !id.is_empty()),
+                        target: Some(record.target_template_id.clone()).filter(|id| !id.is_empty()),
                         profile: Some(record.last_profile.clone()).filter(|id| !id.is_empty()),
                         harness: Some(record.harness_kind.id().to_owned()),
                     },

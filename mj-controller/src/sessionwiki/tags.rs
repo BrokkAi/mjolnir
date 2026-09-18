@@ -52,7 +52,9 @@ impl MjTags {
     /// The tags this metadata is stored as.
     fn tags(&self) -> impl Iterator<Item = String> + '_ {
         [
-            self.target.as_deref().map(|value| format!("{TARGET}{value}")),
+            self.target
+                .as_deref()
+                .map(|value| format!("{TARGET}{value}")),
             self.profile
                 .as_deref()
                 .map(|value| format!("{PROFILE}{value}")),
@@ -216,7 +218,10 @@ mod tests {
         write(&connection, "session-1", &tags("new", "claude", "claude")).expect("rewrite tags");
 
         let read_back = read(&connection, &["session-1"]).expect("read");
-        assert_eq!(read_back.get("session-1"), Some(&tags("new", "claude", "claude")));
+        assert_eq!(
+            read_back.get("session-1"),
+            Some(&tags("new", "claude", "claude"))
+        );
         let stored: i64 = connection
             .query_row(
                 "SELECT count(*) FROM tags WHERE session_id = 'session-1'",
