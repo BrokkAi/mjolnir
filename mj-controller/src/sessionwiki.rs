@@ -1039,84 +1039,44 @@ pub fn transcript_hits(
     )))
 }
 
-/// The matching passages of one loaded session. Pure, so the excerpt rules can
-/// be tested without an index on disk.
+/// The matching passages of one loaded session, converted from SessionWiki's
+/// own grep. Pure, so the conversion can be tested without an index on disk.
 ///
-/// Matching is a case-insensitive substring search over NFC-normalised,
-/// redacted text. That reproduces what the index found: its full-text table
-/// uses a trigram tokenizer, which is substring matching for queries of three
-/// or more characters, and shorter queries already go through a `LIKE` scan.
-/// Redaction is the same `sessionwiki::redact` pass `brief_markdown` makes, so
-/// a credential that never reaches a briefing never reaches a preview either.
+/// Matching, redaction and the excerpt window are `sessionwiki::grep`'s, so the
+/// `sessionwiki grep` CLI and this preview report the same hits. Tool output
+/// never anchors a passage: it is machine chatter the reader did not write,
+/// a hit buried in it would open the preview on a wall of command output, and
+/// the preview collapses tool runs anyway. Tool messages still appear as
+/// context around a real match.
 fn hit_transcript(
     session: &Session,
     query: &str,
     context_messages: usize,
     per_message_chars: usize,
 ) -> WikiHitTranscript {
-    let needle = sessionwiki::util::nfc(query.trim()).to_lowercase();
-    if needle.is_empty() || session.messages.is_empty() {
-        return WikiHitTranscript::default();
-    }
-    let texts: Vec<String> = session
-        .messages
-        .iter()
-        .map(|message| {
-            sessionwiki::redact::redact(&sessionwiki::util::nfc(message.text.trim())).into_owned()
-        })
-        .collect();
-    // Tool output never anchors a passage. It is machine chatter the reader
-    // did not write and does not read: a hit buried in it opens the preview on
-    // a wall of command output, and the preview collapses tool runs anyway, so
-    // a match inside one could not be shown. Tool messages still appear as
-    // context around a real match.
-    let found: Vec<Vec<(usize, usize)>> = texts
-        .iter()
-        .zip(&session.messages)
-        .map(|(text, message)| match message.role {
-            Role::Tool => Vec::new(),
-            _ => matches_in(text, &needle),
-        })
-        .collect();
-
-    // Merge each match's context window into groups of consecutive messages.
-    // Windows one apart are merged too: "0 messages omitted" is noise.
-    let last = texts.len() - 1;
-    let mut groups: Vec<(usize, usize)> = Vec::new();
-    for index in (0..texts.len()).filter(|index| !found[*index].is_empty()) {
-        let start = index.saturating_sub(context_messages);
-        let end = (index + context_messages).min(last);
-        match groups.last_mut() {
-            Some(previous) if start <= previous.1 + 1 => previous.1 = previous.1.max(end),
-            _ => groups.push((start, end)),
-        }
-    }
-    if groups.is_empty() {
-        return WikiHitTranscript::default();
-    }
-
-    let mut blocks: Vec<WikiHitBlock> = Vec::new();
-    let mut previous_end: Option<usize> = None;
-    for (start, end) in &groups {
-        let omitted = match previous_end {
-            Some(previous) => start - previous - 1,
-            None => *start,
-        };
-        for index in *start..=*end {
-            let (text, hits, truncated) = excerpt(&texts[index], &found[index], per_message_chars);
-            blocks.push(WikiHitBlock {
-                role: role_name(session.messages[index].role).to_owned(),
-                text,
-                hits,
-                omitted_before: if index == *start { omitted } else { 0 },
-                truncated,
-            });
-        }
-        previous_end = Some(*end);
-    }
+    let found = sessionwiki::grep::grep_session(
+        session,
+        query,
+        &sessionwiki::grep::GrepOpts {
+            context_messages,
+            chars: per_message_chars,
+            max_matches: None,
+            anchor_roles: vec![Role::User, Role::Assistant],
+        },
+    );
     WikiHitTranscript {
-        blocks,
-        omitted_after: last - previous_end.unwrap_or(last),
+        blocks: found
+            .hits
+            .into_iter()
+            .map(|hit| WikiHitBlock {
+                role: role_name(hit.role).to_owned(),
+                text: hit.text,
+                hits: hit.matches,
+                omitted_before: hit.omitted_before,
+                truncated: hit.truncated,
+            })
+            .collect(),
+        omitted_after: found.omitted_after,
     }
 }
 
@@ -1126,83 +1086,6 @@ fn role_name(role: Role) -> &'static str {
         Role::Assistant => "assistant",
         Role::Tool => "tool",
     }
-}
-
-/// Byte ranges of every non-overlapping case-insensitive occurrence of an
-/// already-lowercased needle.
-///
-/// Lowercasing can change a string's length (`İ` lowercases to two chars), so
-/// the search carries a map from each lowercased byte back to the byte that
-/// starts the character it came from. The returned ranges are therefore
-/// offsets into `text` itself, on character boundaries.
-fn matches_in(text: &str, needle: &str) -> Vec<(usize, usize)> {
-    let mut lowered = String::with_capacity(text.len());
-    let mut origin: Vec<usize> = Vec::with_capacity(text.len() + 1);
-    for (index, character) in text.char_indices() {
-        let before = lowered.len();
-        lowered.extend(character.to_lowercase());
-        origin.resize(origin.len() + (lowered.len() - before), index);
-    }
-    origin.push(text.len());
-
-    let mut hits: Vec<(usize, usize)> = Vec::new();
-    let mut from = 0;
-    while let Some(offset) = lowered[from..].find(needle) {
-        let start = from + offset;
-        from = start + needle.len();
-        let begin = origin[start];
-        let mut end = origin[from];
-        if end <= begin {
-            // The whole match sat inside one character's lowercase expansion.
-            end = text[begin..]
-                .chars()
-                .next()
-                .map_or(begin, |character| begin + character.len_utf8());
-        }
-        hits.push((begin, end));
-    }
-    hits
-}
-
-/// One message capped at `per_message_chars` characters, keeping the window
-/// around its first match, with the hit ranges rebased onto what is kept.
-fn excerpt(
-    text: &str,
-    hits: &[(usize, usize)],
-    per_message_chars: usize,
-) -> (String, Vec<(usize, usize)>, bool) {
-    let total = text.chars().count();
-    if per_message_chars == 0 || total <= per_message_chars {
-        return (text.to_owned(), hits.to_vec(), false);
-    }
-    // A quarter of the budget of lead-in, so the hit reads in context rather
-    // than starting the excerpt.
-    let first = hits
-        .first()
-        .map_or(0, |(start, _)| text[..*start].chars().count());
-    let mut window_start = first.saturating_sub(per_message_chars / 4);
-    window_start = window_start.min(total - per_message_chars);
-    let begin = byte_of_char(text, window_start);
-    let end = byte_of_char(text, window_start + per_message_chars);
-    let kept = hits
-        .iter()
-        .filter_map(|(start, stop)| {
-            let start = (*start).max(begin);
-            let stop = (*stop).min(end);
-            if start < stop {
-                Some((start - begin, stop - begin))
-            } else {
-                None
-            }
-        })
-        .collect();
-    (text[begin..end].to_owned(), kept, true)
-}
-
-fn byte_of_char(text: &str, char_index: usize) -> usize {
-    text.char_indices()
-        .nth(char_index)
-        .map_or(text.len(), |(offset, _)| offset)
 }
 
 /// What a restore needs from the index: the transcript as a snapshot the

@@ -103,3 +103,12 @@ command should change to it.
 constructors described above. Mjolnir uses them to index every enabled Codex and
 Claude profile home instead of only the stock ones, so sessions started under a
 profile home such as `~/.codex3` are searchable.
+
+`brokk-sessionwiki` 0.30.0 adds the `grep` library module and the matching
+`grep` command, which find the passages inside one session the way `search`
+finds sessions, plus `show --jsonl` (one JSON object per message) and the
+matched message index `i` on `search --json` hits. It was published from the
+`publish` branch, tagged `brokk-v0.30.0`. Mjolnir's Resume-preview hit search
+(`transcript_hits` in `mj-controller/src/sessionwiki.rs`) now calls
+`grep_session` instead of scanning for itself, so the CLI and the TUI report
+the same hits.
