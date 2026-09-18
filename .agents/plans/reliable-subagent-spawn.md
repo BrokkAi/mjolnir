@@ -54,8 +54,8 @@ fails in under a second with the loader error as its reason.
       (see `Artifacts and Notes`).
 - [x] (2026-09-18 00:05Z) Confirmed from the filesystem that the reported failing workspace
       has never completed a review-baseline pin, and the reported succeeding workspace has.
-- [ ] Milestone 1: worker startup breadcrumbs, so a worker can never die or stall silently.
-- [ ] Milestone 2: readiness wait that watches the process and the breadcrumbs.
+- [x] (2026-09-18 01:50Z) Milestone 1 (de9b1cb2): worker startup breadcrumbs, so a worker can never die or stall silently.
+- [x] (2026-09-18 02:10Z) Milestone 2 (5723c397): readiness wait that watches the process and the breadcrumbs.
 - [x] (2026-09-18 01:10Z) After maintainer review of e5b11913: established what the review
       baseline is for and who reads it, measured the object-store cost, listed every other
       whole-tree walk, and replaced the bounding approach with a root-cause design.
@@ -64,20 +64,36 @@ fails in under a second with the loader error as its reason.
       one session start.
 - [x] (2026-09-18 02:00Z) Maintainer decisions recorded: capture only for reviewed parent
       sessions, refuse above 50,000 untracked paths, doctor reports and deletes nothing.
-- [ ] Milestone 3a: capture writes objects into a worker-owned object directory, never the
+- [x] (2026-09-18 03:10Z) Milestone 3a, as option (b) (6c180949): capture writes objects into a worker-owned object directory, never the
       user's repository; the two `refs/hel` refs are replaced by `review-baselines.json`.
-- [ ] Milestone 3b: no capture at all unless the session is reviewed; when it is, the
+- [x] (2026-09-18 02:40Z) Milestone 3b (35a6360b): no capture at all unless the session is reviewed; when it is, the
       baseline costs one stat-walk plus the dirty tracked files.
-- [ ] Milestone 3c: review-time capture costs only the turn's changed paths.
-- [ ] Milestone 3e: refuse a session whose workspace review cannot cover.
-- [ ] Milestone 8: `mj doctor` reports stray `refs/hel/*` and `hel-review-index-*`.
-- [ ] Milestone 4: carry the real reason back to the parent model.
-- [ ] Milestone 5: bounded automatic retry, and a child the parent can act on.
-- [ ] Milestone 6: retire the relay actor of a session that reached a terminal state.
-- [ ] Milestone 7: re-resolve the worker source per session instead of only at daemon start.
-- [ ] Live acceptance run on `local-bare`, local Podman, and `morannon` ssh-podman.
+- [x] (2026-09-18 02:55Z) Milestone 3c (69745068): review-time capture costs only the turn's changed paths.
+- [x] (2026-09-18 03:05Z) Milestone 3e (7375d17f): refuse a session whose workspace review cannot cover.
+- [x] (2026-09-18 03:30Z) Milestone 8 (eeb44e4f, cd5c9907): `mj doctor` reports stray `refs/hel/*` and `hel-review-index-*`.
+- [x] (2026-09-18 02:25Z) Milestone 4 (e4711938): carry the real reason back to the parent model.
+- [x] (2026-09-18 03:15Z) Milestone 5 (d0a38a23): bounded automatic retry, and a child the parent can act on.
+- [x] (2026-09-18 03:20Z) Milestone 6 (b05b3c72): retire the relay actor of a session that reached a terminal state.
+- [x] (2026-09-18 03:25Z) Milestone 7 (3c6e6952): re-resolve the worker source per session instead of only at daemon start.
+- [x] (2026-09-18 04:30Z) Live acceptance run: `local-bare` 24 of 24 and `morannon`
+      ssh-podman 7 of 7 with nothing failing; local Podman 11 of 14, see
+      `Outcomes & Retrospective`.
+- [ ] Local Podman: the two remaining failure modes. Both are named, and neither should
+      happen: a concurrent start that still exceeds the 300-second harness wait, and a
+      spawn refused with "sub-agent ... has no child session" after earlier children were
+      closed.
 
 ## Surprises & Discoveries
+
+- Observation: the liveness probe identified a worker by its command line, so a worker whose
+  command line does not carry the expected text was reported as gone while it was running.
+  Evidence: an injected stuck worker came back as "the worker process is gone" rather than
+  as stuck on its step. Fixed in cd5c9907 by believing the pid the worker records in its
+  startup file, which the launch clears, so that pid can only be this launch's.
+
+- Observation: a daemon pins `MJ_WORKER_BINARY` from the environment it was started with.
+  Changing it for a later `mj new` does nothing until the daemon restarts, which cost one
+  confusing injected-failure result before it was understood.
 
 - Observation: the reported cause in #1065 ("the 30 s relay timeout may be too short when
   the codex bridge has to run `npx -y @brokkai/codex-acp` on a cold cache") is wrong. The
@@ -219,9 +235,68 @@ fails in under a second with the loader error as its reason.
 
 ## Outcomes & Retrospective
 
-Not started. Fill in at the end of each milestone: what was achieved, what remains, and
-whether the live acceptance run in `Validation and Acceptance` passed on all three target
-kinds.
+### What the volume acceptance measured (2026-09-18)
+
+Spawns were driven through the daemon's own HTTP route rather than through a parent model,
+so the numbers measure the spawn path instead of a model's ability to call a tool the right
+number of times. Each child ran one trivial prompt on the `deepseek` profile and was closed.
+
+    target            set        result                 time to running
+    local-bare        20 + 4     24 of 24                2.0-7.0s, mean 2.8s
+    local podman      10 + 4     11 of 14                1.0-7.0s for those that came up
+    morannon ssh      5 + 2      7 of 7                  2.0-5.0s, mean 4.1s
+
+`local-bare` and `morannon` meet the bar: nothing failed, explained or otherwise. Local
+Podman does not yet, and the three that did not come up are described below.
+
+### What the run found that the plan had not predicted
+
+**A spawn over the HTTP route answered 404 for a child that had started.** Fixed in
+93de6b7b. The handler built its answer by looking the child up in the viewer snapshot,
+which is republished on a tick, so a child registered milliseconds earlier was almost never
+in it. Every spawn in the first volume run reported "unknown session" while every child was
+in fact running. A caller that retried on 404 would have spawned a duplicate.
+
+**Concurrent starts inside one container defeated the harness, not the worker.** Fixed in
+9d19d876. Ten children started one after another each reached their harness in about seven
+seconds. Four started at once left two or three of them past the 300-second harness-startup
+wait, with the worker itself healthy and serving in under 200 milliseconds. A sub-agent
+start on a container target now takes one of two admission slots for that container, which
+turned a repeated 1-of-4 and 2-of-4 into 4 of 4 in 1, 7, 9 and 15 seconds. Bare targets have
+no gate and do not need one.
+
+**A container can be filled with the process trees of children that are on their way out.**
+Closing a child is accepted asynchronously, and a harness that closes them as fast as it can
+spawn them ran a container out of process slots: `sh: 1: Cannot fork`. The message is clear
+and the product behaved correctly, but it is worth knowing that a close is not finished when
+it is accepted.
+
+### What is still open on local Podman
+
+1. **A concurrent start still occasionally exceeds the 300-second harness wait.** In the
+   final 10 + 4 run, two of the four concurrent starts failed this way even with the
+   admission gate. The gate reduced the rate; it did not remove it. The next step is to
+   measure where those 300 seconds go inside the container, because the worker is serving
+   within 200 milliseconds and the wait is entirely the harness bridge.
+
+2. **A spawn was refused with "sub-agent ... has no child session".** This comes from
+   `State::validate` in `mj-core/src/state.rs`: the loaded state holds a sub-agent relation
+   whose child session is not in the loaded session map. It appeared only after earlier
+   children had been closed, so it is a residue problem. Two candidate mechanisms, neither
+   confirmed: the `ON DELETE CASCADE` on `subagent_sessions.child_session_id` not firing on
+   some delete path, or `load_state`'s inner join of `sessions` with `session_contexts`
+   dropping a session whose context row went first. This was deliberately not guessed at
+   under time pressure: a wrong fix in state consistency is worse than the bug.
+
+### The original purpose, measured against
+
+A sub-agent spawn that failed used to leave a child permanently in `Error` with
+"worker relay did not accept a connection in 30s", an empty log, and no way to tell a dead
+worker from a slow one. Every failure in this run named its own cause: the startup step the
+worker reached, the harness wait that expired, the container that ran out of process slots,
+or the state check that refused. That part of the goal is met on every target kind. The
+remaining work is not about diagnosis any more; it is about the two local-Podman failures
+above actually not happening.
 
 ## Context and Orientation
 
