@@ -21,7 +21,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
-use super::{AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig};
+use super::{AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig};
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
@@ -126,18 +126,39 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // session, and for every sub-agent child, startup runs no Git command at
     // all: the capture exists solely to tell a later review what the turn
     // changed.
-    if !relay_state_exists && !checkpoint_only && config.review_capture {
+    let untracked_at_start = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    if !checkpoint_only && config.review_capture {
         super::record_startup_step(&root, "review-baseline");
-        let mut workspace_roots = vec![config.cwd.clone()];
-        workspace_roots.extend(config.additional_directories.iter().cloned());
-        tokio::task::spawn_blocking(move || {
-            let git = mj_checkpoint::archive::SystemGit;
-            let repositories =
-                crate::review::capture::discover_repositories(&git, &workspace_roots);
-            crate::review::capture::initialize_review_baselines(&git, &repositories)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("review baseline initialization stopped: {error}"))??;
+        let record = root.join(REVIEW_UNTRACKED_FILE);
+        let recorded = if relay_state_exists {
+            // A restart keeps the baseline it already has, so it must keep the
+            // untracked list that belongs to it rather than measuring against
+            // the tree as the restart finds it.
+            std::fs::read(&record)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        } else {
+            let mut workspace_roots = vec![config.cwd.clone()];
+            workspace_roots.extend(config.additional_directories.iter().cloned());
+            let recorded = tokio::task::spawn_blocking(move || {
+                let git = mj_checkpoint::archive::SystemGit;
+                let repositories =
+                    crate::review::capture::discover_repositories(&git, &workspace_roots);
+                crate::review::capture::initialize_review_baselines(&git, &repositories)
+            })
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("review baseline initialization stopped: {error}")
+            })??;
+            if let Ok(bytes) = serde_json::to_vec_pretty(&recorded) {
+                let _ = mj_core::config::atomic_write(&record, &bytes);
+            }
+            recorded
+        };
+        *untracked_at_start
+            .lock()
+            .expect("untracked-at-start lock poisoned") = recorded;
     }
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
@@ -323,6 +344,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         worker_executable: worker_executable.clone(),
         harness_runtime: config.harness_runtime,
         review_capture: config.review_capture,
+        untracked_at_start: untracked_at_start.clone(),
     }));
     // The review supervisor's dispatch tool talks to this worker over its own
     // socket inside the reviewer directory: an MCP server started by a harness

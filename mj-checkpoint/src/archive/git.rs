@@ -316,6 +316,128 @@ pub const REVIEW_CAPTURE_REF: &str = "refs/hel/review-capture";
 /// Ref pointing at the tree a completed review advanced its baseline to.
 pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
 
+/// What a capture starts from before the changed paths are staged on top.
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureBase<'a> {
+    /// The committed tree. Used for a session's starting baseline.
+    Head,
+    /// An earlier capture's tree. Used for a review of one turn's work.
+    Tree(&'a str),
+}
+
+/// Records `base` plus the current content of `paths` as a Git tree object and
+/// returns its id.
+///
+/// This is deliberately proportional to `paths` and not to the working tree.
+/// The scratch index is built with `read-tree`, so it has no stat cache and
+/// `git add` reads exactly the paths it is given: every other tracked file is
+/// carried over from `base` without being opened, and an untracked file that
+/// is not named is simply not in the tree. A capture of the whole working tree
+/// would instead hash every untracked file in it, which in a large workspace is
+/// hundreds of thousands of files and object writes.
+///
+/// The staging runs against a scratch index file named by `GIT_INDEX_FILE`, so
+/// the repository's real index, working tree and HEAD are untouched: after this
+/// call `git status` reports exactly what it reported before. `git add -A` with
+/// a pathspec records a deletion as a deletion, and honours the ignore rules,
+/// which is what makes two captures comparable as "what the agent changed".
+pub fn capture_paths(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: CaptureBase<'_>,
+    paths: &[PathBuf],
+) -> Result<String> {
+    let git_dir = git_text(runner, repository, ["rev-parse", "--absolute-git-dir"])
+        .context("locate the Git directory for a review capture")?;
+    let index = tempfile::Builder::new()
+        .prefix("hel-review-index-")
+        .tempfile_in(&git_dir)
+        .with_context(|| format!("create a scratch Git index in {git_dir}"))?;
+    // Git wants to create the index itself; an existing empty file is read as
+    // a corrupt index.
+    let index_path = index.into_temp_path();
+    std::fs::remove_file(&index_path).ok();
+    let scratch = [(
+        OsString::from("GIT_INDEX_FILE"),
+        index_path.as_os_str().to_os_string(),
+    )];
+    let tree = (|| -> Result<String> {
+        let base = match base {
+            CaptureBase::Tree(tree) => tree.to_owned(),
+            CaptureBase::Head => {
+                let head = run_git(
+                    runner,
+                    repository,
+                    ["rev-parse", "--verify", "--quiet", "HEAD"],
+                    &[],
+                )?;
+                ensure!(
+                    head.status == 0 || head.status == 1,
+                    "{}",
+                    git_failure("resolve capture HEAD", &head)
+                );
+                // An unborn branch has no tree to start from.
+                if head.status == 0 {
+                    "HEAD".to_owned()
+                } else {
+                    "--empty".to_owned()
+                }
+            }
+        };
+        git_success(
+            runner,
+            repository,
+            GitCommand {
+                arguments: ["read-tree", &base]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                stdin: Vec::new(),
+                env: scratch.to_vec(),
+            },
+            "initialize the scratch index",
+        )?;
+        if !paths.is_empty() {
+            let mut arguments: Vec<OsString> = ["add", "-A", "--"]
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+            arguments.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
+            git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments,
+                    stdin: Vec::new(),
+                    env: scratch.to_vec(),
+                },
+                "stage the changed paths into a scratch index",
+            )?;
+        }
+        let output = runner.run(
+            repository,
+            &GitCommand {
+                arguments: vec![OsString::from("write-tree")],
+                stdin: Vec::new(),
+                env: scratch.to_vec(),
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "{}",
+            git_failure("write the review capture tree", &output)
+        );
+        trim_output(&output.stdout, "decode the review capture tree id")
+    })();
+    // The scratch index is this capture's alone; leaving it behind would grow
+    // the git dir by one file per review.
+    let _ = std::fs::remove_file(&index_path);
+    let tree = tree?;
+    ensure!(!tree.is_empty(), "git write-tree produced no tree id");
+    pin_review_tree(runner, repository, REVIEW_CAPTURE_REF, &tree)?;
+    Ok(tree)
+}
+
 /// Records the working tree, tracked and untracked alike, as a Git tree object
 /// and returns its id.
 ///

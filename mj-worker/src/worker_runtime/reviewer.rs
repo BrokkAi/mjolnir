@@ -19,6 +19,7 @@
 //! be mistaken for one another. Each role also locks independently: launching
 //! a lane must not block the controller polling another role's journal.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -114,6 +115,13 @@ pub struct ReviewerPlacement {
     /// started without one cannot be reviewed: with no record of what the tree
     /// held before the turn, every file would be reported as new work.
     pub review_capture: bool,
+    /// Which untracked paths each repository already held at the point the
+    /// current baseline was taken. A review needs this to tell a file the turn
+    /// created from one that was already lying in the working tree, without
+    /// having read any of their contents at startup. It moves forward with the
+    /// baseline, so it is shared rather than copied.
+    pub untracked_at_start:
+        Arc<Mutex<BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>>>,
 }
 
 impl ReviewerPlacement {
@@ -567,11 +575,18 @@ impl ReviewerRole {
              needs `[review] profile` set in config.toml before it starts"
         );
         let repositories = self.review_repositories();
+        let untracked_at_start = self
+            .placement
+            .untracked_at_start
+            .lock()
+            .expect("untracked-at-start lock poisoned")
+            .clone();
         let repositories = tokio::task::spawn_blocking(move || {
             crate::review::capture::capture_repository_deltas(
                 &mj_checkpoint::archive::SystemGit,
                 &repositories,
                 &baselines,
+                &untracked_at_start,
             )
         })
         .await
@@ -586,11 +601,25 @@ impl ReviewerRole {
         &mut self,
         trees: std::collections::BTreeMap<PathBuf, String>,
     ) -> Result<RelayResponseBody> {
-        tokio::task::spawn_blocking(move || {
-            crate::review::capture::advance_baselines(&mj_checkpoint::archive::SystemGit, &trees)
+        // The untracked list has to move with the tree it belongs to, or the
+        // next review would report every file this turn created as new work
+        // all over again. Re-reading the state is one stat-walk per completed
+        // review, which is what the new capture costs anyway.
+        let repositories = self.review_repositories();
+        let refreshed = tokio::task::spawn_blocking(move || {
+            crate::review::capture::advance_baselines(&mj_checkpoint::archive::SystemGit, &trees)?;
+            crate::review::capture::read_untracked_at_start(
+                &mj_checkpoint::archive::SystemGit,
+                &repositories,
+            )
         })
         .await
         .map_err(|error| anyhow::anyhow!("the review baseline update stopped: {error}"))??;
+        *self
+            .placement
+            .untracked_at_start
+            .lock()
+            .expect("untracked-at-start lock poisoned") = refreshed;
         Ok(RelayResponseBody::Ok {
             payload: RelayResponsePayload::ReviewBaselineAdvanced,
         })

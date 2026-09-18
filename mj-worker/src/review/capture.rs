@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
-    GitCommandRunner, REVIEW_BASELINE_REF, capture_worktree_tree, diff_between_trees,
+    CaptureBase, GitCommandRunner, REVIEW_BASELINE_REF, capture_paths, diff_between_trees,
     pin_review_tree,
 };
 use mj_core::relay::RepoDelta;
@@ -23,11 +23,10 @@ pub fn capture_repository_deltas(
     git: &dyn GitCommandRunner,
     repositories: &[PathBuf],
     baselines: &BTreeMap<PathBuf, String>,
+    untracked_at_start: &BTreeMap<PathBuf, Vec<UntrackedEntry>>,
 ) -> Result<Vec<RepoDelta>> {
     let mut deltas = Vec::new();
     for root in repositories {
-        let current = capture_worktree_tree(git, root)
-            .with_context(|| format!("capture the working tree of {}", root.display()))?;
         // A controller baseline takes precedence: it is the point a completed
         // review recorded. The worker pin covers a new session before that
         // first review has a controller baseline, and also a fresh target
@@ -38,6 +37,23 @@ pub fn capture_repository_deltas(
             .filter(|tree| tree_exists(git, root, tree))
             .cloned()
             .or_else(|| pinned_review_baseline(git, root));
+        // Capture only what this turn could have changed. The tracked changes
+        // come straight from `git status`; an untracked path counts when it is
+        // new since the session started, or when its size or modification time
+        // moved. Everything else is carried over from the baseline tree
+        // without being read.
+        let state = read_workspace_state(git, root)?;
+        let empty = Vec::new();
+        let start = untracked_at_start.get(root).unwrap_or(&empty);
+        let mut changed = state.dirty_tracked.clone();
+        changed.extend(changed_untracked(start, &state.untracked));
+        // The capture starts from HEAD, not from the baseline tree, so a turn
+        // that committed its work is still visible: HEAD has moved, and the
+        // diff against the baseline shows the commit. Starting from the
+        // baseline would have carried the old content forward for every path
+        // that `git status` no longer calls dirty.
+        let current = capture_paths(git, root, CaptureBase::Head, &changed)
+            .with_context(|| format!("capture the changed paths of {}", root.display()))?;
         let patch = match &baseline {
             Some(baseline) => diff_between_trees(git, root, Some(baseline), &current)
                 .with_context(|| format!("diff the captured trees of {}", root.display()))?,
@@ -69,17 +85,26 @@ pub fn capture_repository_deltas(
 pub fn initialize_review_baselines(
     git: &dyn GitCommandRunner,
     repositories: &[PathBuf],
-) -> Result<()> {
+) -> Result<BTreeMap<PathBuf, Vec<UntrackedEntry>>> {
+    let mut untracked_at_start = BTreeMap::new();
     for root in repositories {
+        // The untracked list is recorded even when a baseline tree is already
+        // pinned: a restarted worker still has to know which untracked files
+        // predate it, or it would report all of them as this turn's work.
+        let state = read_workspace_state(git, root)?;
+        untracked_at_start.insert(root.clone(), state.untracked);
         if pinned_review_baseline(git, root).is_some() {
             continue;
         }
-        let current = capture_worktree_tree(git, root)
-            .with_context(|| format!("capture the startup worktree of {}", root.display()))?;
+        // The baseline is HEAD plus what the checkout was already dirty with.
+        // Untracked files are deliberately not in it; see `changed_untracked`
+        // for how a review still tells a new file from a pre-existing one.
+        let current = capture_paths(git, root, CaptureBase::Head, &state.dirty_tracked)
+            .with_context(|| format!("capture the startup baseline of {}", root.display()))?;
         pin_review_tree(git, root, REVIEW_BASELINE_REF, &current)
             .with_context(|| format!("pin the startup review baseline of {}", root.display()))?;
     }
-    Ok(())
+    Ok(untracked_at_start)
 }
 
 /// Returns the tree held by the worker's durable baseline ref, if it still
@@ -122,6 +147,18 @@ fn tree_exists(git: &dyn GitCommandRunner, repository: &Path, tree: &str) -> boo
         },
     )
     .is_ok_and(|output| output.status == 0)
+}
+
+/// Reads which untracked paths each repository holds right now, as the point a
+/// later review measures new files against.
+pub fn read_untracked_at_start(
+    git: &dyn GitCommandRunner,
+    repositories: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, Vec<UntrackedEntry>>> {
+    repositories
+        .iter()
+        .map(|root| Ok((root.clone(), read_workspace_state(git, root)?.untracked)))
+        .collect()
 }
 
 /// Pins each named tree as that repository's review baseline.
@@ -196,7 +233,9 @@ mod capture_tests {
     fn a_capture_reports_what_changed_since_the_baseline() {
         let temp = repository();
         let roots = vec![temp.path().to_path_buf()];
-        let first = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap();
         assert!(
             !has_changes(&first),
             "a repository with no baseline starts coverage rather than reviewing its whole history"
@@ -204,7 +243,8 @@ mod capture_tests {
         let baselines = captured_trees(&first);
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { retry(); }\n").unwrap();
-        let second = capture_repository_deltas(&SystemGit, &roots, &baselines).unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new()).unwrap();
         assert!(has_changes(&second));
         assert!(second[0].patch.contains("+fn main() { retry(); }"));
         assert_eq!(
@@ -224,7 +264,9 @@ mod capture_tests {
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
         std::fs::write(temp.path().join("new.rs"), "fn new() {}\n").unwrap();
 
-        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap();
         assert!(has_changes(&deltas));
         assert_eq!(deltas[0].baseline_tree.as_deref(), Some(startup.as_str()));
         assert!(deltas[0].patch.contains("+fn main() { first(); }"));
@@ -245,7 +287,9 @@ mod capture_tests {
         git(temp.path(), &["add", "tracked.rs"]);
         git(temp.path(), &["commit", "-qm", "turn change"]);
 
-        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+fn main() { committed(); }"));
     }
@@ -257,11 +301,14 @@ mod capture_tests {
         initialize_review_baselines(&SystemGit, &roots).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { first(); }\n").unwrap();
-        let first = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap();
         let persisted = captured_trees(&first);
 
         std::fs::write(temp.path().join("tracked.rs"), "fn main() { second(); }\n").unwrap();
-        let second = capture_repository_deltas(&SystemGit, &roots, &persisted).unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &persisted, &BTreeMap::new()).unwrap();
         assert!(has_changes(&second));
         assert_eq!(second[0].baseline_tree, persisted.values().next().cloned());
         assert!(second[0].patch.contains("+fn main() { second(); }"));
@@ -274,12 +321,14 @@ mod capture_tests {
         let roots = vec![temp.path().to_path_buf()];
         std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\n").unwrap();
         std::fs::write(temp.path().join("preexisting.rs"), "already here\n").unwrap();
-        initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
 
         std::fs::write(temp.path().join("tracked.rs"), "base\nbefore\nafter\n").unwrap();
         std::fs::write(temp.path().join("agent.rs"), "new work\n").unwrap();
 
-        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
+                .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+after"));
         assert!(!deltas[0].patch.contains("+before"));
@@ -301,7 +350,9 @@ mod capture_tests {
             Some(startup.as_str())
         );
 
-        let deltas = capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new()).unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap();
         assert!(has_changes(&deltas));
         assert!(deltas[0].patch.contains("+fn main() { pending(); }"));
     }
@@ -317,7 +368,8 @@ mod capture_tests {
             temp.path().to_path_buf(),
             "0123456789abcdef0123456789abcdef01234567".to_string(),
         )]);
-        let deltas = capture_repository_deltas(&SystemGit, &roots, &stale).unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &stale, &BTreeMap::new()).unwrap();
         assert!(!has_changes(&deltas));
         assert_eq!(deltas[0].baseline_tree, None);
         assert!(!deltas[0].current_tree.is_empty());
@@ -340,4 +392,219 @@ mod capture_tests {
             "two roots inside one repository collapse, and a missing one is skipped: {discovered:?}"
         );
     }
+
+    /// Counts the loose objects in a repository, which is how much this
+    /// repository grew.
+    fn loose_objects(repository: &Path) -> usize {
+        let objects = repository.join(".git/objects");
+        let Ok(entries) = std::fs::read_dir(&objects) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .sum()
+    }
+
+    /// The cost of a capture must be the session's own changes, not the size
+    /// of the working tree. This is #1065: a workspace with hundreds of
+    /// thousands of untracked files made every session start read, hash and
+    /// store every one of them before the worker could be reached.
+    #[test]
+    fn a_startup_baseline_does_not_read_untracked_files_it_was_not_asked_about() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        for index in 0..200 {
+            std::fs::write(
+                temp.path().join(format!("untracked-{index}.bin")),
+                format!("content {index}"),
+            )
+            .unwrap();
+        }
+        let before = loose_objects(temp.path());
+
+        initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        // One tree object for the baseline. Two hundred untracked files cost
+        // nothing, because nothing opened them.
+        let written = loose_objects(temp.path()) - before;
+        assert!(
+            written <= 2,
+            "a clean checkout's baseline wrote {written} objects; it must not stage untracked files"
+        );
+    }
+
+    /// A review captures what the turn changed and nothing else, so the same
+    /// untouched untracked files stay unread at review time too.
+    #[test]
+    fn a_review_capture_costs_the_turns_changes_and_not_the_tree() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        for index in 0..200 {
+            std::fs::write(
+                temp.path().join(format!("untracked-{index}.bin")),
+                format!("content {index}"),
+            )
+            .unwrap();
+        }
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+        let before = loose_objects(temp.path());
+
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() { changed(); }\n").unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
+                .unwrap();
+
+        assert!(has_changes(&deltas));
+        assert!(deltas[0].patch.contains("+fn main() { changed(); }"));
+        assert!(
+            !deltas[0].patch.contains("untracked-7.bin"),
+            "an untouched untracked file is not this turn's work: {}",
+            deltas[0].patch
+        );
+        // One blob for the changed file plus one tree; the 200 untracked files
+        // are neither read nor stored.
+        let written = loose_objects(temp.path()) - before;
+        assert!(
+            written <= 3,
+            "the review capture wrote {written} objects for a one-file change"
+        );
+    }
+
+    /// An untracked file the turn created is this turn's work and must be in
+    /// the review, which is what the recorded start list makes possible.
+    #[test]
+    fn a_review_reports_an_untracked_file_the_turn_created() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        std::fs::write(temp.path().join("already.txt"), "was here\n").unwrap();
+        let untracked_at_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("made.txt"), "the agent made this\n").unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &untracked_at_start)
+                .unwrap();
+
+        assert!(deltas[0].patch.contains("made.txt"), "{}", deltas[0].patch);
+        assert!(
+            !deltas[0].patch.contains("already.txt"),
+            "{}",
+            deltas[0].patch
+        );
+    }
+}
+
+/// One untracked path as it stood when the session started.
+///
+/// Size and modification time, not content: recording the content of every
+/// untracked file is exactly the cost this design exists to avoid. They are
+/// enough to tell, at review time, a file the turn created from one that was
+/// already there, and one the turn changed from one it left alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UntrackedEntry {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified_ms: i64,
+}
+
+/// What `git status` says about one repository, split into the two sets a
+/// capture needs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkspaceState {
+    /// Tracked paths that differ from HEAD, staged or not, including deletions.
+    pub dirty_tracked: Vec<PathBuf>,
+    /// Untracked, non-ignored paths.
+    pub untracked: Vec<UntrackedEntry>,
+}
+
+/// Reads the two sets from one `git status`.
+///
+/// This is a stat-walk: one `stat` per tracked file and a `readdir` per
+/// directory. It reads no file contents, which is what separates it from a
+/// capture and is why it is affordable on a very large working tree.
+pub fn read_workspace_state(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+) -> Result<WorkspaceState> {
+    let output = git
+        .run(
+            repository,
+            &mj_checkpoint::archive::GitCommand {
+                arguments: vec![
+                    "status".into(),
+                    "--porcelain=v1".into(),
+                    "--untracked-files=all".into(),
+                    "--no-renames".into(),
+                    "-z".into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )
+        .with_context(|| format!("read the status of {}", repository.display()))?;
+    anyhow::ensure!(
+        output.status == 0,
+        "reading the status of {} failed with status {}: {}",
+        repository.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let mut state = WorkspaceState::default();
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        // `XY <path>`: two status letters, a space, then the path.
+        let Some(path) = record.get(3..) else {
+            continue;
+        };
+        let path = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+        if record[0] == b'?' && record[1] == b'?' {
+            let metadata = repository.join(&path).metadata().ok();
+            state.untracked.push(UntrackedEntry {
+                path,
+                size: metadata.as_ref().map_or(0, std::fs::Metadata::len),
+                modified_ms: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| {
+                        modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .and_then(|since| i64::try_from(since.as_millis()).ok())
+                    })
+                    .unwrap_or_default(),
+            });
+        } else if record[0] != b'!' {
+            state.dirty_tracked.push(path);
+        }
+    }
+    Ok(state)
+}
+
+/// The untracked paths a turn added or changed, judged against how the
+/// repository looked when the session started.
+///
+/// A file that is in both lists with the same size and modification time was
+/// not touched, so it stays out of the capture and out of the review.
+fn changed_untracked(start: &[UntrackedEntry], now: &[UntrackedEntry]) -> Vec<PathBuf> {
+    let before: std::collections::HashMap<&Path, &UntrackedEntry> = start
+        .iter()
+        .map(|entry| (entry.path.as_path(), entry))
+        .collect();
+    now.iter()
+        .filter(|entry| {
+            before
+                .get(entry.path.as_path())
+                .is_none_or(|was| was.size != entry.size || was.modified_ms != entry.modified_ms)
+        })
+        .map(|entry| entry.path.clone())
+        .collect()
 }

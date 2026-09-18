@@ -84,6 +84,10 @@ pub const WORKER_PID_FILE: &str = "worker.pid";
 pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
+/// File in which a worker records which untracked paths each repository held
+/// when its review baseline was taken, so a restart measures new files against
+/// the same point the baseline belongs to.
+pub const REVIEW_UNTRACKED_FILE: &str = "review-untracked.json";
 pub const RELAY_ACTIVE_SEGMENT: &str = "active.jsonl";
 pub const RELAY_SEGMENT_BYTE_LIMIT: u64 = 1024 * 1024;
 /// Journal bytes a restart may have to replay before the snapshot is rewritten.

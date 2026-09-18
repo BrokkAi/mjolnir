@@ -5569,7 +5569,10 @@ fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path();
     git(repository, &["init", "-q", "."]);
-    git(repository, &["config", "user.email", "test@example.invalid"]);
+    git(
+        repository,
+        &["config", "user.email", "test@example.invalid"],
+    );
     git(repository, &["config", "user.name", "Test"]);
     std::fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
     git(repository, &["add", "tracked.txt"]);

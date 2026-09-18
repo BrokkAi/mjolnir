@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use mj_core::config::HarnessKind;
 
-pub use mj_core::relay::{WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE};
+pub use mj_core::relay::{
+    REVIEW_UNTRACKED_FILE, WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE,
+};
 
 /// Record which startup step this worker is on, in `worker-startup.json` in
 /// the worker root.
