@@ -207,6 +207,29 @@ pub(super) async fn reconcile_profile(
     outcomes.into_values().collect()
 }
 
+/// The skills tree this session should converge to.
+///
+/// A session that owns its profile home also gets Mjolnir's managed skills,
+/// exactly as launch staging writes them. A session that runs out of the
+/// user's own harness home gets the user's tree alone, so a sync never
+/// installs Mjolnir-authored files into that home.
+pub(super) fn canonical_session_skills(
+    target: &CredentialSyncTarget,
+) -> Result<mj_core::skills::SkillsArchive> {
+    let collect = if target.owns_profile_home {
+        mj_core::skills::session_skills
+    } else {
+        mj_core::skills::collect_skills
+    };
+    collect(target.harness, &target.profile_home).with_context(|| {
+        format!(
+            "collect canonical skills for profile {} from {}",
+            target.profile_id,
+            target.profile_home.display()
+        )
+    })
+}
+
 /// Returns every action taken; an empty list means the copies already agree.
 pub(super) async fn reconcile_session(
     target: &CredentialSyncTarget,
@@ -214,14 +237,7 @@ pub(super) async fn reconcile_session(
 ) -> Result<Vec<CredentialSyncAction>> {
     let canonical_path = harness_authentication_marker(target.harness, &target.profile_home);
     let (canonical, canonical_bytes) = read_credential_file(target.harness, &canonical_path)?;
-    let canonical_skills = mj_core::skills::collect_skills(target.harness, &target.profile_home)
-        .with_context(|| {
-            format!(
-                "collect canonical skills for profile {} from {}",
-                target.profile_id,
-                target.profile_home.display()
-            )
-        })?;
+    let canonical_skills = canonical_session_skills(target)?;
     let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
     let result = reconcile_connected(
         &mut client,

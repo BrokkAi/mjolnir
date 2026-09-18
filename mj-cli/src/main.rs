@@ -1839,4 +1839,60 @@ mod tests {
         );
         assert!(controller.state.sessions.contains_key(session_id));
     }
+
+    /// The `mj` skill Mjolnir installs into every session it owns the profile
+    /// home for names CLI commands. A renamed or hidden command would leave
+    /// the skill telling agents to run something that does not exist.
+    #[test]
+    fn the_managed_mj_skill_names_only_visible_subcommands() {
+        use clap::CommandFactory;
+
+        let skill = mj_core::skills::managed_skills(mj_core::config::HarnessKind::Claude)
+            .into_iter()
+            .find(|entry| entry.path.ends_with("/mj/SKILL.md"))
+            .expect("the managed mj skill is embedded in mj-core");
+        let text = String::from_utf8(skill.bytes).expect("the skill is UTF-8");
+        let root = Cli::command();
+        let mut checked = 0usize;
+        let mut fenced = false;
+        for line in text.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            for span in line.split('`').skip(1).step_by(2) {
+                let mut words = span.split_whitespace();
+                if words.next() != Some("mj") {
+                    continue;
+                }
+                let mut command = &root;
+                let mut named = "mj".to_string();
+                for word in words {
+                    if word.starts_with('-') || word.starts_with('<') {
+                        break;
+                    }
+                    let found = command
+                        .get_subcommands()
+                        .find(|sub| sub.get_name() == word)
+                        .unwrap_or_else(|| {
+                            panic!("the mj skill names `{named} {word}`, which is not a subcommand")
+                        });
+                    assert!(
+                        !found.is_hide_set(),
+                        "the mj skill names the hidden command `{named} {word}`"
+                    );
+                    named = format!("{named} {word}");
+                    command = found;
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 15,
+            "only {checked} command names were checked; the skill or this parse is wrong"
+        );
+    }
 }

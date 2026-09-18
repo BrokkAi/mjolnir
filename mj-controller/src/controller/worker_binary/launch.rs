@@ -76,6 +76,7 @@ impl Controller {
                 "profile staging completed"
             );
             result?;
+            stage_managed_skills(profile.kind, &profile_stage)?;
             stage_codex_catalog(
                 &session.last_profile,
                 profile,

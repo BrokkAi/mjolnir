@@ -312,6 +312,21 @@ pub(super) async fn wiki_search(
     Ok(Json(page))
 }
 
+/// What the index knows about one session, including whether Mjolnir still
+/// has a record of it. 404 when the index holds no session with that id.
+pub(super) async fn wiki_session(
+    State(state): State<ServerState>,
+    Path(wiki_id): Path<String>,
+) -> Result<Json<mj_client::daemon::WikiSessionInfo>, ApiFailure> {
+    let backend = backend(&state)?.clone();
+    let info = backend
+        .wiki_session(wiki_id.clone())
+        .await
+        .map_err(|error| ApiFailure::unavailable(format!("SessionWiki lookup failed: {error:#}")))?
+        .ok_or_else(|| ApiFailure::not_found(format!("no indexed session {wiki_id}")))?;
+    Ok(Json(info))
+}
+
 pub(super) async fn wiki_brief(
     State(state): State<ServerState>,
     Path(wiki_id): Path<String>,

@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 
 use crate::config::HarnessKind;
 
+mod managed;
+
+pub use managed::managed_skills;
+
 /// Skills archives travel base64-encoded inside an 8 MiB relay frame. The cap
 /// keeps the encoded payload, envelope, and a credential payload comfortably
 /// inside one frame each way.
@@ -153,6 +157,44 @@ pub fn collect_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
     if encoded.len() > MAX_SKILLS_ARCHIVE_BYTES {
         bail!(
             "skills tree under {} encodes to {} bytes, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
+            home.display(),
+            encoded.len()
+        );
+    }
+    Ok(archive)
+}
+
+/// The skills tree a session gets: the user's own skills from `home`, plus the
+/// skills Mjolnir manages.
+///
+/// A managed entry replaces a user entry at the same path, so the session
+/// always runs Mjolnir's copy of a managed skill. Launch staging and the
+/// credential-sync push both compute the tree this way; if they disagreed, the
+/// first reconciliation after launch would wipe whatever the other installed.
+pub fn session_skills(kind: HarnessKind, home: &Path) -> Result<SkillsArchive> {
+    let collected = collect_skills(kind, home)?;
+    let mut entries = collected.entries;
+    for entry in managed_skills(kind) {
+        match entries.binary_search_by(|existing| existing.path.cmp(&entry.path)) {
+            Ok(index) => {
+                tracing::warn!(
+                    path = %entry.path,
+                    home = %home.display(),
+                    "a user skill has the path of a Mjolnir-managed skill; the managed skill replaces it"
+                );
+                entries[index] = entry;
+            }
+            Err(index) => entries.insert(index, entry),
+        }
+    }
+    if entries.len() > MAX_SKILLS_FILES {
+        bail!("skills tree has more than {MAX_SKILLS_FILES} files");
+    }
+    let archive = SkillsArchive { entries };
+    let encoded = archive.encode();
+    if encoded.len() > MAX_SKILLS_ARCHIVE_BYTES {
+        bail!(
+            "skills tree under {} encodes to {} bytes with managed skills, above the {MAX_SKILLS_ARCHIVE_BYTES} byte limit",
             home.display(),
             encoded.len()
         );
@@ -427,6 +469,78 @@ mod tests {
         );
         assert!(first.state().present);
         assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn managed_skills_are_installable_archive_entries() {
+        for kind in HarnessKind::ALL {
+            let entries = managed_skills(kind);
+            assert_eq!(entries.len(), 3, "{kind:?}");
+            let prefix = kind.synced_skill_dirs()[0];
+            for entry in &entries {
+                validate_archive_path(&entry.path).expect(&entry.path);
+                assert!(entry.path.starts_with(&format!("{prefix}/")), "{entry:?}");
+                assert!(entry.bytes.len() as u64 <= MAX_SKILLS_FILE_BYTES);
+                assert!(
+                    entry.bytes.starts_with(b"---\nname: "),
+                    "{} needs skill frontmatter",
+                    entry.path
+                );
+            }
+            // The install path only writes what `decode` accepts, so the
+            // managed set has to survive a round trip on its own.
+            let archive = SkillsArchive {
+                entries: entries.clone(),
+            };
+            let encoded = archive.encode();
+            assert!(encoded.len() <= MAX_SKILLS_ARCHIVE_BYTES);
+            assert_eq!(SkillsArchive::decode(&encoded).unwrap(), archive);
+        }
+    }
+
+    #[test]
+    fn session_skills_of_an_empty_home_is_the_managed_set() {
+        let home = tempfile::tempdir().unwrap();
+        let archive = session_skills(HarnessKind::Claude, home.path()).unwrap();
+        assert_eq!(archive.entries(), managed_skills(HarnessKind::Claude));
+        assert!(archive.state().present);
+        // Collection is unchanged: it still reports the user tree alone.
+        assert!(
+            collect_skills(HarnessKind::Claude, home.path())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_managed_skill_replaces_a_user_skill_with_the_same_path() {
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            "skills/mj/SKILL.md",
+            b"the user's own mj skill",
+        );
+        write(home.path(), "skills/review/SKILL.md", b"review");
+
+        let archive = session_skills(HarnessKind::Codex, home.path()).unwrap();
+        let managed = managed_skills(HarnessKind::Codex);
+        let mine = archive
+            .entries()
+            .iter()
+            .find(|entry| entry.path == "skills/mj/SKILL.md")
+            .unwrap();
+        assert_eq!(mine, &managed[0]);
+        // The user's unrelated skill is kept, and nothing is duplicated.
+        assert!(
+            archive
+                .entries()
+                .iter()
+                .any(|entry| entry.path == "skills/review/SKILL.md" && entry.bytes == b"review")
+        );
+        assert_eq!(archive.entries().len(), managed.len() + 1);
+        let mut sorted = archive.entries().to_vec();
+        sorted.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(sorted, archive.entries());
     }
 
     #[test]

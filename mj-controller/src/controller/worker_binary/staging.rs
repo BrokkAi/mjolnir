@@ -122,6 +122,28 @@ pub(super) fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &
     })
 }
 
+/// Write Mjolnir's managed skills into a staged profile home.
+///
+/// This is the launch half of the invariant that
+/// [`mj_core::skills::session_skills`] defines: a managed skill overwrites a
+/// user skill at the same path, so the staged tree fingerprints the same as
+/// the archive the first credential sync pushes and nothing is wiped.
+pub(super) fn stage_managed_skills(
+    kind: mj_core::config::HarnessKind,
+    profile_stage: &Path,
+) -> Result<()> {
+    for entry in mj_core::skills::managed_skills(kind) {
+        let path = profile_stage.join(&entry.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create staged skills directory {}", parent.display()))?;
+        }
+        atomic_write(&path, &entry.bytes)
+            .with_context(|| format!("write managed skill {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Write the enforcement table's staged setting, if the harness has one. Muse
 /// composes a session's permission profile from its settings file and nothing
 /// on the ACP wire overrides that choice, so the profile has to be staged.

@@ -379,6 +379,18 @@ The sync has protective limits:
 - 1024 files maximum; and
 - no symbolic-link traversal.
 
+### Managed skills
+
+Mjolnir also installs three skills of its own into every session whose harness
+home belongs to the session: `mj` (driving Mjolnir sessions from an agent),
+`recall` (finding and reading earlier sessions), and `provenance` (finding
+which sessions changed a file). They are written at launch and merged into the
+tree pushed on every reconciliation, so they do not disappear after the first
+sync. A user skill with one of those three paths is replaced by the managed
+copy. Sessions that run out of your own harness home instead of a
+Mjolnir-managed one never receive them, so your own `skills/` directory is left
+alone.
+
 The destination tree is replaced atomically. Removing the controller-side
 `skills/` directory therefore removes the synced tree on the next successful
 reconciliation. Other allowlisted directories such as harness plugins are

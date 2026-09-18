@@ -171,7 +171,8 @@ mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
 mj close --session <id> [--force] [--delete-branch]
-mj resume --session <id> [--profile <id>] [--target <id>] [--workspace-id <id>]
+mj resume (--session <id> | --wiki <sessionwiki-id>)
+          [--profile <id>] [--target <id>] [--workspace-id <id>]
           [--queue start|discard] [--json]
 mj cancel-turn --session <id>
 mj api-info [--json]
@@ -200,6 +201,25 @@ supplies the profile, the target, and the workspace, so `mj resume --session
 <id>` is the whole command for continuing where you left off. `--profile` and
 `--target` resume somewhere else, and `--queue` decides whether prompts queued
 when the session stopped are started or discarded (`start` by default).
+
+`mj resume --wiki <sessionwiki-id>` continues a session found in the
+SessionWiki index, whoever ran it, so an agent that searched for earlier work
+does not have to decide what kind of row it found. Mjolnir takes one of three
+branches and says which one it took. A Mjolnir session it still has a record of
+is resumed exactly as `--session` resumes it. A Mjolnir session whose record the
+archive job destroyed is restored: a new session starts with a compacted
+hand-off from the indexed transcript, using `--profile` and `--target` when
+given and the profile and target recorded in the index otherwise. Another tool's
+session (Claude Code, Codex, Kimi Code, Grok Build, Muse) is imported from that
+harness's own home and then resumed, which needs the session to still be there;
+the error names the indexed path so you can import it by hand if it is not.
+`--wiki` and `--session` are mutually exclusive, and `--json` answers with
+`action` (`resume`, `restore` or `import`), `session_id` and `wiki_id`.
+
+`mj sessions --session <id>` accepts a SessionWiki id too. An id that names no
+Mjolnir session is looked up in the index and reported as `mine`, `archived` or
+`native`, with the tool, the indexed path and the Mjolnir session id when there
+is one, so an agent can explain what it found before it continues it.
 
 The command answers as soon as the daemon has taken the session, because
 restoring an archive takes minutes. Follow it with `mj wait --session <id>`,

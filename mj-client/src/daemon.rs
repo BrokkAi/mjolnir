@@ -154,6 +154,46 @@ pub struct WikiHitTranscript {
     pub omitted_after: usize,
 }
 
+/// What one indexed session is, as far as continuing it is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WikiSessionStatus {
+    /// A Mjolnir session this daemon still has a record of.
+    Mine,
+    /// A Mjolnir session whose record the archive job destroyed; only the
+    /// indexed transcript is left.
+    Archived,
+    /// Another tool's session, which Mjolnir would have to import.
+    Native,
+}
+
+/// One row of the SessionWiki index, with what Mjolnir knows about it.
+///
+/// This is what `mj resume --wiki` branches on and what `mj sessions
+/// --session` reports when the id names no Mjolnir session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WikiSessionInfo {
+    /// The SessionWiki id of the row.
+    pub wiki_id: String,
+    /// The tool that produced the session, as SessionWiki names it.
+    pub tool: String,
+    /// The transcript path the index stores for the row.
+    pub path: PathBuf,
+    pub status: WikiSessionStatus,
+    /// The Mjolnir session id, for a row Mjolnir itself published.
+    pub mjolnir_session_id: Option<String>,
+    /// The profile the session last ran under, from the index's own tags.
+    pub profile_id: Option<String>,
+    /// The target template the session ran on, from the index's own tags.
+    pub target_template_id: Option<String>,
+    /// The harness that drove the session, from the tags for a Mjolnir row and
+    /// from the tool name for a native one.
+    pub harness: Option<mj_core::config::HarnessKind>,
+    pub title: String,
+    pub project: String,
+}
+
 /// Start a new session carrying a compacted hand-off from an archived one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -444,6 +484,10 @@ pub enum DaemonAction {
         context_messages: usize,
         per_message_chars: usize,
     },
+    /// What one indexed session is, and what continuing it would mean.
+    WikiSession {
+        wiki_id: String,
+    },
     /// Start a new session from an archived one's transcript.
     WikiRestore(WikiRestoreRequest),
     ScanRecovery {
@@ -606,6 +650,7 @@ pub enum DaemonReply {
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
     WikiHits(Option<WikiHitTranscript>),
+    WikiSession(Option<Box<WikiSessionInfo>>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
     Done,
 }
@@ -1260,6 +1305,15 @@ impl DaemonClient {
         {
             DaemonReply::WikiHits(transcript) => Ok(transcript),
             reply => bail!("unexpected SessionWiki hits reply {reply:?}"),
+        }
+    }
+
+    /// What the index knows about one session, or `None` when the index holds
+    /// no session with that id.
+    pub async fn wiki_session(&mut self, wiki_id: String) -> Result<Option<WikiSessionInfo>> {
+        match self.request(DaemonAction::WikiSession { wiki_id }).await? {
+            DaemonReply::WikiSession(info) => Ok(info.map(|info| *info)),
+            reply => bail!("unexpected SessionWiki session reply {reply:?}"),
         }
     }
 
