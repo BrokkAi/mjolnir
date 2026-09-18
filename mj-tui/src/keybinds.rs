@@ -141,6 +141,8 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::ContainerSettings => CommandId::ContainerSettings,
         KeyAction::ManageProfiles => CommandId::ManageProfiles,
         KeyAction::ManageTargets => CommandId::ManageTargets,
+        KeyAction::ManageMachines => CommandId::ManageMachines,
+        KeyAction::RestartDaemon => CommandId::RestartDaemon,
         KeyAction::ChangeGoSetup => CommandId::ChangeGoSetup,
         KeyAction::CycleSpinner => CommandId::CycleSpinner,
     }

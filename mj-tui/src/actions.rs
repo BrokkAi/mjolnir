@@ -619,8 +619,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Add SSH hosts or EC2 launch templates and edit their shared settings.",
         scope: Scope::Settings,
         pane_keys: &[],
-        // The palette reaches this page; it has no key binding of its own.
-        action: None,
+        // Unbound by default like its siblings; `[keys] manage_machines`
+        // binds it.
+        action: Some(KeyAction::ManageMachines),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -777,12 +778,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Restart the Mjolnir daemon",
         description: "Stop the background daemon and start one from this build, then report which build came up.",
         scope: Scope::Global,
-        // Restarting the daemon is rare and disruptive, so it is reachable
-        // from the palette rather than from a key that could be hit by
-        // accident. It is always offered: the daemon being gone is exactly
-        // when it is needed, and that is also when nothing can be asked.
+        // Restarting the daemon is rare and disruptive, so it has no default
+        // key; `[keys] restart_daemon` binds one. It is always offered: the
+        // daemon being gone is exactly when it is needed, and that is also
+        // when nothing can be asked.
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::RestartDaemon),
         footer: no_footer,
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
@@ -1036,12 +1037,22 @@ impl DashboardState {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
-            CommandId::RestartSession => self
-                .selected_session()
-                .map(|s| DashboardAction::RestartSession {
-                    session_id: s.id.clone(),
-                })
-                .unwrap_or(DashboardAction::None),
+            CommandId::RestartSession => {
+                let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+                    return DashboardAction::None;
+                };
+                // Mid-turn work is lost by a restart, so that case asks first;
+                // an idle session restarts at once.
+                if self.attention_level(&session_id) == crate::AttentionLevel::Working {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                            session_id,
+                            restart: true,
+                        }));
+                    return DashboardAction::None;
+                }
+                DashboardAction::RestartSession { session_id }
+            }
             CommandId::ResumeDialog => DashboardAction::OpenResumeDialog,
             CommandId::Palette => {
                 self.begin_palette();
@@ -1087,6 +1098,19 @@ impl DashboardState {
                         crate::Mode::Confirm(ConfirmDialog::new(Confirmation::StopWithSubagents {
                             session_id,
                             count: active_children,
+                        }));
+                    return DashboardAction::None;
+                }
+                // A retry of a failed stop and a stop of an idle session run
+                // at once; only stopping an agent mid-turn asks first, because
+                // that is the case where a mis-click costs work.
+                if self.transition_failure_kind(&session_id).is_none()
+                    && self.attention_level(&session_id) == crate::AttentionLevel::Working
+                {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                            session_id,
+                            restart: false,
                         }));
                     return DashboardAction::None;
                 }

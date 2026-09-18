@@ -2871,3 +2871,124 @@ fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
         .expect("Recent heading");
     assert!(lines[recent + 1].contains("Mark all read"), "{lines:#?}");
 }
+
+#[test]
+fn stop_and_restart_ask_only_while_the_agent_is_working() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    // Idle: both run at once.
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::StopSession),
+        DashboardAction::Close {
+            session_id: "session-1".into()
+        }
+    );
+    // Working: both ask, and the letter for the second button answers.
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    assert_eq!(
+        dashboard.attention_level("session-1"),
+        AttentionLevel::Working
+    );
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::StopSession),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Stop while working?")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("c Cancel") && line.contains("s Stop now")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('s'))),
+        DashboardAction::Close {
+            session_id: "session-1".into()
+        }
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::RestartSession),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('c'))),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn every_confirmation_button_answers_a_unique_letter() {
+    use crate::dialogs::render::confirmation_accelerators;
+    assert_eq!(
+        confirmation_accelerators(&["No", "Yes", "Yes, delete branch"]),
+        ['n', 'y', 'd']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Cancel", "Confirm"]),
+        ['c', 'o']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Dismiss", "Open transcript", "Open settings"]),
+        ['d', 'o', 's']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Cancel", "Force stop", "Retry stop"]),
+        ['c', 'f', 'r']
+    );
+
+    // The delete dialog's third button is reachable by its letter.
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    dashboard.dispatch_command(CommandId::ForceDestroySession);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("d Yes, delete branch")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('d'))),
+        DashboardAction::ForceDestroy {
+            session_id: "session-1".into(),
+            delete_branch: true
+        }
+    );
+}
+
+#[test]
+fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    chord(&mut dashboard, CommandId::Help);
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Char('x')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()),
+        "{:?}",
+        dashboard.mode
+    );
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+
+    dashboard.set_notice("Something happened.");
+    assert!(dashboard.notices.current().is_some());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.notices.current(), None);
+}

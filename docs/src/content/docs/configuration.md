@@ -193,10 +193,12 @@ The default bindings:
 | `container_settings` | unbound | Edit container settings for the selected session |
 | `manage_profiles` | unbound | Open profile management |
 | `manage_targets` | unbound | Open target management |
+| `manage_machines` | unbound | Open machine management |
+| `restart_daemon` | unbound | Restart the Mjolnir daemon |
 | `change_go_setup` | unbound | Change the `mj go` fast-start setup |
 | `cycle_spinner` | unbound | Cycle the activity spinner style |
 
-The last nine actions are unbound by default because they are destructive or
+The last eleven actions are unbound by default because they are destructive or
 infrequent enough that a mis-hit key should not run them; use the command
 palette (`prefix+:`) instead, or bind them here.
 

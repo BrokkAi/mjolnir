@@ -17,10 +17,10 @@ Milestone numbers match the "Plan of Work" section.
 - [x] (2026-09-18 21:30Z) M1 Attention routing: `prefix+o` next-attention command, `prefix+shift+o` previous, `[advanced] session_order = "priority"`, attention badges on workspace tabs and folded project headings. Documented in terminal-surface, sessions, and configuration pages.
 - [x] (2026-09-18 23:10Z) M2 Notifications: `[notify]` config (mode off/terminal/system, bell, delay, title), BEL and window title from the terminal loop after each frame, macOS/Linux desktop notification via `osascript`/`notify-send` off the loop, suppression for the visible session, Setup section under Display, documented in configuration and terminal-surface pages.
 - [x] (2026-09-19 00:20Z) M3 Finding things: `/` search in the Sessions pane with `b w i d a` state letters and an empty-result hint, fuzzy palette ranking (prefix, then in-order label match scored by word starts and adjacency, then description) with a Recent group of the last five commands, Create/Resume/Workspaces listed in the palette. Naming: left as is (see Decision Log); the Manage runtimes description now says "target" so either word finds it.
-- [ ] M4 Keyboard consistency: tmux/screen prefix collision notice, letter accelerators on every confirmation, bindable Manage machines and Restart daemon, confirmation for Stop and Restart, single-Esc exit from help filter, Esc on a pane clears the notice.
+- [x] (2026-09-19 01:30Z) M4 Keyboard consistency: one-time tmux/screen prefix collision notice (client-hints.json beside config.toml), a letter for every confirmation button derived from its label and printed under the text, `manage_machines` and `restart_daemon` bindable, Stop and Restart ask only while the agent is mid-turn, Esc closes help when its filter is empty, Esc on a pane clears the notice. The first-launch prefix hint from M7 landed here too because it shares the hints store.
 - [ ] M5 Per-session context: git branch and ahead/behind on session rows, `prefix+d` changed-files overlay, context-window usage per session when the harness reports it.
 - [ ] M6 Layout and terminal integration: notice history overlay and stacked failure notices, `NO_COLOR` plus ASCII symbol set, stacked narrow layout under 80 columns, read-only second transcript column at 160 columns or more.
-- [ ] M7 Onboarding and docs: first-launch prefix hint, Terminal surface page corrections, documentation for every new key and setting.
+- [ ] M7 Onboarding and docs: Terminal surface page corrections (remaining: the Commands-button drift). The first-launch prefix hint landed in M4; per-feature docs landed with each milestone.
 
 ## Surprises & Discoveries
 
@@ -54,6 +54,12 @@ Milestone numbers match the "Plan of Work" section.
 - Decision: "Runtimes" (Setup, `[targets.<id>]`) and "Targets" (the pane, the docs page) stay as they are.
   Rationale: The docs define a target as a runtime on a machine, and Setup edits the runtime half; renaming either would break that model and every doc page that uses it. The findability problem is solved by fuzzy palette search over label and description, and the Manage runtimes description now contains the word target.
   Date/Author: 2026-09-18, Claude.
+- Decision: Stop and Restart confirm only when the session's attention level is Working; an idle session and a retry of a failed stop run at once.
+  Rationale: The review called the asymmetry with Delete a rough edge, but a confirmation on every Stop would tax the deliberate palette action that the palette-only access already protects. The case a mis-click costs something is an agent mid-turn, so that is the case that asks.
+  Date/Author: 2026-09-19, Claude.
+- Decision: One-time hints are a JSON file beside `config.toml`, not rows in the daemon database.
+  Rationale: They belong to the person's terminal habits, need no migration classification, and reset with a fresh configuration directory.
+  Date/Author: 2026-09-19, Claude.
 - Decision: The Sessions pane search is a live filter (rows disappear as you type) rather than a separate navigator dialog.
   Rationale: The dashboard has one screen by design (`mj-tui/src/combined.rs:1-6`); an extra modal for search would contradict that. State-letter filters (`a` all, `b` blocked, `w` working, `i` idle, `d` done) work the same way as Herdr's navigator so the vocabulary carries over.
   Date/Author: 2026-09-18, Claude.
@@ -219,6 +225,7 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-19: M4 complete. Confirmation letters come from one table (`confirmation_accelerators`) and are printed by `confirmation_key_line`, replacing the hand-written `Y: Yes N / Esc: No` line.
 - 2026-09-19: M3 complete. Palette search ranks instead of excluding, so a query that prefix-matches one label still lists weaker matches below it; two registry tests were updated to that rule.
 - 2026-09-18: M2 complete. `[notify]` has `bell` rather than Herdr's sound-file fields, and the title is independent of the mode.
 - 2026-09-18: M1 complete. Added the `Failed` attention level and the saved-view mechanism for cross-workspace jumps; moved per-feature documentation into each milestone.

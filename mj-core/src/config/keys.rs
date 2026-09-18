@@ -399,6 +399,8 @@ key_actions! {
     ContainerSettings / container_settings = "",
     ManageProfiles / manage_profiles = "",
     ManageTargets / manage_targets = "",
+    ManageMachines / manage_machines = "",
+    RestartDaemon / restart_daemon = "",
     ChangeGoSetup / change_go_setup = "",
     CycleSpinner / cycle_spinner = "",
 }

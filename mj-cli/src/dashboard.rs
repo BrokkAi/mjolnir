@@ -452,6 +452,24 @@ pub(crate) async fn run_dashboard_for_workspace(
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
     }
+    // Under tmux or screen, ctrl+b is taken before it reaches the dashboard.
+    // Say so once; the notice names both ways out.
+    let mut hints = crate::hints::SeenHints::load();
+    let prefix = context.dashboard.keybinds().prefix_label();
+    if crate::hints::inside_multiplexer()
+        && prefix == mj_core::config::DEFAULT_PREFIX
+        && hints.take(crate::hints::Hint::PrefixCollision)
+    {
+        context.dashboard.set_notice(
+            "Inside tmux or screen: press ctrl+b twice to reach Mjolnir's prefix, or set [keys] prefix in config.toml.",
+        );
+    } else if hints.take(crate::hints::Hint::PrefixKeys) {
+        // The one thing a first launch has to say: there is a prefix key,
+        // and it leads to the key list and the command list.
+        context.dashboard.set_notice(format!(
+            "Press {prefix} ? for every key and {prefix} : for every command."
+        ));
+    }
     let termination = mj_controller::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch

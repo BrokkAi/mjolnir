@@ -11,6 +11,7 @@ mod daemon;
 mod dashboard;
 mod desktop;
 mod go;
+mod hints;
 mod import;
 mod logging;
 mod pollers;

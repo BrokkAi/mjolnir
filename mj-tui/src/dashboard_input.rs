@@ -358,10 +358,12 @@ impl DashboardState {
                 self.record_event_handled();
                 return DashboardAction::None;
             }
-            // Escape belongs to the composer and to modals. On a pane it does
-            // nothing: the combined surface is quit with the detach key, and a stray
-            // Escape must never take the whole screen away.
+            // Escape belongs to the composer and to modals. On a pane it only
+            // clears the notice bar: the combined surface is quit with the
+            // detach key, and a stray Escape must never take the whole screen
+            // away.
             (KeyCode::Esc, _) => {
+                self.notices.clear();
                 self.record_event_handled();
                 return DashboardAction::None;
             }

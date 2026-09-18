@@ -25,6 +25,8 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::DestroyStopped { .. } => &["No", "Yes", "Yes, delete branch"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
+        Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Stop now"],
+        Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
@@ -44,6 +46,55 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
     }
 }
 
+/// One letter per button, in button order, so every confirmation answers a
+/// key without Tab. The letter is the first letter of the label's first word
+/// that no earlier button took, then of a later word, then any later letter
+/// of the label; a label with nothing left gets no letter (`\0`).
+///
+/// `Yes` and `Yes, delete branch` therefore answer `y` and `d`; `Cancel` and
+/// `Confirm` answer `c` and `o`.
+pub(crate) fn confirmation_accelerators(labels: &[&str]) -> Vec<char> {
+    let mut taken = Vec::new();
+    labels
+        .iter()
+        .map(|label| {
+            let lower = label.to_lowercase();
+            let candidates = lower
+                .split(|character: char| !character.is_alphanumeric())
+                .filter_map(|word| word.chars().next())
+                .chain(lower.chars().filter(char::is_ascii_alphanumeric));
+            let letter = candidates
+                .into_iter()
+                .find(|letter| !taken.contains(letter))
+                .unwrap_or('\0');
+            taken.push(letter);
+            letter
+        })
+        .collect()
+}
+
+/// The line under a confirmation's text naming each button's letter, in the
+/// same order the buttons are drawn: `n No · y Yes · d Yes, delete branch`.
+pub(crate) fn confirmation_key_line(labels: &[&str]) -> Line<'static> {
+    let accelerators = confirmation_accelerators(labels);
+    let mut spans = Vec::new();
+    for (index, (label, letter)) in labels.iter().zip(accelerators).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ·  ", theme::muted()));
+        }
+        if letter != '\0' {
+            spans.push(Span::styled(
+                format!("{letter} "),
+                Style::default()
+                    .fg(theme::palette().secondary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled((*label).to_owned(), theme::muted()));
+    }
+    Line::from(spans)
+}
+
 /// Index of the primary (rightmost) button, which is focused when a dialog opens.
 pub(crate) fn primary_button(labels: &[&str]) -> usize {
     labels.len().saturating_sub(1)
@@ -59,6 +110,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
             | Confirmation::StopWithSubagents { .. }
+            | Confirmation::InterruptWork { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::ConvertRawCheckout { .. }
     ) {
@@ -907,6 +959,29 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 ),
             ],
         ),
+        Confirmation::InterruptWork {
+            session_id,
+            restart,
+        } => (
+            if *restart {
+                " Restart while working? "
+            } else {
+                " Stop while working? "
+            },
+            vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw(""),
+                Line::styled(
+                    "The agent is in the middle of a turn.",
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw(if *restart {
+                    "Restarting ends that turn; the workspace and the conversation so far are kept."
+                } else {
+                    "Stopping ends that turn, saves a recovery copy, and frees the target."
+                }),
+            ],
+        ),
         Confirmation::StopWithSubagents { session_id, count } => (
             " Stop parent and sub-agents? ",
             vec![
@@ -1010,7 +1085,6 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(""),
                 Line::raw("Delete this session, its worktree, and its recovery archive?"),
                 Line::raw("Its git branch stays in the repository unless you choose to delete it."),
-                Line::raw("Y: Yes    N / Esc: No"),
             ],
         ),
     }
@@ -1032,6 +1106,7 @@ pub(crate) fn render_confirmation(
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::StopWithSubagents { .. } => 10,
+        Confirmation::InterruptWork { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,
@@ -1039,6 +1114,8 @@ pub(crate) fn render_confirmation(
     };
     let (title, mut lines) = confirmation_body(confirmation);
     let buttons = confirmation_buttons(confirmation);
+    lines.push(Line::raw(""));
+    lines.push(confirmation_key_line(buttons));
     lines.push(Line::raw(""));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let extra = 1;

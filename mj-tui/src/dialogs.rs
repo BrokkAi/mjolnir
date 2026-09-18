@@ -1,6 +1,6 @@
 //! Modal dialogs: session import, confirmations, and the rename editor.
 
-mod render;
+pub(crate) mod render;
 pub(crate) use render::*;
 
 mod container;
@@ -277,6 +277,13 @@ pub(crate) enum Confirmation {
     StopWithSubagents {
         session_id: String,
         count: usize,
+    },
+    /// Stop or restart asked for while the agent is mid-turn. An idle session
+    /// stops without asking; this exists for the one case a mis-click costs
+    /// work in progress.
+    InterruptWork {
+        session_id: String,
+        restart: bool,
     },
     ForceDestroy {
         session_id: String,
@@ -1158,23 +1165,22 @@ impl DashboardState {
         event: Event,
         mut dialog: ConfirmDialog,
     ) -> DashboardAction {
-        if matches!(
-            dialog.confirmation,
-            Confirmation::ForceDestroy { .. } | Confirmation::DestroyStopped { .. }
-        ) && let Event::Key(key) = &event
+        // Every button has a letter, derived from its label by
+        // `confirmation_accelerators`, so a confirmation never needs Tab.
+        if let Event::Key(key) = &event
             && key.kind != crossterm::event::KeyEventKind::Release
             && !key.modifiers.intersects(
                 crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
             )
+            && let crossterm::event::KeyCode::Char(letter) = key.code
         {
-            match key.code {
-                crossterm::event::KeyCode::Char('y' | 'Y') => {
-                    return self.activate_confirmation_button(dialog.confirmation, 1);
-                }
-                crossterm::event::KeyCode::Char('n' | 'N') => {
-                    return self.activate_confirmation_button(dialog.confirmation, 0);
-                }
-                _ => {}
+            let buttons = crate::dialogs::render::confirmation_buttons(&dialog.confirmation);
+            let accelerators = crate::dialogs::render::confirmation_accelerators(buttons);
+            if let Some(index) = accelerators
+                .iter()
+                .position(|accelerator| *accelerator == letter.to_ascii_lowercase())
+            {
+                return self.activate_confirmation_button(dialog.confirmation, index);
             }
         }
         if matches!(
@@ -1338,6 +1344,20 @@ impl DashboardState {
             (Confirmation::StopWithSubagents { session_id, .. }, 1) => {
                 self.cancel_modal();
                 DashboardAction::Close { session_id }
+            }
+            (
+                Confirmation::InterruptWork {
+                    session_id,
+                    restart,
+                },
+                1,
+            ) => {
+                self.cancel_modal();
+                if restart {
+                    DashboardAction::RestartSession { session_id }
+                } else {
+                    DashboardAction::Close { session_id }
+                }
             }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {
                 self.cancel_modal();

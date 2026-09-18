@@ -158,6 +158,12 @@ impl DashboardState {
                     self.mode = *overlay.return_to;
                     return DashboardAction::None;
                 }
+                // Esc with nothing typed closes help, as it does everywhere
+                // else; with a query it clears the query first.
+                KeyCode::Esc if overlay.query.is_empty() => {
+                    self.mode = *overlay.return_to;
+                    return DashboardAction::None;
+                }
                 KeyCode::Esc => {
                     overlay.query.clear();
                     overlay.search_focused = false;
