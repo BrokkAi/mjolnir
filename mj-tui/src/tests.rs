@@ -3325,6 +3325,49 @@ fn a_badge_names_the_most_urgent_level_and_counts_every_flagged_session() {
 }
 
 #[test]
+fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Waiting, 2))
+    );
+
+    // A data-loss session is a terminal failure the Sessions pane never lists;
+    // the tab badge and the attention queue must not point at it either.
+    for state in [SessionState::DestroyedWithDataLoss, SessionState::Lost] {
+        dashboard.state.sessions.get_mut("quiet").unwrap().state = state;
+        assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
+        assert!(
+            !dashboard
+                .ordered_sessions()
+                .iter()
+                .any(|session| session.id == "quiet"),
+            "{state:?} has no row in the pane"
+        );
+        assert_eq!(
+            dashboard.workspace_attention_summary("default"),
+            Some((AttentionLevel::Waiting, 2)),
+            "{state:?} must not turn the badge red or raise its count"
+        );
+        assert!(
+            !dashboard
+                .attention_queue()
+                .iter()
+                .any(|entry| entry.session_id == "quiet"),
+            "{state:?} must not be in the attention queue"
+        );
+    }
+
+    // An error state still has a row, so it still counts.
+    dashboard.state.sessions.get_mut("quiet").unwrap().state = SessionState::Error;
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 3))
+    );
+}
+
+#[test]
 fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));

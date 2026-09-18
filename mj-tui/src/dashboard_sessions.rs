@@ -341,6 +341,20 @@ impl DashboardState {
         Some(())
     }
 
+    /// Whether the Sessions pane lists `session` as a top-level row of
+    /// `workspace_id`: live, mid-transition, or stopped when stopped sessions
+    /// are shown. Terminal failures such as a lost or data-loss session have
+    /// no row, so the badges and the attention queue must not count them
+    /// either; they are reachable only through the resume dialog.
+    fn is_listed_top_level_session(&self, session: &SessionRecord, workspace_id: &str) -> bool {
+        session.workspace_id == workspace_id
+            && !self.state.subagents.contains_key(&session.id)
+            && (session.state.is_active()
+                || self.transition_kind(&session.id).is_some()
+                || (self.config.advanced.show_stopped_sessions
+                    && session.state == SessionState::Stopped))
+    }
+
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
         if let Some(parent_id) = self.subagent_parent_id.as_deref() {
             let mut children = self
@@ -360,14 +374,7 @@ impl DashboardState {
             .state
             .sessions
             .values()
-            .filter(|session| {
-                session.workspace_id == active_workspace_id
-                    && !self.state.subagents.contains_key(&session.id)
-                    && (session.state.is_active()
-                        || self.transition_kind(&session.id).is_some()
-                        || (self.config.advanced.show_stopped_sessions
-                            && session.state == SessionState::Stopped))
-            })
+            .filter(|session| self.is_listed_top_level_session(session, active_workspace_id))
             .collect::<Vec<_>>();
         let priority = self.config.advanced.session_order == SessionOrder::Priority;
         let inputs = active
@@ -532,7 +539,7 @@ impl DashboardState {
             .state
             .sessions
             .values()
-            .filter(|session| !self.state.subagents.contains_key(&session.id))
+            .filter(|session| self.is_listed_top_level_session(session, &session.workspace_id))
             .filter_map(|session| {
                 let level = self.attention_level(&session.id);
                 level.needs_person().then(|| {
@@ -579,9 +586,12 @@ impl DashboardState {
         &self,
         workspace_id: &str,
     ) -> Option<(AttentionLevel, usize)> {
-        self.attention_summary(self.state.sessions.values().filter(|session| {
-            session.workspace_id == workspace_id && !self.state.subagents.contains_key(&session.id)
-        }))
+        self.attention_summary(
+            self.state
+                .sessions
+                .values()
+                .filter(|session| self.is_listed_top_level_session(session, workspace_id)),
+        )
     }
 
     /// The badge for the visible sessions of one project, for a folded
