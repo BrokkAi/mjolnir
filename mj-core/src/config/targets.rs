@@ -431,6 +431,27 @@ impl TargetTemplate {
         }
     }
 
+    /// A copy without the settings that only matter when a session is
+    /// launched.
+    ///
+    /// Build cache settings are resolved once while a session is provisioned
+    /// and stored on its record, so an active session does not depend on
+    /// them. Comparing templates without them lets setup edit a machine's
+    /// build cache while sessions are running.
+    #[must_use]
+    pub fn without_launch_only_settings(&self) -> Self {
+        let mut stripped = self.clone();
+        match &mut stripped {
+            Self::LocalPodman { container }
+            | Self::LocalDocker { container }
+            | Self::AppleContainer { container }
+            | Self::SshPodman { container, .. }
+            | Self::SshDocker { container, .. } => container.build_cache = None,
+            Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
+        }
+        stripped
+    }
+
     pub const fn execution_policy(&self) -> ExecutionPolicy {
         match self {
             Self::LocalBare => ExecutionPolicy::ConfiguredApprovals,

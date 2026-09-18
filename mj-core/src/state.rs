@@ -1622,12 +1622,19 @@ impl State {
                     .bundles
                     .get(&session.bundle_id)
                     .is_some_and(|bundle| after.bundles.get(&session.bundle_id) != Some(bundle));
+            // Build cache settings are resolved at provisioning time and kept
+            // on the session record, so editing them does not disturb a
+            // running session.
             let target_changed =
                 before
                     .targets
                     .get(&session.target_template_id)
                     .is_some_and(|target| {
-                        after.targets.get(&session.target_template_id) != Some(target)
+                        after
+                            .targets
+                            .get(&session.target_template_id)
+                            .map(TargetTemplate::without_launch_only_settings)
+                            != Some(target.without_launch_only_settings())
                     });
             if protected || bundle_changed || target_changed {
                 bail!(
