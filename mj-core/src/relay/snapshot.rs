@@ -521,7 +521,10 @@ impl RelayOperationalState {
     pub fn facts(&self) -> crate::activity::ActivityFacts {
         crate::activity::ActivityFacts {
             execution: self.execution,
-            prompt_started_at_ms: self.active_prompt.as_ref().map(|prompt| prompt.started_at_ms),
+            prompt_started_at_ms: self
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.started_at_ms),
             harness_turn_started_at_ms: self.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.activity_turn_started_at_ms,
             queued_commands: self.queued_prompts.len(),

@@ -1017,9 +1017,7 @@ pub(super) fn turn_stall_message(
     verdict: &mj_core::activity::StallVerdict,
 ) -> String {
     let reason = match verdict {
-        mj_core::activity::StallVerdict::Live => {
-            "mj stopped waiting for the harness".to_owned()
-        }
+        mj_core::activity::StallVerdict::Live => "mj stopped waiting for the harness".to_owned(),
         mj_core::activity::StallVerdict::Silent { silent_ms } => format!(
             "mj received no activity from the harness for {} while a turn was running and no \
              tool call was open, so it failed the turn",

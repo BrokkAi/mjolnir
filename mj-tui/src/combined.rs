@@ -444,7 +444,8 @@ fn render_combined_themed(
     // Between the new-session wizard closing and the daemon registering the
     // session there is no session to key a standby by, so the launch standby
     // fills the band instead and asks for the same room.
-    let launch_standby_drawn = selected_transition.is_none() && dashboard.launch_standby_capturing();
+    let launch_standby_drawn =
+        selected_transition.is_none() && dashboard.launch_standby_capturing();
     let desired_prompt = if launch_standby_drawn {
         dashboard
             .launch_standby

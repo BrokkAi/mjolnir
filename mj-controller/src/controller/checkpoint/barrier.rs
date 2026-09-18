@@ -104,9 +104,11 @@ pub(super) async fn wait_for_checkpoint_barrier(
                 // initial idle sync and before the queued BeginCheckpoint is
                 // processed. Defer from the barrier wait rather than allowing
                 // its timeout to classify the worker as wedged and restart it.
-                return Err(
-                    CheckpointDeferred::background_snapshot(&snapshot.operational, harness).into(),
-                );
+                return Err(CheckpointDeferred::background_snapshot(
+                    &snapshot.operational,
+                    harness,
+                )
+                .into());
             }
             if snapshot.operational.has_work_in_flight() {
                 // A foreground tool, a turn the execution flag has not caught

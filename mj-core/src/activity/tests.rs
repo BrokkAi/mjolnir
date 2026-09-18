@@ -95,7 +95,10 @@ fn a_disabled_bound_never_trips_and_never_spins() {
         last_acp_activity_at_ms: Some(NOW - 1_440 * MINUTE as i64),
         ..ActivityFacts::default()
     };
-    assert_eq!(stall_verdict(&silent, policy(0, 240), NOW), StallVerdict::Live);
+    assert_eq!(
+        stall_verdict(&silent, policy(0, 240), NOW),
+        StallVerdict::Live
+    );
     assert!(!policy(0, 0).enabled());
 }
 
@@ -104,7 +107,10 @@ fn a_disabled_bound_never_trips_and_never_spins() {
 #[test]
 fn an_empty_activity_clock_is_not_a_stall() {
     let facts = ActivityFacts::default();
-    assert_eq!(stall_verdict(&facts, policy(10, 240), NOW), StallVerdict::Live);
+    assert_eq!(
+        stall_verdict(&facts, policy(10, 240), NOW),
+        StallVerdict::Live
+    );
 }
 
 /// What is in flight changes while the watchdog waits, so it never sleeps
@@ -177,7 +183,10 @@ fn a_disconnected_daemon_never_reports_idle() {
         was_idle.has_work_in_flight(),
         "a session nobody can see is never safe to replace"
     );
-    assert!(!was_idle.is_working(), "but it is not known to be computing");
+    assert!(
+        !was_idle.is_working(),
+        "but it is not known to be computing"
+    );
 }
 
 /// A worker that is truly gone must still be recoverable: reporting `Unknown`
@@ -187,7 +196,10 @@ fn a_disconnected_daemon_never_reports_idle() {
 fn a_lost_worker_is_still_recovered() {
     let closed = while_disconnected(MaterializedExecutionState::Closed, Some(NOW));
     assert_eq!(closed, ActivityState::Closed);
-    assert!(!closed.has_work_in_flight(), "a closed session holds nothing");
+    assert!(
+        !closed.has_work_in_flight(),
+        "a closed session holds nothing"
+    );
     assert!(!closed.is_working());
 
     // The same through the facts the controller syncs from a worker that has
@@ -306,7 +318,10 @@ fn a_running_flag_alone_is_not_a_running_turn() {
         ..ActivityFacts::default()
     };
     assert!(classify(&flag_only).is_idle());
-    assert!(has_work_in_flight(&flag_only), "but it is still not safe to kill");
+    assert!(
+        has_work_in_flight(&flag_only),
+        "but it is still not safe to kill"
+    );
     // The phase a session reports keeps naming the flag, so nothing that read
     // `chat_phase` before reads something weaker now.
     assert_eq!(chat_phase(&flag_only), RelayExecutionState::Running);
@@ -337,7 +352,12 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
         idle_since_ms: Some(NOW),
         ..ActivityFacts::default()
     };
-    assert_eq!(classify(&idle), ActivityState::Idle { since_ms: Some(NOW) });
+    assert_eq!(
+        classify(&idle),
+        ActivityState::Idle {
+            since_ms: Some(NOW)
+        }
+    );
 
     let goal = ActivityFacts {
         goal_active: true,
@@ -372,7 +392,10 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
             started_at_ms: NOW - MINUTE as i64,
         }
     );
-    assert_eq!(classify(&tool_only).chat_phase(), RelayExecutionState::Running);
+    assert_eq!(
+        classify(&tool_only).chat_phase(),
+        RelayExecutionState::Running
+    );
 
     // A turn marker outranks everything below it.
     let turn = ActivityFacts {
@@ -408,8 +431,7 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
 /// it with it, so an unknown state lands on a cautious value instead.
 #[test]
 fn an_unrecognized_published_state_is_cautious_rather_than_fatal() {
-    let from_the_future =
-        serde_json::json!({"state": "compacting", "started_at_ms": 12_345_i64});
+    let from_the_future = serde_json::json!({"state": "compacting", "started_at_ms": 12_345_i64});
     let state: ActivityState =
         serde_json::from_value(from_the_future).expect("an unknown state must still deserialize");
     assert_eq!(state, ActivityState::Unrecognized);

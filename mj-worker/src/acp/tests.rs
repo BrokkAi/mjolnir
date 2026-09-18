@@ -2645,7 +2645,10 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
     let RuntimeEvent::Warning { message } = warning else {
         panic!("expected the stall warning");
     };
-    assert!(message.contains("long-build"), "names the tool call: {message}");
+    assert!(
+        message.contains("long-build"),
+        "names the tool call: {message}"
+    );
     assert!(
         message.contains("MJ_TURN_TOOL_STALL_TIMEOUT_MS"),
         "names the knob that raises the limit: {message}"
@@ -2733,7 +2736,10 @@ async fn a_silent_harness_fails_the_turn_with_a_reason() {
     assert_eq!(stop_reason, TURN_STALLED_STOP_REASON);
     let diagnostic = diagnostic.expect("the outcome carries the reason, not only the transcript");
     assert_eq!(diagnostic.code.as_deref(), Some(TURN_STALLED_STOP_REASON));
-    assert!(diagnostic.message.contains("stopped responding"), "{diagnostic:?}");
+    assert!(
+        diagnostic.message.contains("stopped responding"),
+        "{diagnostic:?}"
+    );
 
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
@@ -4721,9 +4727,7 @@ fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
 fn the_stall_message_says_what_happened_and_what_to_do() {
     let silent = turn_stall_message(
         HarnessKind::Muse,
-        &mj_core::activity::StallVerdict::Silent {
-            silent_ms: 630_000,
-        },
+        &mj_core::activity::StallVerdict::Silent { silent_ms: 630_000 },
     );
     assert!(silent.contains("stopped responding"));
     assert!(
