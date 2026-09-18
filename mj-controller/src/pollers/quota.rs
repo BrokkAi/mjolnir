@@ -202,6 +202,21 @@ pub(super) fn record_refresh_result(
     });
 }
 
+/// Whether a local image host's engine can be run at all.
+///
+/// Only local hosts are checked: a remote host's engine lives on the other
+/// side of ssh, and a failure there is real news about that host.
+pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::OsStr>) -> bool {
+    match host {
+        ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
+            let Some(path) = path else { return false };
+            let engine = host.engine();
+            std::env::split_paths(path).any(|directory| directory.join(engine).is_file())
+        }
+        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) => true,
+    }
+}
+
 pub(super) async fn refresh_images(
     plan: Vec<ImageRefresh>,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
@@ -216,6 +231,18 @@ pub(super) async fn refresh_images(
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut hosts = tokio::task::JoinSet::new();
     for refresh in plan {
+        // The default configuration names a podman, a docker, and on macOS an
+        // Apple container target whether or not the engine is installed. An
+        // engine that is not on this machine is not a failed download, and it
+        // must not become a notice on every start.
+        if !local_engine_installed(&refresh.host, std::env::var_os("PATH").as_deref()) {
+            tracing::debug!(
+                host = refresh.host.label(),
+                image = refresh.image,
+                "container engine is not installed; skipping the image refresh"
+            );
+            continue;
+        }
         // ProcessExecutor is synchronous, and a pull is long: it belongs on a
         // blocking thread, never on the runtime.
         let executor = CancellableProcessExecutor::new(cancelled.clone());

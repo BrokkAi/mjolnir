@@ -1389,7 +1389,7 @@ pub enum ImageHost {
 }
 
 impl ImageHost {
-    const fn engine(&self) -> &'static str {
+    pub const fn engine(&self) -> &'static str {
         match self {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",

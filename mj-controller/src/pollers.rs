@@ -35,8 +35,8 @@ use crate::session_manager::{
 };
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
-    DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageRefresh,
-    RefreshWhen, SessionResourceProbe, SessionResourceUsage,
+    DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageHost,
+    ImageRefresh, RefreshWhen, SessionResourceProbe, SessionResourceUsage,
 };
 use crate::worker_client::CredentialSyncCoordinator;
 

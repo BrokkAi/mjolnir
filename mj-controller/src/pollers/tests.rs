@@ -1456,3 +1456,27 @@ fn a_failed_pull_is_reported_once_until_the_error_changes() {
         "a failure after a success is news again"
     );
 }
+
+/// The default configuration names every local engine, installed or not. An
+/// engine that is not on the machine is skipped, not reported as a failed
+/// download; a remote host is always tried, because its engine is elsewhere.
+#[test]
+fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("podman"), "").unwrap();
+    let path = std::env::join_paths([directory.path()]).unwrap();
+
+    assert!(local_engine_installed(&ImageHost::LocalPodman, Some(&path)));
+    assert!(!local_engine_installed(
+        &ImageHost::LocalDocker,
+        Some(&path)
+    ));
+    assert!(!local_engine_installed(&ImageHost::LocalPodman, None));
+    assert!(local_engine_installed(
+        &ImageHost::SshDocker(crate::targets::SshTarget {
+            destination: "build@example".into(),
+            ssh_args: Vec::new(),
+        }),
+        None,
+    ));
+}
