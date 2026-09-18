@@ -934,8 +934,19 @@ fn hit_transcript(
             sessionwiki::redact::redact(&sessionwiki::util::nfc(message.text.trim())).into_owned()
         })
         .collect();
-    let found: Vec<Vec<(usize, usize)>> =
-        texts.iter().map(|text| matches_in(text, &needle)).collect();
+    // Tool output never anchors a passage. It is machine chatter the reader
+    // did not write and does not read: a hit buried in it opens the preview on
+    // a wall of command output, and the preview collapses tool runs anyway, so
+    // a match inside one could not be shown. Tool messages still appear as
+    // context around a real match.
+    let found: Vec<Vec<(usize, usize)>> = texts
+        .iter()
+        .zip(&session.messages)
+        .map(|(text, message)| match message.role {
+            Role::Tool => Vec::new(),
+            _ => matches_in(text, &needle),
+        })
+        .collect();
 
     // Merge each match's context window into groups of consecutive messages.
     // Windows one apart are merged too: "0 messages omitted" is noise.
@@ -1893,6 +1904,39 @@ mod tests {
         );
         assert_eq!(found.omitted_after, 1, "the last message is not shown");
         assert!(found.blocks[0].hits.is_empty(), "context has no hits");
+    }
+
+    /// A query that only occurs in tool output finds nothing, and a tool
+    /// message beside a real match still comes back as context. Tool text is
+    /// machine chatter: anchoring a passage on it opens the preview on command
+    /// output the reader never wrote, and the preview collapses tool runs, so
+    /// the match could not be shown even if it were returned.
+    #[test]
+    fn transcript_hits_never_anchor_on_tool_output() {
+        let session = indexed(vec![
+            (Role::User, "make it build"),
+            (Role::Tool, "cargo build --needle"),
+            (Role::Assistant, "it builds"),
+        ]);
+
+        let only_in_a_tool = hit_transcript(&session, "needle", 1, 4_000);
+        assert!(
+            only_in_a_tool.blocks.is_empty(),
+            "tool output must not anchor a passage, got {:?}",
+            only_in_a_tool.blocks
+        );
+
+        let beside_a_match = hit_transcript(&session, "builds", 1, 4_000);
+        let shown: Vec<(&str, bool)> = beside_a_match
+            .blocks
+            .iter()
+            .map(|block| (block.role.as_str(), !block.hits.is_empty()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![("tool", false), ("assistant", true)],
+            "a tool message is still context around a real match"
+        );
     }
 
     /// A long message is cut down to the caller's budget around its first hit,

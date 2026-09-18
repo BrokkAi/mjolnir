@@ -95,7 +95,9 @@ impl RuntimeState {
                 self.start_deferred_cleanup(session_id)?;
                 return Ok(());
             }
-            CloseRoute::Graceful | CloseRoute::RecoverInterrupted => {}
+            CloseRoute::Graceful
+            | CloseRoute::RecoverInterrupted
+            | CloseRoute::SettleWithoutCheckpoint => {}
         }
         let operation_session_id = session_id.clone();
         let result = self
@@ -119,22 +121,33 @@ impl RuntimeState {
                         state.clone(),
                         session_id.clone(),
                     );
-                    let deferred = if route == CloseRoute::RecoverInterrupted {
-                        controller
-                            .recover_interrupted_close_managed(
-                                &session_id,
-                                &executor,
-                                &state.session_manager,
-                            )
-                            .await?
-                    } else {
-                        controller
-                            .close_session_managed_controlled(
-                                &session_id,
-                                &executor,
-                                &state.session_manager,
-                            )
-                            .await?
+                    let deferred = match route {
+                        CloseRoute::RecoverInterrupted => {
+                            controller
+                                .recover_interrupted_close_managed(
+                                    &session_id,
+                                    &executor,
+                                    &state.session_manager,
+                                )
+                                .await?
+                        }
+                        // Nothing to archive and no relay to latch, so this
+                        // close only tears down and settles. The route was
+                        // decided after `wait_before_close` let any live
+                        // create or resume finish, so a session that is still
+                        // genuinely provisioning is not caught here.
+                        CloseRoute::SettleWithoutCheckpoint => {
+                            controller.close_session_without_checkpoint(&session_id, &executor)?
+                        }
+                        _ => {
+                            controller
+                                .close_session_managed_controlled(
+                                    &session_id,
+                                    &executor,
+                                    &state.session_manager,
+                                )
+                                .await?
+                        }
                     };
                     Ok(if deferred {
                         DaemonLifecycleResult::DeferredCleanup

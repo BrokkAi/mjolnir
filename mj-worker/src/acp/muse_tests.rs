@@ -22,6 +22,7 @@ pub(crate) async fn native_muse_turn(
     HarnessKind::Muse.configure_home_environment(home, &mut environment);
     let resuming = resume.is_some();
     let spec = LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command: adapter.to_path_buf(),
@@ -38,6 +39,8 @@ pub(crate) async fn native_muse_turn(
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     let (commands, receiver) = mpsc::channel(16);
     let (sender, mut events) = mpsc::channel(128);
@@ -147,6 +150,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             ("MJ_MUSE_TEST_SCENARIO".into(), scenario.into()),
         ]);
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: adapter.clone(),
@@ -163,6 +167,8 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
+            tools_in_flight: Default::default(),
+            stall_policy: None,
         };
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut events) = mpsc::channel(128);

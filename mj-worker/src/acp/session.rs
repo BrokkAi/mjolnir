@@ -467,8 +467,16 @@ pub(super) async fn serve_session(
                 // Start the stall clock at send time so the watchdog measures
                 // silence within this turn, not idle time carried from before.
                 spec.acp_activity.mark();
-                let stall_timeout =
-                    turn_stall_timeout().filter(|_| turn_ends_only_on_prompt_reply(spec.harness));
+                // Claude and Codex mark their own turn ends, so a lost reply
+                // cannot hang them and the watchdog stays out of their way.
+                let stall_policy = if turn_ends_only_on_prompt_reply(spec.harness) {
+                    spec.stall_policy.unwrap_or_else(turn_stall_policy)
+                } else {
+                    mj_core::activity::StallPolicy {
+                        silence: None,
+                        tool_call: None,
+                    }
+                };
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -615,44 +623,79 @@ pub(super) async fn serve_session(
                             // place; the next prompt goes to the same session.
                             break;
                         }
-                        _ = async {
-                            let timeout = stall_timeout
-                                .expect("stall branch is guarded by stall_timeout")
-                                .as_millis() as u64;
-                            // Keep waiting as long as the harness keeps sending
-                            // updates; only sustained silence trips the watchdog.
+                        verdict = async {
+                            // Keep waiting as long as the harness shows a sign
+                            // of life. A tool call is a sign of life: a turn
+                            // blocked in a twenty-minute build sends nothing at
+                            // all, and failing it for that lost real work
+                            // (#1020). Only the much longer tool-call bound can
+                            // end such a turn.
                             loop {
-                                let idle = acp_idle_millis(&spec.acp_activity);
-                                if idle >= timeout {
-                                    break;
+                                let facts = turn_stall_facts(spec);
+                                let now_ms = mj_core::clock::epoch_millis();
+                                let verdict = mj_core::activity::stall_verdict(&facts, stall_policy, now_ms);
+                                // At most one line a second, and the only
+                                // record of why a turn was or was not failed
+                                // for going quiet. A turn that is wrongly
+                                // failed is diagnosed from exactly these
+                                // facts (#1020).
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    tools_in_flight = ?facts
+                                        .tools_in_flight
+                                        .iter()
+                                        .map(|tool| (
+                                            tool.tool_call_id.as_str(),
+                                            tool.status,
+                                            now_ms.saturating_sub(tool.started_at_ms),
+                                        ))
+                                        .collect::<Vec<_>>(),
+                                    silent_ms = facts
+                                        .last_acp_activity_at_ms
+                                        .map(|last| now_ms.saturating_sub(last)),
+                                    ?verdict,
+                                    policy = ?stall_policy,
+                                    "turn stall check"
+                                );
+                                match verdict {
+                                    mj_core::activity::StallVerdict::Live => {
+                                        tokio::time::sleep(stall_policy.next_check(&facts, now_ms)).await;
+                                    }
+                                    verdict => break verdict,
                                 }
-                                tokio::time::sleep(Duration::from_millis(timeout - idle)).await;
                             }
-                        }, if prompt_running && stall_timeout.is_some() => {
-                            let idle_ms = acp_idle_millis(&spec.acp_activity);
+                        }, if prompt_running && stall_policy.enabled() => {
                             tracing::warn!(
                                 session_id = %session_id,
-                                idle_ms,
                                 harness = ?spec.harness,
-                                "turn stalled with no ACP activity; failing the turn"
+                                verdict = ?verdict,
+                                "turn stopped responding; failing the turn"
                             );
+                            let message = turn_stall_message(spec.harness, &verdict);
                             emit_runtime_event(
                                 events,
                                 RuntimeEvent::Warning {
-                                    message: turn_stall_message(spec.harness, idle_ms),
+                                    message: message.clone(),
                                 },
                             )
                             .await?;
                             // Fail the turn so it leaves Running and `mj wait`
                             // returns; leave the session serving so a resend or
-                            // a late recovery still works.
+                            // a late recovery still works. The reason travels
+                            // with the outcome, not only in the transcript, so
+                            // `mj wait` and the session summary can say why.
                             emit_runtime_event(
                                 events,
                                 RuntimeEvent::PromptFinished {
                                     request_id,
-                                    stop_reason: PROMPT_ERROR_STOP_REASON.to_owned(),
+                                    stop_reason: TURN_STALLED_STOP_REASON.to_owned(),
                                     usage: None,
-                                    diagnostic: None,
+                                    diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                                        message,
+                                        code: Some(TURN_STALLED_STOP_REASON.to_owned()),
+                                        http_status: None,
+                                        reset_at: None,
+                                    }),
                                 },
                             )
                             .await?;

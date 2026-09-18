@@ -39,8 +39,11 @@ impl IdleWorkspaceLease {
                     operation.verify().await?;
                     return Ok(operation);
                 }
+                // The bare flag misses a turn or a tool the projection has
+                // not caught up with. The lease already holds the barrier, so
+                // ask whether anything *else* is running.
                 ensure!(
-                    snapshot.operational.execution != RelayExecutionState::Running,
+                    !snapshot.operational.has_work_in_flight(),
                     "session started work before the file barrier was ready"
                 );
                 tokio::time::sleep(Duration::from_millis(25)).await;

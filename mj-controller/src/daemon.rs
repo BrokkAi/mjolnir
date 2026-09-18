@@ -21,6 +21,7 @@ use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor,
     ProvisionStage, ProvisionStageGuard,
 };
+use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
 use mj_core::relay::RelayCommand;
@@ -46,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 use crate::pollers::{
     dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_close_session_ids,
     reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
+    unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -111,6 +113,10 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
+    /// Work waiting for one session's harness to become ready: the prompts a
+    /// person typed while it started, and the hand-off a restored session
+    /// carries. One ordered queue per session, each drained by one task.
+    startup_prompts: Mutex<BTreeMap<String, StartupQueue>>,
     close_requested: Mutex<BTreeSet<String>>,
     controller: Mutex<Controller>,
     controller_loader: fn() -> Result<Controller>,
@@ -239,6 +245,8 @@ enum CloseRoute {
     Graceful,
     /// A previous close stopped partway; finish it from its checkpoint.
     RecoverInterrupted,
+    /// Nothing to checkpoint: tear down whatever target is left and settle.
+    SettleWithoutCheckpoint,
     /// Already stopped, but the target still has to be removed.
     DeferredCleanup,
     /// Already stopped with nothing left to do.
@@ -260,6 +268,8 @@ fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
         } else {
             CloseRoute::Done
         }
+    } else if crate::controller::has_nothing_to_checkpoint(session) {
+        CloseRoute::SettleWithoutCheckpoint
     } else {
         CloseRoute::Graceful
     }
@@ -272,6 +282,31 @@ fn durable_session_state(controller: &Controller, session_id: &str) -> Option<Se
         .sessions
         .get(session_id)
         .map(|session| session.state)
+}
+
+/// One piece of work that waits for a starting session's harness.
+///
+/// Both kinds are ordered against each other on purpose: a restored session's
+/// hand-off is the hidden context its first prompt reads, so it has to be
+/// installed before any queued prompt is submitted.
+pub(crate) enum StartupStep {
+    InstallHandoff(Box<mj_core::archive::CanonicalSessionSnapshot>),
+    Prompt {
+        text: String,
+        inherited_draft: Option<String>,
+    },
+}
+
+/// The steps waiting for one session, and the task draining them.
+///
+/// The entry exists only while a drain task owns it. `in_flight` marks a step
+/// that has been popped and is running, so the queue is never treated as empty
+/// while its last step is still being carried out.
+struct StartupQueue {
+    pending: VecDeque<StartupStep>,
+    in_flight: bool,
+    cancel: CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct ActiveLifecycle {

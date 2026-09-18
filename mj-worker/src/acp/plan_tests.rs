@@ -149,6 +149,7 @@ impl PlanProbe {
         let (commands, mut requests) = mpsc::channel(16);
         let (event_tx, events) = mpsc::channel(128);
         let spec = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "plan-probe".into(),
@@ -165,6 +166,8 @@ impl PlanProbe {
             execution_policy: policy,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
+            tools_in_flight: Default::default(),
+            stall_policy: None,
         };
         let driver = tokio::spawn(async move {
             drive(

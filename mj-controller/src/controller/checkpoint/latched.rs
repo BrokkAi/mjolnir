@@ -210,12 +210,6 @@ impl Controller {
             }
             if exclusivity == LatchExclusivity::ReleaseAfterLatch {
                 let snapshot = relay.connection_mut().sync().await?;
-                if snapshot.operational.execution == RelayExecutionState::Running {
-                    // A routine recovery copy must not open a barrier just to
-                    // abandon it as soon as it observes the active turn.
-                    relay.release();
-                    return Err(CheckpointDeferred::harness_busy().into());
-                }
                 if !snapshot
                     .operational
                     .safe_for_checkpoint(session.harness_kind)
@@ -230,6 +224,17 @@ impl Controller {
                         session.harness_kind,
                     )
                     .into());
+                }
+                if snapshot.operational.execution != RelayExecutionState::Closed
+                    && snapshot.operational.has_work_in_flight()
+                {
+                    // A routine recovery copy must not open a barrier just to
+                    // abandon it as soon as it observes the active turn, and
+                    // the bare execution flag misses a turn or a tool whose
+                    // projection has not caught up. Any remaining work defers
+                    // to the next idle observation.
+                    relay.release();
+                    return Err(CheckpointDeferred::harness_busy().into());
                 }
             }
             let barrier_command_id = new_command_id("checkpoint")?;

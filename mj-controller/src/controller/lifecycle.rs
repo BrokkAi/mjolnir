@@ -327,6 +327,89 @@ impl Controller {
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
     }
 
+    /// Record that an in-flight lifecycle state has no operation left to
+    /// finish it, so the session stops waiting for one.
+    ///
+    /// The state is re-checked against the freshly loaded record, because the
+    /// caller decided what to reconcile from a startup snapshot. Returns
+    /// whether anything changed.
+    pub fn fail_interrupted_lifecycle(&mut self, session_id: &str, cause: &str) -> Result<bool> {
+        self.fail_interrupted_lifecycle_with(
+            session_id,
+            cause,
+            crate::database::save_lifecycle_session,
+        )
+    }
+
+    fn fail_interrupted_lifecycle_with(
+        &mut self,
+        session_id: &str,
+        cause: &str,
+        persist: impl Fn(&SessionRecord) -> Result<()>,
+    ) -> Result<bool> {
+        let Some(record) = self.state.sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+        if crate::pollers::interrupted_lifecycle_cause(record).is_none() {
+            return Ok(false);
+        }
+        let previous = record.clone();
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        record.last_error = Some(cause.to_owned());
+        persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist the failure of an interrupted lifecycle state",
+            &persist,
+        )?;
+        Ok(true)
+    }
+
+    /// Close a session that has nothing to checkpoint.
+    ///
+    /// A record still provisioning never reached a running worker, and a
+    /// record with no target locator has no target to read a workspace from,
+    /// so in both cases there is no relay to latch and no harness state to
+    /// archive. Waiting for a relay that does not exist is what left a stuck
+    /// provisioning session unclosable. Any target the session did leave
+    /// behind is still torn down, and the checkpoint it already had is kept,
+    /// so this is a close, not a forced destroy.
+    ///
+    /// Returns whether target storage cleanup was deferred, like the graceful
+    /// close does.
+    pub fn close_session_without_checkpoint(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<bool> {
+        self.close_session_without_checkpoint_with(
+            session_id,
+            executor,
+            crate::database::save_lifecycle_session,
+        )
+    }
+
+    fn close_session_without_checkpoint_with(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        persist: impl Fn(&SessionRecord) -> Result<()>,
+    ) -> Result<bool> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .clone();
+        ensure!(
+            has_nothing_to_checkpoint(&session),
+            "session {session_id} has a workspace to checkpoint; close it gracefully instead"
+        );
+        self.stop_target_and_settle(session_id, &session, executor, &persist)
+    }
+
     fn record_interrupted_close(&mut self, session_id: &str, error: &anyhow::Error) -> Result<()> {
         let record = self.state.sessions.get_mut(session_id).unwrap();
         apply_interrupted_close_error(record, error, &now());
@@ -563,9 +646,23 @@ impl Controller {
             verify_installed_checkpoint_gate(session_id, checkpoint)
                 .context("verify the recovery archive before force stopping")?;
         }
+        self.stop_target_and_settle(session_id, &session, executor, &persist)
+    }
+
+    /// Tear down whatever target the session holds and settle its record in
+    /// `Stopped`. Shared by force stop and by a close that has nothing to
+    /// checkpoint; neither takes a fresh archive, so neither may decide on its
+    /// own whether the session still has one.
+    fn stop_target_and_settle(
+        &mut self,
+        session_id: &str,
+        session: &SessionRecord,
+        executor: &impl CommandExecutor,
+        persist: &impl Fn(&SessionRecord) -> Result<()>,
+    ) -> Result<bool> {
         let mut deferred = false;
         if let Some(locator) = &session.target {
-            let backend = backend_locator(locator, &session, &self.config)?;
+            let backend = backend_locator(locator, session, &self.config)?;
             if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                 plan.execute(executor)?;
                 deferred = true;
@@ -575,7 +672,7 @@ impl Controller {
         }
         if let Some(worktree) = &session.managed_worktree {
             retire_managed_worktree(executor, worktree)
-                .context("retire managed raw-session worktree after force stop")?;
+                .context("retire managed raw-session worktree after stopping the target")?;
         }
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Stopped;
@@ -588,9 +685,9 @@ impl Controller {
         persist_session_record_transition_or_restore(
             &mut self.state,
             session_id,
-            &session,
-            "persist stopped state after force stopping the current target",
-            &persist,
+            session,
+            "persist stopped state after tearing down the current target",
+            persist,
         )?;
         Ok(deferred)
     }
@@ -724,6 +821,29 @@ impl Controller {
         self.state.subagents.remove(session_id);
         self.state.destroy_session_force(session_id)?;
         Ok(())
+    }
+}
+
+/// Whether a close of this session has no workspace to archive.
+///
+/// Only a session that cannot be holding live work qualifies. A record still
+/// `Provisioning` has never had a worker connected, so there is no relay to
+/// latch and no harness state to capture. A record mid-close or already
+/// failed, with no target locator left, has no target to read a workspace
+/// from at all. Every other state may hold work and must take the graceful
+/// close's checkpoint.
+pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
+    match session.state {
+        SessionState::Provisioning => true,
+        SessionState::Closing
+        | SessionState::Destroying
+        | SessionState::Error
+        | SessionState::Lost => session.target.is_none(),
+        SessionState::Running
+        | SessionState::Disconnected
+        | SessionState::Checkpointing
+        | SessionState::Stopped
+        | SessionState::DestroyedWithDataLoss => false,
     }
 }
 

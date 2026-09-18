@@ -3826,8 +3826,9 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
     );
 }
 
-/// The wait endpoint reports a turn number and a final message for a turn it
-/// only knows the start position of.
+/// The wait endpoint reports a turn number and a final message for the span
+/// one turn covers. A message the harness records after the turn ended — a
+/// resume notice is one — belongs to no turn and must not displace the answer.
 #[test]
 fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
     let directory = tempfile::tempdir().unwrap();
@@ -3862,6 +3863,9 @@ fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
         agent(2, "first answer"),
         user(3, "second"),
         agent(4, "second answer"),
+        // Recorded after the second turn completed, the way a harness reports
+        // the model a resumed session opened on.
+        agent(5, "Warning: this session was recorded with another model"),
     ];
     for (index, item) in items.into_iter().enumerate() {
         let ordinal = index as u64 + 1;
@@ -3884,20 +3888,133 @@ fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
         .unwrap();
     }
 
-    let first = load_materialized_turn_summary_from(&database, "session-1", 1).unwrap();
+    let first = load_materialized_turn_summary_from(&database, "session-1", 1, 2).unwrap();
     assert_eq!(first.turn_number, 1);
     assert_eq!(first.turn_started_at_ms, 100);
-    assert_eq!(first.last_changed_at_ms, 450);
+    assert_eq!(first.last_changed_at_ms, 250);
     assert_eq!(
         first.final_message.as_deref(),
-        Some("second answer"),
-        "a summary from the first turn covers everything after it"
+        Some("first answer"),
+        "a turn's summary stops where the turn ended"
     );
 
-    let second = load_materialized_turn_summary_from(&database, "session-1", 3).unwrap();
+    let second = load_materialized_turn_summary_from(&database, "session-1", 3, 4).unwrap();
     assert_eq!(second.turn_number, 2);
     assert_eq!(second.turn_started_at_ms, 300);
-    assert_eq!(second.final_message.as_deref(), Some("second answer"));
+    assert_eq!(second.last_changed_at_ms, 450);
+    assert_eq!(
+        second.final_message.as_deref(),
+        Some("second answer"),
+        "a message recorded after the turn ended is not the turn's answer"
+    );
+}
+
+/// A finished child session reports the answer of the turn it ran, so a
+/// harness notice recorded after that turn — a resume warning, for instance —
+/// must not take its place. The session-wide newest agent message does take
+/// its place, which is why the report is read from the turn's own span.
+#[test]
+fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let agent = |position: u64, text: &str| TranscriptItem {
+        stable_id: format!("agent:{position}"),
+        position,
+        latest_content_event_ordinal: Some(position),
+        created_at_ms: position as i64 * 100,
+        last_changed_at_ms: position as i64 * 100,
+        body: TranscriptBody::Agent {
+            chunks: vec![serde_json::json!({
+                "content": {"type": "text", "text": text}
+            })],
+            streaming: false,
+        },
+    };
+    let mutations = [
+        MaterializedSessionMutation {
+            transcript: vec![TranscriptMutation::Upsert(TranscriptItem {
+                stable_id: "user:1".into(),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 100,
+                last_changed_at_ms: 100,
+                body: TranscriptBody::User {
+                    content: vec![serde_json::json!({"type": "text", "text": "do the work"})],
+                },
+            })],
+            execution: Some(MaterializedExecutionState::Running { started_at_ms: 100 }),
+            active_turn: Some(Some(MaterializedTurn {
+                command_id: "prompt-1".into(),
+                accepted_ordinal: Some(1),
+                turn_start_position: 1,
+                started_at_ms: 100,
+            })),
+            ..MaterializedSessionMutation::default()
+        },
+        MaterializedSessionMutation {
+            transcript: vec![TranscriptMutation::Upsert(agent(2, "the handoff report"))],
+            ..MaterializedSessionMutation::default()
+        },
+        MaterializedSessionMutation {
+            execution: Some(MaterializedExecutionState::Idle),
+            active_turn: Some(None),
+            last_turn_outcome: Some(MaterializedTurnOutcome {
+                diagnostic: None,
+                usage: None,
+                command_id: "prompt-1".into(),
+                accepted_ordinal: Some(1),
+                turn_start_position: Some(1),
+                completed_ordinal: 3,
+                completed_at_ms: 300,
+                outcome: TurnOutcomeKind::Completed {
+                    stop_reason: "EndTurn".into(),
+                },
+            }),
+            ..MaterializedSessionMutation::default()
+        },
+        MaterializedSessionMutation {
+            transcript: vec![TranscriptMutation::Upsert(agent(
+                4,
+                "Warning: this session was recorded with another model",
+            ))],
+            ..MaterializedSessionMutation::default()
+        },
+    ];
+    for (index, mutation) in mutations.into_iter().enumerate() {
+        let ordinal = index as u64 + 1;
+        let previous = if ordinal == 1 {
+            RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            event_digest(ordinal - 1)
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &previous,
+            &event_digest(ordinal),
+            &mutation,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        load_materialized_finished_turn_message_from(&database, "session-1")
+            .unwrap()
+            .as_deref(),
+        Some("the handoff report")
+    );
+    assert_eq!(
+        load_materialized_session_summary_from(&database, "session-1")
+            .unwrap()
+            .unwrap()
+            .last_agent_message
+            .as_deref(),
+        Some("Warning: this session was recorded with another model"),
+        "the session-wide newest message is the notice, which is what made this worth bounding"
+    );
 }
 
 #[test]

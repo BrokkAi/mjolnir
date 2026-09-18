@@ -76,10 +76,10 @@ use config_picker::ConfigPicker;
 use elicitation::ElicitationDialog;
 pub use elicitation::ElicitationDraft;
 use history::{HistorySearch, HistorySearchRequest};
-pub use rendering::{truncate_line_to_width, wrap_styled_line};
 #[cfg(test)]
 use rendering::voice_button_area;
 use rendering::{TranscriptRenderMode, sanitize_terminal_text};
+pub use rendering::{truncate_line_to_width, wrap_styled_line};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
     ToolDiffstatRequest, TranscriptAnchor, TranscriptRenderCache, TranscriptScrollbarState,
@@ -818,9 +818,11 @@ impl ChatState {
     /// The real composer for a session that is not attached yet: parked
     /// behind a Starting/Resuming transition or an in-flight attach. It edits
     /// exactly like the attached composer — the whole readline chord set —
-    /// but `Enter` keeps the draft and explains instead of sending, because
-    /// there is no session to send to, and command completion stays off
-    /// because no session can answer commands. The draft survives until the
+    /// and `Enter` on a plain prompt clears the input, shows the text as a
+    /// queued preview, and returns `ChatAction::Prompt` so the host can have
+    /// the daemon deliver it once the session is live. A command keeps the
+    /// draft and explains, because no session can answer it yet, and command
+    /// completion stays off for the same reason. The draft survives until the
     /// host carries it into the attached chat.
     pub fn standby(
         session_id: &str,

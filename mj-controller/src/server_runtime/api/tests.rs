@@ -81,7 +81,7 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
         message: "model is unavailable".into(),
     };
     assert_eq!(
-        subagent_status(None, None, Some(&status)),
+        subagent_status(None, None, Some(&status), None),
         ("error".into(), Some("model is unavailable".into()), true)
     );
 }
@@ -259,6 +259,8 @@ fn ready_view(model: &str) -> ManagedSessionView {
         last_acp_activity_at_ms: None,
         current_step_started_at_ms: None,
         foreground_tool_started_at_ms: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
         harness_turn: None,
         last_harness_turn_started_ordinal: None,
         background_commands: Vec::new(),

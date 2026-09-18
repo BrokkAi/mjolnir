@@ -324,6 +324,8 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
         last_acp_activity_at_ms: None,
         current_step_started_at_ms: None,
         foreground_tool_started_at_ms: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
         harness_turn: None,
         last_harness_turn_started_ordinal: None,
         background_commands: Vec::new(),
@@ -341,6 +343,85 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
     assert!(agent_accepts_prompt_images(&operational(Some(Box::new(
         capabilities
     )))));
+}
+
+/// Issue #1025: while the daemon has no live view of a worker, every session
+/// reported `chat_phase: idle` — not a stale value, but the default value of
+/// an enum — even when its own durable record said a turn was running. An
+/// evaluation driver reading `chat_phase == idle` treated those turns as
+/// finished.
+#[test]
+fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
+    let mut controller = controller_with_profiles(&["claude"]);
+    let mut record = phone_session("session-1", 0);
+    record.harness_kind = HarnessKind::Claude;
+    record.last_profile = "claude".into();
+    record.state = SessionState::Running;
+    controller.state.sessions.insert(record.id.clone(), record);
+
+    let project = |execution| {
+        let materialized_activity = std::collections::BTreeMap::from([(
+            "session-1".to_owned(),
+            crate::server_runtime::snapshot::MaterializedActivity {
+                last_activity_at_ms: Some(7_777),
+                execution,
+            },
+        )]);
+        viewer_snapshot(
+            &controller,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &PhoneSessionViews {
+                conversations: &std::collections::BTreeMap::new(),
+                queued_prompts: &std::collections::BTreeMap::new(),
+                active_user_shells: &std::collections::BTreeMap::new(),
+                pending_elicitations: &std::collections::BTreeMap::new(),
+                prompt_images: &std::collections::BTreeSet::new(),
+                // No live operational state: this is exactly the window after
+                // a daemon restart, before it has reattached to the worker.
+                operational: &std::collections::BTreeMap::new(),
+                materialized_activity: &materialized_activity,
+                project_sources: &PhoneProjectSources::default(),
+                operations: &std::collections::BTreeMap::new(),
+                move_recoveries: &std::collections::BTreeMap::new(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &std::collections::BTreeMap::new(),
+            },
+            1,
+        )
+    };
+
+    let running = project(mj_core::state::MaterializedExecutionState::Running {
+        started_at_ms: 1_000,
+    });
+    let session = &running.sessions[0];
+    assert_eq!(
+        session.chat_phase,
+        crate::server::ViewerChatPhase::Running,
+        "a turn the durable record knows about is still running"
+    );
+    assert!(!session.is_idle);
+    assert_eq!(
+        session
+            .activity_state
+            .as_ref()
+            .map(mj_core::activity::ActivityState::last_known),
+        Some(&mj_core::activity::ActivityState::Turn {
+            started_at_ms: Some(1_000)
+        }),
+        "the summary says what was last known, and that it is no longer live"
+    );
+
+    // A session the daemon cannot see and whose record shows no turn is still
+    // not *confirmed* idle, so automation cannot read completion into it.
+    let quiet = project(mj_core::state::MaterializedExecutionState::Idle);
+    let session = &quiet.sessions[0];
+    assert_eq!(session.chat_phase, crate::server::ViewerChatPhase::Idle);
+    assert!(
+        !session.is_idle,
+        "missing operational state is not confirmed idle"
+    );
 }
 
 #[test]
@@ -405,14 +486,21 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         last_acp_activity_at_ms: None,
         current_step_started_at_ms: None,
         foreground_tool_started_at_ms: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
         harness_turn: None,
         last_harness_turn_started_ordinal: None,
         background_commands: Vec::new(),
         background_work_known: None,
     };
     let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
-    let materialized_activity =
-        std::collections::BTreeMap::from([("session-1".into(), Some(7_777_i64))]);
+    let materialized_activity = std::collections::BTreeMap::from([(
+        "session-1".to_owned(),
+        crate::server_runtime::snapshot::MaterializedActivity {
+            last_activity_at_ms: Some(7_777_i64),
+            execution: mj_core::state::MaterializedExecutionState::Idle,
+        },
+    )]);
     let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
         viewer_snapshot(
             &controller,

@@ -280,7 +280,7 @@ response = json.loads(result.stdout)
 | `cancelled` | The turn was cancelled or interrupted, which is what `cancel-turn` produces. |
 | `quota_limit` | Reported usage quota is exhausted, or the model was at capacity and no retry is armed. |
 | `timeout` | The deadline passed with the turn still running. Wait again with the same `turn_id`. |
-| `stopped` | The session is stopped, stopping, or failed, so no turn can finish on it. |
+| `stopped` | The session is stopped, stopping, or failed, so no turn can finish on it. `message` carries the session's own recorded reason when it has one, such as a resume that failed. |
 
 - `turn_number` is the one-based position of this turn in the conversation, and
   `elapsed_ms` is how long it took from its first item to its last change. Both
@@ -371,6 +371,48 @@ undone. Afterwards `GET /sessions/{id}` and
 forced close also takes over a graceful close that is stuck, so it is the way
 out when a close failed and left the session in `error`.
 
+### Resume a stopped session
+
+```text
+POST /api/v1/sessions/{session_id}/resume
+```
+
+```json
+{
+  "profile_id": "codex",
+  "target_id": "local",
+  "workspace_id": "workspace-1",
+  "queue": "start"
+}
+```
+
+The body is optional and so is every field in it: the session's own record
+supplies the profile, target, and workspace it last ran with, so a bodiless POST
+means "continue this session where it left off". `queue` is `start` or
+`discard`, and decides what happens to prompts that were queued when the session
+stopped; it defaults to `start`.
+
+```json
+{
+  "session_id": "session-1",
+  "workspace_id": "workspace-1",
+  "profile_id": "codex",
+  "target_id": "local"
+}
+```
+
+The reply is `202` with the settings the resume will actually use. Like
+creation, it answers before the session is up: restoring a checkpoint onto a
+fresh target takes minutes. Wait on the session with no `turn_id` and the wait
+blocks while the resume runs, then returns once the session is live; a resume
+that fails answers `stopped` with the reason.
+
+This is the same operation the terminal's Resume wizard runs, with the same
+repository preflight and the same cross-harness handoff. A running session is
+refused with `409` — close it first, or use a move to change where a live
+session runs. Model and effort are not part of this request: apply them with
+`PATCH /sessions/{id}/config` once the wait returns.
+
 ### Get the work out
 
 ```text
@@ -429,6 +471,7 @@ Preconditions, all answering `409` with the reason:
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
 | `mj export --session <id> --kind file --path <path>` | `GET /sessions/{id}/files?path=` |
 | `mj close --session <id> [--force]` | `POST /sessions/{id}/close` |
+| `mj resume --session <id>` | `POST /sessions/{id}/resume` |
 | `mj cancel-turn --session <id>` | `POST /sessions/{id}/cancel-turn` |
 
 Every one of them takes `--json` and then prints the route's response unchanged,

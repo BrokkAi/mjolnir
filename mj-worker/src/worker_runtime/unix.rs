@@ -282,16 +282,14 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         session_environment.clone(),
         acp_events_tx.clone(),
     );
-    // The bridge environment has to be final before it is persisted, and
-    // Codex needs the model this session accepted before it opens the resumed
-    // thread. Read the accepted configuration once; the launch spec below and
-    // the ACP runtime share it.
+    // The bridge environment has to be final before it is persisted. The
+    // accepted selectors are not part of it: the ACP runtime re-pins them into
+    // this spec before every bridge start, including the first one.
     let accepted_config = {
         let relay = relay.lock().expect("relay lock poisoned");
         let state = relay.operational_state();
         acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
     };
-    super::pin_accepted_codex_model(config.harness, &mut config.environment, &accepted_config)?;
     let supervisor_path = root.join("acp-supervisor.json");
     AcpSupervisorSpec {
         command: config.bridge_command,
@@ -332,11 +330,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // keeps a harness from outliving the session it was reviewing for.
     // One acquisition: a guard taken inside the struct literal below would
     // live until the literal ends and deadlock the next one.
-    let (acp_activity, step_clock, accepted_config) = {
+    let (acp_activity, step_clock, tools_in_flight, accepted_config) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
             relay.step_clock(),
+            relay.tools_in_flight(),
             Arc::new(Mutex::new(accepted_config)),
         )
     };
@@ -369,6 +368,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                 supervisor_path.to_string_lossy().into_owned(),
             ],
             environment: session_environment,
+            bridge_spec_path: Some(supervisor_path.clone()),
             cwd: config.cwd,
             additional_directories: config.additional_directories,
             extra_mcp_servers: Vec::new(),
@@ -383,6 +383,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             execution_policy: config.execution_policy,
             acp_activity,
             step_clock,
+            tools_in_flight,
+            stall_policy: None,
         };
         let mut acp_task = tokio::spawn(acp::run(acp_spec, acp_commands_rx, acp_events_tx));
 

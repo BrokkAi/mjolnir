@@ -324,6 +324,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 last_acp_activity_at_ms: None,
                 current_step_started_at_ms: None,
                 foreground_tool_started_at_ms: None,
+                tools_in_flight: Vec::new(),
+                activity: None,
                 harness_turn: None,
                 last_harness_turn_started_ordinal: None,
                 background_commands: Vec::new(),
@@ -1791,6 +1793,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
+        state: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![mj_core::relay::BackgroundCommand {
             id: "test:active".into(),
@@ -1811,6 +1814,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
+        state: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![
             mj_core::relay::BackgroundCommand {
@@ -1944,6 +1948,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
+        state: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![mj_core::relay::BackgroundCommand {
             id: "test:task".into(),

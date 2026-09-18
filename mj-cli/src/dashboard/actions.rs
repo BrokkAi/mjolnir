@@ -24,8 +24,8 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
     spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
-    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_startup_prompt, spawn_workspace_create, spawn_workspace_delete,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -520,6 +520,24 @@ pub(crate) async fn apply_dashboard_action(
                     .dashboard
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
+        }
+        DashboardAction::QueueStartupPrompt { session_id, text } => {
+            // The daemon clears the saved draft only when it still holds the
+            // text this prompt was typed from; anything else stays put.
+            let inherited_draft = context
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .filter(|session| session.draft_input == text)
+                .map(|session| session.draft_input.clone());
+            spawn_startup_prompt(
+                session_id,
+                text,
+                inherited_draft,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
         }
         DashboardAction::RenameSession { session_id, title } => {
             context.dashboard.set_notice("Renaming session…");
@@ -1288,6 +1306,41 @@ pub(crate) fn start_preflighted_session_launch(
     start_session_launch_with_repository_preflight(context, action, Some(repository_preflight));
 }
 
+/// Opens the composer that catches typing while a creation runs. Registration
+/// is several seconds of work away — loading the controller, probing Git
+/// remotes, registering with the daemon — and until it lands there is no
+/// session id to key a standby composer by, so the launch standby holds the
+/// text and the new session's standby adopts it.
+fn begin_launch_standby(context: &mut DashboardContext, action: &DashboardAction) {
+    let DashboardAction::CreateSession {
+        profile_id,
+        bundle_id,
+        project_directory,
+        ..
+    } = action
+    else {
+        return;
+    };
+    let target = project_directory
+        .as_ref()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|| bundle_id.clone());
+    context
+        .dashboard
+        .begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+            target,
+            profile: profile_id.clone(),
+            title: String::new(),
+            harness_kind: context
+                .controller
+                .config
+                .profiles
+                .get(profile_id)
+                .map(|profile| profile.kind),
+            subagent_count: 0,
+        });
+}
+
 fn start_session_launch_with_repository_preflight(
     context: &mut DashboardContext,
     action: DashboardAction,
@@ -1308,6 +1361,7 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
+            begin_launch_standby(context, &action);
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,

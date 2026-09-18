@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -> LaunchSpec {
     LaunchSpec {
+        bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
         command,
@@ -20,6 +21,8 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        stall_policy: None,
     }
 }
 

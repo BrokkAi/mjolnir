@@ -105,6 +105,13 @@ pub(super) async fn run_daemon_runtime(
         workspaces,
     ));
     let move_operations = blocking(crate::database::load_move_operations).await?;
+    // Every session a durable move intent names is owned by that intent,
+    // whether or not this startup resumes it, so reconciliation leaves it
+    // alone.
+    let move_sessions = move_operations
+        .iter()
+        .map(|operation| operation.selection.session_id.clone())
+        .collect::<BTreeSet<_>>();
     let move_owned = state.recover_moves(move_operations)?;
     state.resume_retained_cleanups();
     let cancellation = crate::termination::Coordinator::install().token();
@@ -166,6 +173,53 @@ pub(super) async fn run_daemon_runtime(
         interrupted_close_cancellations.push(interrupted_cancellation);
         interrupted_close_tasks.push(interrupted_close_task);
     }
+    // Whatever is still in an in-flight lifecycle state now has no owner: the
+    // moves, the interrupted closes, and the checkpointing rows above are
+    // every operation that legitimately resumes. The list comes from the
+    // startup snapshot, so a session created after this cannot be caught by
+    // it, and the writes run off this path because they touch the database.
+    let reconciliation = {
+        let unowned = unowned_interrupted_lifecycles(
+            &controller,
+            &move_owned.union(&move_sessions).cloned().collect(),
+        );
+        (!unowned.is_empty()).then(|| {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let reconciled = tokio::task::spawn_blocking(move || {
+                    let mut controller = Controller::load()?;
+                    let mut reconciled = 0usize;
+                    for (session_id, cause) in unowned {
+                        match controller.fail_interrupted_lifecycle(&session_id, &cause) {
+                            Ok(true) => {
+                                tracing::warn!(%session_id, %cause, "session left in flight by a daemon restart marked failed");
+                                reconciled += 1;
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                %session_id,
+                                error = format!("{error:#}"),
+                                "could not reconcile an interrupted lifecycle state"
+                            ),
+                        }
+                    }
+                    anyhow::Ok(reconciled)
+                })
+                .await;
+                match reconciled {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(_)) => refresh_runtime_controller(&state).await,
+                    Ok(Err(error)) => tracing::warn!(
+                        error = format!("{error:#}"),
+                        "could not load the controller to reconcile interrupted lifecycles"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "interrupted lifecycle reconciliation task failed");
+                    }
+                }
+            })
+        })
+    };
     let mut phone_publisher: Option<RemoteSessionPublisher> = None;
     let mut phone_task = None;
     let mut remote_request_bridge = None;
@@ -378,6 +432,18 @@ pub(super) async fn run_daemon_runtime(
         "cancel daemon lifecycle operations",
         state.cancel_and_wait_lifecycles().await,
     );
+    record_daemon_cleanup(
+        &mut outcome,
+        "drain startup prompts",
+        state.cancel_and_join_startup_prompts().await,
+    );
+    if let Some(reconciliation) = reconciliation {
+        record_daemon_cleanup(
+            &mut outcome,
+            "join interrupted lifecycle reconciliation",
+            reconciliation.await.map_err(anyhow::Error::new),
+        );
+    }
     for interrupted_close_task in interrupted_close_tasks {
         record_daemon_cleanup(
             &mut outcome,

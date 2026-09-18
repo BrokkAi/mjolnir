@@ -859,10 +859,10 @@ fn readline_chords_edit_the_standby_draft() {
     assert!(dashboard.take_standby_prompt_draft("session-1").is_some());
 }
 
-/// Enter must not send while the session is not live: it is consumed with
-/// an explanation and the draft stays editable.
+/// Enter during a starting transition hands the prompt to the host for
+/// delivery: the draft clears and the text stays visible as a queued preview.
 #[test]
-fn enter_during_a_starting_transition_does_not_send_or_clear_the_draft() {
+fn enter_during_a_starting_transition_queues_the_prompt_for_delivery() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
@@ -872,13 +872,187 @@ fn enter_during_a_starting_transition_does_not_send_or_clear_the_draft() {
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
+        DashboardAction::QueueStartupPrompt {
+            session_id: "session-1".into(),
+            text: "h".into(),
+        }
     );
-    assert!(dashboard.notice().is_some());
     assert_eq!(
         dashboard
             .standby_prompts
             .get("session-1")
+            .map(|standby| standby.draft()),
+        Some(String::new())
+    );
+    assert_eq!(
+        dashboard
+            .standby_prompts
+            .get("session-1")
+            .map(|standby| standby.queued_prompt_texts()),
+        Some(vec!["h".to_owned()])
+    );
+}
+
+/// A prompt the daemon refused comes back as the draft, ahead of anything
+/// typed since, and its preview goes away.
+#[test]
+fn a_refused_startup_prompt_returns_to_the_standby_draft() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    for character in "first".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    for character in "next".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+
+    dashboard.restore_standby_prompt("session-1", "first");
+
+    let standby = dashboard
+        .standby_prompts
+        .get("session-1")
+        .expect("standby composer");
+    assert_eq!(standby.draft(), "first\nnext");
+    assert!(standby.queued_prompt_texts().is_empty());
+}
+
+/// A command cannot be answered while the session is offline, so Enter keeps
+/// the draft and explains instead of queueing anything.
+#[test]
+fn a_command_in_the_standby_composer_keeps_its_draft() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    for character in "/help".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(dashboard.notice().is_some());
+    let standby = dashboard
+        .standby_prompts
+        .get("session-1")
+        .expect("standby composer");
+    assert_eq!(standby.draft(), "/help");
+    assert!(standby.queued_prompt_texts().is_empty());
+}
+
+/// A creation that has not registered yet has no session to key a standby by,
+/// so the launch standby takes the typing instead of the session that was
+/// selected before. Enter there keeps the text as a preview, because there is
+/// no session id to queue it against yet.
+#[test]
+fn typing_before_a_launch_registers_edits_the_launch_standby() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+        target: "/tmp/project".into(),
+        profile: "profile-1".into(),
+        title: String::new(),
+        harness_kind: None,
+        subagent_count: 0,
+    });
+
+    for character in "hello".chars() {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char(character))),
+            DashboardAction::None
+        );
+    }
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    dashboard.handle_paste("later");
+
+    assert!(dashboard.has_launch_standby());
+    assert!(dashboard.launch_standby_capturing());
+    assert!(dashboard.standby_prompts.is_empty());
+    let standby = dashboard.launch_standby.as_ref().expect("launch standby");
+    assert_eq!(standby.draft(), "later");
+    assert_eq!(standby.queued_prompt_texts(), vec!["hello".to_owned()]);
+}
+
+/// Registration hands the launch standby to the new session: the draft and the
+/// queued previews move into that session's standby, and the queued texts come
+/// back oldest first so the host can have the daemon deliver each one.
+#[test]
+fn adopting_the_launch_standby_moves_its_draft_and_prompts() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+        target: "/tmp/project".into(),
+        profile: "profile-1".into(),
+        title: String::new(),
+        harness_kind: None,
+        subagent_count: 0,
+    });
+    for character in "first".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    for character in "second".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    for character in "still typing".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+
+    assert_eq!(
+        dashboard.adopt_launch_standby("session-1"),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+
+    assert!(!dashboard.has_launch_standby());
+    assert!(!dashboard.launch_standby_capturing());
+    let standby = dashboard
+        .standby_prompts
+        .get("session-1")
+        .expect("adopted standby composer");
+    assert_eq!(standby.draft(), "still typing");
+    assert_eq!(
+        standby.queued_prompt_texts(),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+}
+
+/// Selecting another session while a launch is being prepared hands the keys
+/// back to that session, and the launch standby keeps its text for the session
+/// that is still on its way.
+#[test]
+fn selecting_a_session_stops_the_launch_standby_from_capturing() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+        target: "/tmp/project".into(),
+        profile: "profile-1".into(),
+        title: String::new(),
+        harness_kind: None,
+        subagent_count: 0,
+    });
+    dashboard.handle_key(key(KeyCode::Char('h')));
+
+    dashboard.selected_session_id = Some("session-other".into());
+
+    assert!(dashboard.has_launch_standby());
+    assert!(!dashboard.launch_standby_capturing());
+    assert_eq!(
+        dashboard
+            .launch_standby
+            .as_ref()
             .map(|standby| standby.draft()),
         Some("h".into())
     );

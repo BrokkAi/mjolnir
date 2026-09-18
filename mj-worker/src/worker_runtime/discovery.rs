@@ -47,6 +47,9 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
             supervisor.to_string_lossy().into_owned(),
         ],
         environment: session_environment,
+        // Discovery opens a throwaway session that never accepts a selector,
+        // so there is nothing to pin into its spec.
+        bridge_spec_path: None,
         cwd: spec.cwd,
         additional_directories: vec![],
         project_memory: None,
@@ -58,6 +61,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         execution_policy: policy,
         acp_activity: Default::default(),
         step_clock: Default::default(),
+        tools_in_flight: Default::default(),
+        stall_policy: None,
     };
     probe(launch, spec.model).await
 }
@@ -268,6 +273,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
 "#).unwrap();
         let launch = LaunchSpec {
+            bridge_spec_path: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
             command: "python3".into(),
@@ -284,6 +290,8 @@ for line in sys.stdin:
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: Default::default(),
             step_clock: Default::default(),
+            tools_in_flight: Default::default(),
+            stall_policy: None,
         };
         let defaults = probe(launch.clone(), None).await.unwrap();
         assert_eq!(defaults.model.as_deref(), Some("default"));

@@ -15,6 +15,12 @@ pub struct LaunchSpec {
     pub extra_mcp_servers: Vec<mj_core::worker_launch::ReviewMcpServer>,
     /// Private Mjolnir delegation socket for supported parent sessions.
     pub subagent_mcp_socket: Option<PathBuf>,
+    /// The supervisor spec the bridge command reads, when this launch has
+    /// one. It is rewritten from `accepted_config` before every bridge start,
+    /// so a harness that can only take a selector before it opens a session
+    /// gets the value this session accepted at *this* launch rather than the
+    /// one it held when the worker started.
+    pub bridge_spec_path: Option<PathBuf>,
     pub resume_session: Option<String>,
     /// Whether Mjolnir's durable state shows the native session named by
     /// `resume_session` may already hold conversation history. Codex writes a
@@ -33,6 +39,14 @@ pub struct LaunchSpec {
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.
     pub step_clock: StepClock,
+    /// The tool calls the agent has open, shared with the durable relay that
+    /// records them. The turn stall watchdog reads this: a turn blocked in a
+    /// long tool call is working, however silent the protocol is (#1020).
+    pub tools_in_flight: mj_core::activity::ToolsInFlight,
+    /// How long a running turn may go without a sign of life. `None` reads the
+    /// process environment, which is what every launch does; a test sets it
+    /// directly so it does not have to reach for a global.
+    pub stall_policy: Option<mj_core::activity::StallPolicy>,
 }
 
 pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {

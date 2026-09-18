@@ -39,10 +39,12 @@ fn activity_animation_stops_when_foreground_and_background_work_settle() {
 }
 
 /// A standby composer edits exactly like the attached one — the readline
-/// chords, paste with normalized line endings — but Enter keeps the draft
-/// and explains instead of sending, and command completion stays closed.
+/// chords, paste with normalized line endings — and Enter on a plain prompt
+/// queues it: the input clears, the text becomes a preview, and the host gets
+/// a `Prompt` action. A command keeps the draft and explains, and command
+/// completion stays closed.
 #[test]
-fn a_standby_composer_edits_like_the_real_one_but_never_sends() {
+fn a_standby_composer_edits_like_the_real_one_and_queues_its_prompt() {
     let config: Config = serde_json::from_str(r#"{"version": 0}"#).expect("default config");
     let mut chat = ChatState::standby(
         "session-1",
@@ -63,13 +65,24 @@ fn a_standby_composer_edits_like_the_real_one_but_never_sends() {
     chat.paste("…\r\nsecond");
     assert_eq!(chat.input, "alpha beta…\nsecond");
 
+    // A command cannot be answered while the session is offline, so it is
+    // consumed with an explanation and the draft stays put.
+    chat.set_input("/help".into());
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.notice().is_some());
+    assert_eq!(chat.draft(), "/help");
+    assert!(chat.queued_prompt_texts().is_empty());
+
+    chat.set_input("alpha beta…\nsecond".into());
     assert_eq!(
         chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::None,
-        "Enter must not produce a prompt while no session is attached"
+        ChatAction::Prompt("alpha beta…\nsecond".into()),
+        "Enter must hand a plain prompt to the host"
     );
-    assert!(chat.notice().is_some());
-    assert_eq!(chat.draft(), "alpha beta…\nsecond");
+    assert_eq!(chat.draft(), "");
+    assert_eq!(chat.queued_prompt_texts(), vec!["alpha beta…\nsecond"]);
+    assert!(chat.remove_queued_prompt_text("alpha beta…\nsecond"));
+    assert!(chat.queued_prompt_texts().is_empty());
 
     chat.set_input("/mod".into());
     chat.update_autocomplete();

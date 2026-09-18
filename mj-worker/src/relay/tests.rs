@@ -252,6 +252,51 @@ fn acp_activity_clock_is_shared_with_operational_status_but_not_persisted() {
     assert_eq!(reopened.operational_state().last_acp_activity_at_ms, None);
 }
 
+/// The worker assembles activity facts directly, because the idle clock runs
+/// on every journal append and building a whole operational state there would
+/// clone the session configuration once per streamed chunk. That makes two
+/// places that translate a session into facts, so this pins them together: if
+/// one ever stops reporting a fact the other reports, this fails.
+#[test]
+fn worker_facts_match_the_published_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    assert_eq!(
+        relay.activity_facts(),
+        relay.operational_state().facts(),
+        "a fresh relay"
+    );
+
+    relay.acp_activity_clock().mark();
+    // The handle the ACP driver's watchdog holds is taken before the session
+    // runs, exactly as the worker runtime takes it, and must see what the
+    // relay records afterwards. If these ever stop being the same tracker,
+    // the watchdog goes blind and a turn blocked in a long tool call is
+    // failed again (#1020).
+    let watchdog_view = relay.tools_in_flight();
+    assert!(watchdog_view.is_empty());
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted {
+            started_at_ms: 1_234,
+        })
+        .unwrap();
+    relay.record_session_update(tool_call_update()).unwrap();
+    let published = relay.operational_state();
+    assert_eq!(relay.activity_facts(), published.facts(), "a working relay");
+    assert_eq!(
+        published.activity.as_ref(),
+        Some(&mj_core::activity::classify(&published.facts())),
+        "the published answer is the one a consumer would compute"
+    );
+    assert_eq!(published.tools_in_flight.len(), 1);
+    assert_eq!(
+        watchdog_view.snapshot(),
+        published.tools_in_flight,
+        "the watchdog's handle and the published list are one tracker"
+    );
+    assert!(!published.activity_state().is_idle());
+}
+
 #[test]
 fn restored_native_identity_waits_for_current_acp_configuration() {
     let temp = tempfile::tempdir().unwrap();

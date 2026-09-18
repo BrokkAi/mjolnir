@@ -410,7 +410,7 @@ impl DurableRelay {
     pub fn agent_terminal_closed(&mut self, terminal_id: &str) -> Result<()> {
         self.active_agent_terminals.remove(terminal_id);
         self.foreground_tools
-            .remove(&crate::acp::fallback_terminal_tool_call_id(terminal_id));
+            .close(&crate::acp::fallback_terminal_tool_call_id(terminal_id));
         self.closed_agent_terminals.insert(terminal_id.to_owned());
         self.persist_activity_transition()
     }
@@ -440,41 +440,6 @@ impl DurableRelay {
         self.foreground_tools.clear();
         if self.background_work == BackgroundWorkPolicy::KimiTasks {
             self.background_work_known = Some(false);
-        }
-    }
-
-    /// Track tool statuses that prove the agent is still doing foreground
-    /// work. Pending and in-progress have portable ACP meanings across every
-    /// harness; prose and plan updates do not carry a corresponding end, so
-    /// they cannot safely override known background work on their own.
-    pub(super) fn track_foreground_tool(&mut self, update: &SessionUpdate) {
-        let (tool_call_id, status) = match update {
-            SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), Some(call.status)),
-            SessionUpdate::ToolCallUpdate(call) => {
-                (call.tool_call_id.0.as_ref(), call.fields.status)
-            }
-            _ => return,
-        };
-        let Some(status) = status else {
-            return;
-        };
-        if matches!(
-            status,
-            agent_client_protocol::schema::v1::ToolCallStatus::Pending
-                | agent_client_protocol::schema::v1::ToolCallStatus::InProgress
-        ) {
-            let started_at_ms = self.step_clock.started_at_ms().unwrap_or_else(epoch_millis);
-            self.foreground_tools
-                .entry(tool_call_id.to_owned())
-                .and_modify(|(previous, previous_started_at_ms)| {
-                    if *previous != status {
-                        *previous = status;
-                        *previous_started_at_ms = started_at_ms;
-                    }
-                })
-                .or_insert((status, started_at_ms));
-        } else {
-            self.foreground_tools.remove(tool_call_id);
         }
     }
 

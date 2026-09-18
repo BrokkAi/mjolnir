@@ -159,6 +159,16 @@ impl RuntimeState {
                             );
                         }
                     }
+                    // A create or resume that failed owns its record. If it did
+                    // not get as far as rolling that record back, the stored
+                    // error is applied here, because nothing else will.
+                    if let Err(error) = &result
+                        && matches!(kind, LifecycleKind::Create | LifecycleKind::Resume)
+                    {
+                        state
+                            .fail_unfinished_provisioning(&operation_session_id, error)
+                            .await;
+                    }
                     state.note_lifecycle_outcome(&operation_session_id);
                     if let Err(error) =
                         reach_test_hook("lifecycle_reservation_before_result_publication").await

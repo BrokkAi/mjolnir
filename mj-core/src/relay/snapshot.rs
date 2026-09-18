@@ -459,8 +459,25 @@ pub struct RelayOperationalState {
     /// started its current status. Unlike the general step clock, this is
     /// positive evidence of foreground work even when the harness exposes no
     /// turn boundary of its own.
+    ///
+    /// Kept for a daemon too old to read `tools_in_flight`, and derived from
+    /// it; new code reads `tools_in_flight`, which also carries the age of the
+    /// oldest call, which is what bounds a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_tool_started_at_ms: Option<i64>,
+    /// Every tool call the agent has open, oldest first. A harness that marks
+    /// no turn of its own is visible only this way, and a turn blocked in a
+    /// long tool call is proved to be working by it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_in_flight: Vec<crate::activity::InFlightToolCall>,
+    /// The worker's own answer to what this session is doing.
+    ///
+    /// Published so no consumer re-derives one. A daemon reading an older
+    /// worker that does not send it classifies [`Self::facts`] with the same
+    /// `mj-core` function the worker used, so the answer is identical either
+    /// way; there is no second implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::activity::ActivityState>,
     /// The turn the harness started on its own, while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_turn: Option<HarnessTurn>,
@@ -494,44 +511,113 @@ impl RelayOperationalState {
             && self.acp_ready.unwrap_or(true)
     }
 
+    /// Everything that bears on whether this session is working, in the shape
+    /// `mj_core::activity` decides with.
+    ///
+    /// This is the only translation from a relay snapshot into an activity
+    /// decision. Every predicate below goes through it, so none of them can
+    /// read a different subset of the facts than another.
+    #[must_use]
+    pub fn facts(&self) -> crate::activity::ActivityFacts {
+        crate::activity::ActivityFacts {
+            execution: self.execution,
+            prompt_started_at_ms: self
+                .active_prompt
+                .as_ref()
+                .map(|prompt| prompt.started_at_ms),
+            harness_turn_started_at_ms: self.harness_turn.map(|turn| turn.started_at_ms),
+            turn_started_at_ms: self.activity_turn_started_at_ms,
+            queued_commands: self.queued_prompts.len(),
+            // A worker too old to list its open tool calls still reports the
+            // newest one's start, and that is enough to know a tool is
+            // running. Reading only the list would quietly lose the fact and
+            // call a working session idle.
+            tools_in_flight: if self.tools_in_flight.is_empty() {
+                self.foreground_tool_started_at_ms
+                    .or_else(|| {
+                        // A step in flight under a running turn is foreground
+                        // work even when the harness has named no tool call
+                        // for it. It has always counted as such; naming it
+                        // here keeps that in one place.
+                        (self.execution == RelayExecutionState::Running)
+                            .then_some(self.current_step_started_at_ms)
+                            .flatten()
+                            .filter(|started_at_ms| *started_at_ms >= 0)
+                    })
+                    .map(|started_at_ms| crate::activity::InFlightToolCall {
+                        tool_call_id: String::new(),
+                        status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                        started_at_ms,
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                self.tools_in_flight.clone()
+            },
+            background_started_at_ms: self
+                .background_commands
+                .iter()
+                .map(|command| command.started_at_ms)
+                .chain(
+                    self.active_user_shells
+                        .iter()
+                        .filter_map(|shell| shell.started_at_ms),
+                )
+                .min(),
+            background_commands: self.background_commands.len(),
+            active_user_shells: self.active_user_shells.len(),
+            active_agent_terminals: self.active_agent_terminals.len(),
+            goal_active: self.goal.active(),
+            goal_running: self.goal.running(),
+            goal_pending_resume: self.goal.pending_resume.is_some(),
+            goal_decision: self.goal.decision.is_some(),
+            goal_synchronized: self.goal.synchronized(),
+            background_work_known: self.background_work_known,
+            acp_ready: self.acp_ready,
+            checkpoint_only: self.checkpoint_only,
+            checkpoint_barrier: self.checkpoint_barrier.is_some(),
+            capacity_retry_armed: self
+                .capacity_retry
+                .as_ref()
+                .is_some_and(|retry| !retry.submitted),
+            last_acp_activity_at_ms: self.last_acp_activity_at_ms,
+            current_step_started_at_ms: self.current_step_started_at_ms,
+            idle_since_ms: self.idle_since_ms,
+        }
+    }
+
+    /// What this session is doing: the worker's published answer, or the same
+    /// classification of the same facts when the worker is too old to publish
+    /// one.
+    #[must_use]
+    pub fn activity_state(&self) -> crate::activity::ActivityState {
+        self.activity
+            .clone()
+            .unwrap_or_else(|| crate::activity::classify(&self.facts()))
+    }
+
     /// Whether nothing the worker owns would be destroyed by killing it now.
     ///
     /// Stopping a worker tears down the ACP bridge with it, so any operation
-    /// that replaces a worker in place has to wait for this. Every way the
-    /// session can still be holding work is listed here, and each is a
-    /// separate fact: the agent can be mid-turn, the harness can have started
-    /// a turn of its own, a foreground tool, a terminal or a command it
-    /// launched can still be running, a prompt can be queued behind the
-    /// current one, a user shell can be open, and a checkpoint barrier can be
-    /// waiting to capture.
+    /// that replaces a worker in place has to wait for this. A held checkpoint
+    /// barrier is itself a reason to wait; [`Self::has_work_in_flight`] is the
+    /// same predicate without it, for a caller that holds the barrier and is
+    /// asking whether anything else is running.
     #[must_use]
     pub fn is_quiet(&self) -> bool {
-        self.goal.pending_resume.is_none()
-            && self.goal.decision.is_none()
-            && !self.goal.active()
-            && !self.goal.running()
-            && self.execution == RelayExecutionState::Idle
-            && self.acp_ready != Some(false)
-            && self.background_work_known != Some(false)
-            && self.active_prompt.is_none()
-            && self.harness_turn.is_none()
-            && self.queued_prompts.is_empty()
-            && self.active_user_shells.is_empty()
-            && self.active_agent_terminals.is_empty()
-            && self.foreground_tool_started_at_ms.is_none()
-            && self.background_commands.is_empty()
-            && self.checkpoint_barrier.is_none()
+        crate::activity::is_quiet(&self.facts())
+    }
+
+    /// Whether the session still owns foreground or background work.
+    #[must_use]
+    pub fn has_work_in_flight(&self) -> bool {
+        crate::activity::has_work_in_flight(&self.facts())
     }
 
     /// Whether a controller may replace this worker without losing work.
-    ///
-    /// Older Codex and Kimi workers cannot prove that native goals or
-    /// background agents are absent, even when their snapshots look quiet.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
-        self.is_quiet()
-            && (harness != HarnessKind::Codex || self.goal.synchronized())
-            && (harness != HarnessKind::Kimi || self.background_work_known == Some(true))
+        crate::activity::safe_to_replace(&self.facts(), harness)
     }
 
     /// Whether a routine checkpoint may admit a barrier without risking
@@ -543,29 +629,7 @@ impl RelayOperationalState {
 
     /// The same provider-owned work prerequisite used by checkpoint admission.
     pub fn checkpoint_background_blocker(&self, harness: HarnessKind) -> Option<&'static str> {
-        if self.checkpoint_only || self.execution == RelayExecutionState::Closed {
-            None
-        } else if harness == HarnessKind::Codex && !self.goal.synchronized() {
-            Some("Codex goal and execution state is not synchronized; checkpoint deferred")
-        } else if self.goal.active() || self.goal.running() || self.goal.decision.is_some() {
-            Some("an active goal owns this session; pause the goal before checkpointing")
-        } else if harness != HarnessKind::Kimi {
-            None
-        } else if self.background_work_known.is_none() {
-            Some(
-                "Kimi worker has not reported background-agent synchronization support; checkpoint requires a worker reporting synchronized task state",
-            )
-        } else if self.background_work_known == Some(false) {
-            Some(
-                "Kimi background-agent state is not synchronized; checkpoint requires a synchronized empty task list",
-            )
-        } else if !self.background_commands.is_empty() {
-            Some(
-                "Kimi background agents are still active; checkpoint requires their completion and a synchronized empty task list",
-            )
-        } else {
-            None
-        }
+        crate::activity::checkpoint_blocker(&self.facts(), harness)
     }
 }
 
@@ -1002,6 +1066,11 @@ impl RelaySnapshot {
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
             foreground_tool_started_at_ms: None,
+            // Live process facts, like the ones below: only
+            // `DurableRelay::operational_state` can see them, and a tool call
+            // a dead harness had open is not inherited by its replacement.
+            tools_in_flight: Vec::new(),
+            activity: None,
             harness_turn: self.harness_turn.map(|turn| HarnessTurn {
                 started_at_ms: turn.started_at_ms,
             }),

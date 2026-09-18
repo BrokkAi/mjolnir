@@ -235,10 +235,9 @@ pub fn list_native_session_sources(
 /// leaves the caller to derive a title from the conversation.
 pub fn native_session_title(harness: HarnessKind, source_path: &Path) -> Option<String> {
     match harness {
-        HarnessKind::Kimi => kimi_state_listing_metadata(source_path, Path::new(""))
-            .ok()
-            .flatten()
-            .map(|(title, _, _)| title),
+        HarnessKind::Kimi => {
+            kimi_state_listing_metadata(source_path, Path::new("")).map(|(title, _, _)| title)
+        }
         HarnessKind::Grok => grok::grok_listing_metadata(source_path).0,
         _ => None,
     }

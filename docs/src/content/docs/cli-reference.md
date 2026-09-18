@@ -167,6 +167,8 @@ mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
 mj close --session <id> [--force] [--delete-branch]
+mj resume --session <id> [--profile <id>] [--target <id>] [--workspace-id <id>]
+          [--queue start|discard] [--json]
 mj cancel-turn --session <id>
 mj api-info [--json]
 ```
@@ -177,6 +179,21 @@ the outcome, the turn number, the elapsed time, and the agent's final message,
 and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
+
+`mj resume` continues a session that `mj close` stopped. The session keeps its
+id, its transcript, and its work; Mjolnir provisions a fresh target and restores
+the verified checkpoint. Every selector is optional: the session's own record
+supplies the profile, the target, and the workspace, so `mj resume --session
+<id>` is the whole command for continuing where you left off. `--profile` and
+`--target` resume somewhere else, and `--queue` decides whether prompts queued
+when the session stopped are started or discarded (`start` by default).
+
+The command answers as soon as the daemon has taken the session, because
+restoring an archive takes minutes. Follow it with `mj wait --session <id>`,
+which blocks while the resume runs and reports the reason if it fails, and then
+`mj set-config` and `mj prompt` as for any live session. A session that is
+already running is refused: close it first. `mj move` is the command for a live
+session that should continue elsewhere.
 
 `mj close --force` destroys the session instead of checkpointing it. It removes
 the managed worktree's checkout but leaves its git branch in the source
