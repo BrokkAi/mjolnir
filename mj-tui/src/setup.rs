@@ -527,7 +527,6 @@ fn value_summary(
         {
             if *value { "☑" } else { "☐" }.to_owned()
         }
-        // The machine's own switch is a checkbox; an unset value means on.
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.
