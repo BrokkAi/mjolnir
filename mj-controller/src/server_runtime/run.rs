@@ -261,7 +261,7 @@ pub async fn run_server(
                 operations = lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
-                if let Err(error) = snapshot_tx.send(viewer_snapshot(
+                let snapshot = viewer_snapshot(
                     &controller,
                     &phone_workspaces,
                     &quotas,
@@ -281,7 +281,8 @@ pub async fn run_server(
                         reviews: &review_views(&daemon_runtime),
                     },
                     $revision,
-                )) {
+                );
+                if let Err(error) = snapshot_tx.send(snapshot) {
                     tracing::debug!(revision = $revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
                 }
             };
@@ -1415,6 +1416,14 @@ pub async fn run_server(
                         session_id.as_deref(),
                         &result,
                     );
+                    // A session that is taking work again has recovered from
+                    // whatever its last close did, so it stops reporting it.
+                    if result.is_ok() && let Some(session_id) = session_id.clone() {
+                        let daemon_runtime = daemon_runtime.clone();
+                        tokio::spawn(async move {
+                            daemon_runtime.clear_recorded_close_failure(&session_id).await;
+                        });
+                    }
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,

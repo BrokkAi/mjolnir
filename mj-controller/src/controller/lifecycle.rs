@@ -333,6 +333,61 @@ impl Controller {
         Ok(true)
     }
 
+    /// Record why a close failed on a session the close left in its earlier
+    /// state, so the person who asked for it learns that it did not finish.
+    ///
+    /// A close that ended in a state of its own — interrupted and resumable,
+    /// or left without a live worker — has already recorded the reason that
+    /// fits that state, and it says more than this one does, so it is kept.
+    /// Reports whether anything changed.
+    pub fn record_failed_close(&mut self, session_id: &str, cause: &str) -> Result<bool> {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        // A reason from an earlier close of this session is replaced, so a
+        // repeated close reports its own log entry rather than an older one.
+        if record.last_error.is_some() && record.public_error().is_none() {
+            return Ok(false);
+        }
+        let previous = record.clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.last_error = Some(cause.to_owned());
+        record.updated_at = now();
+        persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist the reason a close did not finish",
+            &crate::database::save_lifecycle_session,
+        )?;
+        Ok(true)
+    }
+
+    /// Forget a recorded close failure, because something for this session has
+    /// since succeeded. Only the sentence a failed close wrote is cleared; a
+    /// raw error from any other operation is left alone. Reports whether
+    /// anything changed.
+    pub fn clear_recorded_close_failure(&mut self, session_id: &str) -> Result<bool> {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        if record.public_error().is_none() {
+            return Ok(false);
+        }
+        let previous = record.clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.last_error = None;
+        record.updated_at = now();
+        persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "clear the reason a close did not finish",
+            &crate::database::save_lifecycle_session,
+        )?;
+        Ok(true)
+    }
+
     /// Close a session that has nothing to checkpoint.
     ///
     /// A record still provisioning never reached a running worker, and a

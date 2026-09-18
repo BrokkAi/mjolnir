@@ -327,7 +327,13 @@ pub(crate) struct SessionArgs {
 #[derive(Debug, Args)]
 pub(crate) struct CloseArgs {
     #[arg(long)]
-    session: String,
+    session: Option<String>,
+    /// Taken only so the command can explain itself. `mj close <id>` is a
+    /// common mistake, and every session command in this CLI names its
+    /// session with `--session`, so clap's "unexpected argument" would leave
+    /// the person guessing which option it wanted.
+    #[arg(value_name = "SESSION", hide = true)]
+    misplaced_session: Option<String>,
     /// Destroy the session without a checkpoint: the target is torn down, the
     /// recovery archive removed, sub-agents destroyed first; irreversible.
     #[arg(long)]
@@ -729,24 +735,46 @@ pub(crate) async fn sessions(
     Ok(())
 }
 
+/// Close a session, with or without a checkpoint.
+///
+/// A non-force close is accepted asynchronously, because checkpointing and
+/// tearing down a target take minutes. Follow it with `mj wait --session <id>`,
+/// which blocks while the close runs and reports why it failed if it does.
 pub(crate) async fn close(args: CloseArgs) -> Result<()> {
+    let session = close_session_id(&args)?;
     let client = ApiClient::connect().await?;
     client
-        .close(&args.session, args.force, args.delete_branch)
+        .close(session, args.force, args.delete_branch)
         .await?;
     match args.json {
         true => print_json(&serde_json::json!({
-            "session_id": args.session,
+            "session_id": session,
             "accepted": true,
             "forced": args.force,
         })),
         false => {
             match args.force {
-                true => println!("destroying {}", args.session),
-                false => println!("closing {}", args.session),
+                true => println!("destroying {session}"),
+                false => {
+                    println!("closing {session}");
+                    println!("watch it with `mj wait --session {session}`");
+                }
             }
             Ok(())
         }
+    }
+}
+
+/// Which session this close is for, or a message naming the option that says
+/// so.
+fn close_session_id(args: &CloseArgs) -> Result<&str> {
+    match (args.session.as_deref(), args.misplaced_session.as_deref()) {
+        (Some(session), None) => Ok(session),
+        (None, Some(session)) => {
+            bail!("name the session as an option: `mj close --session {session}`")
+        }
+        (Some(_), Some(_)) => bail!("name the session once, with --session"),
+        (None, None) => bail!("name the session to close with --session <id>"),
     }
 }
 
@@ -1246,6 +1274,26 @@ mod tests {
 
         // The name is required: an empty create would otherwise reach the API.
         assert!(Cli::try_parse_from(["mj", "workspaces", "create"]).is_err());
+    }
+
+    #[test]
+    fn close_names_the_option_that_takes_a_session_id() {
+        let parsed = Cli::try_parse_from(["mj", "close", "s1"]).expect("the id is accepted");
+        let Command::Close(args) = parsed.command.expect("close is a command") else {
+            panic!("close parsed as another command");
+        };
+        let error = close_session_id(&args).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--session s1"),
+            "the error has to say which option to use: {error:#}"
+        );
+
+        let parsed =
+            Cli::try_parse_from(["mj", "close", "--session", "s1"]).expect("the option parses");
+        let Command::Close(args) = parsed.command.expect("close is a command") else {
+            panic!("close parsed as another command");
+        };
+        assert_eq!(close_session_id(&args).unwrap(), "s1");
     }
 
     #[test]

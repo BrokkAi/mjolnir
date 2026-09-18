@@ -1804,6 +1804,58 @@ fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
 }
 
 #[test]
+fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
+    let request = WaitRequest::default();
+
+    // The close owns the session. Without this the wait would answer
+    // "stopped" while the close was still running, and never see how it ended.
+    let running_close = WaitObservation {
+        closing: true,
+        lifecycle: Some(ViewerLifecycleCategory::Stopping),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    assert_eq!(resolve_wait(&running_close, &request), None);
+
+    // It ended and the session is alive again, so it failed. The reason the
+    // close recorded is what the wait has to report: the request that asked
+    // for the close was answered when it was admitted.
+    let failed_close = WaitObservation {
+        close_failure: Some("the close did not finish: the checkpoint could not be written".into()),
+        lifecycle: Some(ViewerLifecycleCategory::Live),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    let decision = resolve_wait(&failed_close, &request).unwrap();
+    assert_eq!(decision.outcome, WaitOutcome::Error);
+    assert_eq!(
+        decision.message.as_deref(),
+        Some("the close did not finish: the checkpoint could not be written"),
+        "reporting the finished turn instead would call a failed close a success"
+    );
+
+    // A close that reached its destination still ends the wait as stopped.
+    let finished_close = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Stopped),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    assert_eq!(
+        resolve_wait(&finished_close, &request).unwrap().outcome,
+        WaitOutcome::Stopped
+    );
+
+    // A close that left the session dead reports its recorded reason rather
+    // than only that the session failed.
+    let dead = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Failed),
+        launch_error: Some("close failed and left the session without a live worker".into()),
+        ..idle(None)
+    };
+    assert_eq!(
+        resolve_wait(&dead, &request).unwrap().message.as_deref(),
+        Some("close failed and left the session without a live worker")
+    );
+}
+
+#[test]
 fn a_launch_failure_for_another_session_is_not_this_session_s() {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -1864,6 +1916,33 @@ fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
         serde_json::to_value(&failed).unwrap()["error"],
         "secret-token at /highly/secret/codex"
     );
+}
+
+#[test]
+fn a_running_session_publishes_a_failed_close_but_not_a_raw_error() {
+    let (config, mut state) = sample_config_state();
+
+    // The same running session, with the sentence a failed close records
+    // instead of the raw chain the fixture starts with. A failed close leaves
+    // the session running, so gating this on the state would hide it.
+    state.sessions.get_mut("session-1").unwrap().last_error = Some(format!(
+        "{}; the daemon log records the reason under reference lifecycle-9",
+        mj_core::state::CLOSE_FAILURE_PREFIX
+    ));
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let running = ApiSession::from(&snapshot.sessions[0]);
+    assert_eq!(
+        running.error.as_deref(),
+        Some(
+            "the close did not finish; the daemon log records the reason under reference lifecycle-9"
+        ),
+        "a close that failed has to reach the person who asked for it"
+    );
+
+    // A later successful transition clears the record, and with it the report.
+    state.sessions.get_mut("session-1").unwrap().last_error = None;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, None);
 }
 
 #[test]

@@ -101,10 +101,14 @@ impl RuntimeState {
                     .map(|control| control.cancelled.clone())
                     .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+                // The operation's own id is also what a failure reports as its
+                // reference, so a person holding "the close did not finish"
+                // can find the daemon-log entry that says why.
+                let operation_reference = new_command_id("lifecycle")?;
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
-                        operation_id: new_command_id("lifecycle")?,
+                        operation_id: operation_reference.clone(),
                         create_control,
                         kind,
                         cancelled: cancelled.clone(),
@@ -163,6 +167,21 @@ impl RuntimeState {
                             .fail_unfinished_provisioning(&operation_session_id, &failure.detail)
                             .await;
                     }
+                    // A close is accepted asynchronously: its caller has been
+                    // answered and the CLI has already printed `closing <id>`
+                    // and exited. A failure puts the record back in the state
+                    // it had, so without this the person is never told (#1081).
+                    if let Err(failure) = &result
+                        && kind == LifecycleKind::Close
+                    {
+                        state
+                            .record_failed_close(
+                                &operation_session_id,
+                                &operation_reference,
+                                failure,
+                            )
+                            .await;
+                    }
                     state.note_lifecycle_outcome(&operation_session_id);
                     if let Err(error) =
                         reach_test_hook("lifecycle_reservation_before_result_publication").await
@@ -174,7 +193,7 @@ impl RuntimeState {
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
                     if let Err(error) = &result {
-                        tracing::warn!(session_id = %operation_session_id, ?kind, %error, "lifecycle operation failed");
+                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
                     }
                     result_tx.send_replace(Some(result));
                     // Completion must release transient mutation ownership even
