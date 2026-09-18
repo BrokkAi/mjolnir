@@ -26,8 +26,8 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - [x] (2026-09-17) M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated with `\x02q`.
 - [x] (2026-09-17) M3: `Alt-T` and `Alt-V` leave the composer; `ToggleTranscriptRendering` and `ToggleDictation` reach the visible conversation through mj-cli's action executor.
 - [x] (2026-09-17) M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
-- [ ] M5: user docs, hint strings, README, troubleshooting, config reference, regenerated screenshots.
-- [ ] Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile, outside the sandbox; retrospective written.
+- [x] (2026-09-17) M5: user docs, hint strings, README, troubleshooting, config reference, regenerated screenshots.
+- [x] (2026-09-17) Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile, outside the sandbox; retrospective written.
 
 ## Surprises & Discoveries
 
@@ -216,7 +216,49 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 
 ## Outcomes & Retrospective
 
-Not started.
+What shipped: mj's terminal surface now runs on a tmux-style prefix key. `mj-core`
+gained a `[keys]` configuration section with herdr's key-string syntax, a parser,
+a formatter, a resolver and fatal validation; `Config` carries it and
+`CONFIG_VERSION` moved to 11. `mj-tui` gained a router (`mj-tui/src/keybinds.rs`)
+that arms on the prefix, runs a bound command on the next key, forwards a second
+prefix press as the literal key, and cancels on `Esc` or a mouse press. The
+command registry lost its compile-time `Alt` and function-key chords and gained
+an `action` column, so the footer, the help overlay and the command palette all
+print the bindings actually in force. `Alt-T` and `Alt-V` left the composer and
+became registry commands reaching the visible conversation through mj-cli's
+action executor. Lists everywhere answer `j`/`k`, `G` and `ctrl+d`/`ctrl+u`, and
+the help overlay has a `/` filter. The documentation, the README and the four
+generated screenshots describe the prefix model rather than the old chords.
+
+Three defaults moved while the work was under way, all to keep herdr's
+split-pane letters free for the panes mj plans to grow: dictation went from
+`prefix+v` to `prefix+m`, cancel-operation from `prefix+x` to `prefix+shift+c`,
+and pane cycling dropped its `prefix+j`/`prefix+k` aliases and kept
+`prefix+tab`/`prefix+shift+tab` only. The reserved set is `v`, `x`, `h`, `j`,
+`k`, `l`, `minus` and `r`, which is what herdr uses for splitting, closing and
+moving between panes.
+
+Two hard-coded chords survived the first M2 sweep because they lived in dialog
+key handlers rather than in the registry: the target-actions dialog cancelled a
+running test on a literal `Alt-X`, and the new/resume wizard rechecked target
+readiness on a literal `F5`. Only a grep found them. The cheap invariant for the
+next person is to grep for `KeyCode::F(` and `KeyModifiers::ALT` outside the
+composer and the text field; anything that matches is a chord the registry does
+not know about.
+
+The M4 review caught a regression of its own: giving the command palette
+`ctrl+u` and `ctrl+d` for paging took them away from the palette's query field,
+where they are readline's kill-to-line-start and delete-forward. The paging keys
+now apply only while the query is empty. The readline audit the plan asked for
+needed no code at all: the composer and `TextField` already implement every row
+of herdr's text-field table.
+
+What was not done: the plan's manual `cargo run -p mj-cli` walkthrough has not
+been performed interactively. Nobody has watched the `PREFIX` banner appear, hit
+`ctrl+b ctrl+b` in a live composer, edited a running `config.toml` to
+`prefix = "ctrl+space"` and waited for the reload, or confirmed that two fields
+bound to the same key stop `mj` from starting. All four behaviours have unit or
+integration coverage, but the interactive check is left for the user.
 
 ## Context and Orientation
 
@@ -568,6 +610,47 @@ popup:
 
     ↑↓ scroll · / filter · Esc closes
 
+
+### Final
+
+`cargo test` (dev profile, outside the sandbox, whole workspace):
+
+    mj_chat             test result: ok. 529 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.56s
+    mj_checkpoint       test result: ok. 129 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.99s
+    mj_client           test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s
+    mj_controller       test result: ok. 1347 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 63.30s
+    mj_core             test result: ok. 372 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+    mj_review           test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    mj_transcript       test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+    mj_tui              test result: ok. 508 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.29s
+    mj_worker (lib)     test result: ok. 462 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 34.53s
+    mj_worker (bin)     test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+    worker_environment  test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.91s
+    worker_proxy_exit   test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+    worker_proxy_long_root test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+    mj (bin)            test result: ok. 119 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+    daemon_startup      test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+    import_e2e          test result: ok. 1 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    instance            test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+    logging             test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s
+    store_divergence    test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.73s
+    termination_pty     test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.34s
+
+The doc-test targets all report `0 passed; 0 failed`.
+
+`cargo clippy --all-targets -- -D warnings` exits 0 with no diagnostics.
+
+`cargo test -p brokk-mjolnir --test termination_pty`, run on its own afterwards:
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+
+M5 regenerated four screenshots under `docs/src/assets/screenshots/`. All four
+carry the new footer row, and `command-palette.svg` also shows the live bindings
+in the palette's key column:
+
+    ctrl+b then: c create · g resume · a read · z size · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+
+No `Alt-` or function-key text remains in any of them.
 
 ## Interfaces and Dependencies
 

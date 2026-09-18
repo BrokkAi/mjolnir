@@ -204,6 +204,9 @@ a key another command defaults to is the normal way to move a key.
   `"prefix+<key>"` instead.
 - A direct binding on `ctrl+c` or `ctrl+v` is rejected: the dashboard and
   composer already treat them as cancel and paste.
+- A direct binding whose key equals the prefix is rejected with `the prefix
+  key cannot also be a direct binding`, because that key already arms the
+  prefix and would never reach the command.
 - A prefix binding whose key equals the prefix itself is rejected, because
   that combination is reserved for sending the literal prefix key through
   (see [Terminal surface](/terminal-surface/#prefix-key)).
