@@ -44,6 +44,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: true,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -5558,4 +5559,90 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
         daemon.await.unwrap_err().is_cancelled(),
         "the daemon must still have been serving when the test aborted it"
     );
+}
+
+/// Builds a repository whose staging blocks for `seconds`, by giving every
+/// path a clean filter that sleeps. This is how a working tree with hundreds
+/// of thousands of untracked files behaves for a review capture, at a size a
+/// test can hold.
+fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path();
+    git(repository, &["init", "-q", "."]);
+    git(
+        repository,
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(repository, &["config", "user.name", "Test"]);
+    std::fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+    git(repository, &["add", "tracked.txt"]);
+    git(repository, &["commit", "-qm", "seed"]);
+    git(
+        repository,
+        &[
+            "config",
+            "filter.slow.clean",
+            &format!("sleep {seconds} && cat"),
+        ],
+    );
+    std::fs::write(repository.join(".gitattributes"), "* filter=slow\n").unwrap();
+    std::fs::write(repository.join("untracked.txt"), "untracked\n").unwrap();
+    temp
+}
+
+async fn control_socket_appears(root: &Path, within: std::time::Duration) -> bool {
+    tokio::time::timeout(within, async {
+        while !root.join("control.sock").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// A session that no review can run for must do no working-tree capture at
+/// startup. This is the #1065 failure: the capture is proportional to the
+/// working tree, so a session in a large tree never reached its control
+/// socket, and a sub-agent child paid that cost for a review it is never given.
+#[tokio::test]
+async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot_be_staged() {
+    let workspace = repository_whose_staging_blocks(10);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut config = launch_config("profile-home");
+    config.cwd = workspace.path().to_owned();
+    config.review_capture = false;
+    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+
+    assert!(
+        control_socket_appears(&root, std::time::Duration::from_secs(5)).await,
+        "an unreviewed session must not wait for a working-tree capture"
+    );
+    daemon.abort();
+    let _ = daemon.await;
+}
+
+/// The same working tree, with review configured, still blocks before the
+/// socket. This is the half the capture redesign has to make cheap; it is
+/// asserted here so the gate above cannot be mistaken for the whole fix.
+#[tokio::test]
+async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
+    let workspace = repository_whose_staging_blocks(10);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut config = launch_config("profile-home");
+    config.cwd = workspace.path().to_owned();
+    config.review_capture = true;
+    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+
+    assert!(
+        !control_socket_appears(&root, std::time::Duration::from_secs(2)).await,
+        "the capture is what delays the socket, so this half must still block"
+    );
+    daemon.abort();
+    let _ = daemon.await;
 }

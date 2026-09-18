@@ -406,7 +406,7 @@ container images, see [Custom images](/custom-images/).
 
 The dashboard asks every configured profile for current capacity and refreshes
 profiles independently, so a slow provider does not delay the others. Press
-`F5` to refresh Targets and Quota immediately.
+`prefix+shift+r` to refresh Targets and Quota immediately.
 
 | Harness | Quota source shown by Mjolnir |
 | --- | --- |

@@ -446,14 +446,14 @@ fn container_editor(dashboard: &DashboardState) -> &ContainerEditor {
     editor
 }
 
-/// Reaches a session command the way the user does now: `F2`, type
+/// Reaches a session command the way the user does now: the palette chord, type
 /// enough of the name to pick it out, Enter. The session edit dialog
 /// these fixtures used to press `e` for no longer exists.
 fn through_the_palette(dashboard: &mut DashboardState, query: &str) {
-    dashboard.handle_key(key(KeyCode::F(2)));
+    open_palette(dashboard);
     assert!(
         matches!(dashboard.mode, Mode::Palette(_)),
-        "F2 opens the palette"
+        "the palette chord opens the palette"
     );
     for character in query.chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
@@ -475,6 +475,7 @@ fn open_rename_editor(dashboard: &mut DashboardState) {
 fn setup_opens_in_place_and_container_settings_remain_available() {
     let mut empty = DashboardState::new(
         mj_core::config::Config {
+            keys: Default::default(),
             build_cache: Default::default(),
             subagents: Default::default(),
             version: mj_core::config::CONFIG_VERSION,

@@ -42,6 +42,25 @@ const INHERITED_GIT_SETTINGS: &[&str] = &[
     "user.name",
 ];
 
+/// Whether starting a child worker can be tried again.
+///
+/// Only a worker that provably never published its control socket qualifies:
+/// it owns no relay, no journal and no harness, so a second start cannot
+/// duplicate or corrupt work. A refusal is never retried, because it names a
+/// precondition that a second attempt would meet in exactly the same way, and
+/// a cancelled operation is not retried either.
+fn subagent_start_is_retryable(error: &anyhow::Error) -> bool {
+    if mj_core::refusal::Refusal::of(error).is_some() {
+        return false;
+    }
+    if format!("{error:#}").contains("operation cancelled") {
+        return false;
+    }
+    error
+        .downcast_ref::<super::readiness::WorkerStartupFailure>()
+        .is_some_and(|failure| !failure.reached_socket)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProvisioningFailureDisposition {
     /// A freshly registered session has no durable history to retain.
@@ -95,30 +114,53 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        // Placement failures must reach the same failure arm as startup
-        // failures; otherwise the child record stays `Provisioning` forever.
-        let placement = self.worker_placement(session_id);
-        let (result, placement) = match placement {
-            Ok((backend, worker_root)) => {
-                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                let prepared =
-                    self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
-                let result = match prepared {
-                    Ok(()) => {
-                        self.connect_and_start_worker(
-                            session_id,
-                            executor,
-                            &backend,
-                            &worker_root,
-                            false,
-                        )
-                        .await
-                    }
-                    Err(error) => Err(error),
-                };
-                (result, Some((backend, worker_root)))
+        // One retry, and only for a worker that provably never published a
+        // control socket. Such a worker has no relay, no durable journal and
+        // no harness, so starting another over the same root cannot duplicate
+        // or corrupt anything. A spawn is issued by a model that cannot see
+        // the target, so a transient start failure it could have retried by
+        // hand is better retried here.
+        let mut attempts: Vec<String> = Vec::new();
+        let (result, placement) = loop {
+            let attempt = self.attempt_subagent_start(session_id, executor).await;
+            let (result, placement) = attempt;
+            let Err(error) = &result else {
+                break (result, placement);
+            };
+            if attempts.len() == 1 || !subagent_start_is_retryable(error) {
+                if !attempts.is_empty() {
+                    let combined = attempts
+                        .iter()
+                        .enumerate()
+                        .map(|(index, attempt)| format!("attempt {}: {attempt}", index + 1))
+                        .chain(std::iter::once(format!(
+                            "attempt {}: {error:#}",
+                            attempts.len() + 1
+                        )))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    break (Err(anyhow::anyhow!("{combined}")), placement);
+                }
+                break (result, placement);
             }
-            Err(error) => (Err(error), None),
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "sub-agent worker never started; retrying once"
+            );
+            attempts.push(format!("{error:#}"));
+            // The next attempt reinstalls the worker files, so stop whatever
+            // the failed one may have left behind first.
+            if let Some((backend, worker_root)) = &placement
+                && let Err(stop_error) =
+                    super::worker_binary::stop_worker(executor, backend, worker_root)
+            {
+                tracing::debug!(
+                    session_id,
+                    error = format!("{stop_error:#}"),
+                    "could not stop the worker of a retried sub-agent start"
+                );
+            }
         };
         match result {
             Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
@@ -150,6 +192,43 @@ impl Controller {
                 crate::database::save_lifecycle_session(record)?;
                 Err(error)
             }
+        }
+    }
+
+    /// One start of a child worker: place it, install its files, and wait for
+    /// its relay. The placement is returned even on failure, because the
+    /// caller needs it to stop a worker that may be half up.
+    async fn attempt_subagent_start(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> (
+        Result<Option<String>>,
+        Option<(targets::TargetLocator, String)>,
+    ) {
+        // Placement failures must reach the same failure arm as startup
+        // failures; otherwise the child record stays `Provisioning` forever.
+        match self.worker_placement(session_id) {
+            Ok((backend, worker_root)) => {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                let prepared =
+                    self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
+                let result = match prepared {
+                    Ok(()) => {
+                        self.connect_and_start_worker(
+                            session_id,
+                            executor,
+                            &backend,
+                            &worker_root,
+                            false,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                (result, Some((backend, worker_root)))
+            }
+            Err(error) => (Err(error), None),
         }
     }
 

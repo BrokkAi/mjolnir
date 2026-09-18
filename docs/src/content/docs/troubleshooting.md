@@ -46,7 +46,7 @@ matter, but only `fixable` means the doctor loop has not converged.
 
 ## Configuration is missing, invalid, or from a newer build
 
-If `config.toml` does not exist, run `mj` and open **F7 Settings** to add or detect
+If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
 Managed container and EC2 sessions also need a bundle; a bare session selects
 an existing Git project directory instead.
@@ -162,24 +162,35 @@ common case where `!which tool` succeeds but session launch says the tool is
 missing. See [Custom container images](/custom-images/) and the profile fields
 in [Configuration reference](/configuration/).
 
-## Alt shortcuts arrive as Escape plus a letter
+## The prefix key does nothing
 
-Mjolnir relies on terminal Meta/Alt chords for global actions such as `Alt+N`,
-`Alt+S`, and `Alt+Q`. If the terminal sends `Escape` followed by the plain
-letter, configure it to send Meta instead:
+Mjolnir's global commands run from a tmux-style prefix key (`ctrl+b` by
+default): press it, release it, then press the command letter. If pressing it
+does nothing, something between your keyboard and Mjolnir is intercepting it:
 
-- In iTerm2, set the Option key to **Esc+** for the active profile.
-- In Terminal.app, enable **Use Option as Meta key**.
-- In tmux, use a short escape delay such as `set -sg escape-time 10` in
-  `~/.tmux.conf`, then restart or reload tmux.
+- **tmux or GNU screen**, run with their own default prefix (`ctrl+b` for
+  tmux, `ctrl+a` for screen), consumes the key before Mjolnir sees it. Press
+  it twice to send the literal key through, the same way you would reach any
+  other application's own binding on that key from inside the multiplexer; or
+  set a different `prefix` in `[keys]` so the two tools stop colliding.
+- A terminal emulator or desktop environment can also bind the same key
+  globally; check its keyboard shortcut settings if the multiplexer
+  explanation does not apply.
 
-You can keep working while fixing the terminal: `F2` opens the command palette,
-and `F1` opens the full key reference globally. Plain `?` opens help only while
-focus is outside Prompt; in Prompt it is ordinary input. Every global chord is
-represented in help. If a desktop environment consumes function keys, use its
-Fn modifier or change its media-key setting. See [Terminal
-surface](/terminal-surface/) and the compact [CLI and keyboard
-reference](/cli-reference/).
+Plain `?` still opens help while focus is outside Prompt, independent of the
+prefix. See [Terminal surface](/terminal-surface/#prefix-key) for the full
+default table and [Configuration reference](/configuration/#keys-keys) for
+rebinding the prefix.
+
+## A `[keys]` edit did not take effect
+
+An invalid `[keys]` entry is a configuration error like any other, and it
+names the exact field. At startup this is fatal: Mjolnir refuses to run until
+the file is fixed. While Mjolnir is already running, the daemon reloads
+`config.toml` continuously but keeps the last good configuration and only
+logs a warning when a reload fails, so a broken edit can look like nothing
+happened rather than like an error. Run `mj doctor` to see the current
+validation error, or restart Mjolnir to have it reported at startup.
 
 ## A container target will not start
 

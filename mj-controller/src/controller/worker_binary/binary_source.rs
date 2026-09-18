@@ -224,7 +224,7 @@ impl WorkerBinarySourceSnapshot {
         match source {
             Ok(availability) => Ok(availability.clone()),
             Err(error) => bail!(
-                "worker source for {arch} ({requirement:?}) was unavailable when the daemon started; install it and restart the daemon to retry: {error}"
+                "worker source for {arch} ({requirement:?}) was unavailable when the daemon started: {error}"
             ),
         }
     }
@@ -349,10 +349,79 @@ pub(super) fn worker_binary_for_arch(
     requirement: WorkerBinaryRequirement,
 ) -> Result<WorkerBinaryAvailability> {
     if let Some(snapshot) = PINNED_WORKER_BINARY_SOURCES.get() {
-        return snapshot.resolve(arch, requirement);
+        let pinned = snapshot.resolve(arch, requirement);
+        if pinned_source_is_usable(&pinned, &|path| path.is_file()) {
+            return pinned;
+        }
+        // Either nothing resolved when the daemon started, or the file the pin
+        // named has been taken away since. Both used to fail every session on
+        // this daemon until someone restarted it, which is #1068: a build
+        // directory that a cache reaper removed took every later session with
+        // it. Look again instead.
+        return resolve_worker_source_again(arch, requirement, pinned.err());
     }
     let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
     worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+}
+
+/// Whether a pinned worker source can still be used as it stands.
+///
+/// A remote source is a URL and stays usable. A local one is a path, and a
+/// path can stop being a file after the daemon pinned it: a build directory a
+/// cache reaper removed is exactly #1068.
+pub(super) fn pinned_source_is_usable(
+    pinned: &Result<WorkerBinaryAvailability>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> bool {
+    match pinned {
+        Ok(WorkerBinaryAvailability::Local { path, .. }) => is_file(path),
+        Ok(WorkerBinaryAvailability::Remote { .. }) => true,
+        Err(_) => false,
+    }
+}
+
+/// Resolve a worker source now, after the pinned one turned out to be unusable.
+///
+/// A resolved local binary is copied into the daemon's own pinned cache, so
+/// whatever removed the first one cannot remove this one too.
+fn resolve_worker_source_again(
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    pinned_error: Option<anyhow::Error>,
+) -> Result<WorkerBinaryAvailability> {
+    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    let resolved =
+        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file());
+    match resolved {
+        Ok(WorkerBinaryAvailability::Local { path, source }) => {
+            let cache_root = data_dir().join("workers").join("pinned");
+            let path = match copy_worker_source_to_cache(&path, &cache_root) {
+                Ok(cached) => cached,
+                Err(error) => {
+                    tracing::warn!(
+                        arch,
+                        error = format!("{error:#}"),
+                        "could not cache a re-resolved worker source; using it where it is"
+                    );
+                    path
+                }
+            };
+            tracing::info!(
+                arch,
+                requirement = ?requirement,
+                source = %source,
+                "re-resolved a worker source the daemon could not pin at startup"
+            );
+            Ok(WorkerBinaryAvailability::Local { path, source })
+        }
+        Ok(remote) => Ok(remote),
+        // Report what the daemon found at startup as well: it may name a
+        // different, more useful absence than this attempt does.
+        Err(error) => Err(match pinned_error {
+            Some(pinned) => error.context(format!("{pinned:#}")),
+            None => error,
+        }),
+    }
 }
 
 /// The lookup itself, with the controller's own path and the file probe passed

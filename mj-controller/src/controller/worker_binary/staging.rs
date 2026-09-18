@@ -108,7 +108,13 @@ pub(super) fn configure_claude_subagent_mcp(profile_stage: &Path, worker_root: &
                     "worker",
                     "subagent-mcp",
                     "--socket",
-                    Path::new(worker_root).join(mj_worker_socket_name())
+                    Path::new(worker_root).join(mj_worker_socket_name()),
+                    // Claude's own limit is on silence, which the server's
+                    // progress notifications break, so this keeps the full
+                    // advertised wait. Naming the harness anyway keeps both
+                    // delivery paths explicit.
+                    "--harness",
+                    mj_core::config::HarnessKind::Claude.id()
                 ]
             }),
         );

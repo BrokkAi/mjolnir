@@ -377,6 +377,7 @@ fn a_staged_setting_reports_a_traversed_value_that_is_not_an_object() {
 fn sample_config() -> Config {
     Config {
         version: CONFIG_VERSION,
+        keys: Default::default(),
         sessions_side: Default::default(),
         advanced: Default::default(),
         show_stopped_sessions: false,
@@ -2098,4 +2099,69 @@ fn settings_that_belong_to_a_machine_are_refused_on_a_runtime() {
         );
         assert!(error.contains(expected), "expected {expected:?}: {error}");
     }
+}
+
+#[test]
+fn config_load_reports_key_errors_fatally() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\
+             [keys]\n\
+             help = \"prefix+space\"\n\
+             pane_preset = \"prefix+space\"\n"
+        ),
+    )
+    .unwrap();
+
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("keys.pane_preset = \"prefix+space\""),
+        "{error}"
+    );
+    assert!(error.contains("keys.help"), "{error}");
+
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[keys]\nprefix = \"nope\"\n"),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(error.contains("keys.prefix = \"nope\""), "{error}");
+}
+
+#[test]
+fn unknown_keys_fields_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[keys]\nnew_sesion = \"prefix+c\"\n"),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(error.contains("new_sesion"), "{error}");
+}
+
+#[test]
+fn keys_section_is_omitted_from_serialized_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = Config::default();
+    config.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(!body.contains("[keys]"), "{body}");
+
+    let mut rebound = Config::default();
+    rebound.keys.refresh = BindingConfig::from(["prefix+shift+r", "f5"]);
+    rebound.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("[keys]"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), rebound);
+    assert_eq!(
+        rebound.keybinds().labels(KeyAction::Refresh),
+        vec!["ctrl+b shift+r".to_owned(), "f5".to_owned()]
+    );
 }

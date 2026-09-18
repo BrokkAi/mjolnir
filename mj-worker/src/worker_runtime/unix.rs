@@ -21,7 +21,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
-use super::{AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig};
+use super::{AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig};
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
@@ -85,6 +85,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
     let checkpoint_only = config.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
+    super::record_startup_step(&root, "policy");
     if !checkpoint_only {
         super::enforce_execution_policy(&mut config)?;
     }
@@ -121,20 +122,52 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // different: replacing a missing baseline then could hide changes from a
     // review that was interrupted. A restored relay has no state file yet, so
     // its restored worktree is a safe fresh-session boundary.
-    if !relay_state_exists && !checkpoint_only {
-        let mut workspace_roots = vec![config.cwd.clone()];
-        workspace_roots.extend(config.additional_directories.iter().cloned());
-        tokio::task::spawn_blocking(move || {
-            let git = mj_checkpoint::archive::SystemGit;
-            let repositories =
-                crate::review::capture::discover_repositories(&git, &workspace_roots);
-            crate::review::capture::initialize_review_baselines(&git, &repositories)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("review baseline initialization stopped: {error}"))??;
+    // Only a session a review can run for pays for a baseline. For every other
+    // session, and for every sub-agent child, startup runs no Git command at
+    // all: the capture exists solely to tell a later review what the turn
+    // changed.
+    let untracked_at_start = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    if !checkpoint_only && config.review_capture {
+        super::record_startup_step(&root, "review-baseline");
+        let record = root.join(REVIEW_UNTRACKED_FILE);
+        let recorded = if relay_state_exists {
+            // A restart keeps the baseline it already has, so it must keep the
+            // untracked list that belongs to it rather than measuring against
+            // the tree as the restart finds it.
+            std::fs::read(&record)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        } else {
+            let mut workspace_roots = vec![config.cwd.clone()];
+            workspace_roots.extend(config.additional_directories.iter().cloned());
+            let recorded = tokio::task::spawn_blocking(move || {
+                // Bounded: this runs before the control socket exists, so a Git
+                // command that never returns would be a session that never
+                // starts and never says why.
+                let git = crate::review::capture::BoundedGit::new(
+                    crate::review::capture::WORKSPACE_STATE_TIMEOUT,
+                );
+                let repositories =
+                    crate::review::capture::discover_repositories(&git, &workspace_roots);
+                crate::review::capture::initialize_review_baselines(&git, &repositories)
+            })
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("review baseline initialization stopped: {error}")
+            })??;
+            if let Ok(bytes) = serde_json::to_vec_pretty(&recorded) {
+                let _ = mj_core::config::atomic_write(&record, &bytes);
+            }
+            recorded
+        };
+        *untracked_at_start
+            .lock()
+            .expect("untracked-at-start lock poisoned") = recorded;
     }
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
+    super::record_startup_step(&root, "durable-relay");
     let mut durable_relay = if checkpoint_only {
         DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
     } else {
@@ -188,6 +221,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         std::fs::remove_file(&exit_record)
             .with_context(|| format!("clear stale exit record {}", exit_record.display()))?;
     }
+    super::record_startup_step(&root, "bind-socket");
     let listener = bind_unix_listener(&socket)
         .with_context(|| format!("bind worker socket {}", socket.display()))?;
     listener
@@ -201,6 +235,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    super::record_startup_step(&root, "serving");
 
     if restarting
         && durable_relay.operational_state().execution
@@ -313,6 +348,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         additional_directories: config.additional_directories.clone(),
         worker_executable: worker_executable.clone(),
         harness_runtime: config.harness_runtime,
+        review_capture: config.review_capture,
+        untracked_at_start: untracked_at_start.clone(),
     }));
     // The review supervisor's dispatch tool talks to this worker over its own
     // socket inside the reviewer directory: an MCP server started by a harness

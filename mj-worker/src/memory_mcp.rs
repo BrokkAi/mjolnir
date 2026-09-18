@@ -18,7 +18,11 @@ pub fn run_mcp_stdio(root: &Path) -> Result<()> {
             // Writes compare versions; answering one call at a time keeps two
             // edits from racing inside one harness.
             dispatch: crate::mcp_stdio::Dispatch::Sequential,
-            call: move |params: Option<&Value>| call_tool(&store, params),
+            progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
+            // Memory calls are local file work and answer at once.
+            call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
+                call_tool(&store, params)
+            },
         },
     )
 }

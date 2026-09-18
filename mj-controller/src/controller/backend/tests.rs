@@ -687,6 +687,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         extra_args: Vec::new(),
     };
     let config = Config {
+        keys: Default::default(),
         build_cache: Default::default(),
         subagents: Default::default(),
         version: mj_core::config::CONFIG_VERSION,

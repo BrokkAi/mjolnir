@@ -1,5 +1,7 @@
 use super::*;
-use crate::test_support::{buffer_lines, cell_column, dashboard_with_session, running_session};
+use crate::test_support::{
+    buffer_lines, cell_column, chord, dashboard_with_session, running_session,
+};
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mj_core::workspace::WorkspaceRecord;
 
@@ -564,7 +566,7 @@ fn manager_load_finishes_behind_help_and_is_restored_when_help_closes() {
     ));
 
     assert_eq!(
-        dashboard.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+        chord(&mut dashboard, crate::CommandId::Help),
         DashboardAction::None
     );
     assert!(matches!(

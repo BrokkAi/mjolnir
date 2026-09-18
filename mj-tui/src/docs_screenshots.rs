@@ -11,7 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::KeyCode;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -25,7 +24,8 @@ use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityTarget, Deploym
 
 use crate::render::render;
 use crate::test_support::{
-    agent_message, alt_key, config, key, materialized_session_for, running_session, transcript_item,
+    agent_message, chord, config, materialized_session_for, open_new_session_wizard, open_palette,
+    running_session, transcript_item,
 };
 use crate::{DashboardState, PaneSize, SupportPane};
 
@@ -51,7 +51,7 @@ fn generate_documentation_screenshots() {
     );
 
     let mut wizard = documentation_dashboard();
-    wizard.handle_key(alt_key('w'));
+    open_new_session_wizard(&mut wizard);
     capture(
         &output.join("new-session.svg"),
         "Mjolnir new-session wizard",
@@ -60,7 +60,7 @@ fn generate_documentation_screenshots() {
     );
 
     let mut palette = documentation_dashboard();
-    palette.handle_key(key(KeyCode::F(2)));
+    open_palette(&mut palette);
     capture(
         &output.join("command-palette.svg"),
         "Mjolnir command palette",
@@ -69,7 +69,7 @@ fn generate_documentation_screenshots() {
     );
 
     let mut setup = documentation_dashboard();
-    setup.handle_key(key(KeyCode::F(7)));
+    chord(&mut setup, crate::CommandId::OpenConfig);
     capture(
         &output.join("setup.svg"),
         "Mjolnir Settings",

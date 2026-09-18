@@ -24,6 +24,11 @@ const SUBAGENT_QUEUE: &str = "subagents.json";
 /// wedge the socket task forever.
 const SOCKET_WAIT_CEILING: Duration = Duration::from_secs(MAX_WAIT_SECONDS + 60);
 
+/// Slack a `wait` gets on top of the caller's own timeout before this worker
+/// stops waiting for the daemon and answers by itself. It covers the hop that
+/// carries the daemon's result back here; past it, answering late helps nobody.
+const WORKER_WAIT_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueueState {
@@ -208,6 +213,71 @@ mod tests {
         assert_eq!(waiter.await.unwrap(), Some(done("r1")));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_the_daemon_never_answers_is_answered_here_at_the_callers_deadline() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+        let socket = directory.path().join("test.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let served = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                serve_one(stream, endpoint).await.unwrap();
+            }
+        });
+
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        let request = SubagentToolRequest {
+            request_id: "r-late".into(),
+            created_at_ms: 1,
+            action: SubagentToolAction::WaitAgents {
+                child_session_ids: vec!["child-1".into(), "child-2".into()],
+                timeout_seconds: Some(45),
+            },
+        };
+        let mut body = serde_json::to_vec(&request).unwrap();
+        body.push(b'\n');
+        client.write_all(&body).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Nothing ever completes this request. The answer must still arrive,
+        // at the caller's deadline plus this worker's small grace.
+        let started = Instant::now();
+        let mut line = String::new();
+        BufReader::new(&mut client)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        served.await.unwrap();
+
+        assert!(
+            elapsed >= Duration::from_secs(45) && elapsed <= Duration::from_secs(55),
+            "the answer must land at the caller's deadline, took {elapsed:?}"
+        );
+        let reply: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["result"]["is_error"], false, "{reply}");
+        let payload: serde_json::Value =
+            serde_json::from_str(reply["result"]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            payload["status"],
+            mj_core::subagent::WAIT_STATUS_STILL_RUNNING,
+            "{payload}"
+        );
+        assert_eq!(payload["agents"][0]["child_session_id"], "child-1");
+        assert!(
+            payload["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("Call wait again"),
+            "{payload}"
+        );
+    }
+
     #[tokio::test]
     async fn a_waiting_socket_call_gives_up_at_its_deadline() {
         let directory = tempfile::tempdir().unwrap();
@@ -268,6 +338,55 @@ pub(super) fn serve(root: &Path) -> Result<(SubagentEndpoint, super::unix::Socke
     Ok((endpoint, super::unix::SocketGuard(path)))
 }
 
+/// How long this worker waits for the daemon before answering by itself. Only
+/// a `wait` has a deadline of the caller's own choosing; every other action is
+/// bounded by the blanket ceiling, because the caller gave no deadline to keep.
+fn wait_budget(action: &mj_core::subagent::SubagentToolAction) -> Duration {
+    match action {
+        mj_core::subagent::SubagentToolAction::WaitAgents {
+            timeout_seconds, ..
+        } => mj_core::subagent::subagent_wait_timeout(*timeout_seconds) + WORKER_WAIT_GRACE,
+        _ => SOCKET_WAIT_CEILING,
+    }
+}
+
+/// The children a `wait` is about, or `None` for any other action. Only a
+/// `wait` can be answered by this worker alone; the rest have no answer that
+/// does not come from the daemon.
+fn waiting_children(action: &mj_core::subagent::SubagentToolAction) -> Option<Vec<String>> {
+    match action {
+        mj_core::subagent::SubagentToolAction::WaitAgents {
+            child_session_ids, ..
+        } => Some(child_session_ids.clone()),
+        _ => None,
+    }
+}
+
+/// This worker's own answer to a `wait` the daemon did not finish in time. It
+/// carries the same shape as the daemon's answer, so a model reads one rule:
+/// `status` says whether the children are finished, and `next_action` says what
+/// to do. It is not an error; the children are still working.
+fn late_daemon_reply(
+    request_id: &str,
+    child_session_ids: &[String],
+    waited_seconds: u64,
+) -> SubagentToolResult {
+    let payload = mj_core::subagent::still_running_payload(
+        child_session_ids,
+        waited_seconds,
+        Some(
+            "Mjolnir did not finish checking these children within this call's timeout. \
+             Their state here is unknown rather than observed; call wait again to collect it.",
+        ),
+    );
+    SubagentToolResult {
+        request_id: request_id.to_owned(),
+        completed_at_ms: mj_core::clock::epoch_millis(),
+        is_error: false,
+        message: serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+    }
+}
+
 async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -282,15 +401,35 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     // the tool's answer. A repeat request id returns the cached result at
     // once; otherwise wait, so the harness never sees a placeholder while the
     // real answer is delivered elsewhere.
+    //
+    // A `wait` gets the caller's own deadline here, on this host's monotonic
+    // clock. This is the timer the model depends on: it is unaffected by a
+    // daemon restart, by a result that could not be handed back, and by clock
+    // skew between the two hosts. When it expires this worker answers the call
+    // itself rather than leaving the harness in silence.
     let request_id = request.request_id.clone();
+    let deadline_budget = wait_budget(&request.action);
+    let waiting_for = waiting_children(&request.action);
+    let started = Instant::now();
     let result = match endpoint.enqueue(request)? {
         Some(cached) => Some(cached),
         None => {
             endpoint
-                .await_result(&request_id, Instant::now() + SOCKET_WAIT_CEILING)
+                .await_result(&request_id, started + deadline_budget)
                 .await
         }
     };
+    let result = result.or_else(|| {
+        waiting_for.map(|children| {
+            tracing::warn!(
+                request_id = %request_id,
+                waited_seconds = started.elapsed().as_secs(),
+                "the daemon did not answer a sub-agent wait by its deadline; \
+                 answering that the children are still running"
+            );
+            late_daemon_reply(&request_id, &children, started.elapsed().as_secs())
+        })
+    });
     let mut body = serde_json::to_vec(&SocketReply {
         accepted: true,
         result,

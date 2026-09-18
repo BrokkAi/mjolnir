@@ -444,6 +444,7 @@ mod tests {
                 step_started_at_ms: None,
                 background_started_at_ms: None,
                 idle_since_ms: Some(100),
+                last_activity_at_ms: None,
                 label: None,
             }),
             is_idle: true,

@@ -255,9 +255,8 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state.set_notice(
-                        "Starting microphone… click again or press Alt-V to transcribe",
-                    );
+                    self.state
+                        .set_notice("Starting microphone… click it again to transcribe");
                     spawn_dictation(auth_path, self.voice_updates_tx.clone(), cancel_rx);
                 }
             }
@@ -272,13 +271,35 @@ impl ActiveChat {
         ChatEventOutcome::Handled
     }
 
+    /// Switches the transcript between rendered Markdown and raw source.
+    ///
+    /// The key that runs this belongs to the host's command registry, so the
+    /// host calls it directly rather than through a composer key.
+    pub fn toggle_transcript_rendering(&mut self) {
+        self.state.toggle_render_mode();
+    }
+
+    /// Starts, finishes or cancels dictation, exactly as clicking the
+    /// microphone does. Nothing happens while dictation is unavailable and no
+    /// recording is running.
+    pub fn toggle_dictation(&mut self) {
+        let action = self.state.dictation_toggle_action();
+        if action == ChatAction::None {
+            return;
+        }
+        // Dictation never asks the host to leave the conversation, so there
+        // is no outcome to forward.
+        let _ = self.dispatch(action);
+    }
+
     /// Leaves the conversation: stops any dictation and reports how far the
     /// transcript has been read, which the host turns into the session's read
     /// receipt and its saved draft.
     ///
-    /// `Alt-Q` is a global chord, so the host catches it before the composer
-    /// sees the key and calls this directly; `/detach` reaches it through
-    /// [`ChatAction::QuitDetach`]. Both paths must do the same bookkeeping.
+    /// The detach key is a host binding, so the host catches it before the
+    /// composer sees the key and calls this directly; `/detach` reaches it
+    /// through [`ChatAction::QuitDetach`]. Both paths must do the same
+    /// bookkeeping.
     pub fn detach(&mut self) -> ChatEventOutcome {
         self.cancel_dictation();
         ChatEventOutcome::QuitDetach {

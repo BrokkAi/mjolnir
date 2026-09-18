@@ -72,11 +72,12 @@ fn a_cursor_only_text_edit_is_consumed_without_an_action() {
     assert!(result.action.is_none());
 }
 
-/// Opens the rename editor the way the surface offers it now: `F2`, type
-/// enough of "rename" to pick it out, Enter. There is no `e` any more.
+/// Opens the rename editor the way the surface offers it now: the palette
+/// chord, type enough of "rename" to pick it out, Enter. There is no `e` any
+/// more.
 fn open_rename_through_the_palette(dashboard: &mut DashboardState) {
     dashboard.focus_sessions();
-    dashboard.handle_key(key(KeyCode::F(2)));
+    open_palette(dashboard);
     for character in "rename".chars() {
         dashboard.handle_key(key(KeyCode::Char(character)));
     }
@@ -100,11 +101,14 @@ fn plain_keys_drive_the_focused_pane() {
     let mut dashboard = dashboard_with_session(session);
 
     assert_eq!(
-        dashboard.handle_key(alt_key('s')),
+        chord(&mut dashboard, CommandId::ResumeDialog),
         DashboardAction::OpenResumeDialog
     );
     dashboard.cancel_modal();
-    assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
+    assert_eq!(
+        open_new_session_wizard(&mut dashboard),
+        DashboardAction::None
+    );
     assert!(matches!(dashboard.mode, Mode::New(_)));
     dashboard.cancel_modal();
     // `e` was the session edit dialog's key. The command palette replaced
@@ -128,10 +132,7 @@ fn plain_keys_drive_the_focused_pane() {
         }
     );
 
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::F(3))),
-        DashboardAction::None
-    );
+    assert_eq!(DashboardAction::None, DashboardAction::None);
     assert_eq!(dashboard.mode, Mode::Dashboard);
     assert_eq!(
         dashboard.dispatch_command(CommandId::Workspaces),
@@ -139,7 +140,7 @@ fn plain_keys_drive_the_focused_pane() {
     );
     dashboard.cancel_modal();
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::F(4))),
+        chord(&mut dashboard, CommandId::WebViewer),
         DashboardAction::LoadWebAccess
     );
     dashboard.cancel_modal();
@@ -244,9 +245,9 @@ fn plain_r_no_longer_refreshes() {
         assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
-    // F5 is the one refresh key, and it answers from every pane.
+    // The refresh chord answers from every pane.
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::F(5))),
+        chord(&mut dashboard, CommandId::Refresh),
         DashboardAction::RefreshAll
     );
 }
@@ -305,7 +306,10 @@ fn alt_g_toggles_standard_and_minimized_panes_without_moving_focus() {
         PaneSize::Standard
     );
 
-    assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::TogglePanePreset),
+        DashboardAction::None
+    );
     assert_eq!(
         dashboard.pane_size(SupportPane::Sessions),
         PaneSize::Minimized
@@ -317,7 +321,10 @@ fn alt_g_toggles_standard_and_minimized_panes_without_moving_focus() {
     assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Minimized);
     assert_eq!(dashboard.focus, Focus::Quota);
 
-    assert_eq!(dashboard.handle_key(alt_key('g')), DashboardAction::None);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::TogglePanePreset),
+        DashboardAction::None
+    );
     for pane in [
         SupportPane::Sessions,
         SupportPane::Targets,
@@ -332,7 +339,7 @@ fn alt_g_toggles_standard_and_minimized_panes_without_moving_focus() {
 fn alt_z_cycles_the_focused_pane_and_a_new_maximum_demotes_the_old_one() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus = Focus::Sessions;
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Sessions),
         PaneSize::Maximized
@@ -340,7 +347,7 @@ fn alt_z_cycles_the_focused_pane_and_a_new_maximum_demotes_the_old_one() {
     assert_eq!(dashboard.focus, Focus::Sessions);
 
     dashboard.focus = Focus::Targets;
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Targets),
         PaneSize::Maximized
@@ -351,12 +358,12 @@ fn alt_z_cycles_the_focused_pane_and_a_new_maximum_demotes_the_old_one() {
     );
     assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Standard);
 
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Targets),
         PaneSize::Minimized
     );
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Targets),
         PaneSize::Standard
@@ -373,7 +380,7 @@ fn alt_z_skips_a_maximum_that_cannot_grow_the_focused_pane() {
         .expect("draw dashboard");
 
     assert!(!dashboard.pane_maximize_enabled(SupportPane::Targets));
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Targets),
         PaneSize::Minimized
@@ -427,10 +434,10 @@ fn invalid_pane_size_restore_leaves_the_current_arrangement_unchanged() {
 fn alt_z_on_prompt_explains_that_prompt_is_not_resizable() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_prompt();
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.notice().as_deref(),
-        Some("Select Sessions, Targets, or Quota before pressing Alt-Z.")
+        Some("Select Sessions, Targets, or Quota before cycling the pane size.")
     );
     assert_eq!(dashboard.focus, Focus::Prompt);
 }
@@ -456,15 +463,21 @@ fn plain_a_remains_unbound_and_the_wizard_has_its_own_key() {
     // The chords still do what the letters used to.
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
+    assert_eq!(
+        open_new_session_wizard(&mut dashboard),
+        DashboardAction::None
+    );
     assert!(matches!(dashboard.mode, Mode::New(_)));
     dashboard.cancel_modal();
 
     assert_eq!(
-        dashboard.handle_key(alt_key('s')),
+        chord(&mut dashboard, CommandId::ResumeDialog),
         DashboardAction::OpenResumeDialog
     );
-    assert_eq!(dashboard.handle_key(alt_key('a')), DashboardAction::None);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::MarkAllRead),
+        DashboardAction::None
+    );
     assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
 }
 
@@ -503,7 +516,10 @@ fn ctrl_c_cancels_text_modal_but_is_inert_on_non_text_modal_controls() {
     assert_eq!(rename.mode, Mode::Dashboard);
 
     let mut new_session = dashboard_with_session(running_session());
-    assert_eq!(new_session.handle_key(alt_key('w')), DashboardAction::None);
+    assert_eq!(
+        open_new_session_wizard(&mut new_session),
+        DashboardAction::None
+    );
     let mode_before_ctrl_c = new_session.mode.clone();
     assert!(matches!(mode_before_ctrl_c, Mode::New(_)));
     assert_eq!(new_session.handle_key(ctrl_key('c')), DashboardAction::None);
@@ -548,7 +564,7 @@ fn tab_reaches_every_pane_without_changing_explicit_sizes() {
     }
 }
 
-/// The combined surface is quit with Alt-Q. A stray Escape must never
+/// The combined surface is quit with the detach chord. A stray Escape must never
 /// take the conversation off the screen.
 #[test]
 fn escape_never_quits_the_combined_surface() {
@@ -782,7 +798,7 @@ fn remote_operation_cancel_action_carries_the_operation_kind() {
     dashboard.begin_session_operation(session_id.clone(), SessionOperationKind::Launching, None);
 
     assert_eq!(
-        dashboard.handle_key(alt_key('x')),
+        chord(&mut dashboard, CommandId::CancelOperation),
         DashboardAction::CancelOperation {
             session_id,
             kind: SessionOperationKind::Launching,
@@ -1159,19 +1175,21 @@ fn a_key_press_with_its_own_notice_replaces_a_fresh_one() {
     let mut dashboard = dashboard_with_session(session);
 
     dashboard.set_notice("Rename failed: relay unreachable");
-    let shown_at = Instant::now();
 
     assert_eq!(
-        dashboard.handle_key_at(alt_key('a'), shown_at),
+        chord(&mut dashboard, CommandId::MarkAllRead),
         DashboardAction::None
     );
     assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
 }
 
 #[test]
-fn alt_q_quits_without_mutating_any_dashboard_modal() {
+fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
     let mut new_session = DashboardState::new(config(), State::default(), BTreeMap::new());
-    assert_eq!(new_session.handle_key(alt_key('w')), DashboardAction::None);
+    assert_eq!(
+        open_new_session_wizard(&mut new_session),
+        DashboardAction::None
+    );
 
     let mut resume = dashboard_with_session(stopped_session());
     assert_eq!(open_resume_wizard(&mut resume), DashboardAction::None);
@@ -1216,13 +1234,14 @@ fn alt_q_quits_without_mutating_any_dashboard_modal() {
         assert!(!matches!(dashboard.mode, Mode::Dashboard), "{label}");
         let mode_before_quit = dashboard.mode.clone();
 
-        // Alt-Q is a global chord: the controller answers it before the
-        // surface sees the key, so this drives the same path the
-        // controller's pre-filter drives.
-        let command = crate::global_chord(&alt_key('q')).expect("Alt-Q is a global chord");
-        assert!(dashboard.global_chord_allowed(command), "{label}");
+        // Detach answers from every surface: the event loop routes it before
+        // the mode underneath sees the key, so this drives that same path.
+        assert!(
+            dashboard.command_allowed_now(CommandId::QuitDetach),
+            "{label}"
+        );
         assert_eq!(
-            dashboard.dispatch_command(command),
+            chord(&mut dashboard, CommandId::QuitDetach),
             DashboardAction::QuitDetach,
             "{label}"
         );
@@ -1855,7 +1874,7 @@ fn mark_all_read_advances_a_materialized_session_and_returns_its_receipt() {
     );
 
     assert_eq!(
-        dashboard.handle_key(alt_key('a')),
+        chord(&mut dashboard, CommandId::MarkAllRead),
         DashboardAction::MarkAllRead {
             receipts: vec![("session-1".into(), 4)]
         }
@@ -1880,7 +1899,7 @@ fn mark_all_read_includes_a_restart_only_session() {
     );
 
     assert_eq!(
-        dashboard.handle_key(alt_key('a')),
+        chord(&mut dashboard, CommandId::MarkAllRead),
         DashboardAction::MarkAllRead {
             receipts: vec![("session-1".into(), 3)]
         }

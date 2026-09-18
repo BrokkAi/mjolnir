@@ -30,7 +30,7 @@ Active work and requests for input take precedence over unread activity. Reading
 
 ## Create a session
 
-Press **Create**, `n`, `N`, `Alt+N`, or `Alt+W` anywhere in the terminal
+Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
 dashboard. The full wizard resolves four things:
 
 1. A [profile](/profiles/) selects Codex, Claude Code, Kimi Code, Grok Build, or Muse Code and the credentials to use.
@@ -44,9 +44,9 @@ defaults on for primary checkouts and off for linked worktrees. Containers, VMs,
 and plain directories leave it disabled. The terminal and web reviews both
 offer this choice. Opening an empty workspace does not create a session.
 
-Provisioning runs in the background. The new row appears immediately in Sessions, its status changes as each launch stage completes, and a failure remains visible with useful diagnostics. `Alt+X` cancels an in-flight launch without blocking the rest of the dashboard.
+Provisioning runs in the background. The new row appears immediately in Sessions, its status changes as each launch stage completes, and a failure remains visible with useful diagnostics. `prefix+shift+c` cancels an in-flight launch without blocking the rest of the dashboard.
 
-Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container edits made later through **F2 → Container settings** take effect when that container is next created.
+Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container edits made later through the command palette (`prefix+:`) → **Container settings** take effect when that container is next created.
 
 ## Work, queue, and cancel
 
@@ -60,16 +60,24 @@ The prompt surface also understands:
 - `/review` for an independent review of the completed turn; see [turn review](/turn-review/).
 - Agent-advertised slash commands, which appear in completion beside Mjolnir's local commands.
 
-Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. Use `Alt+X` only for a lifecycle operation such as launch, resume, or stop.
+Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
+
+### When a turn goes quiet
+
+A turn ends when the harness answers. Mjolnir ends one on its own only when something deterministic says the turn cannot finish: the harness bridge process exited, its connection closed, or the worker was restarted. Each of those appears within seconds as a failed turn with the reason in `mj wait` and in the transcript.
+
+Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Mjolnir does not guess: it reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minute(s)`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj cancel-turn` or `Esc`.
+
+There is one case Mjolnir cannot recover from: an adapter that finished the work — wrote its final message, made its commit — and then failed to send the reply. That work exists in the workspace and in the harness's own session files, but never reaches Mjolnir's transcript, so the turn stays running until you end it. If you would rather have Mjolnir end such turns automatically, set `MJ_TURN_STALL_TIMEOUT_MS` to a number of milliseconds of silence to allow; the turn then fails with the reason `harness_inactive`. It is off by default because the same setting will also end healthy turns that are merely slow.
 
 ## Detach and reattach
 
-`Alt+Q` detaches the current terminal client. Active turns, shell commands, and queued prompts keep running under the daemon.
+`prefix+q` detaches the current terminal client. Active turns, shell commands, and queued prompts keep running under the daemon.
 
 Run `mj` again to reattach. Mjolnir selects the workspace and opens the session whose agent spoke most recently. You can also reconnect through the authenticated [web viewer](/web-viewer/).
 
 While the terminal says **Opening session**, `Esc` cancels that attachment,
-selecting another session switches immediately, and `Alt+Q` still quits.
+selecting another session switches immediately, and `prefix+q` still quits.
 Opening times out after 15 seconds. A failed or cancelled open stays stopped;
 press `Enter` on the session in Sessions to retry. Cancelling attachment leaves
 the agent running.
@@ -101,7 +109,7 @@ Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and veri
 
 ## Stop safely
 
-Select a live session, press `F2`, and choose **Stop session**. A normal stop:
+Select a live session, press `prefix+:`, and choose **Stop session**. A normal stop:
 
 1. Freezes dispatch at a safe boundary.
 2. Captures and verifies a current recovery archive.
@@ -117,7 +125,7 @@ Destroying a session leaves the managed worktree's git branch in the source repo
 
 ## Resume on a fresh target
 
-Press **Resume** or `Alt+S` to search every non-live Mjolnir session, including
+Press **Resume** or `prefix+g` to search every non-live Mjolnir session, including
 records that were previously archived by a provider. Provider archive metadata
 is shown read-only. The resume wizard lets you:
 
@@ -236,7 +244,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `Alt+S` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
+The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 For scripting, select a specific native UUID or the latest session:
 
@@ -313,7 +321,7 @@ navigation keep working.
 
 ### The Archived tab
 
-`Alt+S` opens Resume with a third tab, **Archived**, listing sessions whose live
+`prefix+g` opens Resume with a third tab, **Archived**, listing sessions whose live
 Mjolnir copy is gone but whose conversation SessionWiki still has. The pane under
 the list previews the selected session's conversation. The web viewer has the
 same search, Archived section, preview, and Restore button.

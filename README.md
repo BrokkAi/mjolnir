@@ -142,7 +142,7 @@ The dashboard keeps its workspace tabs, session details, targets, and quotas.
 Switching to another directory-linked workspace also switches the folder and
 saved setup used by **New**; unlinked workspaces keep the normal launch wizard.
 Running `mj go` again selects the invoking directory's workspace regardless of
-which workspace you last visited. **New** (or **Alt-N**) starts another concurrent
+which workspace you last visited. **New** (or **prefix+c**) starts another concurrent
 session with those choices. **Menu → Change setup** changes
 this project's next launch; `mj go --global-default` also changes the default
 for new projects. `mj go --setup` opens that setup directly.
@@ -159,7 +159,7 @@ inside the application. Plain `mj` keeps its existing dashboard workflow.
 
 On first launch, Mjolnir creates a workspace from the current directory.
 Press **Create** to choose a profile, target, and project. Local target choices
-are supplied automatically and checked before selection. Open **F7 Settings**
+are supplied automatically and checked before selection. Open **prefix+s Settings**
 to manage harness accounts, SSH or EC2 connections, and runtime options; no
 setup command is required. Run `mj doctor` for additional prerequisite checks.
 

@@ -344,13 +344,17 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         panic!("Codex receives the Mjolnir sub-agent MCP server");
     };
     assert_eq!(server.name, "mj-agents");
+    // The harness travels with the server because its own MCP client decides
+    // how long one `wait` call may stay open.
     assert_eq!(
         server.args,
         [
             "worker",
             "subagent-mcp",
             "--socket",
-            "/worker/subagents.sock"
+            "/worker/subagents.sock",
+            "--harness",
+            "codex"
         ]
     );
 }
@@ -4741,11 +4745,33 @@ fn salvage_settles_a_named_tool_and_ignores_the_rest() {
     assert!(salvage_tool_call_update(&message).is_none());
 }
 
+/// Both stall bounds are off unless an operator asks for one.
+///
+/// Mjolnir does not guess that a quiet turn is a dead turn: silence is not
+/// evidence, and failing a healthy turn for it destroys real work (#1020,
+/// #1017). Only a positive number of milliseconds arms a bound, so an unset,
+/// empty, zero or mistyped value leaves the turn running and visible.
 #[test]
-fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
-    assert!(turn_ends_only_on_prompt_reply(HarnessKind::Muse));
-    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Claude));
-    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Codex));
+fn a_stall_bound_is_off_unless_a_positive_timeout_is_configured() {
+    for off in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("0"),
+        Some("off"),
+        Some("-5"),
+    ] {
+        assert_eq!(
+            parse_stall_timeout(off),
+            None,
+            "{off:?} must not arm a watchdog"
+        );
+    }
+    assert_eq!(
+        parse_stall_timeout(Some(" 30000 ")),
+        Some(Duration::from_millis(30_000)),
+        "a positive value arms the bound it names"
+    );
 }
 
 #[test]
@@ -4818,14 +4844,26 @@ fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
     );
 }
 
-/// The default bounds: ten minutes of silence, four hours for one tool call.
-/// The tool-call bound is long on purpose — failing a healthy long build loses
-/// work silently, while a bound that is too long only delays a failure the
-/// user can already end with a cancel.
+/// The daemon carries both knobs to the workers it starts. A worker re-execs
+/// with a cleared environment, so a value set for the daemon reaches it only
+/// because this list names it. Without the silence knob in that list there is
+/// no way to arm the opt-in bound on any target.
 #[test]
-fn the_tool_call_bound_is_much_longer_than_the_silence_bound() {
-    assert_eq!(DEFAULT_TURN_STALL_TIMEOUT_MS, 600_000);
-    assert_eq!(DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS, 14_400_000);
+fn the_daemon_carries_both_stall_knobs_to_its_workers() {
+    let carried = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../mj-controller/src/controller/worker_binary/launch.rs"
+    ))
+    .expect("read the launch configuration that carries the knobs");
+    for name in [
+        TURN_STALL_TIMEOUT_VARIABLE,
+        TOOL_CALL_STALL_TIMEOUT_VARIABLE,
+    ] {
+        assert!(
+            carried.contains(name),
+            "the daemon must carry {name} to the worker that reads it"
+        );
+    }
 }
 
 /// Fake bridge that rejects every attempt to reload a recorded session and

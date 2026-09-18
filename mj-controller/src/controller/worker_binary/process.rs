@@ -62,12 +62,21 @@ pub(super) fn start_worker_command(
     let config = format!("{worker_root}/launch.json");
     // These files describe the worker's previous life. Clear them as part of
     // the launch, before the new daemon can be probed: a stale exit record
-    // aborts startup, while a stale socket makes a recovering daemon look
-    // ready and invites the reconnect actor to kill it as unresponsive.
+    // aborts startup, a stale socket makes a recovering daemon look ready and
+    // invites the reconnect actor to kill it as unresponsive, and a stale
+    // startup record would be read as this launch's progress even if the new
+    // process never ran at all.
     let clear_stale_runtime = format!(
-        "rm -f {} {}; ",
-        targets::join_remote_command(&[format!("{worker_root}/worker-exit.json")]),
+        "rm -f {} {} {}; ",
+        targets::join_remote_command(&[format!(
+            "{worker_root}/{}",
+            mj_core::relay::WORKER_EXIT_FILE
+        )]),
         targets::join_remote_command(&[format!("{worker_root}/control.sock")]),
+        targets::join_remote_command(&[format!(
+            "{worker_root}/{}",
+            mj_core::relay::WORKER_STARTUP_FILE
+        )]),
     );
     let detached_script = format!(
         "{clear_stale_runtime}nohup {} >{} 2>&1 </dev/null &",
@@ -204,11 +213,78 @@ pub(super) fn worker_binary_probe_failure(
     }
 }
 
-/// Fetch the worker's structured exit record, log tail, and current process
-/// state from the target, so unreachable-worker errors carry the root cause.
-/// The process section distinguishes a worker that died early from one that
-/// is still running but never accepted a relay connection; it must be read
-/// before the caller stops the worker.
+/// What one probe of a starting or dead worker found.
+///
+/// The three facts are read from the same command, because on a container or
+/// SSH target every probe costs a round trip: whether the process is there,
+/// which startup step it last recorded, and the diagnostic text a failure
+/// should carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::controller) struct WorkerProbe {
+    /// A process for this worker root is running on the target.
+    pub alive: bool,
+    /// The latest step from `worker-startup.json`, when the worker wrote one.
+    pub step: Option<String>,
+    /// The worker recorded its own death.
+    pub exited: bool,
+    /// A sentence the worker wrote for whoever asked, when it stopped on a
+    /// precondition the caller can fix rather than on an internal failure.
+    pub refusal: Option<String>,
+    /// Exit record, log tail and process state, for an error to carry.
+    pub diagnostics: String,
+}
+
+/// Fetch the worker's startup record, structured exit record, log tail, and
+/// current process state from the target, so unreachable-worker errors carry
+/// the root cause. The process section distinguishes a worker that died early
+/// from one that is still running but never accepted a relay connection; it
+/// must be read before the caller stops the worker.
+pub(in crate::controller) fn probe_worker(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Option<WorkerProbe> {
+    let text = worker_last_words(executor, locator, worker_root)?;
+    Some(WorkerProbe {
+        alive: process_section(&text).is_some_and(|section| section.starts_with("alive")),
+        step: startup_step(&text),
+        exited: text.contains(WORKER_EXIT_RECORD_MARKER),
+        refusal: exit_refusal(&text),
+        diagnostics: text,
+    })
+}
+
+/// The sentence a refusing worker wrote in its exit record, when it wrote one.
+fn exit_refusal(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once(WORKER_EXIT_RECORD_MARKER)?;
+    let body = rest.split("\n--- ").next().unwrap_or(rest);
+    let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    record
+        .get("refusal")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// The text under the process marker, which is `alive (...)` or `absent`.
+fn process_section(text: &str) -> Option<&str> {
+    text.split_once(WORKER_PROCESS_MARKER)
+        .map(|(_, rest)| rest.trim_start())
+}
+
+/// The latest step name from the startup record embedded in a probe.
+///
+/// The record is pretty-printed JSON, so it is bounded by the next section
+/// marker rather than by counting braces.
+fn startup_step(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once(WORKER_STARTUP_RECORD_MARKER)?;
+    let body = rest.split("\n--- ").next().unwrap_or(rest);
+    let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    record
+        .get("step")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 pub(in crate::controller) fn worker_last_words(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -216,9 +292,10 @@ pub(in crate::controller) fn worker_last_words(
 ) -> Option<String> {
     let script = format!(
         r#"{identity}
+if [ -f {root}/{startup_file} ]; then echo '{startup_marker}'; cat {root}/{startup_file}; fi
 if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi
 if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi
-echo '--- worker process ---'
+echo '{process_marker}'
 if hel_pid=$(hel_recorded_worker); then
     echo "alive (recorded pid $hel_pid)"
     hel_ps -o pid=,ppid=,stat=,etime=,args= -p "$hel_pid"
@@ -244,6 +321,9 @@ MJ_PS
 "#,
         identity = targets::worker_daemon_identity_script(worker_root),
         root = targets::posix_quote(worker_root),
+        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
+        startup_marker = WORKER_STARTUP_RECORD_MARKER,
+        process_marker = WORKER_PROCESS_MARKER,
         marker = WORKER_EXIT_RECORD_MARKER
     );
     let command = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
@@ -269,4 +349,36 @@ MJ_PS
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!text.is_empty()).then(|| format!("worker diagnostics:\n{text}"))
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// The probe's output is one block of text from the target. Reading the
+    /// step and the process state out of it is what lets the readiness wait
+    /// tell a worker that is still working from one that has died, so both
+    /// have to survive the pretty-printed JSON and the sections around it.
+    #[test]
+    fn a_probe_reads_the_latest_step_and_whether_the_worker_is_alive() {
+        let text = format!(
+            "worker diagnostics:\n{WORKER_STARTUP_RECORD_MARKER}\n\
+             {{\n  \"step\": \"review-baseline\",\n  \"pid\": 41,\n  \
+             \"steps\": [\n    {{ \"step\": \"start\" }},\n    \
+             {{ \"step\": \"review-baseline\" }}\n  ]\n}}\n\
+             --- worker.log (tail) ---\n\n{WORKER_PROCESS_MARKER}\n\
+             alive (recorded pid 41)\n41 1 Sl 00:12 hel worker run"
+        );
+
+        assert_eq!(startup_step(&text).as_deref(), Some("review-baseline"));
+        assert!(process_section(&text).is_some_and(|section| section.starts_with("alive")));
+    }
+
+    #[test]
+    fn a_worker_that_left_no_startup_record_reports_no_step() {
+        let text = format!("worker diagnostics:\n{WORKER_PROCESS_MARKER}\nabsent");
+
+        assert_eq!(startup_step(&text), None);
+        assert!(process_section(&text).is_some_and(|section| section.starts_with("absent")));
+    }
 }

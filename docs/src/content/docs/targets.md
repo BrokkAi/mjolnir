@@ -13,10 +13,10 @@ removed after a verified stop.
 
 Local target choices are supplied automatically and checked live when you open
 the target picker. Add SSH and AWS connections or customize runtime defaults in
-**F7 Settings → Machines** and **F7 Settings → Runtimes**. No setup command is
-required. A target
-that is checking or unavailable cannot advance; **F5** in the picker rechecks
-all targets. Dashboard **F5** refreshes host capacity. The optional
+**prefix+s Settings → Machines** and **prefix+s Settings → Runtimes**. No setup
+command is required. A target that is checking or unavailable cannot advance;
+**prefix+shift+r** in the picker rechecks all targets. Dashboard
+**prefix+shift+r** refreshes host capacity. The optional
 `mj doctor --smoke` command exercises container creation and removal.
 
 ## Capability matrix
@@ -292,8 +292,8 @@ directory paths, and destinations must be unique safe absolute paths without
 parent traversal.
 
 Attachments are per-session state in `mj.sqlite3`, not target fields in
-`config.toml`. They can be changed for the next recreation through
-**F2 → Container settings** where supported. See [Session lifecycle](/sessions/).
+`config.toml`. They can be changed for the next recreation through the
+command palette (**prefix+:**) → **Container settings** where supported. See [Session lifecycle](/sessions/).
 
 ## CPU, memory, and instance sizing
 

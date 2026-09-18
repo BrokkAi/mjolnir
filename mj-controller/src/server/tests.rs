@@ -38,6 +38,7 @@ fn minted_desktop_cookie_validates_and_names_a_viewer() {
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
+        keys: Default::default(),
         build_cache: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,

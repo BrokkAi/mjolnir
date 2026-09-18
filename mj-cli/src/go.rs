@@ -136,14 +136,22 @@ pub(crate) fn resolve_recipe(
     mut recipe: GoRecipe,
 ) -> Result<(Config, GoRecipe)> {
     let mut config = Config::load()?;
+    // The settings key is whatever `[keys]` says it is, so the advice names
+    // the binding in force rather than a key that may have been rebound.
+    let settings = config
+        .keybinds()
+        .labels(mj_core::config::KeyAction::OpenSettings)
+        .first()
+        .map(|key| format!("{key} Settings"))
+        .unwrap_or_else(|| "Settings".to_owned());
     ensure!(
         config.enabled_profile(&recipe.profile_id).is_some(),
-        "Saved account {:?} is unavailable. Use Change setup to choose an account, or F7 Settings to restore it.",
+        "Saved account {:?} is unavailable. Use Change setup to choose an account, or {settings} to restore it.",
         recipe.profile_id
     );
     let target = config.targets.get(&recipe.target_id).with_context(|| {
         format!(
-            "Saved target {:?} is unavailable. Use Change setup or F7 Settings to restore it.",
+            "Saved target {:?} is unavailable. Use Change setup or {settings} to restore it.",
             recipe.target_id
         )
     })?;

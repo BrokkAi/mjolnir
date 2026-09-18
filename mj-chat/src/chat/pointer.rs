@@ -53,12 +53,29 @@ impl ChatState {
         self.active_user_shells.clone()
     }
 
-    pub(crate) fn toggle_render_mode(&mut self) {
+    /// Switches the transcript between rendered Markdown and raw source.
+    ///
+    /// The host owns the key that runs this, so it is called from the
+    /// dashboard's command registry as well as from the transcript control.
+    pub fn toggle_render_mode(&mut self) {
         self.render_mode = self.render_mode.toggled();
         self.set_notice(match self.render_mode {
             TranscriptRenderMode::Rich => "Rich transcript rendering enabled",
             TranscriptRenderMode::Raw => "Raw transcript source enabled",
         });
+    }
+
+    /// What a dictation toggle should do right now.
+    ///
+    /// A recording remains stoppable even if the helper becomes unavailable
+    /// while it is running, so an active recording answers even when voice is
+    /// no longer available. An unavailable idle microphone is inert.
+    pub fn dictation_toggle_action(&self) -> ChatAction {
+        if self.voice_available || self.voice_active {
+            ChatAction::ToggleVoice
+        } else {
+            ChatAction::None
+        }
     }
 
     /// The surfaces the last frame registered, for the selection engine.
@@ -377,11 +394,7 @@ impl ChatState {
         }
         let voice_result = self.voice_form.handle(&Event::Mouse(mouse));
         if let Some(Interaction::Activate(VoiceControl::Microphone)) = voice_result.action {
-            return if self.voice_available || self.voice_active {
-                ChatAction::ToggleVoice
-            } else {
-                ChatAction::None
-            };
+            return self.dictation_toggle_action();
         }
         if voice_result.consumed {
             return ChatAction::None;

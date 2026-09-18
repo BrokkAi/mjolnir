@@ -8,6 +8,7 @@
 //! caller already uses stays the same:
 //!
 //! * `harness` -- [`HarnessKind`], [`HarnessProfile`] and execution policy.
+//! * `keys` -- the `[keys]` section: the prefix key and every bindable action.
 //! * `machines` -- hosts, the stored runtime shape, and the conversion
 //!   between them and [`TargetTemplate`].
 //! * `targets` -- projects, containers and [`TargetTemplate`].
@@ -15,12 +16,14 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 
 mod harness;
+mod keys;
 mod loading;
 mod machines;
 mod targets;
 mod ui;
 
 pub use harness::*;
+pub use keys::*;
 pub use loading::*;
 pub use machines::*;
 pub use targets::*;
@@ -321,7 +324,7 @@ impl BuildCacheConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 11;
+pub const CONFIG_VERSION: u32 = 12;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -357,6 +360,7 @@ pub struct Config {
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub build_cache: BuildCacheConfig,
+    pub keys: KeysConfig,
     pub legacy_startup: (),
     pub profiles: BTreeMap<String, HarnessProfile>,
     pub bundles: BTreeMap<String, ProjectBundle>,
@@ -391,6 +395,8 @@ struct StoredConfig {
     subagents: SubagentConfig,
     #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
     build_cache: BuildCacheConfig,
+    #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
+    keys: KeysConfig,
     #[serde(
         default,
         rename = "startup",
@@ -430,7 +436,7 @@ impl<'de> Deserialize<'de> for TargetEntry {
 /// against the file's version.
 enum InterpretedTarget {
     Stored(StoredTarget),
-    /// A pre-version-11 table, which fuses a host and a runtime and is
+    /// A pre-version-12 table, which fuses a host and a runtime and is
     /// migrated into a machine plus a runtime.
     Legacy(TargetTemplate),
 }
@@ -462,7 +468,7 @@ fn interpret_target(
     if STORED_TARGET_KINDS.contains(&kind) {
         // `apple-container` is spelled the same before and after the split.
         // In an old file without a `machine` key it is the fused kind.
-        let fused = kind == "apple-container" && !table.contains_key("machine") && version <= 10;
+        let fused = kind == "apple-container" && !table.contains_key("machine") && version <= 11;
         if !fused {
             return from_value().map(InterpretedTarget::Stored);
         }
@@ -471,7 +477,7 @@ fn interpret_target(
             "target {id:?} has unknown kind {kind:?}; use one of {}",
             STORED_TARGET_KINDS.join(", ")
         );
-    } else if version > 10 {
+    } else if version > 11 {
         let (new_kind, machine) = legacy_kind_advice(kind).expect("checked above");
         bail!(
             "target {id:?} uses the old kind {kind:?}; write kind = {new_kind:?} and machine = {machine:?}"
@@ -498,6 +504,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             build_cache,
+            keys,
             legacy_startup,
             profiles,
             bundles,
@@ -525,10 +532,10 @@ impl TryFrom<StoredConfig> for Config {
             show_stopped_sessions,
             sessions_side,
             advanced,
-            // Versions 1 through 10 acquire this build's defaults in memory
-            // and upgrade on the next ordinary save. Version 11 splits
+            // Versions 1 through 11 acquire this build's defaults in memory
+            // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes.
-            version: if matches!(version, 1..=10) {
+            version: if matches!(version, 1..=11) {
                 CONFIG_VERSION
             } else {
                 version
@@ -540,6 +547,7 @@ impl TryFrom<StoredConfig> for Config {
             sessionwiki,
             subagents,
             build_cache,
+            keys,
             legacy_startup,
             profiles,
             bundles,
@@ -574,6 +582,7 @@ impl From<Config> for StoredConfig {
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
             build_cache: config.build_cache,
+            keys: config.keys,
             legacy_startup: config.legacy_startup,
             profiles: config.profiles,
             bundles: config.bundles,
@@ -597,6 +606,7 @@ impl Default for Config {
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             build_cache: BuildCacheConfig::default(),
+            keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
@@ -697,7 +707,16 @@ impl Config {
         for (id, target) in &self.targets {
             target.validate(id)?;
         }
+        self.keys.resolve()?;
         Ok(())
+    }
+
+    /// The key bindings in force.
+    ///
+    /// A `Config` in hand has already passed `validate`, so the fallback to
+    /// the defaults here can only be reached by an unvalidated value.
+    pub fn keybinds(&self) -> Keybinds {
+        self.keys.resolve().unwrap_or_default()
     }
 
     pub fn load() -> Result<Self> {
@@ -768,11 +787,12 @@ impl Config {
         // optional advanced settings; version 7 restores stopped-session
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
-        // SessionWiki section; version 11 splits machines from runtimes.
-        // Earlier configs acquire defaults in memory, and their fused target
-        // kinds become machines plus runtimes, on the next ordinary save.
-        // The version bump itself happens in `TryFrom<StoredConfig>`, which is
-        // also what decides whether an old `kind` is still accepted.
+        // SessionWiki section; version 11 adds the key bindings; version 12
+        // splits machines from runtimes. Earlier configs acquire defaults in
+        // memory, and their fused target kinds become machines plus runtimes,
+        // on the next ordinary save. The version bump itself happens in
+        // `TryFrom<StoredConfig>`, which is also what decides whether an old
+        // `kind` is still accepted.
         let config: Self = toml::from_str(&contents)
             .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         config.validate()?;

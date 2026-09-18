@@ -24,10 +24,12 @@ const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 
-/// Alt-Q, which a terminal sends as Escape followed by the letter. Alt is the
-/// same modifier on every platform, so unlike the old Ctrl-Q this needs no
-/// per-platform encoding.
-const QUIT_KEY: &[u8] = b"\x1bq";
+/// The detach chord: `ctrl+b` (byte 0x02) then `q`. The prefix is matched as
+/// Control on every platform, so this needs no per-platform encoding.
+const QUIT_KEY: &[u8] = b"\x02q";
+
+/// The create-session chord: the prefix then `c`.
+const NEW_SESSION_KEY: &[u8] = b"\x02c";
 
 /// The DECSET pair crossterm 0.29 writes for `EnableMouseCapture` and
 /// `DisableMouseCapture`. Both are single writes, so any one sequence stands
@@ -510,7 +512,9 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
             .sessions
             .is_empty()
     );
-    master.write_all(b"\x1bn").expect("open New session wizard");
+    master
+        .write_all(NEW_SESSION_KEY)
+        .expect("open New session wizard");
     wait_for_output(
         &mut master,
         &mut output,
@@ -588,7 +592,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     // launch is pending or its failed provisional session has been removed.
     // This second invocation uses the same explicit shortcut.
     output.clear();
-    master.write_all(b"\x1bn").unwrap();
+    master.write_all(NEW_SESSION_KEY).unwrap();
     wait_for_output(
         &mut master,
         &mut output,
@@ -730,8 +734,8 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
     let mut output = Vec::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
 
-    // Alt-Q. Escape belongs to the composer and to modals now; it no longer
-    // quits, so the Escape in this sequence is only the Alt prefix.
+    // The detach chord. Escape belongs to the composer and to modals now; it
+    // no longer quits, and the prefix key is what starts this sequence.
     master.write_all(QUIT_KEY).expect("send the quit key");
     let status = wait_for_exit(
         child.child_mut(),

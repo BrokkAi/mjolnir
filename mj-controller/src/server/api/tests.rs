@@ -1617,6 +1617,7 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
         mj_core::activity::ActivityState::Unknown {
             last_known: Box::new(mj_core::activity::ActivityState::Turn {
                 started_at_ms: Some(1),
+                last_activity_at_ms: None,
             }),
             since_ms: Some(2),
         },

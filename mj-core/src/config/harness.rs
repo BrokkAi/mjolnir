@@ -459,13 +459,6 @@ impl HarnessKind {
         matches!(self, Self::Claude | Self::Codex)
     }
 
-    /// Whether this harness marks the end of its own turn. Every other harness
-    /// leaves the turn running until the `session/prompt` reply arrives, so a
-    /// lost reply hangs it until the watchdog steps in.
-    pub const fn marks_own_turn_end(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
-    }
-
     /// The harness-home-relative directories that hold its native session
     /// files, scanned when a checkpoint captures or restores native state.
     pub const fn native_session_dirs(self) -> &'static [&'static str] {

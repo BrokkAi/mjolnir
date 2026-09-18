@@ -320,6 +320,12 @@ pub struct ApiActivityDetails {
     pub background_started_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since_ms: Option<i64>,
+    /// When anything last arrived from the harness, while a turn or a tool is
+    /// in flight. A surface subtracts it from the current time to show how
+    /// long a running session has been quiet. Mjolnir never ends a turn for
+    /// this on its own; see `mj_core::activity::silence_note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
