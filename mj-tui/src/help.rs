@@ -173,6 +173,12 @@ impl DashboardState {
                     overlay.query.clear();
                     overlay.scroll = 0;
                 }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_sub(1);
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_add(1).min(last);
+                }
                 KeyCode::Backspace => {
                     overlay.query.pop();
                     overlay.scroll = 0;
@@ -550,6 +556,40 @@ mod tests {
         // A second Esc, with nothing to clear, closes as it always did.
         dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(dashboard.mode, Mode::Dashboard);
+    }
+
+    /// The filter keeps every printable key as text, so walking the matches
+    /// needs a chord. `ctrl+n` and `ctrl+p` move while `n` and `p` still type,
+    /// the same pairing the command palette already answers.
+    #[test]
+    fn ctrl_n_and_ctrl_p_move_the_help_filter_while_plain_letters_type() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        chord(&mut dashboard, crate::CommandId::Help);
+        dashboard.handle_key(key(KeyCode::Char('/')));
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.scroll, 1);
+        assert_eq!(overlay.query, "");
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.scroll, 0);
+        assert_eq!(overlay.query, "");
+
+        for character in "np".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.query, "np");
+        assert!(overlay.search_focused);
     }
 
     /// While the filter has focus every printable key is filter text, so the

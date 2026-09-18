@@ -402,7 +402,7 @@ Press `Esc` to cancel a running shell command. The same `!` syntax works in the 
 
 Press `prefix+?` for scrollable contextual help and `Esc` to close it. The footer is generated from the same command registry: pane-local commands appear first, then the live prefix chord group, so the footer never names a key that is not actually bound.
 
-Inside help, press `/` to filter the rows. Typing narrows them to the rows whose key, command name, or description contains what you typed; `Ctrl+U` clears the filter text; `Esc` clears the filter and a second `Esc` closes help; `Enter` closes it from either state. The arrow and page keys keep scrolling while the filter has focus.
+Inside help, press `/` to filter the rows. Typing narrows them to the rows whose key, command name, or description contains what you typed; `Ctrl+U` clears the filter text; `Esc` clears the filter and a second `Esc` closes help; `Enter` closes it from either state. The arrow and page keys keep scrolling while the filter has focus, and `Ctrl+P` and `Ctrl+N` move up and down one row, the same pairing the command palette answers.
 
 If you run Mjolnir inside tmux or GNU screen with its default `ctrl+b` prefix, the multiplexer sees `ctrl+b` first and Mjolnir's prefix never arms. Press `ctrl+b` twice to send it through, as you would for tmux's own prefix, or set `prefix` to a different key in `[keys]`. The dashboard notices this on its first launch inside a multiplexer and says so once in the footer.
 
