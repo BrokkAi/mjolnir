@@ -30,6 +30,7 @@ pub enum CommandId {
     FocusPaneDown,
     FocusPaneUp,
     FocusPaneRight,
+    ZoomPane,
     ResizePaneLeft,
     ResizePaneDown,
     ResizePaneUp,
@@ -511,6 +512,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneRight),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ZoomPane,
+        label: "Zoom pane",
+        description: "Fill the conversation area with the pane you are in, or put the others back.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::Zoom),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -1242,6 +1255,7 @@ impl DashboardState {
             CommandId::FocusPaneDown => self.focus_pane_command(NavDirection::Down),
             CommandId::FocusPaneUp => self.focus_pane_command(NavDirection::Up),
             CommandId::FocusPaneRight => self.focus_pane_command(NavDirection::Right),
+            CommandId::ZoomPane => self.zoom_pane_command(),
             CommandId::ResizePaneLeft => self.resize_pane_command(NavDirection::Left),
             CommandId::ResizePaneDown => self.resize_pane_command(NavDirection::Down),
             CommandId::ResizePaneUp => self.resize_pane_command(NavDirection::Up),
@@ -1575,6 +1589,10 @@ mod tests {
             (CommandId::FocusPaneDown, "ctrl+b j"),
             (CommandId::FocusPaneUp, "ctrl+b k"),
             (CommandId::FocusPaneRight, "ctrl+b l"),
+            (CommandId::ZoomPane, "ctrl+b z"),
+            // Zoom took herdr's `prefix+z`, so the support panes' size key is
+            // its shifted form.
+            (CommandId::CycleFocusedPaneSize, "ctrl+b shift+z"),
         ] {
             assert_eq!(dashboard.key_labels(id), vec![label.to_owned()], "{id:?}");
         }

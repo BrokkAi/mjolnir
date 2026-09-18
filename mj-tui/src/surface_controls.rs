@@ -269,6 +269,38 @@ pub(crate) fn render_pane_close_control(
     frame.render_widget(Paragraph::new(theme::glyphs().close).style(style), area);
 }
 
+/// The width a pane title leaves clear for [`render_pane_zoom_control`], on
+/// top of the close chip's own reserve.
+pub(crate) const PANE_ZOOM_CONTROL_RESERVE: u16 = 3;
+
+/// Draws the zoom chip on the zoomed pane's title row, left of the close
+/// chip. Clicking it runs the same command the key does, which unzooms.
+pub(crate) fn render_pane_zoom_control(
+    frame: &mut Frame,
+    dashboard: &DashboardState,
+    transcript: Rect,
+) {
+    let reserve = PANE_CLOSE_CONTROL_RESERVE + PANE_ZOOM_CONTROL_RESERVE;
+    if transcript.width < reserve + 2 || transcript.height == 0 {
+        return;
+    }
+    let area = Rect::new(
+        transcript.right().saturating_sub(reserve),
+        transcript.y,
+        3,
+        1,
+    );
+    let control = SurfaceControl::Command(CommandId::ZoomPane);
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    let style = if form.is_armed(control) {
+        theme::selection(true)
+    } else {
+        theme::muted()
+    };
+    frame.render_widget(Paragraph::new(" Z ").style(style), area);
+}
+
 pub(crate) fn render_onboarding_actions(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
     let buttons = [
         (CommandId::OpenConfig, "Settings"),

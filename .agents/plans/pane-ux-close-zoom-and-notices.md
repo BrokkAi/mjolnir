@@ -19,7 +19,7 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 - [x] M1: close a pane by id; a `×` chip on every conversation pane's title row. Done 2026-09-18T10:48-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] M2: split-open notices for a session that is already open. Done 2026-09-18T11:34-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] M3: wheel routes to the pane under the pointer; focused transcript border. Done 2026-09-18T12:26-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
-- [ ] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`).
+- [x] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`). Done 2026-09-18T13:20-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean. Docs text for zoom and the moved `pane_size` updated; screenshots still to regenerate.
 - [ ] M5: last pane on `prefix+;`.
 - [ ] Docs and screenshot regeneration for the key changes.
 - [ ] End-to-end check against the lab, then push.
@@ -57,6 +57,26 @@ A wheel over an unfocused pane holding no conversation now falls through to
 `DashboardState::handle_event_result` rather than scrolling the focused pane.
 That handler answers the wheel only inside the support panes, so a wheel over
 the conversation band does nothing, which is the intended result.
+
+Moving `pane_size`'s default off `prefix+z` needs no `CONFIG_VERSION` bump and
+no migration. `KeysConfig::resolve` walks the user's own fields before the
+defaults, and a default that collides with a user binding is dropped rather
+than reported: a user who wrote `pane_size = "prefix+z"` keeps it and simply
+gets no default zoom key. `CONFIG_VERSION` stays 12. `prefix+shift+z` round
+trips through `format_key_combo` unchanged, as `prefix+shift+n` and
+`prefix+shift+r` already do.
+
+The footer's key row prints the support-pane size key, so
+`footer_groups_pane_keys_then_prefix_chords_in_rank_order` in
+`mj-tui/src/render/tests.rs` pinned `z size` and now expects `shift+z size`.
+Zoom itself has no footer word, so it does not join that row.
+
+Only two places asked the layout for the panes to draw: the pane-width
+measurement before the band allocation and the pane loop itself. Both now call
+`conversation_panes`, and because `conversation_pane_areas` — what
+`chat_region_contains` and `pane_bands` read — is built from the loop's result,
+hit-testing follows the zoom without a separate change. `focus_pane_toward`
+still reads the full layout on purpose.
 
 `cargo build --workspace` fails in this checkout because `mj-desktop` needs
 GTK development packages that are not installed. The workspace's

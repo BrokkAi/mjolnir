@@ -464,8 +464,7 @@ fn render_combined_themed(
     // allocation needs are measured against.
     let focused_pane = dashboard.focused_pane();
     let pane_widths = dashboard
-        .conversation_layout
-        .panes(Rect::new(
+        .conversation_panes(Rect::new(
             content_area.x,
             content_area.y,
             content_area.width,
@@ -666,7 +665,7 @@ fn render_combined_themed(
         upper_content_height,
     );
     dashboard.conversation_area = Some(conversation_area);
-    let panes = dashboard.conversation_layout.panes(conversation_area);
+    let panes = dashboard.conversation_panes(conversation_area);
     // One pane keeps the band heights the allocator computed for the whole
     // frame. Several panes each carve their own leaf, because a pane's
     // composer is as tall as that pane's draft needs and no taller.
@@ -913,6 +912,7 @@ fn render_combined_themed(
         // The lone pane offers a close only while it holds a conversation:
         // closing it empties it, which is nothing to ask for when it is
         // already empty. A chat modal owns the frame, so the chip stands down.
+        let zoom_chip = dashboard.conversation_zoomed();
         let close_chip = (pane_bands.len() > 1 || dashboard.pane_session(pane_id).is_some())
             && !focused_chat_session
                 .as_deref()
@@ -974,7 +974,8 @@ fn render_combined_themed(
                                 banner: banner.as_ref(),
                             }),
                             overlay: area,
-                            title_controls: title_controls(close_chip),
+                            title_controls: title_controls(close_chip)
+                                + zoom_title_controls(zoom_chip),
                             pane_focused: focus_borders,
                         },
                         prompt_focused,
@@ -1017,7 +1018,7 @@ fn render_combined_themed(
                         transcript_area,
                         reason,
                         dashboard.config.spinner,
-                        title_controls(close_chip),
+                        title_controls(close_chip) + zoom_title_controls(zoom_chip),
                         focus_borders,
                     );
                     if opening {
@@ -1048,6 +1049,9 @@ fn render_combined_themed(
                 pane_id,
             );
         }
+        if zoom_chip {
+            crate::surface_controls::render_pane_zoom_control(frame, dashboard, transcript_area);
+        }
     }
 
     if !chat_drew_footer {
@@ -1062,6 +1066,15 @@ fn render_combined_themed(
 fn title_controls(close_chip: bool) -> u16 {
     if close_chip {
         crate::surface_controls::PANE_CLOSE_CONTROL_RESERVE
+    } else {
+        0
+    }
+}
+
+/// The further columns the zoom chip takes, left of the close chip.
+fn zoom_title_controls(zoom_chip: bool) -> u16 {
+    if zoom_chip {
+        crate::surface_controls::PANE_ZOOM_CONTROL_RESERVE
     } else {
         0
     }

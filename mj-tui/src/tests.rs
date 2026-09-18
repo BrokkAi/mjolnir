@@ -2790,6 +2790,160 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
     assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
+/// Zoom fills the conversation band with the focused pane: the other panes
+/// keep their place in the arrangement but are neither drawn nor pointed at,
+/// and the zoom toggles back off.
+#[test]
+fn zoom_fills_the_band_with_the_focused_pane_and_toggles_back() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    let band = dashboard.conversation_area.expect("the conversation band");
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ZoomPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    );
+    assert!(dashboard.conversation_zoomed());
+    drawn(&mut dashboard, 120, 40);
+
+    let panes = dashboard.conversation_panes(band);
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].id, second);
+    assert_eq!(panes[0].rect, band);
+    // Hit-testing agrees with what was drawn: the hidden pane answers for
+    // nothing, and the zoomed pane answers for the whole band.
+    let (transcript, _) = dashboard.pane_bands(second).expect("the zoomed pane drew");
+    assert_eq!(transcript.width, band.width);
+    assert!(dashboard.pane_bands(first).is_none());
+    assert_eq!(
+        dashboard.chat_region_contains(band.x + 1, band.y + 1),
+        Some(second)
+    );
+
+    // The arrangement underneath is untouched, so unzooming puts both back.
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(!dashboard.conversation_zoomed());
+    drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.conversation_panes(band).len(), 2);
+    assert!(dashboard.pane_bands(first).is_some());
+}
+
+/// Directional focus works against the arrangement the zoom hides, and moving
+/// the keyboard keeps the zoom: the new pane fills the band in its turn.
+#[test]
+fn focusing_another_pane_while_zoomed_keeps_the_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    chord(&mut dashboard, CommandId::ZoomPane);
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusPaneLeft),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+
+    assert_eq!(dashboard.focused_pane(), first);
+    assert!(dashboard.conversation_zoomed());
+    let band = dashboard.conversation_area.expect("the conversation band");
+    let panes = dashboard.conversation_panes(band);
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].id, first);
+    assert_ne!(second, first);
+}
+
+/// Splitting and closing both change which panes there are, so each one ends
+/// the zoom rather than leaving panes hidden behind it.
+#[test]
+fn a_split_or_a_close_ends_the_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(dashboard.conversation_zoomed());
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Vertical, None)
+        .expect("the test conversation area has room for a third pane");
+    assert!(!dashboard.conversation_zoomed());
+
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(dashboard.conversation_zoomed());
+    dashboard.close_pane(first);
+    assert!(!dashboard.conversation_zoomed());
+}
+
+/// A lone pane already fills the band, so the command says so instead of
+/// changing nothing silently.
+#[test]
+fn zooming_a_lone_pane_says_there_is_nothing_to_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    dashboard.focus_prompt();
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ZoomPane),
+        DashboardAction::None
+    );
+
+    assert!(!dashboard.conversation_zoomed());
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Only one pane; nothing to zoom")
+    );
+}
+
+/// The zoomed pane carries a `Z` chip left of its close chip, and clicking it
+/// puts the other panes back.
+#[test]
+fn clicking_the_zoom_chip_unzooms() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_current_session(Some("session-1"));
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    chord(&mut dashboard, CommandId::ZoomPane);
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let (transcript, _) = dashboard
+        .pane_bands(dashboard.focused_pane())
+        .expect("the zoomed pane drew");
+    let chip = (transcript.right() - 6, transcript.y);
+    assert_eq!(
+        lines[chip.1 as usize].chars().nth(chip.0 as usize),
+        Some('Z'),
+        "the zoomed pane draws a Z chip left of its close chip: {lines:#?}"
+    );
+
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), chip)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), chip)),
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    );
+    assert!(!dashboard.conversation_zoomed());
+}
+
 /// The pane with the keyboard draws its transcript border in the focused
 /// style, and its neighbour does not, so the focused pane is visible without
 /// reading the composer.
