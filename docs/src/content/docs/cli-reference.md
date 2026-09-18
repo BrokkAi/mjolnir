@@ -20,7 +20,7 @@ mj [--instance <name>] [--workspace <name>] [command]
 | `mj workspaces` | Open the workspace manager in the dashboard. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
-Use `Alt+Q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
+Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
 
 ## Daemon control
 
@@ -88,7 +88,7 @@ mj import <harness> (--session <uuid> | --latest) [options]
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 
-Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a stopped session record, and makes that record available through `Alt+S`.
+Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a stopped session record, and makes that record available through `prefix+g`.
 
 Examples:
 

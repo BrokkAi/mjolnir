@@ -7,9 +7,9 @@ Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
 prompt history, per-session resource choices, drafts, and read markers live in
 Mjolnir's state database instead; they are not fields in this file.
 
-Open **Settings** with **F7** to add or edit agent profiles, SSH and EC2
+Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
-palette (**F2**) also provides **Manage agent profiles** and **Manage machines
+palette (**prefix+:**) also provides **Manage agent profiles** and **Manage machines
 and runtimes**. No setup command or file editing is required. **Detect machine**
 on the **Machines and Runtimes** page can import existing agent accounts for
 review.
@@ -18,7 +18,7 @@ Standard local targets are supplied automatically: localhost, Podman, Docker,
 and Apple container on macOS. Saved entries override their defaults. The new,
 resume, and move target pickers check every target in the background, including
 SSH connectivity and AWS credentials and launch templates. Pending or failed
-checks block Next and show the reason; press **F5** to recheck after fixing it.
+checks block Next and show the reason; press **prefix+shift+r** to recheck after fixing it.
 Checks do not start stopped services, and launch performs a final preflight.
 
 Settings refuses to remove or rewrite configuration used by an active session;
@@ -64,7 +64,7 @@ The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `10`. |
+| `version` | integer | yes | none | Configuration schema version; use `11`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -73,6 +73,7 @@ The only accepted top-level keys are:
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
+| `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
 | `targets` | table of named tables | no | empty | Named places where sessions run. |
@@ -81,7 +82,7 @@ The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
 **Interface**. This is only a presentation grouping; the fields remain at the
 top level in `config.toml`.
 
-A missing or empty file is treated as an empty version 10 configuration. Older
+A missing or empty file is treated as an empty version 11 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -115,6 +116,104 @@ show_stopped_sessions = false
 The terminal Setup screen edits these settings under **Advanced**. Detailed
 clocks do not change how sessions run: the normal `Running` status continues
 across the originating turn and its background work.
+
+## Keys `[keys]`
+
+The optional `[keys]` table rebinds the prefix key and every command it
+drives. Mjolnir follows tmux's model, described in [Terminal
+surface](/terminal-surface/#prefix-key): press the prefix, release it, then
+press a second key. An edit here takes effect the next time the daemon
+reloads the file, within about a second; the terminal Setup screen does not
+show this section, so it is edited by hand.
+
+```toml
+[keys]
+prefix = "ctrl+b"
+new_session = "prefix+c"
+refresh = ["prefix+shift+r", "f5"]
+switch_workspace = "prefix+1..9"
+pane_preset = ""
+```
+
+Each field takes one key string or a list of them; a list binds every string
+in it to the same command. An empty string (`""`) unbinds a default. The
+`1..9` range form, optionally with a leading modifier such as `ctrl+1..9`, is
+accepted only for `switch_workspace`; it expands to nine bindings, one per
+digit.
+
+A key string is modifier tokens joined by `+`, then a key name. Modifiers are
+`ctrl`/`control`, `alt`/`option`/`meta`, `shift`, and `cmd`/`command`/`super`.
+Key names include `space`, `enter`/`return`, `esc`/`escape`, `tab`,
+`backspace`/`bs`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, the
+arrow keys, `f1`–`f12`, punctuation names such as `slash`, `semicolon`, and
+`backtick`, and any single character. An uppercase letter is read as the
+lowercase letter plus `shift`. A binding that should fire only after the
+prefix key carries a `prefix+` marker, for example `prefix+shift+n`; a
+binding written without that marker fires directly, with no prefix.
+
+The default bindings:
+
+| Field | Default | Action |
+| --- | --- | --- |
+| `prefix` | `ctrl+b` | The prefix key itself |
+| `help` | `prefix+?` | Open help |
+| `settings` | `prefix+s` | Open Settings |
+| `detach` | `prefix+q` | Detach this terminal |
+| `new_session` | `prefix+c` | Open the session creation wizard |
+| `resume` | `prefix+g` | Open the Resume picker |
+| `workspace_manager` | `prefix+shift+n` | Open workspace management |
+| `focus_workspaces` | `prefix+w` | Focus the workspace tab row |
+| `next_workspace` | `prefix+n` | Select the next workspace |
+| `previous_workspace` | `prefix+p` | Select the previous workspace |
+| `switch_workspace` | `prefix+1..9` | Select a workspace by number |
+| `next_pane` | `prefix+tab` | Focus the next support pane |
+| `previous_pane` | `prefix+shift+tab` | Focus the previous support pane |
+| `pane_size` | `prefix+z` | Cycle the focused support pane's size |
+| `pane_preset` | `prefix+b` | Toggle the dashboard pane preset |
+| `refresh` | `prefix+shift+r` | Refresh target capacity and profile quota |
+| `palette` | `prefix+:` | Open the command palette |
+| `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
+| `mark_all_read` | `prefix+a` | Mark all session activity as read |
+| `web_viewer` | `prefix+u` | Show the web viewer address and access code |
+| `rename_session` | `prefix+shift+t` | Rename the selected session |
+| `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
+| `toggle_dictation` | `prefix+m` | Start or stop dictation |
+| `stop_session` | unbound | Stop the selected session |
+| `restart_session` | unbound | Restart the selected session |
+| `move_session` | unbound | Move the selected session to another target |
+| `delete_session` | unbound | Delete the selected session |
+| `container_settings` | unbound | Edit container settings for the selected session |
+| `manage_profiles` | unbound | Open profile management |
+| `manage_targets` | unbound | Open target management |
+| `change_go_setup` | unbound | Change the `mj go` fast-start setup |
+| `cycle_spinner` | unbound | Cycle the activity spinner style |
+
+The last nine actions are unbound by default because they are destructive or
+infrequent enough that a mis-hit key should not run them; use the command
+palette (`prefix+:`) instead, or bind them here.
+
+`Config::validate` rejects an invalid `[keys]` table fatally, the same as any
+other configuration error, with one exception: a binding you write silently
+displaces a default binding on the same key, because rebinding a command onto
+a key another command defaults to is the normal way to move a key.
+
+- The prefix must be a modified chord (carrying `ctrl`, `alt`, or `super`) or
+  a function key; a bare letter or a `shift`-only combination is rejected.
+- A direct binding (no `prefix+` marker) on an unmodified printable character
+  is rejected, because the composer reads that key as text; write
+  `"prefix+<key>"` instead.
+- A direct binding on `ctrl+c` or `ctrl+v` is rejected: the dashboard and
+  composer already treat them as cancel and paste.
+- A prefix binding whose key equals the prefix itself is rejected, because
+  that combination is reserved for sending the literal prefix key through
+  (see [Terminal surface](/terminal-surface/#prefix-key)).
+- Two user-written bindings on the same key is rejected with an error naming
+  both fields, for example `keys.pane_preset = "prefix+space": already bound
+  by keys.help`.
+
+This key-string syntax matches [herdr](https://github.com/herdrdev/herdr)'s
+own `[keys]` table, so a line can be copied between the two configuration
+files unchanged.
 
 ## Web viewer `[phone]`
 

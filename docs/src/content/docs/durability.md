@@ -38,7 +38,7 @@ checkpoint.
 ## Queued work continues in order
 
 The worker promotes queued prompts one at a time, in the order they were
-accepted. Closing the TUI with `Alt+Q`, closing a browser tab, or stopping the
+accepted. Closing the TUI with `prefix+q`, closing a browser tab, or stopping the
 controller daemon does not turn those accepted prompts back into client-side
 drafts.
 
@@ -131,7 +131,7 @@ another checkpoint operation is not quiet and may defer the copy. See
 ## Detach, stop, destroy, and resume are different
 
 **Detach** closes only the current client. The daemon, worker, harness, and
-queue keep running. In the TUI use `Alt+Q`; running `mj` later reattaches.
+queue keep running. In the TUI use `prefix+q`; running `mj` later reattaches.
 
 **Stop** preserves the logical session. A normal stop records its intent,
 creates or safely reuses a verified archive, closes and seals the relay at the

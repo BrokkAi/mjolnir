@@ -21,10 +21,10 @@ name, then leaves the dashboard ready for an explicit session. On Linux and
 macOS, an unconfigured installation prepares a local Codex profile and
 `localhost` target; it does not start a session.
 
-Press **Create**, `Alt+N`, or `N` to open the full creation wizard. Choose the
+Press **Create**, `N`, or `prefix+c` to open the full creation wizard. Choose the
 profile, target, project, resources, and attached directories before launch.
 Launch progress and failures appear on the dashboard. When the new session is
-ready, type a prompt and press `Enter`. Use **F7 Settings** to discover agent
+ready, type a prompt and press `Enter`. Use **prefix+s Settings** to discover agent
 accounts, add SSH or EC2 connections, and change runtime options. No setup
 command is required.
 
@@ -42,7 +42,7 @@ You can revise every generated value later. See [configuration](/configuration/)
 
 ## 2. Resolve any missing prerequisites
 
-If the first session reports a prerequisite failure, detach with `Alt+Q`, then run:
+If the first session reports a prerequisite failure, detach with `prefix+q`, then run:
 
 ```sh
 mj doctor
@@ -70,7 +70,7 @@ The login command is profile-aware: it runs the correct harness authentication f
 
 ## 3. Create a custom session (optional)
 
-For another agent, project, or target, press **Create** or `Alt+W` from anywhere
+For another agent, project, or target, press **Create** or `prefix+c` from anywhere
 on the dashboard. The full new-session wizard walks through:
 
 1. A harness profile.
@@ -99,17 +99,19 @@ Useful controls for the first run:
 | --- | --- |
 | `Tab` / `Shift+Tab` | Move through Workspaces, Sessions, Prompt, Targets, and Quota |
 | `Page Up` / `Page Down` | Scroll the transcript from any focus |
-| `F1` | Open contextual help |
-| `F2` | Open the searchable command palette |
-| `Alt+N` / `Alt+W` | Open the full creation wizard |
-| `F7` | Edit configuration in Settings |
-| `Alt+Q` | Detach this terminal |
+| `prefix+?` | Open contextual help |
+| `prefix+:` | Open the searchable command palette |
+| `prefix+c` | Open the full creation wizard |
+| `prefix+s` | Edit configuration in Settings |
+| `prefix+q` | Detach this terminal |
+
+The prefix is `ctrl+b`, the same as tmux: press it, release it, then press the second key. Every key here, including the prefix, is editable in `config.toml` under `[keys]`; see [Terminal surface](/terminal-surface/#prefix-key) for the full default table and [Configuration](/configuration/#keys-keys) for the syntax.
 
 The [terminal surface guide](/terminal-surface/) covers pane sizing, the full composer keymap, the command palette, and `!` shell commands.
 
 ## 5. Detach and reconnect
 
-Press `Alt+Q` when you are ready to leave the terminal. Detaching closes only this dashboard: the daemon and sessions keep running, active turns continue, and queued prompts remain queued.
+Press `prefix+q` when you are ready to leave the terminal. Detaching closes only this dashboard: the daemon and sessions keep running, active turns continue, and queued prompts remain queued.
 
 Reconnect with:
 

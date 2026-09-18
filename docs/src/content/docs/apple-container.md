@@ -27,7 +27,7 @@ an [EC2 target](/aws/) instead.
 ## Configure a target
 
 Mjolnir supplies this local target automatically on macOS and checks the runtime
-before allowing selection. Customize it in **F7 Settings → Machines and Runtimes**:
+before allowing selection. Customize it in **prefix+s Settings → Machines and Runtimes**:
 
 ```toml
 [targets.apple-container]
