@@ -58,20 +58,50 @@ impl fmt::Display for ClaudeUsageError {
     }
 }
 
-/// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`.
-/// The CLI is invoked only to refresh rejected credentials; its print-mode
-/// usage output is approximate, so the API response remains authoritative.
+/// Query the same OAuth usage endpoint as Claude Code's interactive `/usage`,
+/// except on macOS, where Claude Code is asked directly.
+///
+/// The endpoint is authenticated with the access token from the profile home's
+/// `.credentials.json`. On macOS that file does not exist: Claude Code keeps
+/// the credentials in the Keychain, where only Claude Code itself reads them.
+/// The API has no token to send there, so its print-mode `/usage` output is
+/// the only quota macOS can report.
 pub async fn query(
     home: PathBuf,
     environment: HashMap<String, String>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    query_with(
-        home,
-        environment,
-        USAGE_URL,
-        Arc::new(CancellableProcessExecutor::with_timeout(REFRESH_TIMEOUT)),
-    )
-    .await
+    let executor = Arc::new(CancellableProcessExecutor::with_timeout(REFRESH_TIMEOUT));
+    if cfg!(target_os = "macos") {
+        return query_cli_with(environment, executor).await;
+    }
+    query_with(home, environment, USAGE_URL, executor).await
+}
+
+/// Read the quota out of Claude Code's own `/usage` output.
+async fn query_cli_with(
+    environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+) -> Result<ClaudeUsageReport, ClaudeUsageError> {
+    let output = run_claude_usage(environment, executor, "read Claude usage")
+        .await
+        .map_err(ClaudeUsageError::Query)?;
+    // Claude Code reports a missing login on stdout and exits zero, so both
+    // streams are read before the status is judged.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if is_authentication_error(&text) {
+        return Err(ClaudeUsageError::NotSignedIn);
+    }
+    if output.status != 0 {
+        return Err(ClaudeUsageError::Query(format!(
+            "claude /usage exited with status {}",
+            output.status
+        )));
+    }
+    parse_cli_usage(&text).ok_or(ClaudeUsageError::Parse)
 }
 
 async fn query_with(
@@ -173,10 +203,13 @@ async fn refresh_and_retry(
     query_api(client, usage_url, token).await
 }
 
-async fn run_claude_refresh(
+/// Run Claude Code's `/usage` in print mode. The refresh path wants only the
+/// exit status out of it; macOS reads the quota from its stdout.
+async fn run_claude_usage(
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
-) -> Result<(), ClaudeUsageError> {
+    purpose: &'static str,
+) -> Result<CommandOutput, String> {
     let mut command = CommandSpec::new(
         if cfg!(windows) {
             "claude.cmd"
@@ -185,12 +218,21 @@ async fn run_claude_refresh(
         },
         ["-p", "/usage", "--no-session-persistence"],
     )
-    .purpose("refresh Claude login");
+    .purpose(purpose);
     command.env.extend(environment);
-    let output = tokio::task::spawn_blocking(move || executor.execute(&command))
+    tokio::task::spawn_blocking(move || executor.execute(&command))
         .await
-        .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
-        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+        .map_err(|error| format!("worker failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn run_claude_refresh(
+    environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+) -> Result<(), ClaudeUsageError> {
+    let output = run_claude_usage(environment, executor, "refresh Claude login")
+        .await
+        .map_err(ClaudeUsageError::Refresh)?;
     successful_refresh_output(output)
 }
 
@@ -290,6 +332,106 @@ fn api_window(value: &Value, percent_key: &str) -> Option<ClaudeUsageWindow> {
     })
 }
 
+/// Scrape `claude -p /usage` for the two windows the quota row shows.
+///
+/// The command prints one line per window, each naming its own percentage:
+///
+/// ```text
+/// Current session: 6% used · resets Sep 18 at 6:20pm (Europe/Paris)
+/// Current week (all models): 30% used · resets Sep 20 at 1:59pm (Europe/Paris)
+/// Current week (Fable): 40% used · resets Sep 20 at 2pm (Europe/Paris)
+/// ```
+///
+/// The sections below those quote unrelated percentages ("57% of your usage
+/// was at >150k context", "Top skills: /code-review 3%"), so only a line whose
+/// label is one of the windows is read, and only when the number is followed
+/// by `used`. A percentage that means something else is worth reporting as
+/// unparsed rather than reporting backwards.
+fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
+    let mut five_hour = None;
+    let mut weekly = Vec::new();
+
+    for line in strip_ansi(output).lines() {
+        let Some((label, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let label = label.trim().to_ascii_lowercase();
+        if label != "current session" && !label.starts_with("current week") {
+            continue;
+        }
+        let Some(window) = cli_window(rest) else {
+            continue;
+        };
+        if label == "current session" {
+            five_hour = Some(window);
+        } else {
+            weekly.push(window);
+        }
+    }
+
+    // Two weekly windows can be in force at once, as an overall limit and a
+    // per-model one. The binding limit is the one with the least left, which
+    // is also what the API path reports.
+    let week = weekly
+        .into_iter()
+        .min_by_key(|window| window.remaining_percent);
+    (five_hour.is_some() || week.is_some()).then_some(ClaudeUsageReport { five_hour, week })
+}
+
+/// One window from the text after a `/usage` line's label.
+fn cli_window(rest: &str) -> Option<ClaudeUsageWindow> {
+    let (used, tail) = rest.trim_start().split_once('%')?;
+    let used: f64 = used.trim().parse().ok()?;
+    if !tail.trim_start().starts_with("used") {
+        return None;
+    }
+    Some(ClaudeUsageWindow {
+        remaining_percent: 100 - (used.round().clamp(0.0, 100.0) as u8),
+        reset_context: tail
+            .split_once("resets ")
+            .map(|(_, context)| context.trim().to_owned())
+            .filter(|context| !context.is_empty()),
+    })
+}
+
+/// Claude Code paints `/usage` for a terminal, so its output can carry SGR
+/// escapes even in print mode.
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut characters = input.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        // CSI sequences end at their final byte; anything else ends at the
+        // next character.
+        if characters.next() == Some('[') {
+            for character in characters.by_ref() {
+                if character.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn is_authentication_error(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    [
+        "not logged in",
+        "not signed in",
+        "unauthenticated",
+        "unauthorized",
+        "please log in",
+        "please login",
+        "invalid api key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn api_scope_name(value: &Value) -> Option<String> {
     value
         .pointer("/scope/model/display_name")
@@ -297,12 +439,6 @@ fn api_scope_name(value: &Value) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// Scrape Claude Code `/usage` output for the two quota windows we display.
-///
-/// The command output has changed shape across Claude Code releases (plain
-/// lines, markdown-ish tables, and the ACP metadata wording all show up in the
-/// wild), so the parser intentionally keys off semantic labels plus nearby
-/// percentage words rather than a single exact template.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +447,80 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use std::sync::Mutex;
+
+    /// Captured verbatim from `claude -p /usage --no-session-persistence`.
+    const CLI_USAGE: &str = "\
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 6% used · resets Sep 18 at 6:20pm (Europe/Paris)
+Current week (all models): 30% used · resets Sep 20 at 1:59pm (Europe/Paris)
+Current week (Fable): 40% used · resets Sep 20 at 2pm (Europe/Paris)
+
+What's contributing to your limits usage?
+Approximate, based on local sessions on this machine — does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.
+
+Last 24h · 2108 requests · 13 sessions
+  57% of your usage was at >150k context
+  41% of your usage was while 4+ sessions ran in parallel
+  31% of your usage came from subagent-heavy sessions
+  Top skills: /code-review 3%
+  Top MCP servers: claude-in-chrome 1%
+
+Last 7d · 5966 requests · 78 sessions
+  52% of your usage was at >150k context
+  28% of your usage came from subagent-heavy sessions
+  28% of your usage was while 4+ sessions ran in parallel
+  Top skills: /code-review 2%
+  Top subagents: Explore 2%, Plan 1%
+  Top MCP servers: claude-in-chrome 2%
+";
+
+    #[test]
+    fn cli_usage_reports_both_windows_and_the_binding_weekly_limit() {
+        let report = parse_cli_usage(CLI_USAGE).expect("the captured output parses");
+
+        let five_hour = report.five_hour.expect("session window");
+        assert_eq!(five_hour.remaining_percent, 94);
+        assert_eq!(
+            five_hour.reset_context.as_deref(),
+            Some("Sep 18 at 6:20pm (Europe/Paris)")
+        );
+        // 40% used is the weekly limit that binds first, not 30%.
+        let week = report.week.expect("weekly window");
+        assert_eq!(week.remaining_percent, 60);
+        assert_eq!(
+            week.reset_context.as_deref(),
+            Some("Sep 20 at 2pm (Europe/Paris)")
+        );
+    }
+
+    /// The later sections are full of percentages that are not quota.
+    #[test]
+    fn cli_usage_ignores_percentages_that_are_not_a_window() {
+        let report = parse_cli_usage(
+            "Last 24h · 2108 requests · 13 sessions\n  \
+             57% of your usage was at >150k context\n  \
+             Top skills: /code-review 3%\n",
+        );
+        assert_eq!(report, None);
+    }
+
+    #[test]
+    fn cli_usage_survives_terminal_colouring() {
+        let coloured = "\u{1b}[1mCurrent session:\u{1b}[0m \u{1b}[32m6% used\u{1b}[0m · resets Sep 18 at 6:20pm\n";
+        let report = parse_cli_usage(coloured).expect("coloured output parses");
+        assert_eq!(report.five_hour.unwrap().remaining_percent, 94);
+    }
+
+    /// A window whose number stops meaning "used" must read as unparsed
+    /// rather than as its own complement.
+    #[test]
+    fn cli_usage_refuses_a_percentage_it_cannot_interpret() {
+        assert_eq!(
+            parse_cli_usage("Current session: 6% left · resets Sep 18 at 6:20pm\n"),
+            None
+        );
+    }
 
     #[derive(Clone)]
     struct RefreshExecutor {

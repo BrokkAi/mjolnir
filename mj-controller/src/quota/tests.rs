@@ -618,6 +618,10 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
     assert!(server.await.unwrap_err().is_cancelled());
 }
 
+/// macOS reads the quota from Claude Code itself and never opens the
+/// credentials file, so the expiry this asserts is not a state it can reach.
+/// Running it there would also spawn the real `claude` binary.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn expired_claude_credentials_report_login_expired() {
     let directory = tempfile::tempdir().unwrap();
