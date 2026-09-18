@@ -411,11 +411,11 @@ differs from the one the program expects, so two programs at different versions
 re-index everything each time you alternate between them — on a large corpus
 that is tens of minutes per switch.
 
-This build links the `brokk-sessionwiki` crate, version 0.30.0. Install the
+This build links the `brokk-sessionwiki` crate, version 0.30.1. Install the
 matching tool, which is still named `sessionwiki`, with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.30.0
+cargo install --locked brokk-sessionwiki@0.30.1
 ```
 
 ## Recover an orphaned worker

@@ -16,7 +16,7 @@ command -v sessionwiki
 ```
 
 If it is missing, say so once and continue without it. It installs with
-`cargo install --locked brokk-sessionwiki@0.30.0`.
+`cargo install --locked brokk-sessionwiki@0.30.1`.
 
 Commands sync the index before they read it, which is usually right. If a
 scheduled `sessionwiki sync` already keeps the index current, `--no-sync`

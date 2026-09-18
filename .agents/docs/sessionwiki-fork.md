@@ -112,3 +112,7 @@ matched message index `i` on `search --json` hits. It was published from the
 (`transcript_hits` in `mj-controller/src/sessionwiki.rs`) now calls
 `grep_session` instead of scanning for itself, so the CLI and the TUI report
 the same hits.
+
+`brokk-sessionwiki` 0.30.1 (tag `brokk-v0.30.1`) restores the default SIGPIPE
+disposition at startup so `sessionwiki grep -l ... | head` exits quietly
+instead of panicking on the closed pipe. Mjolnir links 0.30.1.
