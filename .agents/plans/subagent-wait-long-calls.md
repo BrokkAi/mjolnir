@@ -111,16 +111,17 @@ measured to need one, from the harness kind the worker already knows.
   ACP (`mj-worker/src/acp/launch.rs:171`, `McpServerStdio::new("mj-agents", worker)`),
   and that wire format carries only a name, command and arguments, so `tool_timeout_sec`
   is not reachable from Mjolnir on this path. Confidence: the 150-second measurement is
-  confirmed; the true ceiling is unknown.
+  confirmed. The true ceiling was unknown when this was written and was measured later at
+  300 seconds of total elapsed time; see the Codex observation below.
 
 - Observation: Kimi never receives these tools, so its MCP timeouts are out of scope.
   Evidence: `subagent_tools_enabled` in
   `mj-controller/src/controller/worker_binary/launch.rs:432` returns true only for
   `HarnessKind::Claude | HarnessKind::Codex`. For the record, Kimi's MCP client applies a
   *total* 60000 ms request timeout by default and does not pass `resetTimeoutOnProgress`,
-  so progress notifications would not help it; if Kimi is ever added as a parent harness,
-  the cap chosen here (600 seconds or less) would still be too long for it without a
-  staged `toolTimeoutMs`.
+  so progress notifications would not help it; if Kimi is ever added as a parent harness it
+  would need its own entry in `max_wait_seconds_for`, at 60 seconds or below, or a staged
+  `toolTimeoutMs`.
 
 - Observation (the reproduced defect): Mjolnir's wait deadline is measured from the
   moment the daemon starts executing the request, and any re-execution restarts it from
