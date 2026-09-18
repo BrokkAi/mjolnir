@@ -179,7 +179,7 @@ pub(super) async fn action(
     State(state): State<ServerState>,
     Json(action): Json<ControllerAction>,
 ) -> Result<StatusCode, ApiError> {
-    validate_action(&action, &state.snapshot_rx.borrow())?;
+    validate_action_live(&state, &action).await?;
     let action = decode_prompt_images_off_task(action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state

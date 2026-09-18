@@ -43,14 +43,15 @@ pub(super) async fn set_config(
     Path(session_id): Path<String>,
     Json(request): Json<SetConfigRequest>,
 ) -> Result<Json<ApiSession>, ApiFailure> {
-    validate_action(
+    crate::server::validate_action_live(
+        &state,
         &ControllerAction::SetConfig {
             session_id: session_id.clone(),
             key: request.key.clone(),
             value: request.value.clone(),
         },
-        &state.snapshot_rx.borrow(),
-    )?;
+    )
+    .await?;
     let backend = backend(&state)?;
     backend
         .set_config(session_id.clone(), request.key, request.value)
@@ -60,13 +61,16 @@ pub(super) async fn set_config(
         &state.snapshot_rx.borrow(),
         &session_id,
     )?);
-    if let Some(handle) = backend.session_handle(session_id).await?
-        && let Some(snapshot) = handle.view().snapshot
+    // The snapshot has not caught up with the change that just succeeded, so
+    // the answer reports what the session itself holds.
+    if let Some(options) = crate::server::live_session_config_options(
+        &state,
+        &session_id,
+        session.harness_kind.parse()?,
+    )
+    .await
     {
-        session.config_options = crate::server::session_config_view(
-            session.harness_kind.parse()?,
-            &snapshot.operational,
-        );
+        session.config_options = options;
     }
     Ok(Json(session))
 }

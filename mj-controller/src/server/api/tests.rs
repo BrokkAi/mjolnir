@@ -6,6 +6,9 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, SET_COOKIE};
 use http_body_util::BodyExt as _;
+use mj_client::session::{
+    ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
+};
 use tokio::sync::{mpsc, watch};
 use tower::ServiceExt as _;
 
@@ -328,6 +331,80 @@ impl Default for FakeWorkspaces {
 /// The child id the fake backend reports for a spawn.
 const SPAWNED_CHILD: &str = "spawned-child-1";
 
+/// A live session actor that reports one view and accepts every command.
+/// Hand-written rather than mocked so a handler test runs the real path from
+/// the route through the backend to the session's own configuration.
+#[derive(Clone)]
+struct FakeSession {
+    session_id: String,
+    view: ManagedSessionView,
+}
+
+impl SessionHandleBackend for FakeSession {
+    fn search_prompts(
+        &self,
+        _bundle_id: String,
+        _scope: mj_core::storage::HistoryScope,
+        _query: String,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn review_state(&self) -> BoxFuture<'_, AnyResult<mj_client::session::ReviewState>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+    fn config_result(
+        &self,
+        _command_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<Option<String>>>> {
+        Box::pin(async { Ok(Some(None)) })
+    }
+    fn clone_box(&self) -> Box<dyn SessionHandleBackend> {
+        Box::new(self.clone())
+    }
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    fn view(&self) -> ManagedSessionView {
+        self.view.clone()
+    }
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn has_changed(&self) -> AnyResult<bool> {
+        Ok(false)
+    }
+    fn changed(&mut self) -> BoxFuture<'_, AnyResult<ManagedSessionView>> {
+        Box::pin(std::future::pending())
+    }
+    fn enqueue_submit(
+        &self,
+        _command_id: String,
+        _command: mj_core::relay::RelayCommand,
+    ) -> BoxFuture<'_, AnyResult<PendingRelaySubmit>> {
+        Box::pin(async { Ok(PendingRelaySubmit::new(Box::pin(async { Ok(1) }))) })
+    }
+    fn enqueue_sync(&self) -> BoxFuture<'_, AnyResult<PendingRelaySync>> {
+        Box::pin(async { Ok(PendingRelaySync::new(Box::pin(async { Ok(()) }))) })
+    }
+    fn respond_elicitation(
+        &self,
+        _elicitation_id: String,
+        _response: mj_core::elicitation::ElicitationResponse,
+    ) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn stop_background_task(&self, _background_task_id: String) -> BoxFuture<'_, AnyResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn reviewer(
+        &self,
+        _role: Option<String>,
+        _action: mj_client::session::ReviewerAction,
+    ) -> BoxFuture<'_, AnyResult<mj_client::session::ReviewerOutcome>> {
+        Box::pin(async { anyhow::bail!("no reviewer in this fake") })
+    }
+}
+
 #[derive(Default)]
 struct FakeBackend {
     workspaces: FakeWorkspaces,
@@ -356,6 +433,10 @@ struct FakeBackend {
     file_paths: Mutex<Vec<PathBuf>>,
     file_writes: Mutex<Vec<(PathBuf, Vec<u8>, bool)>>,
     events: Mutex<Vec<crate::database::ApiEvent>>,
+    /// What the live session actor reports, when this fake has one. The
+    /// controller snapshot deliberately disagrees with it in the tests that
+    /// set this, which is the lag a configuration change has to survive.
+    live_view: Option<ManagedSessionView>,
     shutdown: tokio_util::sync::CancellationToken,
     event_queries: Mutex<Vec<(crate::database::ApiEventFilter, Option<u64>)>>,
 }
@@ -431,9 +512,12 @@ impl SubagentBackend for FakeBackend {
 
     fn session_handle(
         &self,
-        _session_id: String,
+        session_id: String,
     ) -> BoxFuture<'_, AnyResult<Option<SessionHandle>>> {
-        Box::pin(async { Ok(None) })
+        let view = self.live_view.clone();
+        Box::pin(async move {
+            Ok(view.map(|view| SessionHandle::new(FakeSession { session_id, view })))
+        })
     }
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>> {
         Box::pin(async move {
@@ -588,6 +672,110 @@ impl SubagentBackend for FakeBackend {
 /// Returns the snapshot sender alongside the router: dropping it closes the
 /// watch channel, which the wait loop correctly treats as the controller
 /// going away.
+/// The choices a running session offers, as a live view the fake reports.
+fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
+    let materialized = mj_core::state::MaterializedSession::empty("session-1");
+    let mut operational =
+        mj_core::relay::RelaySnapshot::new("session-1".into()).operational_state();
+    operational.config_options = serde_json::from_value(serde_json::json!([
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": model,
+         "options": [{"value": "slow", "name": "Slow"}, {"value": "flash", "name": "Flash"}]},
+        {"id": "thinking", "name": "Effort", "category": "thought_level", "type": "select",
+         "currentValue": efforts[0],
+         "options": efforts.iter().map(|value| serde_json::json!({"value": value, "name": value})).collect::<Vec<_>>()},
+    ]))
+    .expect("the fixture describes selects the schema accepts");
+    ManagedSessionView {
+        snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
+            window: mj_core::state::ProjectionWindow::of(&materialized),
+            materialized,
+            operational,
+            latest_credential_sync_signal: None,
+            worker_build: None,
+        }),
+        connected: true,
+        error: None,
+    }
+}
+
+/// A model change replaces the effort catalogue at once, while the controller
+/// snapshot still carries the previous model's choices for a while. Validating
+/// the next change against the snapshot refused an effort the session does
+/// offer (#1091).
+#[tokio::test]
+async fn an_effort_the_live_session_offers_is_accepted_while_the_snapshot_still_lags() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["low", "high", "max"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.set_config = true;
+        // What the previous model offered, which is all the snapshot knows.
+        snapshot.sessions[0].config_options = vec![super::super::ViewerConfigOption {
+            key: "effort".into(),
+            label: "effort".into(),
+            current: Some("low".into()),
+            choices: ["low", "high"]
+                .into_iter()
+                .map(|value| super::super::ViewerConfigChoice {
+                    value: value.into(),
+                    name: value.into(),
+                    description: None,
+                })
+                .collect(),
+        }];
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"effort","value":"max"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the value the model just selected offers must not be refused"
+    );
+    let body = json_body(response).await;
+    let effort = body["config_options"]
+        .as_array()
+        .expect("the answer lists the session's options")
+        .iter()
+        .find(|option| option["key"] == "effort")
+        .expect("effort is one of them")
+        .clone();
+    assert_eq!(
+        effort["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| choice["value"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["low", "high", "max"],
+        "the answer reports the live choices, not the snapshot's"
+    );
+
+    // Neither list offers this one, so the refusal stands.
+    let response = app
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"effort","value":"extreme"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 fn api_app(
     backend: Arc<FakeBackend>,
     adjust: impl FnOnce(&mut ViewerSnapshot),
