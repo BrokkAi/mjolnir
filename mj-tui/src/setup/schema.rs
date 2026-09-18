@@ -5,13 +5,16 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false})
+            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project","symbols":null})
+        }
+        "notify" => {
+            json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
@@ -134,6 +137,13 @@ pub(super) fn label(key: &str) -> String {
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
         "show_stopped_sessions" => "Show stopped sessions",
+        "session_order" => "Session order",
+        "symbols" => "Symbols",
+        "notify" => "Notifications",
+        "mode" => "Notify through",
+        "bell" => "Ring the terminal bell",
+        "delay_seconds" => "Delay before notifying (seconds)",
+        "title" => "Show counts in the terminal title",
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
@@ -203,6 +213,9 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     match parts.as_slice() {
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // Unset symbols follow the terminal: ASCII on the Linux console or
+        // without a UTF-8 locale, Unicode otherwise.
+        ["advanced", "symbols"] => "Follows the terminal".to_owned(),
         // The backend emits no CPU or memory flag, so the container competes
         // for the whole machine.
         ["targets", _, "cpus" | "memory"] => "No limit".to_owned(),
@@ -267,13 +280,25 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             )
             .to_lowercase()
         ),
-        "advanced" => match ["detailed_activity_clocks", "show_stopped_sessions"]
-            .iter()
-            .filter(|field| section[*field] == Value::Bool(true))
-            .count()
-        {
-            0 => "All off".to_owned(),
-            count => format!("{count} on"),
+        "advanced" => {
+            let on = ["detailed_activity_clocks", "show_stopped_sessions"]
+                .iter()
+                .filter(|field| section[*field] == Value::Bool(true))
+                .count();
+            let order = if section["session_order"] == Value::String("priority".to_owned()) {
+                " · priority order"
+            } else {
+                ""
+            };
+            match on {
+                0 => format!("All off{order}"),
+                count => format!("{count} on{order}"),
+            }
+        }
+        "notify" => match section["mode"].as_str() {
+            Some("off") => "Off".to_owned(),
+            Some("system") => "Desktop and terminal".to_owned(),
+            _ => "Terminal".to_owned(),
         },
         "profiles" | "machines" | "targets" | "bundles" => named_entries(section),
         "phone" => {
@@ -402,6 +427,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
     let values: &[&str] = match key {
         "sessions_side" => &["left", "right"],
+        "session_order" => &["project", "priority"],
+        "symbols" => &["unicode", "ascii"],
+        "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "tier" => &["quick", "extended"],
         "permissions" => &["guardian", "yolo"],
@@ -480,8 +508,27 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
         "advanced" => "Optional diagnostics and display details for the activity surface.",
+        "notify" => {
+            "How to be told when a session you are not looking at asks a question, fails, or finishes."
+        }
+        "mode" if path.first().is_some_and(|key| key == "notify") => {
+            "Terminal rings the bell and works over SSH. System also posts a desktop notification through osascript or notify-send."
+        }
+        "bell" => "Ring the terminal bell with each notification.",
+        "delay_seconds" => {
+            "Wait this long before notifying, so a question the agent answers itself stays quiet."
+        }
+        "title" => {
+            "Keep the terminal window title showing how many sessions are waiting or unread."
+        }
         "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
         "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
+        "session_order" => {
+            "Group sessions by project, or list the ones that need you first without project headings."
+        }
+        "symbols" => {
+            "Draw status marks, borders, and separators with Unicode or plain ASCII. Unset, the terminal decides: ASCII on the Linux console or without a UTF-8 locale."
+        }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
         }

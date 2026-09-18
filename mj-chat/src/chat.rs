@@ -1444,16 +1444,52 @@ struct Notice {
     protected: bool,
 }
 
+/// How many past notices the log keeps.
+pub const NOTICE_HISTORY: usize = 30;
+
+/// One notice as the log remembers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeRecord {
+    pub text: String,
+    pub at: std::time::Instant,
+    /// Whether it was a failure, which the log draws in the warning color.
+    pub failure: bool,
+}
+
 #[derive(Debug, Default)]
 struct NoticeSlot {
     notice: Option<Notice>,
     /// Bumped when the displayed text changes, so a dirty-gated renderer can
     /// tell that the bar moved without keeping a copy of its text.
     generation: u64,
+    /// The last [`NOTICE_HISTORY`] notices, oldest first, so a burst of
+    /// background failures that overwrote each other can still be read.
+    history: std::collections::VecDeque<NoticeRecord>,
+    /// Failures that arrived while an earlier failure was still protected on
+    /// the bar; the bar names their count until it is cleared or dismissed.
+    stacked_failures: usize,
 }
 
 impl NoticeSlot {
     fn write(&mut self, notice: Option<Notice>) {
+        if let Some(notice) = &notice
+            && self
+                .history
+                .back()
+                .is_none_or(|last| last.text != notice.text)
+        {
+            self.history.push_back(NoticeRecord {
+                text: notice.text.clone(),
+                at: notice.set_at,
+                failure: notice.protected,
+            });
+            while self.history.len() > NOTICE_HISTORY {
+                self.history.pop_front();
+            }
+        }
+        if notice.is_none() {
+            self.stacked_failures = 0;
+        }
         let displayed_text_changed = self.notice.as_ref().map(|current| current.text.as_str())
             != notice.as_ref().map(|next| next.text.as_str());
         self.notice = notice;
@@ -1497,11 +1533,37 @@ impl Notices {
     /// failure still replaces it immediately.
     pub fn set_failure(&self, notice: impl Into<String>) {
         let text = sanitize_terminal_text(&notice.into());
-        self.lock().write(Some(Notice {
-            text,
+        let mut slot = self.lock();
+        // A failure landing on a failure the person has not had time to
+        // read: keep the newest visible and say how many there were.
+        let stacking = slot.notice.as_ref().is_some_and(|current| {
+            current.protected
+                && current.set_at.elapsed() < NOTICE_MINIMUM_DISPLAY
+                && current.text != text
+        });
+        slot.stacked_failures = if stacking {
+            slot.stacked_failures.max(1) + 1
+        } else {
+            1
+        };
+        let stacked = slot.stacked_failures;
+        slot.write(Some(Notice {
+            text: text.clone(),
             set_at: std::time::Instant::now(),
             protected: true,
         }));
+        if stacked > 1 {
+            // The log keeps the plain text; only the bar carries the count.
+            if let Some(current) = slot.notice.as_mut() {
+                current.text = format!("{stacked} failures · latest: {text}");
+                slot.generation = slot.generation.wrapping_add(1);
+            }
+        }
+    }
+
+    /// The notices seen so far, newest first, for the log overlay.
+    pub fn history(&self) -> Vec<NoticeRecord> {
+        self.lock().history.iter().rev().cloned().collect()
     }
 
     /// Replaces the notice only if it still reads `expected`, so a

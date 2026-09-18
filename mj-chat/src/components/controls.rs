@@ -22,12 +22,12 @@ fn focus_style() -> Style {
 fn normal_style() -> Style {
     Style::new()
         .fg(theme::palette().text)
-        .bg(theme::palette().surface_raised)
+        .patch(theme::raised())
 }
 fn disabled_style() -> Style {
     Style::new()
         .fg(theme::palette().muted)
-        .bg(theme::palette().surface_raised)
+        .patch(theme::raised())
 }
 
 fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
@@ -539,7 +539,11 @@ impl TextField {
             if display_width + grapheme_width > width {
                 break;
             }
-            visible.push_str(if secret { "•" } else { grapheme });
+            visible.push_str(if secret {
+                theme::glyphs().bullet
+            } else {
+                grapheme
+            });
             display_width += grapheme_width;
             byte += grapheme.len();
             cursor_map.push((
@@ -590,7 +594,7 @@ impl Checkbox {
         id: K,
     ) {
         form.register(id, ControlKind::Checkbox, area, enabled);
-        let mark = if checked { '✓' } else { ' ' };
+        let mark = if checked { theme::glyphs().check } else { " " };
         frame.render_widget(
             Paragraph::new(format!("[{mark}] {label}")).style(control_style(form, id, enabled)),
             area,
@@ -720,6 +724,11 @@ impl ComboBox {
     /// The compact affordance appended to a collapsed choice value.
     pub const GLYPH: &'static str = "▾";
 
+    /// [`Self::GLYPH`] in the symbol set in force.
+    pub fn glyph() -> &'static str {
+        theme::glyphs().dropdown
+    }
+
     /// Returns a collapsed field value with the dropdown affordance.
     #[must_use]
     pub fn display_value(value: &str) -> String {
@@ -810,12 +819,12 @@ impl ComboBox {
 }
 
 fn clipped_display(value: &str, width: usize) -> String {
-    let suffix = format!(" {}", ComboBox::GLYPH);
+    let suffix = format!(" {}", ComboBox::glyph());
     if width == 0 {
         return String::new();
     }
     if width < suffix.width() {
-        return ComboBox::GLYPH.to_owned();
+        return ComboBox::glyph().to_owned();
     }
     if width == suffix.width() {
         return suffix

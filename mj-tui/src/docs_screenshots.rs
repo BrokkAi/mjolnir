@@ -76,7 +76,7 @@ fn generate_documentation_screenshots() {
     capture(
         &output.join("setup.svg"),
         "Mjolnir Settings",
-        "The compact Settings modal with Interface, Advanced, Agent Profiles, Projects, Machines, Runtimes, Code Review, and Web Access settings.",
+        "The compact Settings modal with Interface, Notifications, Advanced, Agent Profiles, Projects, Machines, Runtimes, Code Review, and Web Access settings.",
         &mut setup,
     );
 

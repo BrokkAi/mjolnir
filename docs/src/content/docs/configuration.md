@@ -68,9 +68,10 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, or `high-contrast`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
+| `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
@@ -109,12 +110,16 @@ activity without changing how sessions run:
 [advanced]
 detailed_activity_clocks = false
 show_stopped_sessions = false
+session_order = "project"
+# symbols = "ascii"
 ```
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
 | `show_stopped_sessions` | boolean | `false` | When enabled, stopped sessions appear in the terminal Sessions pane for their workspace. |
+| `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
+| `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
 
 The terminal Setup screen edits these settings under **Advanced**. Detailed
 clocks do not change how sessions run: the normal `Running` status continues
@@ -177,10 +182,13 @@ The default bindings:
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
 | `mark_all_read` | `prefix+a` | Mark all session activity as read |
+| `next_attention` | `prefix+o` | Open the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
 | `toggle_dictation` | `prefix+m` | Start or stop dictation |
+| `changed_files` | `prefix+d` | List the selected session's changed files |
 | `split_vertical` | `prefix+v` | Open the selected session in a pane beside this one |
 | `split_horizontal` | `prefix+-` | Open the selected session in a pane below this one |
 | `close_pane` | `prefix+x` | Close the conversation pane you are in |
@@ -195,6 +203,9 @@ The default bindings:
 | `container_settings` | unbound | Edit container settings for the selected session |
 | `manage_profiles` | unbound | Open profile management |
 | `manage_targets` | unbound | Open target management |
+| `manage_machines` | unbound | Open machine management |
+| `restart_daemon` | unbound | Restart the Mjolnir daemon |
+| `notice_log` | unbound | Show the last notices the footer reported |
 | `change_go_setup` | unbound | Change the `mj go` fast-start setup |
 | `cycle_spinner` | unbound | Cycle the activity spinner style |
 | `resize_pane_left` | unbound | Move the conversation pane's border left |
@@ -202,7 +213,7 @@ The default bindings:
 | `resize_pane_up` | unbound | Move the conversation pane's border up |
 | `resize_pane_right` | unbound | Move the conversation pane's border right |
 
-The thirteen actions listed as unbound have no default key because they are
+The actions listed as unbound have no default key because they are
 destructive, infrequent, or fine adjustments that a mis-hit key should not run;
 use the command palette (`prefix+:`) instead, or bind them here.
 
@@ -235,6 +246,30 @@ a key another command defaults to is the normal way to move a key.
 This key-string syntax matches [herdr](https://github.com/herdrdev/herdr)'s
 own `[keys]` table, so a line can be copied between the two configuration
 files unchanged.
+
+## Notifications `[notify]`
+
+The optional `[notify]` table controls how the terminal dashboard reports a
+session you are not looking at when it asks a question, fails, or finishes
+with an answer you have not read. The session whose conversation is on
+screen never notifies.
+
+```toml
+[notify]
+mode = "terminal"
+bell = true
+delay_seconds = 2
+title = true
+```
+
+| Field | TOML type | Default | Behavior |
+| --- | --- | --- | --- |
+| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS or `notify-send` on Linux. `off` reports nothing. |
+| `bell` | boolean | `true` | Whether each notification rings the terminal bell. Turn it off with `mode = "system"` for silent desktop notifications. |
+| `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
+| `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |
+
+The terminal Setup screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 

@@ -693,6 +693,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         version: mj_core::config::CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
+        notify: Default::default(),
         show_stopped_sessions: false,
         spinner: Default::default(),
         theme: Default::default(),

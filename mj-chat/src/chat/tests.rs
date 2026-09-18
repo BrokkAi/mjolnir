@@ -1049,6 +1049,48 @@ fn notices_set_replace_if_and_clear() {
 }
 
 #[test]
+fn notices_keep_a_history_and_count_failures_that_stack() {
+    let notices = Notices::default();
+    notices.set("Profile quotas refreshed");
+    notices.set_failure("Resume failed: archive missing");
+    // A second failure before the first was readable: the bar counts them,
+    // the log keeps each plain.
+    notices.set_failure("Move failed: target unreachable");
+    assert_eq!(
+        notices.current().as_deref(),
+        Some("2 failures · latest: Move failed: target unreachable")
+    );
+    let history = notices.history();
+    assert_eq!(
+        history
+            .iter()
+            .map(|record| (record.text.as_str(), record.failure))
+            .collect::<Vec<_>>(),
+        [
+            ("Move failed: target unreachable", true),
+            ("Resume failed: archive missing", true),
+            ("Profile quotas refreshed", false),
+        ]
+    );
+    // Clearing resets the count; the next failure stands alone.
+    notices.clear();
+    notices.set_failure("Stop failed");
+    assert_eq!(notices.current().as_deref(), Some("Stop failed"));
+    // The same text twice is one history entry.
+    notices.clear();
+    notices.set("Same");
+    notices.set("Same");
+    assert_eq!(
+        notices
+            .history()
+            .iter()
+            .filter(|record| record.text == "Same")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn a_fresh_failure_notice_survives_routine_background_notices() {
     let notices = Notices::default();
     notices.set_failure("Resume failed: archived transcript is invalid");
@@ -1059,10 +1101,12 @@ fn a_fresh_failure_notice_survives_routine_background_notices() {
         Some("Resume failed: archived transcript is invalid")
     );
 
+    // A newer failure replaces the protected one at once, and the bar says
+    // that one was overwritten.
     notices.set_failure("Resume failed: target disconnected");
     assert_eq!(
         notices.current().as_deref(),
-        Some("Resume failed: target disconnected")
+        Some("2 failures · latest: Resume failed: target disconnected")
     );
 
     let after_set = std::time::Instant::now();

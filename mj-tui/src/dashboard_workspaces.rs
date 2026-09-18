@@ -70,6 +70,7 @@ impl DashboardState {
         }
 
         self.switch_go_workspace(workspace_id.as_deref());
+        self.sessions_filter = None;
         self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()

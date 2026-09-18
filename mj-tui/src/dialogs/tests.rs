@@ -481,6 +481,7 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
             version: mj_core::config::CONFIG_VERSION,
             sessions_side: Default::default(),
             advanced: Default::default(),
+            notify: Default::default(),
             show_stopped_sessions: false,
             spinner: Default::default(),
             theme: Default::default(),

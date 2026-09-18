@@ -163,8 +163,30 @@ fn frame_index(elapsed_ms: u128, count: usize, interval_ms: u128) -> usize {
     ((elapsed_ms / interval_ms) % count as u128) as usize
 }
 
+/// The frames of every style when only ASCII can be drawn.
+const ASCII_COMPACT_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+
 /// Colored twelve-column activity ornament. Idle always rests on a quiet rule.
 pub fn activity_line(style: SpinnerStyle, elapsed_ms: u128, active: bool) -> Line<'static> {
+    if theme::ascii() {
+        // A marker sweeping a dashed rail: the same width as every style.
+        let rail = "-".repeat(SPINNER_WIDTH);
+        if !active {
+            return Line::styled(rail, Style::default().fg(ink_color(SpinnerInk::Faint)));
+        }
+        let at = frame_index(elapsed_ms, SPINNER_WIDTH, SPINNER_FRAME_INTERVAL_MS);
+        return Line::from(vec![
+            Span::styled(
+                "-".repeat(at),
+                Style::default().fg(ink_color(SpinnerInk::Faint)),
+            ),
+            Span::styled("#", Style::default().fg(ink_color(SpinnerInk::Bright))),
+            Span::styled(
+                "-".repeat(SPINNER_WIDTH - at - 1),
+                Style::default().fg(ink_color(SpinnerInk::Faint)),
+            ),
+        ]);
+    }
     let frame = if active {
         let frames = style.frames();
         &frames[frame_index(elapsed_ms, frames.len(), style.frame_interval_ms())]
@@ -182,7 +204,11 @@ pub fn activity_line(style: SpinnerStyle, elapsed_ms: u128, active: bool) -> Lin
 
 /// Single-column activity frame for session lists and loading states.
 pub fn compact_frame(style: SpinnerStyle, elapsed_ms: u128) -> &'static str {
-    let frames = style.compact_frames();
+    let frames = if theme::ascii() {
+        &ASCII_COMPACT_FRAMES[..]
+    } else {
+        style.compact_frames()
+    };
     frames[frame_index(elapsed_ms, frames.len(), SPINNER_FRAME_INTERVAL_MS)]
 }
 

@@ -233,7 +233,11 @@ impl<K: Copy + Eq> Dialog<K> {
         if self.submission_pending {
             for (id, label, enabled) in &mut buttons {
                 if self.form.is_default_action(*id) {
-                    *label = "Working…";
+                    *label = if theme::ascii() {
+                        "Working.."
+                    } else {
+                        "Working…"
+                    };
                     *enabled = false;
                 }
             }
@@ -456,11 +460,17 @@ impl DialogShell {
     }
 
     pub fn hints(commands: bool) -> Line<'static> {
+        let glyphs = theme::glyphs();
+        let (arrows, separator) = (glyphs.arrows_vertical, glyphs.footer_separator);
         Line::styled(
             if commands {
-                " ↑↓ browse · Click/Enter runs · Tab moves · Esc closes "
+                format!(
+                    " {arrows} browse{separator}Click/Enter runs{separator}Tab moves{separator}Esc closes "
+                )
             } else {
-                " ↑↓ select · Double-click/Enter opens · Tab moves · Esc back "
+                format!(
+                    " {arrows} select{separator}Double-click/Enter opens{separator}Tab moves{separator}Esc back "
+                )
             },
             theme::muted(),
         )

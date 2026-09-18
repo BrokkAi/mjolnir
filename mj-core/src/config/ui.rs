@@ -97,14 +97,19 @@ pub enum UiTheme {
     #[serde(rename = "darcula", alias = "dracula")]
     Darcula,
     HighContrast,
+    /// No colors at all: the terminal's own foreground and background, with
+    /// bold and reverse video carrying focus and selection. Chosen
+    /// automatically when the `NO_COLOR` environment variable is set.
+    Mono,
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Midnight,
         Self::Light,
         Self::Darcula,
         Self::HighContrast,
+        Self::Mono,
     ];
 
     pub fn label(self) -> &'static str {
@@ -113,6 +118,7 @@ impl UiTheme {
             Self::Light => "Light",
             Self::Darcula => "Darcula",
             Self::HighContrast => "High Contrast",
+            Self::Mono => "Monochrome",
         }
     }
 
@@ -146,6 +152,90 @@ pub struct AdvancedConfig {
     pub detailed_activity_clocks: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub show_stopped_sessions: bool,
+    #[serde(skip_serializing_if = "SessionOrder::is_default")]
+    pub session_order: SessionOrder,
+    /// Which glyphs the dashboard draws with. `None` decides from the
+    /// terminal: ASCII on the Linux console or a locale without UTF-8,
+    /// Unicode otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<SymbolSet>,
+}
+
+/// The character set the dashboard draws status symbols, borders, and
+/// separators with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolSet {
+    Unicode,
+    Ascii,
+}
+
+/// How the dashboard tells the person about a session they are not looking
+/// at: one that asked a question, failed, or finished with an unread answer.
+///
+/// `Terminal` rings the terminal bell and works over SSH and inside a
+/// multiplexer, which is why it is the default. `System` also posts a desktop
+/// notification through `osascript` on macOS or `notify-send` on Linux.
+/// `Off` reports nothing. Independently of the mode, `title` keeps the
+/// terminal window title showing how many sessions are waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    pub mode: NotifyMode,
+    /// Whether a notification also rings the terminal bell. Off leaves the
+    /// system notification alone as the only signal.
+    pub bell: bool,
+    /// How long a session must stay in need of a person before it is
+    /// reported, so a question the agent answers itself does not ring.
+    pub delay_seconds: u64,
+    /// Whether the terminal title shows the waiting and unread counts.
+    pub title: bool,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            mode: NotifyMode::Terminal,
+            bell: true,
+            delay_seconds: 2,
+            title: true,
+        }
+    }
+}
+
+impl NotifyConfig {
+    pub(super) fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMode {
+    Off,
+    #[default]
+    Terminal,
+    System,
+}
+
+/// How the Sessions pane orders its rows.
+///
+/// `Project` groups sessions under a heading per project, in creation order,
+/// which keeps related work together. `Priority` drops the headings and lists
+/// the sessions that need a person first: waiting for input, then failed,
+/// then unread, then working, then idle, newest activity first within a level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionOrder {
+    #[default]
+    Project,
+    Priority,
+}
+
+impl SessionOrder {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl AdvancedConfig {

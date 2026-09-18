@@ -124,11 +124,11 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
         let mut x = area.x;
         for group in groups.iter().filter(|group| !group.is_empty()) {
             if x > area.x {
-                x = x.saturating_add(Line::raw(theme::FOOTER_GROUP_SEPARATOR).width() as u16);
+                x = x.saturating_add(Line::raw(theme::footer_group_separator()).width() as u16);
             }
             for (index, (id, text)) in group.iter().enumerate() {
                 if index > 0 {
-                    x = x.saturating_add(Line::raw(theme::FOOTER_SEPARATOR).width() as u16);
+                    x = x.saturating_add(Line::raw(theme::footer_separator()).width() as u16);
                 }
                 let width = Line::raw(text.as_str()).width() as u16;
                 crate::surface_controls::render_footer_command(

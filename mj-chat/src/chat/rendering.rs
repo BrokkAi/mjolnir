@@ -45,7 +45,7 @@ pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Li
     } else {
         Style::default()
             .fg(theme::palette().muted)
-            .bg(theme::palette().surface_raised)
+            .patch(theme::raised())
     };
     Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).left_aligned()
 }
@@ -230,7 +230,7 @@ impl MarkdownWriter {
             );
             let separator = column_widths
                 .iter()
-                .map(|width| "─".repeat(width + CELL_PADDING * 2))
+                .map(|width| crate::theme::glyphs().rule.repeat(width + CELL_PADDING * 2))
                 .collect::<Vec<_>>()
                 .join(&" ".repeat(COLUMN_GAP));
             self.lines.push(LogicalLine {
@@ -381,7 +381,7 @@ pub(super) fn markdown_lines(
                     style_stack.push(writer.style);
                     writer.style = Style::default()
                         .fg(theme::palette().text)
-                        .bg(theme::palette().surface_raised);
+                        .patch(theme::raised());
                 }
                 Tag::List(start) => writer.lists.push(ListState { next: start }),
                 Tag::Item => {
@@ -481,7 +481,7 @@ pub(super) fn markdown_lines(
                         writer
                             .style
                             .fg(theme::palette().secondary)
-                            .bg(theme::palette().surface_raised),
+                            .patch(theme::raised()),
                     ));
                 }
             }
@@ -763,7 +763,8 @@ pub(super) fn append_trimmed_ellipsis(line: &mut Line<'static>, preserved_spans:
         .last()
         .map_or(Style::default(), |span| span.style);
     trim_spans_before_ellipsis(&mut line.spans, preserved_spans);
-    line.spans.push(Span::styled("…", style));
+    line.spans
+        .push(Span::styled(crate::theme::glyphs().ellipsis, style));
 }
 
 /// Truncate a styled line to `width` terminal cells, keeping each span's style and
@@ -784,7 +785,7 @@ pub fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static
         if used >= budget {
             if width > 0 {
                 trim_spans_before_ellipsis(&mut spans, 0);
-                spans.push(Span::styled("…", span.style));
+                spans.push(Span::styled(crate::theme::glyphs().ellipsis, span.style));
             }
             return Line::from(spans);
         }
@@ -811,7 +812,7 @@ pub fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static
             }
             if width > 0 {
                 trim_spans_before_ellipsis(&mut spans, 0);
-                spans.push(Span::styled("…", style));
+                spans.push(Span::styled(crate::theme::glyphs().ellipsis, style));
             }
             return Line::from(spans);
         }

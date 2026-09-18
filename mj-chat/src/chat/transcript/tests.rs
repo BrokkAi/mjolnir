@@ -1976,7 +1976,7 @@ fn agent_preview_tail_matches_the_conversation_body_rows_without_the_gutter() {
         body.iter().all(|line| line
             .spans
             .first()
-            .is_none_or(|span| span.content != ROLE_GUTTER)),
+            .is_none_or(|span| span.content != role_gutter())),
         "the comparison rows have no gutter left to match"
     );
 
@@ -2062,7 +2062,7 @@ fn blank_rows_inside_messages_keep_the_role_gutter() {
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect::<String>()
-                    == ROLE_GUTTER
+                    == role_gutter()
             })
             .expect("blank row with role gutter");
 

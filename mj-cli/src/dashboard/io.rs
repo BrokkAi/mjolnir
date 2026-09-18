@@ -109,6 +109,10 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<(std::path::PathBuf, String), String>,
     },
+    GitStatus {
+        session_id: String,
+        result: std::result::Result<mj_core::local_git::SessionGitStatus, String>,
+    },
     GoPrepared {
         workspace_id: String,
         retry: Box<DashboardAction>,
@@ -687,6 +691,10 @@ impl DashboardContext {
                         "Could not remember this conversation: {error}"
                     ));
                 }
+            }
+            DashboardIoUpdate::GitStatus { session_id, result } => {
+                self.git_probes_in_flight.remove(&session_id);
+                self.dashboard.set_git_status(session_id, result);
             }
             DashboardIoUpdate::GoContext { session_id, result } => {
                 self.go_context_in_flight = false;

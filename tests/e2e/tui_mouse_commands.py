@@ -171,13 +171,15 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         tmux.wait_until(lambda: "Host / fleet" not in tmux.capture() if title == "Targets"
                         else "Profile  Harness" not in tmux.capture(), title + " minimized")
 
-    for width, height in ((79, 18), (80, 18), (140, 40), (200, 60)):
+    for width, height in ((59, 18), (70, 18), (80, 18), (140, 40), (200, 60)):
         tmux.resize(width, height)
-        if width < 80:
+        if width < 60:
             tmux.wait_for("Terminal too small", f"dashboard width guard at {width} columns")
-            record(f"minimum-{width}x{height}", "resize below 80 columns", "the explicit terminal-width guard is rendered")
+            record(f"minimum-{width}x{height}", "resize below 60 columns", "the explicit terminal-width guard is rendered")
             continue
         tmux.wait_for("Sessions", f"dashboard at {width}x{height}")
+        if width < 80:
+            record(f"stacked-{width}x{height}", "resize between 60 and 79 columns", "the Sessions list stacks above the conversation")
         tmux.send_key("F2")
         tmux.wait_for("Commands")
         dismiss_modal("✦ Commands")

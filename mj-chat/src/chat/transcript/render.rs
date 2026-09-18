@@ -111,7 +111,10 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
     Line::from(spans)
 }
 
-pub(crate) const ROLE_GUTTER: &str = "│ ";
+/// The gutter before every transcript body row, in the symbol set in force.
+pub(crate) fn role_gutter() -> &'static str {
+    theme::glyphs().role_gutter
+}
 pub(crate) const ROLE_GUTTER_WIDTH: usize = 2;
 
 /// Body rows of an agent message for a summary viewport: the conversation's
@@ -335,9 +338,18 @@ pub(super) fn entry_logical_lines(
             .iter()
             .map(|item| {
                 let (glyph, style) = match item.status {
-                    PlanStatus::Pending => ("○", Style::default().fg(theme::palette().muted)),
-                    PlanStatus::Running => ("●", Style::default().fg(theme::palette().warning)),
-                    PlanStatus::Completed => ("✓", Style::default().fg(theme::palette().success)),
+                    PlanStatus::Pending => (
+                        theme::glyphs().pending,
+                        Style::default().fg(theme::palette().muted),
+                    ),
+                    PlanStatus::Running => (
+                        theme::glyphs().running,
+                        Style::default().fg(theme::palette().warning),
+                    ),
+                    PlanStatus::Completed => (
+                        theme::glyphs().check,
+                        Style::default().fg(theme::palette().success),
+                    ),
                 };
                 LogicalLine {
                     line: Line::from(vec![
@@ -479,20 +491,32 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
 
 pub(crate) fn tool_presentation(status: ToolStatus) -> (&'static str, &'static str, Style) {
     match status {
-        ToolStatus::Pending => ("•", "waiting", Style::default().fg(theme::palette().muted)),
+        ToolStatus::Pending => (
+            theme::glyphs().bullet,
+            "waiting",
+            Style::default().fg(theme::palette().muted),
+        ),
         ToolStatus::Running => (
-            "●",
+            theme::glyphs().running,
             "running",
             Style::default().fg(theme::palette().warning),
         ),
-        ToolStatus::Completed => ("✓", "done", Style::default().fg(theme::palette().muted)),
-        ToolStatus::Failed => ("×", "failed", Style::default().fg(theme::palette().error)),
+        ToolStatus::Completed => (
+            theme::glyphs().check,
+            "done",
+            Style::default().fg(theme::palette().muted),
+        ),
+        ToolStatus::Failed => (
+            theme::glyphs().failed.trim(),
+            "failed",
+            Style::default().fg(theme::palette().error),
+        ),
     }
 }
 
 pub(crate) fn with_role_gutter(line: Line<'static>, style: Style) -> Line<'static> {
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    spans.push(Span::styled(ROLE_GUTTER, style));
+    spans.push(Span::styled(role_gutter(), style));
     spans.extend(line.spans);
     Line::from(spans)
 }
@@ -503,7 +527,7 @@ pub(crate) fn without_role_gutter(mut line: Line<'static>) -> Line<'static> {
     if line
         .spans
         .first()
-        .is_some_and(|span| span.content == ROLE_GUTTER)
+        .is_some_and(|span| span.content == role_gutter())
     {
         line.spans.remove(0);
     }
@@ -513,5 +537,5 @@ pub(crate) fn without_role_gutter(mut line: Line<'static>) -> Line<'static> {
 pub(crate) fn line_is_empty(line: &Line<'_>) -> bool {
     line.spans
         .iter()
-        .all(|span| span.content.trim().is_empty() || span.content.as_ref() == ROLE_GUTTER)
+        .all(|span| span.content.trim().is_empty() || span.content.as_ref() == role_gutter())
 }

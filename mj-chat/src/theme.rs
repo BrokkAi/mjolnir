@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 
 use std::cell::Cell;
+use std::sync::OnceLock;
 
+pub use mj_core::config::SymbolSet;
 pub use mj_core::config::UiTheme;
 
 /// Semantic colors always paired with the palette's painted surfaces.
@@ -112,12 +114,59 @@ const HIGH_CONTRAST: Palette = Palette {
     activity_dim: rgb(64, 0, 32),
 };
 
+/// No colors: every slot is the terminal's own default, and the style
+/// functions below carry focus and selection with bold and reverse video.
+const MONO: Palette = Palette {
+    background: Color::Reset,
+    surface_raised: Color::Reset,
+    surface: Color::Reset,
+    selection: Color::Reset,
+    text: Color::Reset,
+    muted: Color::Reset,
+    border: Color::Reset,
+    accent: Color::Reset,
+    secondary: Color::Reset,
+    success: Color::Reset,
+    warning: Color::Reset,
+    error: Color::Reset,
+    session_error: Color::Reset,
+    session_activity: Color::Reset,
+    session_attention: Color::Reset,
+    session_idle: Color::Reset,
+    activity_dim: Color::Reset,
+};
+
 thread_local! {
     static CURRENT: Cell<UiTheme> = const { Cell::new(UiTheme::Midnight) };
+    static SYMBOLS: Cell<SymbolSet> = const { Cell::new(SymbolSet::Unicode) };
 }
 
 pub fn current() -> UiTheme {
     CURRENT.get()
+}
+
+/// Whether the palette in force paints no colors, so styles have to say
+/// everything with modifiers.
+pub fn is_mono() -> bool {
+    current() == UiTheme::Mono
+}
+
+/// Whether `NO_COLOR` (https://no-color.org) is set to a non-empty value.
+/// Read once: the answer cannot change while the process runs.
+pub fn no_color_requested() -> bool {
+    static NO_COLOR: OnceLock<bool> = OnceLock::new();
+    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()))
+}
+
+/// The theme to draw with: the configured one, unless `NO_COLOR` asks for
+/// none, which wins over every configured choice.
+pub fn effective_theme(configured: UiTheme) -> UiTheme {
+    theme_for(configured, no_color_requested())
+}
+
+/// [`effective_theme`] with the environment answer passed in, for tests.
+pub fn theme_for(configured: UiTheme, no_color: bool) -> UiTheme {
+    if no_color { UiTheme::Mono } else { configured }
 }
 
 pub fn palette_for(theme: UiTheme) -> &'static Palette {
@@ -126,8 +175,209 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
         UiTheme::Light => &LIGHT,
         UiTheme::Darcula => &DARCULA,
         UiTheme::HighContrast => &HIGH_CONTRAST,
+        UiTheme::Mono => &MONO,
     }
 }
+
+/// The glyphs one symbol set draws with. Every site that draws a status
+/// mark, a control, a rule, or a separator reads these through [`glyphs`],
+/// so switching the set changes all of them together.
+#[derive(Debug)]
+pub struct Glyphs {
+    pub working: &'static str,
+    pub waiting: &'static str,
+    pub unread: &'static str,
+    pub idle: &'static str,
+    pub unknown: &'static str,
+    pub unreachable: &'static str,
+    pub failed: &'static str,
+    pub starting: &'static str,
+    pub resuming: &'static str,
+    pub moving: &'static str,
+    pub checkpointing: &'static str,
+    pub stopping: &'static str,
+    pub stopped: &'static str,
+    pub destroying: &'static str,
+    /// The caret before the selected row.
+    pub selected: &'static str,
+    pub ellipsis: &'static str,
+    pub row_menu: &'static str,
+    pub workspace_menu: &'static str,
+    pub close: &'static str,
+    pub size_minimized: &'static str,
+    pub size_standard: &'static str,
+    pub size_maximized: &'static str,
+    pub warning: &'static str,
+    pub spark: &'static str,
+    pub rule: &'static str,
+    pub none: &'static str,
+    pub footer_separator: &'static str,
+    pub footer_group_separator: &'static str,
+    pub bullet: &'static str,
+    pub check: &'static str,
+    pub running: &'static str,
+    pub pending: &'static str,
+    pub dropdown: &'static str,
+    pub scroll_track: &'static str,
+    pub scroll_thumb: &'static str,
+    pub bar_full: &'static str,
+    pub bar_left: &'static str,
+    pub bar_right: &'static str,
+    pub arrows_vertical: &'static str,
+    pub role_gutter: &'static str,
+}
+
+pub const UNICODE_GLYPHS: Glyphs = Glyphs {
+    working: "◐",
+    waiting: "!",
+    unread: "✓",
+    idle: "○",
+    unknown: "·",
+    unreachable: "?",
+    failed: "×",
+    starting: "↑",
+    resuming: "↻",
+    moving: "⇄",
+    checkpointing: "▣",
+    stopping: "↓",
+    stopped: "■",
+    destroying: "⊗",
+    selected: "› ",
+    ellipsis: "…",
+    row_menu: " ⋯ ",
+    workspace_menu: " ☰ ",
+    close: " × ",
+    size_minimized: "▁",
+    size_standard: "▪",
+    size_maximized: "□",
+    warning: "⚠",
+    spark: "✦",
+    rule: "─",
+    none: "—",
+    footer_separator: " · ",
+    footer_group_separator: " │ ",
+    bullet: "•",
+    check: "✓",
+    running: "●",
+    pending: "○",
+    dropdown: "▾",
+    scroll_track: "│",
+    scroll_thumb: "▐",
+    bar_full: "█",
+    bar_left: "▕",
+    bar_right: "▏",
+    arrows_vertical: "↑↓",
+    role_gutter: "│ ",
+};
+
+pub const ASCII_GLYPHS: Glyphs = Glyphs {
+    working: "*",
+    waiting: "!",
+    unread: "+",
+    idle: "-",
+    unknown: ".",
+    unreachable: "?",
+    failed: "x",
+    starting: "^",
+    resuming: "~",
+    moving: "<>",
+    checkpointing: "#",
+    stopping: "v",
+    stopped: "=",
+    destroying: "X",
+    selected: "> ",
+    ellipsis: "..",
+    row_menu: " . ",
+    workspace_menu: " = ",
+    close: " x ",
+    size_minimized: "-",
+    size_standard: "=",
+    size_maximized: "+",
+    warning: "!",
+    spark: "*",
+    rule: "-",
+    none: "-",
+    footer_separator: " - ",
+    footer_group_separator: " | ",
+    bullet: "*",
+    check: "x",
+    running: "*",
+    pending: "o",
+    dropdown: "v",
+    scroll_track: "|",
+    scroll_thumb: "#",
+    bar_full: "#",
+    bar_left: "[",
+    bar_right: "]",
+    arrows_vertical: "^v",
+    role_gutter: "| ",
+};
+
+/// The glyphs in force on this thread.
+pub fn glyphs() -> &'static Glyphs {
+    match SYMBOLS.get() {
+        SymbolSet::Unicode => &UNICODE_GLYPHS,
+        SymbolSet::Ascii => &ASCII_GLYPHS,
+    }
+}
+
+/// Whether the ASCII set is in force.
+pub fn ascii() -> bool {
+    SYMBOLS.get() == SymbolSet::Ascii
+}
+
+/// Select a symbol set for synchronous rendering, restoring it even on panic.
+pub fn with_symbols<R>(symbols: SymbolSet, render: impl FnOnce() -> R) -> R {
+    struct Restore(SymbolSet);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SYMBOLS.set(self.0);
+        }
+    }
+    let _restore = Restore(SYMBOLS.replace(symbols));
+    render()
+}
+
+/// The symbol set to draw with: the configured one, or a guess from the
+/// terminal when nothing is configured. The Linux console and a locale
+/// without UTF-8 cannot show the Unicode set.
+pub fn symbols_for(configured: Option<SymbolSet>) -> SymbolSet {
+    configured.unwrap_or_else(|| {
+        static DETECTED: OnceLock<SymbolSet> = OnceLock::new();
+        *DETECTED.get_or_init(|| {
+            symbols_for_environment(
+                std::env::var("TERM").ok().as_deref(),
+                ["LC_ALL", "LC_CTYPE", "LANG"]
+                    .into_iter()
+                    .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+                    .as_deref(),
+            )
+        })
+    })
+}
+
+/// [`symbols_for`]'s guess, from the terminal name and the locale.
+pub fn symbols_for_environment(term: Option<&str>, locale: Option<&str>) -> SymbolSet {
+    if term == Some("linux") {
+        return SymbolSet::Ascii;
+    }
+    match locale {
+        Some(locale) if !locale.to_ascii_lowercase().contains("utf") => SymbolSet::Ascii,
+        _ => SymbolSet::Unicode,
+    }
+}
+
+/// An all-ASCII border for terminals that cannot draw box characters.
+const ASCII_BORDER: ratatui::symbols::border::Set = ratatui::symbols::border::Set {
+    top_left: "+",
+    top_right: "+",
+    bottom_left: "+",
+    bottom_right: "+",
+    vertical_left: "|",
+    vertical_right: "|",
+    horizontal_top: "-",
+    horizontal_bottom: "-",
+};
 
 pub fn palette() -> &'static Palette {
     palette_for(current())
@@ -184,6 +434,15 @@ pub fn title(focused: bool) -> Style {
 }
 
 pub fn selection(focused: bool) -> Style {
+    if is_mono() {
+        // With no colors, reverse video is the selection.
+        let style = Style::default().add_modifier(Modifier::REVERSED);
+        return if focused {
+            style.add_modifier(Modifier::BOLD)
+        } else {
+            style
+        };
+    }
     if focused {
         Style::default()
             .fg(palette().accent)
@@ -191,6 +450,29 @@ pub fn selection(focused: bool) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(palette().text).bg(palette().selection)
+    }
+}
+
+/// The background of a raised surface: a selected row, an armed control, a
+/// modal's title bar. Reverse video without colors.
+pub fn raised() -> Style {
+    if is_mono() {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(palette().surface_raised)
+    }
+}
+
+/// The style of a control that is switched on, such as the active pane size
+/// chip: a raised surface in a colored theme, reverse video without colors.
+pub fn active_control() -> Style {
+    if is_mono() {
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette().accent)
+            .bg(palette().surface_raised)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
@@ -210,12 +492,16 @@ pub fn hint_description() -> Style {
 
 /// Rounded panels keep identical content geometry regardless of focus.
 pub fn panel(focused: bool) -> Block<'static> {
-    Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
         .style(Style::default().fg(palette().text).bg(palette().surface))
         .border_style(border(focused))
-        .title_style(title(focused))
+        .title_style(title(focused));
+    if ascii() {
+        block.border_set(ASCII_BORDER)
+    } else {
+        block.border_type(BorderType::Rounded)
+    }
 }
 
 pub fn modal() -> Block<'static> {
@@ -227,37 +513,64 @@ pub fn modal() -> Block<'static> {
 }
 
 /// Distinguishes keys from their descriptions without changing hint spacing.
+///
+/// The text is cut at the footer separators in force, so the ASCII set's
+/// ` - ` never splits a hyphenated key such as `Shift-Enter`.
 pub fn hints(text: &str) -> Line<'static> {
     let mut spans = Vec::new();
-    for hint in text.split_inclusive(['·', '│']) {
+    let separators = [footer_group_separator(), footer_separator()];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let cut = separators
+            .iter()
+            .filter_map(|separator| rest.find(separator).map(|at| (at, separator.len())))
+            .min();
+        let (hint, separator) = match cut {
+            Some((at, len)) => (&rest[..at], &rest[at..at + len]),
+            None => (rest, ""),
+        };
         let leading = hint.len() - hint.trim_start().len();
         let key_end = hint[leading..]
             .find(char::is_whitespace)
             .map_or(hint.len(), |offset| leading + offset);
         spans.push(Span::styled(hint[..leading].to_owned(), muted()));
         spans.push(Span::styled(hint[leading..key_end].to_owned(), key_hint()));
-        spans.push(Span::styled(hint[key_end..].to_owned(), muted()));
+        spans.push(Span::styled(
+            format!("{}{separator}", &hint[key_end..]),
+            muted(),
+        ));
+        rest = &rest[hint.len() + separator.len()..];
     }
     Line::from(spans)
 }
 
-pub const FOOTER_SEPARATOR: &str = " · ";
-pub const FOOTER_GROUP_SEPARATOR: &str = " │ ";
+/// The text between two hints of one footer group.
+pub fn footer_separator() -> &'static str {
+    glyphs().footer_separator
+}
+
+/// The text between two footer groups.
+pub fn footer_group_separator() -> &'static str {
+    glyphs().footer_group_separator
+}
 
 /// The footer row drawn while the prefix key is waiting for the key that
 /// completes a chord. `prefix` is the resolved prefix label and `help_key` the
 /// key that lists the bindings.
 pub fn prefix_banner(prefix: &str, help_key: &str) -> Line<'static> {
+    let badge = if is_mono() {
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette().background)
+            .bg(palette().accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    let separator = footer_separator();
     Line::from(vec![
+        Span::styled(" PREFIX ".to_owned(), badge),
         Span::styled(
-            " PREFIX ".to_owned(),
-            Style::default()
-                .fg(palette().background)
-                .bg(palette().accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" esc cancel · {prefix} send · {help_key} keys"),
+            format!(" esc cancel{separator}{prefix} send{separator}{help_key} keys"),
             muted(),
         ),
     ])
@@ -339,10 +652,10 @@ pub fn footer_items_text<T>(groups: &[Vec<T>; 3], label: impl Fn(&T) -> &str) ->
                 .iter()
                 .map(&label)
                 .collect::<Vec<_>>()
-                .join(FOOTER_SEPARATOR)
+                .join(footer_separator())
         })
         .collect::<Vec<_>>()
-        .join(FOOTER_GROUP_SEPARATOR)
+        .join(footer_group_separator())
 }
 
 #[cfg(test)]
@@ -392,8 +705,61 @@ mod tests {
     }
 
     #[test]
+    fn no_color_selects_the_monochrome_theme_and_mono_uses_reverse_video() {
+        assert_eq!(theme_for(UiTheme::Light, true), UiTheme::Mono);
+        assert_eq!(theme_for(UiTheme::Light, false), UiTheme::Light);
+        with_theme(UiTheme::Mono, || {
+            assert_eq!(base().bg, Some(Color::Reset));
+            assert!(selection(true).add_modifier.contains(Modifier::REVERSED));
+            assert!(active_control().add_modifier.contains(Modifier::REVERSED));
+        });
+    }
+
+    #[test]
+    fn ascii_symbols_follow_the_console_and_the_locale_and_swap_every_glyph() {
+        assert_eq!(
+            symbols_for_environment(Some("linux"), Some("en_US.UTF-8")),
+            SymbolSet::Ascii
+        );
+        assert_eq!(
+            symbols_for_environment(Some("xterm"), Some("C")),
+            SymbolSet::Ascii
+        );
+        assert_eq!(
+            symbols_for_environment(Some("xterm"), Some("en_US.utf8")),
+            SymbolSet::Unicode
+        );
+        assert_eq!(
+            symbols_for_environment(Some("xterm"), None),
+            SymbolSet::Unicode
+        );
+        assert_eq!(symbols_for(Some(SymbolSet::Ascii)), SymbolSet::Ascii);
+        with_symbols(SymbolSet::Ascii, || {
+            assert!(glyphs().working.is_ascii());
+            assert_eq!(footer_separator(), " - ");
+            // A hyphenated key survives the ASCII separator.
+            let line = hints("Shift-Enter newline - Tab pane | ctrl+b then: c create");
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert_eq!(
+                text,
+                "Shift-Enter newline - Tab pane | ctrl+b then: c create"
+            );
+            assert_eq!(line.spans[1].content, "Shift-Enter");
+        });
+        assert_eq!(footer_separator(), " · ");
+    }
+
+    #[test]
     fn palette_text_is_legible_on_its_painted_surfaces() {
         for theme in UiTheme::ALL {
+            if theme == UiTheme::Mono {
+                // No colors to measure: the terminal's own are in force.
+                continue;
+            }
             let colors = palette_for(theme);
             for foreground in [
                 colors.text,

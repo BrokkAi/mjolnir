@@ -17,7 +17,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use mj_core::config::{Config, HarnessKind, TargetTemplate as HelTargetTemplate};
+use mj_core::config::{Config, HarnessKind, SessionOrder, TargetTemplate as HelTargetTemplate};
 use mj_core::state::{
     MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
     SessionResourceAllocation, SessionState, SessionTransitionKind, State,
@@ -31,8 +31,9 @@ use mj_client::review::RuntimeReviewView;
 use mj_core::targets::AdditionalMount;
 
 use crate::dialogs::{
-    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
-    ImportProgress, RenameEditor, RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
+    ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -50,6 +51,8 @@ mod help;
 mod ingest;
 mod keybinds;
 mod modal_surface;
+mod notify;
+pub use notify::Notification;
 mod palette;
 mod render;
 mod render_changes;
@@ -96,6 +99,62 @@ pub(crate) enum SessionsRow {
     Session { index: usize, expanded: bool },
 }
 
+/// The Sessions pane's filter: free text and an optional attention state.
+///
+/// `editing` means typed characters go into `query`; otherwise the pane's
+/// plain keys keep their meaning and the filter merely stays in force.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionsFilter {
+    pub query: String,
+    pub state: Option<SessionStateFilter>,
+    pub editing: bool,
+}
+
+/// The attention states the Sessions pane can be narrowed to, with the
+/// letters that pick them (the same letters as herdr's navigator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStateFilter {
+    /// `b`: waiting for input or failed.
+    Blocked,
+    /// `w`: a turn or background work in progress.
+    Working,
+    /// `i`: idle with nothing unread.
+    Idle,
+    /// `d`: finished with an unread answer.
+    Done,
+}
+
+impl SessionStateFilter {
+    pub(crate) fn from_letter(letter: char) -> Option<Option<Self>> {
+        Some(match letter {
+            'a' => None,
+            'b' => Some(Self::Blocked),
+            'w' => Some(Self::Working),
+            'i' => Some(Self::Idle),
+            'd' => Some(Self::Done),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Done => "done",
+        }
+    }
+
+    pub(crate) fn admits(self, level: AttentionLevel) -> bool {
+        match self {
+            Self::Blocked => matches!(level, AttentionLevel::Waiting | AttentionLevel::Failed),
+            Self::Working => level == AttentionLevel::Working,
+            Self::Idle => matches!(level, AttentionLevel::Idle | AttentionLevel::Inactive),
+            Self::Done => level == AttentionLevel::Unread,
+        }
+    }
+}
+
 /// The full-height session sidebar, targets, and quotas.
 pub(crate) const DASHBOARD_PANE_COUNT: usize = 3;
 
@@ -136,6 +195,11 @@ pub enum DashboardAction {
         focus_moved: bool,
     },
     RestartSession {
+        session_id: String,
+    },
+    /// Read the session checkout's branch and changed files on its target.
+    /// The host runs it off the loop and answers with `set_git_status`.
+    ProbeGitStatus {
         session_id: String,
     },
     /// A prompt typed into a standby composer while its session was still
@@ -580,6 +644,10 @@ pub(crate) enum Mode {
     Web(WebDialog),
     WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
+    /// The selected session's changed files, branch, and upstream distance.
+    ChangedFiles(ChangedFilesDialog),
+    /// The last notices the footer showed, newest first.
+    NoticeLog(NoticeLogDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
@@ -699,6 +767,10 @@ pub struct DashboardState {
     /// to a different row than the highlight.
     opening_session: Option<String>,
     pub(crate) pane_areas: Option<[Rect; DASHBOARD_PANE_COUNT]>,
+    /// Whether the last frame was too narrow for a sidebar, so the Sessions
+    /// list was stacked above the conversation in its compact form. Read by
+    /// the renderer's size checks; set once per frame.
+    pub(crate) narrow_layout: Cell<bool>,
     /// Where each conversation pane's transcript and composer sat on the last
     /// frame, so the controller can route a mouse event by what the pointer
     /// is over rather than by what has focus, and to the pane it is over.
@@ -717,6 +789,10 @@ pub struct DashboardState {
     /// the selected session anchored to the conversation.
     pub(crate) session_action_focus: Option<CommandId>,
     pub(crate) session_menu_ids: Vec<String>,
+    /// The Sessions pane's search and state filter, when one is open.
+    pub(crate) sessions_filter: Option<SessionsFilter>,
+    /// The commands run lately, newest first, for the palette's Recent group.
+    pub(crate) recent_commands: std::collections::VecDeque<CommandId>,
     /// The rows the open resume dialog shows, derived from the records, the
     /// scans, and the dialog's own search. Rebuilt where those change and once
     /// a second for the activity labels; empty when no dialog is open.
@@ -741,6 +817,9 @@ pub struct DashboardState {
     /// means expanded, so a project that appears later starts expanded without
     /// any extra bookkeeping.
     pub(crate) collapsed_project_keys: BTreeSet<String>,
+    /// The sessions currently needing a person and whether each has been
+    /// reported, for [`DashboardState::notification_events`].
+    pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
     /// The pane, row index, and time of the most recent left click on a
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
@@ -748,6 +827,12 @@ pub struct DashboardState {
     pub(crate) go: Option<go::GoMode>,
     pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
+    /// What each session's checkout looked like when last read, for the
+    /// branch on its row and the changed-files overlay.
+    pub(crate) git_status: BTreeMap<String, Result<mj_core::local_git::SessionGitStatus, String>>,
+    /// When each session's checkout was last asked about, so the host reads
+    /// a visible session's status about once a minute and no more.
+    pub(crate) git_probe_at: BTreeMap<String, Instant>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -834,6 +919,7 @@ mod dashboard_conversation;
 mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
+pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
 
@@ -860,6 +946,8 @@ impl DashboardState {
             go: None,
             go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),
+            git_status: BTreeMap::new(),
+            git_probe_at: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,
@@ -882,6 +970,7 @@ impl DashboardState {
             pane_sessions: BTreeMap::new(),
             opening_session: None,
             pane_areas: None,
+            narrow_layout: Cell::new(false),
             conversation_pane_areas: Vec::new(),
             conversation_area: None,
             resume_sessions_area: None,
@@ -889,6 +978,8 @@ impl DashboardState {
             surface_form: RefCell::new(mj_chat::components::Form::default()),
             session_action_focus: None,
             session_menu_ids: Vec::new(),
+            sessions_filter: None,
+            recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
             resume_hit_counts: [0; 3],
             session_row_areas: Vec::new(),
@@ -896,6 +987,7 @@ impl DashboardState {
             pane_size_control_areas: Vec::new(),
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: BTreeSet::new(),
+            attention_episodes: BTreeMap::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             modal_click_transition: None,

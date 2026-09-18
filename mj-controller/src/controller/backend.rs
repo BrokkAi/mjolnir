@@ -75,6 +75,71 @@ impl Controller {
         Ok((launch.cwd, branch))
     }
 
+    /// The session checkout's branch, distance from upstream, and changed
+    /// files, read with the target's own `git`. Builds on
+    /// [`Self::session_working_context`], so it works wherever that does: a
+    /// local checkout, a container, or an SSH host.
+    pub fn session_git_status(
+        &self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<mj_core::local_git::SessionGitStatus> {
+        let (cwd, branch) = self.session_working_context(session_id, executor)?;
+        if branch.starts_with("not a git") || branch.starts_with("unavailable") {
+            return Ok(mj_core::local_git::parse_git_status(
+                cwd, &branch, None, "", "",
+            ));
+        }
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        let locator = session
+            .target
+            .as_ref()
+            .context("target is still starting")?;
+        let backend = backend_locator(locator, session, &self.config)?;
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        let run = |args: &[&str], purpose: &str| -> Result<Option<String>> {
+            let mut command = vec!["git".to_owned(), "-C".to_owned(), cwd_text.clone()];
+            command.extend(args.iter().map(|arg| (*arg).to_owned()));
+            let output = executor.execute(&targets::command_on_locator(
+                &backend, session_id, command, purpose,
+            )?)?;
+            Ok((output.status == 0).then(|| String::from_utf8_lossy(&output.stdout).into_owned()))
+        };
+        // No upstream is an ordinary state, so a failing count is `None`
+        // rather than an error.
+        let ahead_behind = run(
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            "count commits against upstream",
+        )?;
+        // A repository with no commit yet has no HEAD to diff against.
+        let numstat = run(
+            &["--no-optional-locks", "diff", "--numstat", "HEAD"],
+            "count changed lines",
+        )?
+        .unwrap_or_default();
+        let porcelain = run(
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            "list changed files",
+        )?
+        .unwrap_or_default();
+        Ok(mj_core::local_git::parse_git_status(
+            cwd,
+            &branch,
+            ahead_behind.as_deref(),
+            &numstat,
+            &porcelain,
+        ))
+    }
+
     pub fn resolve_aws_resource_options(
         &self,
         target_id: &str,

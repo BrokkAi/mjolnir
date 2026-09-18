@@ -39,10 +39,11 @@ pub(crate) fn displayed_pane_size(active: PaneSize, maximize_enabled: bool) -> P
 pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Line<'static> {
     let active = displayed_pane_size(active, maximize_enabled);
     let mut spans = Vec::new();
+    let glyphs = theme::glyphs();
     for (index, (size, glyph)) in [
-        (PaneSize::Minimized, "▁"),
-        (PaneSize::Standard, "▪"),
-        (PaneSize::Maximized, "□"),
+        (PaneSize::Minimized, glyphs.size_minimized),
+        (PaneSize::Standard, glyphs.size_standard),
+        (PaneSize::Maximized, glyphs.size_maximized),
     ]
     .into_iter()
     .filter(|(size, _)| *size != PaneSize::Maximized || maximize_enabled)
@@ -52,10 +53,7 @@ pub(crate) fn pane_size_controls(active: PaneSize, maximize_enabled: bool) -> Li
             spans.push(Span::raw(" "));
         }
         let style = if size == active {
-            Style::default()
-                .fg(theme::palette().accent)
-                .bg(theme::palette().surface_raised)
-                .add_modifier(Modifier::BOLD)
+            theme::active_control()
         } else {
             theme::muted().bg(theme::palette().surface)
         };
@@ -71,7 +69,7 @@ pub(crate) fn minimized_pane_size_controls(
     maximize_enabled: bool,
 ) -> Line<'static> {
     let mut controls = pane_size_controls(PaneSize::Minimized, maximize_enabled);
-    controls.spans.push(Span::raw("─"));
+    controls.spans.push(Span::raw(theme::glyphs().rule));
     controls
 }
 
@@ -186,15 +184,19 @@ pub(crate) fn drawn_session_rows_with_options(
                 if let Some(last) = rows.last_mut() {
                     last.spacing = 1;
                 }
-                pending_heading = Some((
-                    key,
-                    Line::styled(
-                        format!("{hotkey}{label}"),
-                        Style::default()
-                            .fg(theme::palette().secondary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ));
+                let mut spans = vec![Span::styled(
+                    format!("{hotkey}{label}"),
+                    Style::default()
+                        .fg(theme::palette().secondary)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                // A folded project hides its rows, so the heading says what
+                // is waiting inside it. An unfolded one shows every symbol.
+                if dashboard.collapsed_project_keys.contains(&key) {
+                    let (waiting, unread) = dashboard.project_attention_counts(&key);
+                    spans.extend(attention_badge(waiting, unread));
+                }
+                pending_heading = Some((key, Line::from(spans)));
             }
             SessionsRow::Session { index, expanded } => {
                 let Some(session) = sessions.get(index) else {
@@ -234,23 +236,29 @@ pub(crate) fn drawn_session_rows_with_options(
                 });
                 let operation = dashboard.session_operations.get(&session.id);
                 let target = targets.get(index).cloned().unwrap_or_default();
+                let git = dashboard.git_row_text(&session.id);
                 let permission = session_permission_badge(session, operation, &dashboard.config);
                 // The selection drives which conversation is on screen, so
                 // the caret marks it in both forms.
                 let selected = options.show_selection
                     && dashboard.selected_session_id.as_deref() == Some(session.id.as_str());
+                let glyphs = theme::glyphs();
                 let symbol = dashboard
                     .transition_kind(&session.id)
                     .map(|transition| match transition {
-                        SessionTransitionKind::Starting => "↑",
-                        SessionTransitionKind::Resuming => "↻",
-                        SessionTransitionKind::Moving => "⇄",
-                        SessionTransitionKind::Stopping => "↓",
-                        SessionTransitionKind::Destroying => "⊗",
+                        SessionTransitionKind::Starting => glyphs.starting,
+                        SessionTransitionKind::Resuming => glyphs.resuming,
+                        SessionTransitionKind::Moving => glyphs.moving,
+                        SessionTransitionKind::Stopping => glyphs.stopping,
+                        SessionTransitionKind::Destroying => glyphs.destroying,
                     })
-                    .or_else(|| dashboard.transition_failure_kind(&session.id).map(|_| "×"))
+                    .or_else(|| {
+                        dashboard
+                            .transition_failure_kind(&session.id)
+                            .map(|_| glyphs.failed)
+                    })
                     .unwrap_or_else(|| facts.status_symbol(review, operation));
-                let prefix = format!("{}{symbol} ", if selected { "› " } else { "  " });
+                let prefix = format!("{}{symbol} ", if selected { glyphs.selected } else { "  " });
                 let (heading_key, heading_line) = match pending_heading.take() {
                     Some((key, line)) => (Some(key), Some(line)),
                     None => (None, None),
@@ -339,6 +347,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         &prefix,
                         spinner,
                         dashboard.config.advanced.detailed_activity_clocks,
+                        git.as_deref(),
                     );
                 } else {
                     compact_session_lines(
@@ -358,7 +367,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 }
                 if selected {
                     for line in lines.iter_mut().skip(usize::from(heading_key.is_some())) {
-                        line.style = line.style.bg(theme::palette().surface_raised);
+                        line.style = line.style.patch(theme::raised());
                     }
                 }
                 rows.push(DrawnSessionRow {
@@ -396,6 +405,7 @@ pub(crate) fn expanded_session_lines(
     prefix: &str,
     spinner: Option<&'static str>,
     detailed_activity_clocks: bool,
+    git: Option<&str>,
 ) {
     let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
@@ -403,17 +413,32 @@ pub(crate) fn expanded_session_lines(
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
     let title_width = width.saturating_sub(3);
-    lines.push(Line::styled(
-        format!(
-            "{prefix}{}",
-            truncate_to_cells(
-                &name,
-                usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
-                Truncate::PLAIN
-            )
-        ),
-        style,
-    ));
+    let name_room = usize::from(title_width).saturating_sub(Line::raw(prefix).width());
+    let title = truncate_to_cells(&name, name_room, Truncate::PLAIN);
+    let mut title_spans = vec![Span::styled(format!("{prefix}{title}"), style)];
+    // The branch follows the name when the line has room: the whole text,
+    // else the branch alone, else nothing. A name is rarely as wide as the
+    // sidebar, so this is where the branch costs nothing.
+    if let Some(git) = git {
+        let free = name_room.saturating_sub(Line::raw(title.as_str()).width() + 2);
+        // The marker and the branch name are the first two words; a branch
+        // name never contains a space.
+        let branch_only = git
+            .match_indices(' ')
+            .nth(1)
+            .map_or(git, |(at, _)| &git[..at]);
+        let text = if Line::raw(git).width() <= free {
+            Some(git)
+        } else if Line::raw(branch_only).width() <= free {
+            Some(branch_only)
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
+        }
+    }
+    lines.push(Line::from(title_spans));
     lines.push(session_activity_line(
         "  ",
         session,
@@ -683,55 +708,50 @@ impl SessionRowFacts<'_> {
         review: Option<&RuntimeReviewView>,
         operation: Option<&SessionOperationDisplay>,
     ) -> &'static str {
-        use mj_core::review::driver::TurnReviewPhase;
-        use mj_core::review::verdict::ReviewVerdict;
+        use crate::AttentionLevel;
 
+        let glyphs = theme::glyphs();
         if operation.is_some() {
-            return "◐";
+            return glyphs.working;
         }
         match self.state {
             SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
-                return "×";
+                return glyphs.failed;
             }
-            SessionState::Stopped => return "■",
-            SessionState::Provisioning => return "↑",
-            SessionState::Checkpointing => return "▣",
-            SessionState::Closing => return "↓",
-            SessionState::Destroying => return "⊗",
-            SessionState::Disconnected => return "?",
+            SessionState::Stopped => return glyphs.stopped,
+            SessionState::Provisioning => return glyphs.starting,
+            SessionState::Checkpointing => return glyphs.checkpointing,
+            SessionState::Closing => return glyphs.stopping,
+            SessionState::Destroying => return glyphs.destroying,
+            SessionState::Disconnected => return glyphs.unreachable,
             SessionState::Running => {}
         }
         if self.unreachable {
-            return "?";
+            return glyphs.unreachable;
         }
-        if self.needs_input() {
-            return "!";
-        }
-        if let Some(review) = review.filter(|review| review.activity_label().is_some()) {
-            if review.is_working() {
-                return "◐";
-            }
-            return match &review.phase {
-                TurnReviewPhase::Verdict(ReviewVerdict::Clean) => "✓",
-                TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
-                | TurnReviewPhase::Forwarding { error: Some(_), .. } => "×",
-                _ => "!",
-            };
-        }
-        let Some(detail) = self.detail else {
-            return "·";
-        };
-        if !detail.activity.is_idle(detail.current_turn_started_at) {
-            "◐"
-        } else if detail.materialized_applied_event_ordinal.is_none()
-            && detail.activity.execution.is_none()
-            && detail.activity.idle_since_ms.is_none()
-        {
-            "·"
-        } else if detail.has_unread() {
-            "✓"
-        } else {
-            "○"
+        // The same scale the attention queue and the badges read, so a row
+        // can never show a symbol the queue disagrees with.
+        match crate::dashboard_sessions::attention_level(
+            self.detail,
+            review,
+            self.state,
+            false,
+            false,
+        ) {
+            AttentionLevel::Waiting => glyphs.waiting,
+            AttentionLevel::Failed => glyphs.failed,
+            AttentionLevel::Working => glyphs.working,
+            AttentionLevel::Unread => glyphs.unread,
+            AttentionLevel::Idle | AttentionLevel::Inactive => match self.detail {
+                Some(detail)
+                    if detail.materialized_applied_event_ordinal.is_some()
+                        || detail.activity.execution.is_some()
+                        || detail.activity.idle_since_ms.is_some() =>
+                {
+                    glyphs.idle
+                }
+                _ => glyphs.unknown,
+            },
         }
     }
 
@@ -992,6 +1012,25 @@ pub(crate) fn sessions_block(
         .title(pane_size_controls(size, maximize_enabled))
 }
 
+/// The ` !2` or ` ✓3` a folded heading or a workspace tab carries: waiting
+/// sessions when there are any, otherwise unread ones, otherwise nothing.
+pub(crate) fn attention_badge(waiting: usize, unread: usize) -> Option<Span<'static>> {
+    let glyphs = theme::glyphs();
+    let text = if waiting > 0 {
+        format!(" {}{waiting}", glyphs.waiting)
+    } else if unread > 0 {
+        format!(" {}{unread}", glyphs.unread)
+    } else {
+        return None;
+    };
+    Some(Span::styled(
+        text,
+        Style::default()
+            .fg(theme::palette().session_attention)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 /// Draws the Sessions pane and reports the per-row mouse hitboxes.
 pub(crate) fn render_sessions(
     frame: &mut Frame,
@@ -1025,10 +1064,11 @@ pub(crate) fn render_sessions(
         drawn_session_rows(dashboard, width)
     };
     let focused = dashboard.focus() == Focus::Sessions;
+    let filter_label = dashboard.sessions_filter_label();
     frame.render_widget(
         sessions_block(
             focused,
-            "",
+            &filter_label,
             area.width,
             dashboard.pane_size(SupportPane::Sessions),
             dashboard.pending_input_count(),
@@ -1068,6 +1108,14 @@ pub(crate) fn render_sessions(
         .with_offset(offset)
         .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
+    if drawn.is_empty() && dashboard.sessions_filter.is_some() && rows_area.height > 0 {
+        frame.render_widget(
+            Paragraph::new("No sessions match · Esc clears the filter")
+                .style(theme::muted())
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            rows_area,
+        );
+    }
     // The table scrolled only as far as it had to; remember where it settled
     // so the next frame does not scroll back to the top.
     dashboard.sessions_scroll.set(state.offset());
@@ -1391,9 +1439,10 @@ pub(crate) fn recovery_warning_name(
     }
     match &session.checkpoint {
         Some(checkpoint) => format!(
-            "{name}  ⚠ Recovery copy {} old",
+            "{name}  {} Recovery copy {} old",
+            theme::glyphs().warning,
             checkpoint_age(now_epoch_seconds, &checkpoint.created_at)
         ),
-        None => format!("{name}  ⚠ Recovery unavailable"),
+        None => format!("{name}  {} Recovery unavailable", theme::glyphs().warning),
     }
 }

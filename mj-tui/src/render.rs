@@ -2,7 +2,7 @@
 mod capacity;
 mod footer;
 mod quotas;
-mod sessions;
+pub(crate) mod sessions;
 pub(crate) use capacity::*;
 pub(crate) use footer::*;
 pub(crate) use quotas::*;
@@ -30,9 +30,9 @@ use mj_client::review::RuntimeReviewView;
 use mj_core::targets::DeploymentCapacityKind;
 
 use crate::dialogs::{
-    render_config_id_editor, render_confirmation, render_container_editor,
-    render_import_bundle_confirmation, render_import_progress, render_rename_editor,
-    render_repository_origin, render_target_actions, render_web_dialog,
+    render_changed_files, render_config_id_editor, render_confirmation, render_container_editor,
+    render_import_bundle_confirmation, render_import_progress, render_notice_log,
+    render_rename_editor, render_repository_origin, render_target_actions, render_web_dialog,
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
@@ -185,6 +185,10 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             render_workspace_manager(frame, area, dialog, &mut surfaces)
         }
         Mode::Rename(editor) => render_rename_editor(frame, area, editor, &mut surfaces),
+        Mode::ChangedFiles(dialog) => {
+            render_changed_files(frame, area, dashboard, dialog, &mut surfaces)
+        }
+        Mode::NoticeLog(dialog) => render_notice_log(frame, area, dashboard, dialog, &mut surfaces),
         Mode::EditContainer(editor) => render_container_editor(frame, area, editor, &mut surfaces),
         Mode::Importing(progress) => render_import_progress(frame, area, progress, &mut surfaces),
         Mode::ConfirmImportBundle(confirmation) => {
@@ -207,7 +211,10 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
 fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str, version: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("✦ MJOLNIR", theme::title(true)),
+            Span::styled(
+                format!("{} MJOLNIR", theme::glyphs().spark),
+                theme::title(true),
+            ),
             // The first-run screen has no workspace pane to carry the build
             // number, so the brand line names it here instead.
             Span::styled(format!("  {version}  /  {workspace_name}"), theme::muted()),
@@ -228,7 +235,11 @@ pub(crate) fn render(frame: &mut Frame, dashboard: &mut DashboardState) {
     crate::combined::render_combined(frame, dashboard, &mut chats, &opening, false);
 }
 
+/// The width from which the Sessions sidebar sits beside the conversation.
+/// Below it, down to [`NARROW_TERMINAL_WIDTH`], the sidebar stacks above.
 pub(crate) const MINIMUM_TERMINAL_WIDTH: u16 = 80;
+/// The narrowest frame the dashboard draws at all.
+pub(crate) const NARROW_TERMINAL_WIDTH: u16 = 60;
 
 pub(crate) enum TerminalSizeRequirement {
     Width(u16),
@@ -289,7 +300,7 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
         ])
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true })
-        .block(theme::panel(false).title(" ✦ Get started ")),
+        .block(theme::panel(false).title(format!(" {} Get started ", theme::glyphs().spark))),
         area,
     );
 }

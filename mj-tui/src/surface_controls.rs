@@ -173,7 +173,10 @@ pub(crate) fn render_workspace_menu(frame: &mut Frame, area: Rect, dashboard: &D
     } else {
         theme::muted()
     };
-    frame.render_widget(Paragraph::new(" ☰ ").style(style), area);
+    frame.render_widget(
+        Paragraph::new(theme::glyphs().workspace_menu).style(style),
+        area,
+    );
 }
 
 pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
@@ -200,9 +203,9 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         } else if enabled {
             ratatui::style::Style::default()
                 .fg(theme::palette().text)
-                .bg(theme::palette().surface_raised)
+                .patch(theme::raised())
         } else {
-            theme::muted().bg(theme::palette().surface_raised)
+            theme::muted().patch(theme::raised())
         };
         frame.render_widget(Paragraph::new(format!(" {label} ")).style(style), rect);
         x = x.saturating_add(width + 1);
@@ -219,7 +222,7 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
         let id = SurfaceControl::Session(index);
         form.register(id, ControlKind::Button, area, true);
         frame.render_widget(
-            Paragraph::new(" ⋯ ").style(if form.is_armed(id) {
+            Paragraph::new(theme::glyphs().row_menu).style(if form.is_armed(id) {
                 theme::selection(true)
             } else {
                 theme::muted()

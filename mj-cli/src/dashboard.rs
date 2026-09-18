@@ -276,6 +276,9 @@ pub(crate) struct DashboardContext {
     startup: StartupSession,
     go_context_refresh: Option<(String, std::time::Instant)>,
     go_context_in_flight: bool,
+    /// Sessions whose checkout is being read right now, so a slow target is
+    /// asked once rather than once per tick.
+    git_probes_in_flight: BTreeSet<String>,
     go_selection_requested: Option<String>,
     go_selection_in_flight: bool,
     /// The notice generation the frame on screen was drawn from. Background
@@ -479,6 +482,24 @@ pub(crate) async fn run_dashboard_for_workspace(
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
     }
+    // Under tmux or screen, ctrl+b is taken before it reaches the dashboard.
+    // Say so once; the notice names both ways out.
+    let mut hints = crate::hints::SeenHints::load();
+    let prefix = context.dashboard.keybinds().prefix_label();
+    if crate::hints::inside_multiplexer()
+        && prefix == mj_core::config::DEFAULT_PREFIX
+        && hints.take(crate::hints::Hint::PrefixCollision)
+    {
+        context.dashboard.set_notice(
+            "Inside tmux or screen: press ctrl+b twice to reach Mjolnir's prefix, or set [keys] prefix in config.toml.",
+        );
+    } else if hints.take(crate::hints::Hint::PrefixKeys) {
+        // The one thing a first launch has to say: there is a prefix key,
+        // and it leads to the key list and the command list.
+        context.dashboard.set_notice(format!(
+            "Press {prefix} ? for every key and {prefix} : for every command."
+        ));
+    }
     let termination = mj_controller::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch
@@ -509,6 +530,8 @@ pub(crate) async fn run_dashboard_for_workspace(
         if redraw {
             context.draw()?;
         }
+        // After the frame, so a bell never precedes the row it is about.
+        context.emit_notifications()?;
         redraw = true;
         let mut action = DashboardAction::None;
         let mut chat_outcome = mj_chat::chat::ChatEventOutcome::None;
@@ -752,6 +775,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
             context.refresh_go_context();
+            context.refresh_git_status();
         }
         context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
@@ -1338,6 +1362,7 @@ impl DashboardContext {
             startup: StartupSession::idle(),
             go_context_refresh: None,
             go_context_in_flight: false,
+            git_probes_in_flight: BTreeSet::new(),
             go_selection_requested: None,
             go_selection_in_flight: false,
             drawn_notice_generation: 0,

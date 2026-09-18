@@ -25,6 +25,8 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::DestroyStopped { .. } => &["No", "Yes", "Yes, delete branch"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
+        Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Stop now"],
+        Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
@@ -44,6 +46,55 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
     }
 }
 
+/// One letter per button, in button order, so every confirmation answers a
+/// key without Tab. The letter is the first letter of the label's first word
+/// that no earlier button took, then of a later word, then any later letter
+/// of the label; a label with nothing left gets no letter (`\0`).
+///
+/// `Yes` and `Yes, delete branch` therefore answer `y` and `d`; `Cancel` and
+/// `Confirm` answer `c` and `o`.
+pub(crate) fn confirmation_accelerators(labels: &[&str]) -> Vec<char> {
+    let mut taken = Vec::new();
+    labels
+        .iter()
+        .map(|label| {
+            let lower = label.to_lowercase();
+            let candidates = lower
+                .split(|character: char| !character.is_alphanumeric())
+                .filter_map(|word| word.chars().next())
+                .chain(lower.chars().filter(char::is_ascii_alphanumeric));
+            let letter = candidates
+                .into_iter()
+                .find(|letter| !taken.contains(letter))
+                .unwrap_or('\0');
+            taken.push(letter);
+            letter
+        })
+        .collect()
+}
+
+/// The line under a confirmation's text naming each button's letter, in the
+/// same order the buttons are drawn: `n No · y Yes · d Yes, delete branch`.
+pub(crate) fn confirmation_key_line(labels: &[&str]) -> Line<'static> {
+    let accelerators = confirmation_accelerators(labels);
+    let mut spans = Vec::new();
+    for (index, (label, letter)) in labels.iter().zip(accelerators).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ·  ", theme::muted()));
+        }
+        if letter != '\0' {
+            spans.push(Span::styled(
+                format!("{letter} "),
+                Style::default()
+                    .fg(theme::palette().secondary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled((*label).to_owned(), theme::muted()));
+    }
+    Line::from(spans)
+}
+
 /// Index of the primary (rightmost) button, which is focused when a dialog opens.
 pub(crate) fn primary_button(labels: &[&str]) -> usize {
     labels.len().saturating_sub(1)
@@ -59,6 +110,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
             | Confirmation::StopWithSubagents { .. }
+            | Confirmation::InterruptWork { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::ConvertRawCheckout { .. }
     ) {
@@ -339,6 +391,227 @@ fn render_text_prompt(
     form.end_frame(DialogControl::Field);
 }
 
+/// The notice log: one row per remembered notice, newest first, with how
+/// long ago it was reported.
+pub(crate) fn render_notice_log(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    dialog: &NoticeLogDialog,
+    surfaces: &mut FrameSurfaces,
+) {
+    let history = dashboard.notices.history();
+    let popup_height = u16::try_from(history.len().saturating_add(5).clamp(8, 30)).unwrap_or(30);
+    let popup = centered_modal(frame, surfaces, 80, popup_height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 2 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Recent messages",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    if history.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Nothing has been reported yet.").style(theme::muted()),
+            list_area,
+        );
+    } else {
+        let now = std::time::Instant::now();
+        let age_width = 8;
+        let text_width = usize::from(list_area.width).saturating_sub(age_width + 1);
+        let rows = history
+            .iter()
+            .skip(dialog.scroll)
+            .take(usize::from(list_area.height))
+            .map(|record| {
+                let age = mj_client::usage_format::format_clock(
+                    now.saturating_duration_since(record.at).as_secs(),
+                );
+                let style = if record.failure {
+                    Style::default().fg(theme::palette().warning)
+                } else {
+                    Style::default().fg(theme::palette().text)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>age_width$} ", format!("{age} ago")),
+                        theme::muted(),
+                    ),
+                    Span::styled(
+                        truncate_to_cells(&record.text, text_width, Truncate::PLAIN),
+                        style,
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(rows), list_area);
+    }
+    Dialog::render_actions(
+        frame,
+        footer,
+        &[(DialogControl::NoticeLogClose, "Close", true)],
+        &mut form,
+    );
+    form.end_frame(DialogControl::NoticeLogClose);
+}
+
+/// The changed-files overlay: the branch line, the totals, then one row per
+/// file with its kind and line counts.
+pub(crate) fn render_changed_files(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    dialog: &ChangedFilesDialog,
+    surfaces: &mut FrameSurfaces,
+) {
+    let status = dashboard.git_status.get(&dialog.session_id);
+    let files = status
+        .and_then(|status| status.as_ref().ok())
+        .map(|status| status.changed.as_slice())
+        .unwrap_or_default();
+    let popup_height = u16::try_from(files.len().saturating_add(7).clamp(9, 40)).unwrap_or(40);
+    let popup = centered_modal(frame, surfaces, 80, popup_height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 3 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let name = dashboard
+        .state
+        .sessions
+        .get(&dialog.session_id)
+        .map(|session| session.display_title().to_owned())
+        .unwrap_or_else(|| dialog.session_id.clone());
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        format!("Changed files · {name}"),
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width.saturating_sub(1),
+        inner.height.saturating_sub(4),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let header_line = match status {
+        None => Line::styled(
+            format!("Reading the checkout{}", theme::glyphs().ellipsis),
+            theme::muted(),
+        ),
+        Some(Err(error)) => Line::styled(
+            format!("Could not read the checkout: {error}"),
+            Style::default().fg(theme::palette().warning),
+        ),
+        Some(Ok(status)) => {
+            let (added, removed) = status.totals();
+            let branch = status.row_text();
+            let branch = if branch.is_empty() {
+                status.branch.clone()
+            } else {
+                branch
+            };
+            Line::from(vec![
+                Span::styled(branch, theme::title(true)),
+                Span::styled(
+                    format!(
+                        "   {} file{} · +{added} −{removed}",
+                        status.changed.len(),
+                        if status.changed.len() == 1 { "" } else { "s" }
+                    ),
+                    theme::muted(),
+                ),
+            ])
+        }
+    };
+    frame.render_widget(Paragraph::new(header_line), header);
+
+    if files.is_empty() {
+        let text = match status {
+            Some(Ok(_)) => "Nothing has changed since the last commit.",
+            _ => "",
+        };
+        frame.render_widget(Paragraph::new(text).style(theme::muted()), list_area);
+    } else {
+        let kind_width = 8;
+        let count_width = 12;
+        let path_width = usize::from(list_area.width).saturating_sub(kind_width + count_width + 2);
+        let rows = files
+            .iter()
+            .skip(dialog.scroll)
+            .take(usize::from(list_area.height))
+            .map(|file| {
+                let counts = match (file.added, file.removed) {
+                    (Some(added), Some(removed)) => format!("+{added} −{removed}"),
+                    _ => String::new(),
+                };
+                Line::from(vec![
+                    Span::styled(format!("{:<kind_width$}", file.kind()), theme::muted()),
+                    Span::raw(truncate_to_cells(&file.path, path_width, Truncate::PLAIN)),
+                    Span::styled(
+                        format!(
+                            "{:>width$}",
+                            counts,
+                            width = usize::from(list_area.width)
+                                .saturating_sub(
+                                    kind_width + path_width.min(file.path.chars().count())
+                                )
+                                .min(count_width + 2)
+                        ),
+                        theme::muted(),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(rows), list_area);
+        crate::render::sessions::render_session_scrollbar(
+            frame,
+            Rect::new(list_area.right(), list_area.y, 1, list_area.height),
+            files.len(),
+            dialog.scroll,
+            usize::from(list_area.height).max(1),
+        );
+    }
+    Dialog::render_actions(
+        frame,
+        footer,
+        &[
+            (DialogControl::ChangedFilesRefresh, "Refresh (r)", true),
+            (DialogControl::ChangedFilesClose, "Close", true),
+        ],
+        &mut form,
+    );
+    form.end_frame(DialogControl::ChangedFilesClose);
+}
+
 pub(crate) fn render_rename_editor(
     frame: &mut Frame,
     area: Rect,
@@ -430,7 +703,7 @@ pub(crate) fn render_target_actions(
                     mj_chat::spinner::elapsed_ms(),
                 ),
                 Span::styled(
-                    format!(" Testing {target_id}…"),
+                    format!(" Testing {target_id}{}", theme::glyphs().ellipsis),
                     Style::default().fg(theme::palette().accent),
                 ),
                 Span::styled(
@@ -547,7 +820,7 @@ pub(crate) fn render_web_dialog(
         lines.push(Line::raw("Other viewers and dashboards using that server will be disconnected. Mjolnir will request a graceful stop, then retry this port."));
     } else if dialog.loading {
         lines.push(Line::styled(
-            "Starting web viewer…",
+            format!("Starting web viewer{}", theme::glyphs().ellipsis),
             Style::default().fg(theme::palette().warning),
         ));
     } else if let Some(message) = &dialog.message {
@@ -570,7 +843,7 @@ pub(crate) fn render_web_dialog(
         }
         if dialog.inspecting {
             lines.push(Line::styled(
-                "Inspecting listener…",
+                format!("Inspecting listener{}", theme::glyphs().ellipsis),
                 Style::default().fg(theme::palette().accent),
             ));
         }
@@ -907,6 +1180,29 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 ),
             ],
         ),
+        Confirmation::InterruptWork {
+            session_id,
+            restart,
+        } => (
+            if *restart {
+                " Restart while working? "
+            } else {
+                " Stop while working? "
+            },
+            vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw(""),
+                Line::styled(
+                    "The agent is in the middle of a turn.",
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw(if *restart {
+                    "Restarting ends that turn; the workspace and the conversation so far are kept."
+                } else {
+                    "Stopping ends that turn, saves a recovery copy, and frees the target."
+                }),
+            ],
+        ),
         Confirmation::StopWithSubagents { session_id, count } => (
             " Stop parent and sub-agents? ",
             vec![
@@ -1010,7 +1306,6 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(""),
                 Line::raw("Delete this session, its worktree, and its recovery archive?"),
                 Line::raw("Its git branch stays in the repository unless you choose to delete it."),
-                Line::raw("Y: Yes    N / Esc: No"),
             ],
         ),
     }
@@ -1032,6 +1327,7 @@ pub(crate) fn render_confirmation(
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::StopWithSubagents { .. } => 10,
+        Confirmation::InterruptWork { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,
@@ -1039,6 +1335,8 @@ pub(crate) fn render_confirmation(
     };
     let (title, mut lines) = confirmation_body(confirmation);
     let buttons = confirmation_buttons(confirmation);
+    lines.push(Line::raw(""));
+    lines.push(confirmation_key_line(buttons));
     lines.push(Line::raw(""));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let extra = 1;

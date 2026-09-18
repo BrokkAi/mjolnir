@@ -39,11 +39,15 @@ pub enum CommandId {
     RestartSession,
     ResumeDialog,
     RenameSession,
+    ChangedFiles,
     ContainerSettings,
     StopSession,
     MoveSession,
     ForceDestroySession,
     MarkAllRead,
+    FilterSessions,
+    NextAttention,
+    PreviousAttention,
     CancelOperation,
     ToggleProject,
     TargetActions,
@@ -64,6 +68,7 @@ pub enum CommandId {
     SwitchWorkspace,
     WebViewer,
     RestartDaemon,
+    NoticeLog,
     QuitDetach,
     Palette,
     CycleSpinner,
@@ -311,6 +316,19 @@ fn move_session_available(dashboard: &DashboardState) -> Availability {
     session_idle(dashboard)
 }
 
+/// A selected session whose target is running, which is what reading its
+/// checkout needs.
+fn live_session(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_session() else {
+        return Availability::Hidden;
+    };
+    if session.state.is_active() && session.target.is_some() {
+        Availability::Ready
+    } else {
+        Availability::Blocked("the session's target is not running")
+    }
+}
+
 fn container_session(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_container_session() else {
         return Availability::Hidden;
@@ -364,6 +382,14 @@ fn cancel_footer(dashboard: &DashboardState) -> Option<String> {
     }
     let kind = operation.kind;
     Some(format!("cancel {}", kind.label().to_lowercase()))
+}
+
+/// The footer names the next-attention key only while something is actually
+/// waiting, and says how many sessions are, so the hint is a signal as well
+/// as a reminder of the key.
+fn attention_footer(dashboard: &DashboardState) -> Option<String> {
+    let waiting = dashboard.attention_queue().len();
+    (waiting > 0).then(|| format!("next ({waiting})"))
 }
 
 fn operation_in_flight(dashboard: &DashboardState) -> Availability {
@@ -592,6 +618,42 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::FilterSessions,
+        label: "Search sessions",
+        description: "Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, and a keep only blocked, working, idle, or done sessions, or all of them.",
+        scope: Scope::Sessions,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('/'), "/")],
+        action: None,
+        footer: footer_word!("search"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::NextAttention,
+        label: "Next session needing you",
+        description: "Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::NextAttention),
+        footer: attention_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::PreviousAttention,
+        label: "Previous session needing you",
+        description: "Walk the sessions that need a person in the other direction.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::PreviousAttention),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::CancelOperation,
         label: "Cancel operation",
         description: "Stop the launch, resume, or stop the selected session is in the middle of.",
@@ -626,6 +688,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: session_idle,
+    },
+    CommandSpec {
+        id: CommandId::ChangedFiles,
+        label: "Changed files",
+        description: "List the files the selected session's checkout has changed, with the branch and its distance from upstream.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::ChangedFiles),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: live_session,
     },
     CommandSpec {
         id: CommandId::ContainerSettings,
@@ -727,8 +801,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Add SSH hosts or EC2 launch templates and edit their shared settings.",
         scope: Scope::Settings,
         pane_keys: &[],
-        // The palette reaches this page; it has no key binding of its own.
-        action: None,
+        // Unbound by default like its siblings; `[keys] manage_machines`
+        // binds it.
+        action: Some(KeyAction::ManageMachines),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -737,7 +812,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ManageTargets,
         label: "Manage runtimes",
-        description: "Add a runtime and choose the machine it runs on.",
+        description: "Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.",
         scope: Scope::Settings,
         pane_keys: &[],
         action: Some(KeyAction::ManageTargets),
@@ -885,12 +960,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Restart the Mjolnir daemon",
         description: "Stop the background daemon and start one from this build, then report which build came up.",
         scope: Scope::Global,
-        // Restarting the daemon is rare and disruptive, so it is reachable
-        // from the palette rather than from a key that could be hit by
-        // accident. It is always offered: the daemon being gone is exactly
-        // when it is needed, and that is also when nothing can be asked.
+        // Restarting the daemon is rare and disruptive, so it has no default
+        // key; `[keys] restart_daemon` binds one. It is always offered: the
+        // daemon being gone is exactly when it is needed, and that is also
+        // when nothing can be asked.
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::RestartDaemon),
         footer: no_footer,
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
@@ -906,6 +981,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("refresh"),
         footer_group: FooterGroup::Chord,
         footer_rank: 8,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::NoticeLog,
+        label: "Recent messages",
+        description: "Show the last notices the footer reported, newest first, including failures that replaced each other.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::NoticeLog),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
         available: always_ready,
     },
     CommandSpec {
@@ -988,12 +1075,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// again in the palette only lengthens the search. The keyboard chords, footer
 /// hints, and onboarding buttons that run them are unaffected.
 const PALETTE_HIDDEN: &[CommandId] = &[
-    CommandId::Palette,          // already open when the list is drawn
-    CommandId::Workspaces,       // the pinned ☰ in the Workspaces pane
-    CommandId::NewSessionWizard, // the Create button in the Sessions pane
-    CommandId::ResumeDialog,     // the Resume button in the Sessions pane
-    CommandId::SwitchWorkspace,  // the numbered keys act on the visible tab strip
+    CommandId::Palette,         // already open when the list is drawn
+    CommandId::SwitchWorkspace, // the numbered keys act on the visible tab strip
 ];
+
+/// How many commands the palette remembers under its Recent heading.
+pub(crate) const RECENT_COMMANDS: usize = 5;
 
 /// Whether [`palette_entries`](crate::palette::palette_entries) skips `id`.
 pub(crate) fn hidden_from_palette(id: CommandId) -> bool {
@@ -1123,6 +1210,13 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        // Commands a person reaches for by name are worth remembering; the
+        // pane keys and the palette itself are not.
+        if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
+            self.recent_commands.retain(|recent| *recent != id);
+            self.recent_commands.push_front(id);
+            self.recent_commands.truncate(RECENT_COMMANDS);
+        }
         if matches!(id, CommandId::StopSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
@@ -1152,12 +1246,22 @@ impl DashboardState {
             CommandId::ResizePaneRight => self.resize_pane_command(NavDirection::Right),
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
-            CommandId::RestartSession => self
-                .selected_session()
-                .map(|s| DashboardAction::RestartSession {
-                    session_id: s.id.clone(),
-                })
-                .unwrap_or(DashboardAction::None),
+            CommandId::RestartSession => {
+                let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+                    return DashboardAction::None;
+                };
+                // Mid-turn work is lost by a restart, so that case asks first;
+                // an idle session restarts at once.
+                if self.attention_level(&session_id) == crate::AttentionLevel::Working {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                            session_id,
+                            restart: true,
+                        }));
+                    return DashboardAction::None;
+                }
+                DashboardAction::RestartSession { session_id }
+            }
             CommandId::ResumeDialog => DashboardAction::OpenResumeDialog,
             CommandId::Palette => {
                 self.begin_palette();
@@ -1180,6 +1284,7 @@ impl DashboardState {
                 self.begin_container_edit();
                 DashboardAction::None
             }
+            CommandId::ChangedFiles => self.begin_changed_files(),
             CommandId::MoveSession => self.begin_move(),
             CommandId::StopSession => {
                 let Some(session_id) = self.selected_session().map(|session| session.id.clone())
@@ -1206,6 +1311,19 @@ impl DashboardState {
                         }));
                     return DashboardAction::None;
                 }
+                // A retry of a failed stop and a stop of an idle session run
+                // at once; only stopping an agent mid-turn asks first, because
+                // that is the case where a mis-click costs work.
+                if self.transition_failure_kind(&session_id).is_none()
+                    && self.attention_level(&session_id) == crate::AttentionLevel::Working
+                {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                            session_id,
+                            restart: false,
+                        }));
+                    return DashboardAction::None;
+                }
                 DashboardAction::Close { session_id }
             }
             CommandId::ForceDestroySession => {
@@ -1219,6 +1337,12 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
+            CommandId::FilterSessions => {
+                self.begin_sessions_filter();
+                DashboardAction::None
+            }
+            CommandId::NextAttention => self.step_attention(1),
+            CommandId::PreviousAttention => self.step_attention(-1),
             CommandId::CancelOperation => {
                 // The target-actions dialog's running test is the one thing
                 // cancel reaches through a modal.
@@ -1308,6 +1432,10 @@ impl DashboardState {
             CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::RestartDaemon => DashboardAction::RestartDaemon,
+            CommandId::NoticeLog => {
+                self.begin_notice_log();
+                DashboardAction::None
+            }
             CommandId::QuitDetach => DashboardAction::QuitDetach,
             // Help toggles: the same key that opens the reference closes it
             // again, which is what the overlay's own Esc/F1/? arm does when
@@ -1405,7 +1533,9 @@ mod tests {
         // Still dispatchable: the pinned hamburger runs it through
         // `run_available_command`, which needs the command to stay available.
         assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
-        assert!(hidden_from_palette(CommandId::Workspaces));
+        // Listed in the palette too: the button is one way in, but a person
+        // who types "work" expects to find it.
+        assert!(!hidden_from_palette(CommandId::Workspaces));
     }
 
     /// The footer, the help overlay, and the palette all read one command per
@@ -1461,17 +1591,14 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_omits_only_commands_with_a_pinned_button() {
+    fn the_palette_omits_only_itself_and_the_numbered_workspace_keys() {
+        for id in [CommandId::Palette, CommandId::SwitchWorkspace] {
+            assert!(hidden_from_palette(id), "{id:?}");
+        }
         for id in [
             CommandId::Workspaces,
             CommandId::NewSessionWizard,
             CommandId::ResumeDialog,
-            CommandId::Palette,
-            CommandId::SwitchWorkspace,
-        ] {
-            assert!(hidden_from_palette(id), "{id:?}");
-        }
-        for id in [
             CommandId::RestartSession,
             CommandId::OpenConfig,
             CommandId::WebViewer,

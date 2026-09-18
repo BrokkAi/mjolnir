@@ -343,7 +343,7 @@ pub(crate) fn render_chat_footer(
     let groups = theme::fit_footer_items(
         [
             composer_keys
-                .split(theme::FOOTER_SEPARATOR)
+                .split(theme::footer_separator())
                 .map(|text| (None, text))
                 .collect(),
             footer
@@ -382,11 +382,11 @@ pub(crate) fn render_chat_footer(
         let mut x = footer_area.x;
         for group in groups.iter().filter(|group| !group.is_empty()) {
             if x > footer_area.x {
-                x += display_width(theme::FOOTER_GROUP_SEPARATOR) as u16;
+                x += display_width(theme::footer_group_separator()) as u16;
             }
             for (index, (command, text)) in group.iter().enumerate() {
                 if index > 0 {
-                    x += display_width(theme::FOOTER_SEPARATOR) as u16;
+                    x += display_width(theme::footer_separator()) as u16;
                 }
                 let width = display_width(text) as u16;
                 if let Some(command) = command {

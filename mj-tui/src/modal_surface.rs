@@ -26,8 +26,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::dialogs::{
-    ConfigIdEditor, ConfirmDialog, ContainerEditor, DialogControl, ImportBundleConfirmation,
-    ImportProgress, RenameEditor, RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, ContainerEditor, DialogControl,
+    ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::palette::{CommandPalette, PaletteControl};
@@ -124,6 +125,26 @@ macro_rules! dialog_form {
             &mut self.form
         }
     };
+}
+
+impl DialogModal for NoticeLogDialog {
+    dialog_form!(DialogControl);
+
+    fn prepare(&mut self) {
+        let form = self.form.get_mut();
+        form.set_dismiss_actions(&[DialogControl::NoticeLogClose]);
+        form.set_default_action(DialogControl::NoticeLogClose);
+    }
+}
+
+impl DialogModal for ChangedFilesDialog {
+    dialog_form!(DialogControl);
+
+    fn prepare(&mut self) {
+        let form = self.form.get_mut();
+        form.set_dismiss_actions(&[DialogControl::ChangedFilesClose]);
+        form.set_default_action(DialogControl::ChangedFilesClose);
+    }
 }
 
 impl DialogModal for RenameEditor {
@@ -373,6 +394,8 @@ mode_surfaces!(
     Web,
     WorkspaceManager,
     Rename,
+    ChangedFiles,
+    NoticeLog,
     EditContainer,
     Importing,
     ConfirmImportBundle,

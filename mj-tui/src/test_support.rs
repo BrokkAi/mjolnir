@@ -198,6 +198,7 @@ pub(crate) fn config() -> Config {
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         advanced: Default::default(),
+        notify: Default::default(),
         show_stopped_sessions: false,
         spinner: Default::default(),
         theme: Default::default(),

@@ -368,6 +368,16 @@ impl DashboardState {
         if let Some(action) = self.handle_workspace_pane_key(key) {
             return action;
         }
+        // The Sessions filter takes the keys it is editing with, and its state
+        // letters, before anything else can read them as navigation.
+        if self.focus == Focus::Sessions
+            && self
+                .handle_sessions_filter_key(key, plain && self.session_action_focus.is_none())
+                .is_some()
+        {
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
         match (key.code, command) {
             // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {
@@ -375,10 +385,12 @@ impl DashboardState {
                 self.record_event_handled();
                 return DashboardAction::None;
             }
-            // Escape belongs to the composer and to modals. On a pane it does
-            // nothing: the combined surface is quit with the detach key, and a stray
-            // Escape must never take the whole screen away.
+            // Escape belongs to the composer and to modals. On a pane it only
+            // clears the notice bar: the combined surface is quit with the
+            // detach key, and a stray Escape must never take the whole screen
+            // away.
             (KeyCode::Esc, _) => {
+                self.notices.clear();
                 self.record_event_handled();
                 return DashboardAction::None;
             }

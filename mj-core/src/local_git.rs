@@ -10,6 +10,153 @@ use crate::config::ProjectBundle;
 use crate::remote_git::{NetworkGitSource, display_url, validate_network_url};
 use crate::targets::{CommandExecutor, CommandOutput, CommandSpec};
 
+/// What a session's checkout looks like right now: the branch, how far it
+/// is from its upstream, and the files that differ from HEAD. Produced by the
+/// controller from the target's own `git`, consumed by the session rows and
+/// the changed-files overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionGitStatus {
+    pub checkout: PathBuf,
+    /// The branch name, `detached HEAD`, or a short reason there is none.
+    pub branch: String,
+    /// Commits ahead of and behind the upstream, when there is one.
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub changed: Vec<ChangedFile>,
+}
+
+impl SessionGitStatus {
+    /// The compact form a session row carries beside its target:
+    /// `⎇ main ↑1 ↓2 ±4`. Empty when the checkout is not a repository.
+    pub fn row_text(&self) -> String {
+        self.row_text_with(false)
+    }
+
+    /// [`Self::row_text`] with plain ASCII markers when `ascii` is set:
+    /// `br main +1 -2 ~4`.
+    pub fn row_text_with(&self, ascii: bool) -> String {
+        if self.branch.is_empty()
+            || self.branch.starts_with("not a git")
+            || self.branch.starts_with("unavailable")
+        {
+            return String::new();
+        }
+        let (branch, ahead, behind, changed) = if ascii {
+            ("br", "+", "-", "~")
+        } else {
+            ("⎇", "↑", "↓", "±")
+        };
+        let mut text = format!("{branch} {}", self.branch);
+        if let Some(count) = self.ahead.filter(|ahead| *ahead > 0) {
+            text.push_str(&format!(" {ahead}{count}"));
+        }
+        if let Some(count) = self.behind.filter(|behind| *behind > 0) {
+            text.push_str(&format!(" {behind}{count}"));
+        }
+        if !self.changed.is_empty() {
+            text.push_str(&format!(" {changed}{}", self.changed.len()));
+        }
+        text
+    }
+
+    /// Lines added and removed across every changed file, from what git
+    /// could count (binary files count nothing).
+    pub fn totals(&self) -> (u32, u32) {
+        self.changed.iter().fold((0, 0), |(added, removed), file| {
+            (
+                added + file.added.unwrap_or(0),
+                removed + file.removed.unwrap_or(0),
+            )
+        })
+    }
+}
+
+/// One file that differs from HEAD, as `git status --porcelain` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFile {
+    pub path: String,
+    /// The two-letter porcelain code: `M ` modified in the index, ` M` in the
+    /// worktree, `A ` added, `D ` deleted, `R ` renamed, `??` untracked.
+    pub status: String,
+    /// Lines added and removed against HEAD; `None` for a binary file or one
+    /// git did not count (an untracked file).
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
+impl ChangedFile {
+    /// One word for the change, for a list a person reads.
+    pub fn kind(&self) -> &'static str {
+        match self.status.as_str() {
+            "??" => "new",
+            code if code.starts_with('A') => "added",
+            code if code.starts_with('D') || code.ends_with('D') => "deleted",
+            code if code.starts_with('R') => "renamed",
+            code if code.starts_with('C') => "copied",
+            code if code.contains('U') => "conflict",
+            _ => "modified",
+        }
+    }
+}
+
+/// Builds a [`SessionGitStatus`] from the raw output of four git commands:
+/// `rev-parse --abbrev-ref HEAD`, `rev-list --left-right --count
+/// @{upstream}...HEAD` (or `None` when there is no upstream), `diff --numstat
+/// HEAD`, and `status --porcelain`. Pure, so the parsing has tests that need
+/// no repository.
+pub fn parse_git_status(
+    checkout: PathBuf,
+    branch: &str,
+    ahead_behind: Option<&str>,
+    numstat: &str,
+    porcelain: &str,
+) -> SessionGitStatus {
+    let (behind, ahead) = ahead_behind
+        .and_then(|text| {
+            let mut parts = text.split_whitespace();
+            let behind = parts.next()?.parse::<u32>().ok()?;
+            let ahead = parts.next()?.parse::<u32>().ok()?;
+            Some((behind, ahead))
+        })
+        .map_or((None, None), |(behind, ahead)| (Some(behind), Some(ahead)));
+    let mut counts = std::collections::BTreeMap::new();
+    for line in numstat.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        counts.insert(
+            path.trim().to_owned(),
+            (added.parse::<u32>().ok(), removed.parse::<u32>().ok()),
+        );
+    }
+    let changed = porcelain
+        .lines()
+        .filter(|line| line.len() > 3)
+        .map(|line| {
+            let status = line[..2].to_owned();
+            let path = line[3..].trim();
+            // A rename is written `old -> new`; the new name is the file.
+            let path = path.rsplit(" -> ").next().unwrap_or(path).to_owned();
+            let (added, removed) = counts.get(&path).copied().unwrap_or((None, None));
+            ChangedFile {
+                path,
+                status,
+                added,
+                removed,
+            }
+        })
+        .collect();
+    SessionGitStatus {
+        checkout,
+        branch: branch.trim().to_owned(),
+        ahead,
+        behind,
+        changed,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirtyLocalRepository {
     pub id: String,
@@ -887,5 +1034,39 @@ mod tests {
         );
         let error = resolve_local_repository(ambiguous.path(), &ProcessExecutor).unwrap_err();
         assert!(error.to_string().contains("multiple Git remotes"));
+    }
+
+    #[test]
+    fn git_status_parsing_joins_porcelain_names_with_numstat_counts() {
+        let status = parse_git_status(
+            PathBuf::from("/work"),
+            "feature/x\n",
+            Some("2\t1\n"),
+            "12\t3\tsrc/main.rs\n-\t-\tlogo.png\n0\t5\told.rs\n",
+            " M src/main.rs\n?? notes.md\nR  old.rs -> new.rs\nA  logo.png\n",
+        );
+        assert_eq!(status.branch, "feature/x");
+        assert_eq!((status.behind, status.ahead), (Some(2), Some(1)));
+        assert_eq!(status.changed.len(), 4);
+        let main = &status.changed[0];
+        assert_eq!(
+            (main.path.as_str(), main.kind()),
+            ("src/main.rs", "modified")
+        );
+        assert_eq!((main.added, main.removed), (Some(12), Some(3)));
+        assert_eq!(status.changed[1].kind(), "new");
+        assert_eq!(status.changed[1].added, None);
+        assert_eq!(
+            (status.changed[2].path.as_str(), status.changed[2].kind()),
+            ("new.rs", "renamed")
+        );
+        assert_eq!(status.changed[3].added, None, "binary files count nothing");
+        assert_eq!(status.totals(), (12, 3));
+        assert_eq!(status.row_text(), "⎇ feature/x ↑1 ↓2 ±4");
+
+        let clean = parse_git_status(PathBuf::from("/work"), "main", None, "", "");
+        assert_eq!(clean.row_text(), "⎇ main");
+        let none = parse_git_status(PathBuf::from("/work"), "not a git checkout", None, "", "");
+        assert_eq!(none.row_text(), "");
     }
 }

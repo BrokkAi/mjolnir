@@ -2816,3 +2816,826 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
     assert_eq!(restored.current_session_id(), Some("session-2"));
     assert_eq!(restored.selected_session_id(), Some("session-2"));
 }
+
+/// A form question the agent is waiting on, as the daemon projects it.
+fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
+    mj_core::elicitation::ElicitationRequest::from_acp_params(
+        format!("{session_id}-question"),
+        serde_json::json!({
+            "mode": "form",
+            "sessionId": session_id,
+            "message": "Choose a path",
+            "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+        }),
+    )
+    .expect("valid test question")
+}
+
+/// Three live sessions in the default workspace and one in `other`: `asks`
+/// is waiting on a question, `done` has an unread answer, `quiet` is idle and
+/// read, and `remote` (in `other`) is also waiting on a question.
+fn dashboard_with_attention_mix() -> DashboardState {
+    let mut sessions = BTreeMap::new();
+    for (id, workspace, created) in [
+        ("quiet", "default", "2026-08-01T00:00:00Z"),
+        ("asks", "default", "2026-08-02T00:00:00Z"),
+        ("done", "default", "2026-08-03T00:00:00Z"),
+        ("remote", "other", "2026-08-04T00:00:00Z"),
+    ] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.workspace_id = workspace.into();
+        session.created_at = created.into();
+        session.project_directory = Some(format!("/projects/{id}").into());
+        sessions.insert(session.id.clone(), session);
+    }
+    let mut dashboard = DashboardState::new(
+        config(),
+        State {
+            subagents: Default::default(),
+            version: STATE_VERSION,
+            sessions,
+            mount_history: BTreeMap::new(),
+            container_sizes: BTreeMap::new(),
+        },
+        BTreeMap::new(),
+    );
+    dashboard.set_workspace_names(BTreeMap::from([
+        ("default".into(), "Default".into()),
+        ("other".into(), "Other".into()),
+    ]));
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations = vec![question(id)];
+    }
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .unread_agent_messages = 1;
+    dashboard
+}
+
+#[test]
+fn attention_levels_rank_a_question_above_unread_above_idle() {
+    let dashboard = dashboard_with_attention_mix();
+    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Waiting);
+    assert_eq!(dashboard.attention_level("done"), AttentionLevel::Unread);
+    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Idle);
+    assert_eq!(
+        dashboard.attention_level("missing"),
+        AttentionLevel::Inactive
+    );
+    let queue = dashboard
+        .attention_queue()
+        .into_iter()
+        .map(|entry| entry.session_id)
+        .collect::<Vec<_>>();
+    // Both questions lead; the unread answer follows; the idle session is
+    // not in the queue at all.
+    assert_eq!(queue.len(), 3);
+    assert!(queue[..2].contains(&"asks".to_owned()));
+    assert!(queue[..2].contains(&"remote".to_owned()));
+    assert_eq!(queue[2], "done");
+}
+
+#[test]
+fn next_attention_opens_the_waiting_session_and_wraps_through_the_queue() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Make the local question the newest so it leads the queue.
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    dashboard
+        .session_details
+        .get_mut("remote")
+        .unwrap()
+        .last_activity_at_ms = Some(10);
+    dashboard.select_active_session("quiet");
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+    assert_eq!(dashboard.selected_session_id(), Some("asks"));
+    assert!(dashboard.prompt_has_focus());
+
+    // The next entry lives in another workspace: the dashboard records it as
+    // that workspace's selection and asks the host to switch tabs.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("remote"));
+
+    // From the last entry, previous walks back and next wraps to the front.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::PreviousAttention),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "default".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("default".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("asks"));
+    dashboard.select_active_session("done");
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+}
+
+#[test]
+fn next_attention_reports_an_empty_queue_and_unfolds_a_folded_project() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let key = dashboard
+        .project_source(&dashboard.state.sessions["asks"])
+        .key;
+    dashboard.toggle_project(&key);
+    assert!(dashboard.collapsed_project_keys.contains(&key));
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    // From a session outside the queue, the walk starts at the front.
+    dashboard.select_active_session("quiet");
+    let action = chord(&mut dashboard, CommandId::NextAttention);
+    assert_eq!(
+        action,
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+    assert!(!dashboard.collapsed_project_keys.contains(&key));
+
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .unread_agent_messages = 0;
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.notices.current().as_deref(),
+        Some("Nothing is waiting for you.")
+    );
+}
+
+#[test]
+fn the_footer_names_the_next_key_only_while_something_waits() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let footer = lines.last().unwrap();
+    assert!(footer.contains("o next (3)"), "{footer}");
+
+    let mut quiet = dashboard_with_session(running_session());
+    let lines = drawn(&mut quiet, 120, 40);
+    assert!(
+        !lines.last().unwrap().contains("next ("),
+        "{}",
+        lines.last().unwrap()
+    );
+}
+
+#[test]
+fn workspace_tabs_and_folded_headings_carry_attention_badges() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let tabs = lines
+        .iter()
+        .find(|line| line.contains("Default") && line.contains("Other"))
+        .expect("workspace tab row");
+    assert!(tabs.contains("Default !1"), "{tabs}");
+    assert!(tabs.contains("Other !1"), "{tabs}");
+
+    // Folding the project that holds the unread session puts its count on
+    // the heading; an unfolded project shows the rows instead.
+    let key = dashboard
+        .project_source(&dashboard.state.sessions["done"])
+        .key;
+    dashboard.toggle_project(&key);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let heading = lines
+        .iter()
+        .find(|line| line.contains("done ✓1"))
+        .unwrap_or_else(|| panic!("folded heading with badge: {lines:#?}"));
+    assert!(heading.contains("done ✓1"));
+}
+
+#[test]
+fn priority_order_lists_waiting_first_without_project_headings() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let mut config = dashboard.config.clone();
+    config.advanced.session_order = mj_core::config::SessionOrder::Priority;
+    dashboard.set_config(config);
+
+    let ids = dashboard
+        .ordered_sessions()
+        .into_iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["asks", "done", "quiet"]);
+    assert!(
+        dashboard
+            .sessions_rows()
+            .iter()
+            .all(|row| matches!(row, SessionsRow::Session { .. })),
+        "priority order has no project headings"
+    );
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('1')));
+    assert!(dashboard.collapsed_project_keys.is_empty());
+    assert!(
+        dashboard
+            .notices
+            .current()
+            .as_deref()
+            .is_some_and(|notice| notice.contains("priority order"))
+    );
+
+    // Answering the question drops the session below the unread one.
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .pending_elicitations
+        .clear();
+    let ids = dashboard
+        .ordered_sessions()
+        .into_iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids[0], "done");
+}
+
+#[test]
+fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "qui".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Sessions · /qui")),
+        "{lines:#?}"
+    );
+
+    // Enter keeps the filter and returns the letters to the pane; `j` moves
+    // again instead of typing.
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+
+    // A query nothing matches says so instead of showing an empty pane.
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "zzz".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert!(ids(&dashboard).is_empty());
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("No sessions match")),
+        "{lines:#?}"
+    );
+
+    // Esc clears the text, and Esc again drops the filter.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(ids(&dashboard), ["asks"]);
+    dashboard.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(ids(&dashboard), ["done"]);
+    dashboard.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Sessions · idle")),
+        "{lines:#?}"
+    );
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    assert!(dashboard.sessions_filter.is_none());
+
+    // The state filter and the text filter compose.
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Char('q')));
+    assert!(ids(&dashboard).is_empty());
+    dashboard.handle_key(key(KeyCode::Backspace));
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        ids(&dashboard),
+        ["asks"],
+        "typing `a` edits the query while editing"
+    );
+
+    // Jumping to a session the filter hides drops the filter: with both
+    // questions answered, `done` (unread, hidden by the blocked filter) is
+    // the only entry left in the queue.
+    dashboard.handle_key(key(KeyCode::Enter));
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "done".into()
+        }
+    );
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    open_palette(&mut dashboard);
+    for character in "cre".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    let Mode::Palette(palette) = &dashboard.mode else {
+        panic!("palette open");
+    };
+    assert_eq!(palette.entries[0].id, CommandId::NewSessionWizard);
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    // A subsequence query ranks a word-start match above a description hit.
+    open_palette(&mut dashboard);
+    for character in "mvs".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    let Mode::Palette(palette) = &dashboard.mode else {
+        panic!("palette open");
+    };
+    assert_eq!(
+        palette.entries[0].id,
+        CommandId::MoveSession,
+        "{:?}",
+        palette.entries
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    // Running a command puts it under Recent the next time the palette opens
+    // with an empty query.
+    chord(&mut dashboard, CommandId::MarkAllRead);
+    open_palette(&mut dashboard);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let recent = lines
+        .iter()
+        .position(|line| line.contains("Recent"))
+        .expect("Recent heading");
+    assert!(lines[recent + 1].contains("Mark all read"), "{lines:#?}");
+}
+
+#[test]
+fn stop_and_restart_ask_only_while_the_agent_is_working() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    // Idle: both run at once.
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::StopSession),
+        DashboardAction::Close {
+            session_id: "session-1".into()
+        }
+    );
+    // Working: both ask, and the letter for the second button answers.
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    assert_eq!(
+        dashboard.attention_level("session-1"),
+        AttentionLevel::Working
+    );
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::StopSession),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Stop while working?")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("c Cancel") && line.contains("s Stop now")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('s'))),
+        DashboardAction::Close {
+            session_id: "session-1".into()
+        }
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+
+    assert_eq!(
+        dashboard.dispatch_command(CommandId::RestartSession),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('c'))),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn every_confirmation_button_answers_a_unique_letter() {
+    use crate::dialogs::render::confirmation_accelerators;
+    assert_eq!(
+        confirmation_accelerators(&["No", "Yes", "Yes, delete branch"]),
+        ['n', 'y', 'd']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Cancel", "Confirm"]),
+        ['c', 'o']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Dismiss", "Open transcript", "Open settings"]),
+        ['d', 'o', 's']
+    );
+    assert_eq!(
+        confirmation_accelerators(&["Cancel", "Force stop", "Retry stop"]),
+        ['c', 'f', 'r']
+    );
+
+    // The delete dialog's third button is reachable by its letter.
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    dashboard.dispatch_command(CommandId::ForceDestroySession);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("d Yes, delete branch")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('d'))),
+        DashboardAction::ForceDestroy {
+            session_id: "session-1".into(),
+            delete_branch: true
+        }
+    );
+}
+
+#[test]
+fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    chord(&mut dashboard, CommandId::Help);
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Char('x')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()),
+        "{:?}",
+        dashboard.mode
+    );
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+
+    dashboard.set_notice("Something happened.");
+    assert!(dashboard.notices.current().is_some());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.notices.current(), None);
+}
+
+fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
+    mj_core::local_git::parse_git_status(
+        std::path::PathBuf::from("/work"),
+        "feature/x",
+        Some("2\t1"),
+        "12\t3\tsrc/main.rs\n",
+        " M src/main.rs\n?? notes.md\n",
+    )
+}
+
+#[test]
+fn session_rows_carry_the_branch_once_the_checkout_was_read() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
+
+    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  ⎇ feature/x ↑1 ↓2 ±2")),
+        "{lines:#?}"
+    );
+    // A narrow sidebar keeps the branch and drops the counts.
+    let lines = drawn(&mut dashboard, 100, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  ⎇ feature/x") && !line.contains("±2")),
+        "{lines:#?}"
+    );
+    // A checkout that is not a repository adds nothing to the row.
+    dashboard.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/work".into(),
+            "not a git checkout",
+            None,
+            "",
+            "",
+        )),
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
+}
+
+#[test]
+fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    let start = std::time::Instant::now();
+    assert_eq!(dashboard.git_probe_candidates(start), ["session-1"]);
+    assert!(dashboard.git_probe_candidates(start).is_empty());
+    assert!(
+        dashboard
+            .git_probe_candidates(start + std::time::Duration::from_secs(30))
+            .is_empty()
+    );
+    assert_eq!(
+        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61)),
+        ["session-1"]
+    );
+    // A stopped session's target is gone, so there is nothing to read.
+    dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
+    assert!(
+        dashboard
+            .git_probe_candidates(start + std::time::Duration::from_secs(200))
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ChangedFiles),
+        DashboardAction::ProbeGitStatus {
+            session_id: "session-1".into()
+        }
+    );
+    assert!(matches!(dashboard.mode, Mode::ChangedFiles(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Reading the checkout")),
+        "{lines:#?}"
+    );
+
+    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("modified")
+            && line.contains("src/main.rs")
+            && line.contains("+12 −3")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("new") && line.contains("notes.md")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("2 files · +12 −3")),
+        "{lines:#?}"
+    );
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('r'))),
+        DashboardAction::ProbeGitStatus {
+            session_id: "session-1".into()
+        }
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+
+    // Without a running target the command explains itself instead of
+    // opening an overlay that can never fill.
+    dashboard
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .target = None;
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("Changed files ·")));
+    assert!(matches!(
+        (crate::actions::spec(CommandId::ChangedFiles).available)(&dashboard),
+        crate::actions::Availability::Blocked(_)
+    ));
+}
+
+#[test]
+fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.set_git_status("asks".into(), Ok(git_status_fixture()));
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    dashboard.set_config(config);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let offenders = lines
+        .iter()
+        .flat_map(|line| line.chars())
+        .filter(|character| !character.is_ascii())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        offenders.is_empty(),
+        "non-ASCII glyphs drawn: {offenders:?}\n{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("+---")),
+        "ASCII borders: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  br feature/x")),
+        "{lines:#?}"
+    );
+    let wide = drawn(&mut dashboard, 160, 40);
+    assert!(
+        wide.iter()
+            .any(|line| line.contains("br feature/x +1 -2 ~2")),
+        "{wide:#?}"
+    );
+    // The chord hints are joined by the ASCII separator.
+    assert!(
+        wide.last().unwrap().contains("c create - g resume"),
+        "ASCII footer separators: {}",
+        wide.last().unwrap()
+    );
+
+    // The default set is unchanged.
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_config(config);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(lines.iter().any(|line| line.contains("╭")), "{lines:#?}");
+}
+
+#[test]
+fn the_monochrome_theme_draws_every_surface_without_colors() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let mut config = dashboard.config.clone();
+    config.theme = mj_core::config::UiTheme::Mono;
+    dashboard.set_config(config);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let colored = buffer
+        .content()
+        .iter()
+        .filter(|cell| {
+            cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
+        })
+        .count();
+    assert_eq!(colored, 0, "monochrome must paint no colors");
+    // The selected row still stands out, by reverse video.
+    let lines = buffer_lines(buffer);
+    let (column, row) = point(&lines, "› ");
+    assert!(
+        buffer[(column, row)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "selection is reverse video in mono"
+    );
+    open_palette(&mut dashboard);
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Esc));
+    chord(&mut dashboard, CommandId::Help);
+    drawn(&mut dashboard, 120, 40);
+}
+
+#[test]
+fn the_notice_log_lists_notices_newest_first_and_stacked_failures() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    dashboard.set_notice("Profile quotas refreshed.");
+    dashboard.set_failure_notice("Resume failed: archive missing");
+    dashboard.set_failure_notice("Move failed: target unreachable");
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .contains("2 failures · latest: Move failed: target unreachable"),
+        "{}",
+        lines.last().unwrap()
+    );
+    dashboard.dispatch_command(CommandId::NoticeLog);
+    assert!(matches!(dashboard.mode, Mode::NoticeLog(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let newest = lines
+        .iter()
+        .position(|line| line.contains("Move failed: target unreachable"))
+        .expect("newest failure");
+    let older = lines
+        .iter()
+        .position(|line| line.contains("Resume failed: archive missing"))
+        .expect("older failure");
+    let oldest = lines
+        .iter()
+        .position(|line| line.contains("Profile quotas refreshed."))
+        .expect("plain notice");
+    assert!(newest < older && older < oldest, "{lines:#?}");
+    assert!(lines[newest].contains("ago"), "{lines:#?}");
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+}
