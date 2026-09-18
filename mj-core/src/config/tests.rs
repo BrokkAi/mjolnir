@@ -2020,7 +2020,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     println!("{saved}");
-    assert!(saved.starts_with("version = 11"), "{saved}");
+    assert!(saved.starts_with("version = 12"), "{saved}");
     for expected in [
         "[machines.local]",
         "[machines.local.build_cache]",
@@ -2043,12 +2043,26 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
 }
 
 #[test]
-fn a_version_eleven_config_refuses_the_old_fused_kinds() {
+fn the_current_version_refuses_the_old_fused_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
+    // Version 11 is the last one that may still name a fused kind, because
+    // that version belongs to the key-binding change rather than this split.
     fs::write(
         &path,
         "version = 11\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Config::load_from(&path).unwrap().targets["podman"],
+        TargetTemplate::LocalPodman { .. }
+    ));
+
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n"
+        ),
     )
     .unwrap();
     let error = format!("{:#}", Config::load_from(&path).unwrap_err());
@@ -2062,7 +2076,9 @@ fn a_runtime_must_name_a_machine_that_exists() {
     let error = format!(
         "{:#}",
         toml::from_str::<Config>(
-            "version = 11\n[targets.remote]\nkind = \"podman\"\nmachine = \"builder\"\nimage = \"a:1\"\n"
+            &format!(
+                "version = {CONFIG_VERSION}\n[targets.remote]\nkind = \"podman\"\nmachine = \"builder\"\nimage = \"a:1\"\n"
+            )
         )
         .unwrap_err()
     );
@@ -2092,7 +2108,7 @@ fn settings_that_belong_to_a_machine_are_refused_on_a_runtime() {
     ] {
         let error = format!(
             "{:#}",
-            toml::from_str::<Config>(&format!("version = 11\n{body}"))
+            toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{body}"))
                 .map_err(anyhow::Error::from)
                 .and_then(|config| config.validate())
                 .unwrap_err()

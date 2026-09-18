@@ -57,14 +57,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 11
+version = 12
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `11`. |
+| `version` | integer | yes | none | Configuration schema version; use `12`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -85,7 +85,7 @@ The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
 **Interface**. This is only a presentation grouping; the fields remain at the
 top level in `config.toml`.
 
-A missing or empty file is treated as an empty version 11 configuration. Older
+A missing or empty file is treated as an empty version 12 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -660,15 +660,15 @@ EXAMPLE = "value"
 All common fields except a non-default `workspace_storage` are supported. Apple
 `container` runs only on this machine. See [Apple container](/apple-container/).
 
-### Files written before version 11
+### Files written before version 12
 
-Before version 11 one `[targets.<id>]` table fused the machine and the runtime,
+Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
 with kinds named `local-bare`, `local-podman`, `local-docker`,
 `apple-container`, `ssh-bare`, `ssh-podman`, `ssh-docker`, and `aws-ec2`.
-Mjolnir still reads such a file when its `version` is 10 or lower: it derives
+Mjolnir still reads such a file when its `version` is 11 or lower: it derives
 the machines, moves each container's `build_cache` onto the machine that owns
 it, and writes the new shape on the next save. A file that already says
-`version = 11` must use the new kinds; an old one is refused with the spelling
+`version = 12` must use the new kinds; an old one is refused with the spelling
 to write instead.
 
 ## Complete compact example
@@ -678,7 +678,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 11
+version = 12
 
 [phone]
 enabled = true

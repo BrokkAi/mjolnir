@@ -241,7 +241,7 @@ class AcceptanceLab:
             "-o", f"UserKnownHostsFile={connection['known_hosts']}",
         ]
         lines = [
-            "version = 11",
+            "version = 12",
             "",
             "[phone]",
             "enabled = true",

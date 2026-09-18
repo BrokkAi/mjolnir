@@ -639,7 +639,7 @@ for line in sys.stdin:
                 f"tls_cert = {json.dumps(str(certificate))}\n"
                 f"tls_key = {json.dumps(str(private_key))}\n"
             )
-        config = f'''version = 11
+        config = f'''version = 12
 
 [phone]
 enabled = true

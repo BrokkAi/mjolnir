@@ -571,7 +571,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Manage machines",
         description: "Add SSH hosts or EC2 launch templates and edit their shared settings.",
         scope: Scope::Settings,
-        keys: &[],
+        pane_keys: &[],
+        // The palette reaches this page; it has no key binding of its own.
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,

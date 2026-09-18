@@ -22,6 +22,9 @@ Nothing remains. The only places that still spell a fused kind are the ones that
 
 ## Surprises & Discoveries
 
+- Observation: merging `origin/master` produced a semantic conflict that git could not see. Upstream's new `CommandSpec` replaced `keys` with `pane_keys` plus an optional configurable `action`, and the "Manage machines" command this work added still used the old field. The textual merge succeeded and the build then failed.
+  Evidence: `error[E0560]: struct 'actions::CommandSpec' has no field named 'keys' ... available fields are: 'pane_keys', 'action'`. The command now takes `pane_keys: &[]` and `action: None`, because it is reachable from the palette and has no key binding of its own.
+
 - Observation: an error raised inside `TryFrom<StoredConfig> for Config` reaches the caller as a plain string, because the TOML and JSON deserializers turn it into their own error through `Error::custom(message.to_string())`, which keeps no `anyhow` source chain. `.context(...)` therefore disappeared and only the outermost sentence survived.
   Evidence: the first run of `raw_ssh_permissions_are_required_and_podman_rejects_them` failed with `parse Mjolnir config /tmp/.../config.toml: target "builder" (ssh-bare)`, with serde's own `missing field 'permissions'` missing from the text. Every message these conversions raise now embeds the detail directly (`anyhow!("target {id:?} ({kind}): {error}")`).
 
@@ -41,6 +44,10 @@ Nothing remains. The only places that still spell a fused kind are the ones that
   Evidence: `git checkout docs/src/content/docs/ssh.md` answered `pathspec ... did not match any file(s) known to git`, and `git check-ignore -v` pointed at `.gitignore:57`. The edits were redone on the four sources, the page titles in `sync-podman.mjs` were updated, and `node scripts/sync-podman.mjs` regenerated the pages.
 
 ## Decision Log
+
+- Decision: after merging `origin/master`, `CONFIG_VERSION` is 12, not 11, and a file at version 11 or lower may still use the fused target kinds.
+  Rationale: upstream bumped the version to 11 for its own reason, the new `[keys]` section, while this work bumped it to 11 for the machines/runtimes split. Two different meanings for one number would make an upstream-written version 11 file, which legitimately still carries fused kinds, fail to load here. Taking 12 keeps both changes and moves the "old kinds are refused" line to where it belongs.
+  Date/Author: 2026-09-17, Fable.
 
 - Decision: `CacheHost` carries no container engine, and `git_cache`'s `managed_sessions` takes the engine name as an argument instead.
   Rationale: the plan's `CacheHost::Local | Ssh` is a machine, but `mj-controller/src/controller/git_cache.rs` used the old five variants to choose between `podman ps`, `docker ps` and `container list`. The engine belongs to the runtime, and `targets::TargetTemplate::container_engine()` already names it, so the caller in `prepare` passes it down.
@@ -62,7 +69,7 @@ Nothing remains. The only places that still spell a fused kind are the ones that
   Rationale: failing the load would lock the user out of the Settings screen they need to fix it. The user's stated intent is that these settings were never meaningfully separable.
   Date/Author: 2026-09-17, Fable.
 
-- Decision: Legacy target kinds (`local-bare`, `local-podman`, `local-docker`, `apple-container` under `targets` without a `machine`, `ssh-bare`, `ssh-podman`, `ssh-docker`, `aws-ec2`) are accepted only when the file's `version` is 10 or lower. A version 11 file that uses them is rejected with a message naming the target and the new spelling.
+- Decision: Legacy target kinds (`local-bare`, `local-podman`, `local-docker`, `apple-container` under `targets` without a `machine`, `ssh-bare`, `ssh-podman`, `ssh-docker`, `aws-ec2`) are accepted only when the file's `version` is below the split's version. A file at the split's version that uses them is rejected with a message naming the target and the new spelling. (The split's version became 12 on merging upstream; see the first entry in this log.)
   Rationale: accepting both spellings forever would leave two ways to write the same thing; the version number already exists to gate this.
   Date/Author: 2026-09-17, Fable.
 
@@ -82,7 +89,7 @@ Nothing remains. The only places that still spell a fused kind are the ones that
   Rationale: a legacy `[targets.<id>]` table parses into exactly the fused enum, so migrating a file and saving an in-memory config are the same operation. One implementation cannot drift from the other.
   Date/Author: 2026-09-17, Fable.
 
-- Decision: Config version 11 is a breaking file change for older builds, handled by the existing `newer_version` guard which makes an older build refuse to load or overwrite the file with a clear "Update Mjolnir" message.
+- Decision: The split's config version is a breaking file change for older builds, handled by the existing `newer_version` guard which makes an older build refuse to load or overwrite the file with a clear "Update Mjolnir" message.
   Rationale: this is the established mechanism in `Config::load_from` and `Config::ensure_writable`; no new mechanism is needed.
   Date/Author: 2026-09-17, Fable.
 
