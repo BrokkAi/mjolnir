@@ -344,13 +344,17 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         panic!("Codex receives the Mjolnir sub-agent MCP server");
     };
     assert_eq!(server.name, "mj-agents");
+    // The harness travels with the server because its own MCP client decides
+    // how long one `wait` call may stay open.
     assert_eq!(
         server.args,
         [
             "worker",
             "subagent-mcp",
             "--socket",
-            "/worker/subagents.sock"
+            "/worker/subagents.sock",
+            "--harness",
+            "codex"
         ]
     );
 }

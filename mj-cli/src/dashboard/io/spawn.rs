@@ -562,9 +562,12 @@ pub(crate) fn save_setup_at(
         // The editor includes implicit local defaults. Treat those same defaults
         // as the merge base when they have not been written to disk yet.
         let defaults = Config::default().with_local_targets();
+        // Compare in the stored shape the editor works in, where a runtime
+        // names its machine, rather than in the fused in-memory shape.
+        let stored_defaults = serde_json::to_value(&defaults)?;
         for (id, target) in defaults.targets {
             if !config.targets.contains_key(&id)
-                && original["targets"][&id] == serde_json::to_value(&target)?
+                && original["targets"][&id] == stored_defaults["targets"][&id]
             {
                 config.targets.insert(id, target);
             }

@@ -7,19 +7,19 @@ Mjolnir gives coding agents the ability to execute commands. Its security model
 is therefore a set of explicit boundaries, not a promise that agent-generated
 commands are harmless.
 
-The central rule is simple: **raw targets preserve approvals; isolated targets
-run unrestricted.** A disposable boundary limits damage to the target, but it
-does not prevent the agent or its model provider from reading data and
-credentials intentionally placed inside that boundary.
+The central rule is simple: **bare runtimes preserve approvals; isolated
+runtimes run unrestricted.** A disposable boundary limits damage to the
+runtime, but it does not prevent the agent or its model provider from reading
+data and credentials intentionally placed inside that boundary.
 
-## Execution policy is selected by the target
+## Execution policy is selected by the runtime
 
-| Target kind | Policy |
+| Runtime | Policy |
 | --- | --- |
-| `local-bare` | Preserve the selected profile and harness's configured approvals |
-| `ssh-bare` with `permissions = "guardian"` | Preserve configured approvals |
-| `ssh-bare` with `permissions = "yolo"` | Force unconstrained execution |
-| `local-podman`, `local-docker`, `apple-container`, `ssh-podman`, `aws-ec2` | Force unconstrained execution |
+| `bare` on the `local` machine | Preserve the selected profile and harness's configured approvals |
+| `bare` on an `ssh` machine with `permissions = "guardian"` | Preserve configured approvals |
+| `bare` on an `ssh` machine with `permissions = "yolo"` | Force unconstrained execution |
+| `podman`, `docker`, `apple-container`, and `bare` on an `aws-ec2` machine | Force unconstrained execution |
 
 Mjolnir translates the unconstrained policy into the selected harness's own
 controls:
@@ -36,7 +36,7 @@ Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
 Codex, Claude Code, and Grok Build can preserve guardian-style approvals on a
-raw target. Kimi Code cannot, and neither can Muse Code: its permission
+bare runtime. Kimi Code cannot, and neither can Muse Code: its permission
 profile is a host-lifetime setting that the wire cannot select,
 so every Muse session runs unconstrained. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a

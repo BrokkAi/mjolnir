@@ -325,6 +325,9 @@ impl Default for FakeWorkspaces {
 /// A hand-written backend. Mocking the trait would only re-state its
 /// signature; this returns the exact observations each test needs and
 /// records what the handlers asked for.
+/// The child id the fake backend reports for a spawn.
+const SPAWNED_CHILD: &str = "spawned-child-1";
+
 #[derive(Default)]
 struct FakeBackend {
     workspaces: FakeWorkspaces,
@@ -450,6 +453,26 @@ impl SubagentBackend for FakeBackend {
             self.summary
                 .clone()
                 .context("this fake has no turn summary")
+        })
+    }
+    fn start_subagent(
+        &self,
+        request: crate::controller::RegisterSubagentRequest,
+    ) -> BoxFuture<'_, AnyResult<mj_core::subagent::SubagentRecord>> {
+        Box::pin(async move {
+            Ok(mj_core::subagent::SubagentRecord {
+                child_session_id: SPAWNED_CHILD.to_owned(),
+                parent_session_id: request.parent_session_id,
+                task_name: request.task_name,
+                profile_id: request.profile_id,
+                model: request.model,
+                effort: request.effort,
+                working_directory: request.working_directory,
+                initial_prompt: request.initial_prompt,
+                request_key: request.request_key,
+                created_at: "2026-09-18T00:00:00Z".to_owned(),
+                noticed_turn: None,
+            })
         })
     }
     fn start_followup(
@@ -2541,4 +2564,55 @@ fn a_wait_follows_a_running_resume_and_reports_why_a_failed_one_stopped() {
         decision.message.as_deref(),
         Some("resume failed: checkpoint archive is missing")
     );
+}
+
+/// The child a spawn creates is not in the viewer snapshot yet: that snapshot
+/// is republished on a tick. Answering "unknown session" for a spawn that
+/// succeeded told the caller its child does not exist while the child was
+/// starting, and invited it to spawn a second one.
+#[tokio::test]
+async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown() {
+    let (app, _actions, snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions[0].harness_kind = "codex".to_owned();
+        });
+    let parent = {
+        let snapshot = snapshot_tx.borrow();
+        snapshot.sessions[0].id.clone()
+    };
+
+    // The child reaches the snapshot a moment after the spawn returns from the
+    // controller, which is what happens in a live daemon.
+    let publisher = tokio::spawn({
+        let snapshot_tx = snapshot_tx.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let mut snapshot = snapshot_tx.borrow().clone();
+            let mut child = snapshot.sessions[0].clone();
+            child.id = SPAWNED_CHILD.to_owned();
+            child.title = "spawned child".to_owned();
+            snapshot.sessions.push(child);
+            snapshot_tx.send_replace(snapshot);
+        }
+    });
+
+    let response = app
+        .oneshot(
+            bearer(Request::post(format!(
+                "/api/v1/sessions/{parent}/subagents"
+            )))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_name":"probe","instructions":"say ready","request_key":"probe-1"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    publisher.await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = json_body(response).await;
+    assert_eq!(body["session"]["id"], SPAWNED_CHILD);
+    assert_eq!(body["task_name"], "probe");
 }

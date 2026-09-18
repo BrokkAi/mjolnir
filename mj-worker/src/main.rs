@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use mj_checkpoint::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use mj_core::worker_launch::WorkerLaunchConfig;
 use mj_worker::worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
-    run_daemon,
+    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, record_startup_step,
+    run_acp_supervisor, run_daemon,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -104,6 +104,10 @@ enum WorkerCommand {
     SubagentMcp {
         #[arg(long)]
         socket: PathBuf,
+        /// The parent's harness, whose MCP client decides how long a single
+        /// `wait` may stay open. Omitted means no harness-specific ceiling.
+        #[arg(long)]
+        harness: Option<mj_core::config::HarnessKind>,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -149,11 +153,23 @@ enum WorkerCommand {
 }
 
 fn write_worker_exit_record(root: &Path, reason: &str) {
+    write_worker_exit_record_with_refusal(root, reason, None);
+}
+
+/// The exit record, plus the sentence a refusal wants the person who asked to
+/// read.
+///
+/// A worker refuses before it has a control socket, so this file is its only
+/// way to say anything. The controller lifts `refusal` back onto the error
+/// chain, which turns the failure into a 409 carrying this text instead of a
+/// generic 500.
+fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Option<&str>) {
     if !root.is_dir() {
         return;
     }
     let record = serde_json::json!({
         "reason": reason,
+        "refusal": refusal,
         "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "version": env!("CARGO_PKG_VERSION"),
     });
@@ -164,7 +180,7 @@ fn write_worker_exit_record(root: &Path, reason: &str) {
             return;
         }
     };
-    if let Err(error) = std::fs::write(root.join("worker-exit.json"), bytes) {
+    if let Err(error) = std::fs::write(root.join(mj_core::relay::WORKER_EXIT_FILE), bytes) {
         eprintln!("Mjolnir: could not write worker exit record: {error}");
     }
 }
@@ -273,6 +289,9 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         } else {
             std::env::current_exe()?
         };
+        if let WorkerCommand::Run { root, .. } = &args.command {
+            record_startup_step(root, "re-exec");
+        }
         let mut arguments = std::env::args_os();
         let argv0 = arguments
             .next()
@@ -306,8 +325,9 @@ fn main() -> Result<()> {
     };
     if let Some(root) = &exit_root {
         install_worker_last_words(root);
+        record_startup_step(root, "start");
     }
-    let result = run_worker(cli);
+    let result = run_worker(cli, exit_root.as_deref());
     if let Err(error) = &result
         && let Some(refusal) = error.downcast_ref::<ExportRefused>()
     {
@@ -319,7 +339,12 @@ fn main() -> Result<()> {
     }
     if let Err(error) = &result {
         if let Some(root) = &exit_root {
-            write_worker_exit_record(root, &format!("{error:#}"));
+            let refusal = mj_core::refusal::Refusal::of(error);
+            write_worker_exit_record_with_refusal(
+                root,
+                &format!("{error:#}"),
+                refusal.as_ref().map(mj_core::refusal::Refusal::message),
+            );
         }
         tracing::error!(
             error = format!("{error:#}"),
@@ -329,8 +354,14 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_worker(cli: Cli) -> Result<()> {
+fn run_worker(cli: Cli, exit_root: Option<&Path>) -> Result<()> {
+    if let Some(root) = exit_root {
+        record_startup_step(root, "login-environment");
+    }
     bootstrap_login_environment(&cli).context("initialize worker environment")?;
+    if let Some(root) = exit_root {
+        record_startup_step(root, "runtime");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -385,7 +416,9 @@ async fn run_command(command: Command) -> Result<()> {
         }
         WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
-        WorkerCommand::SubagentMcp { socket } => mj_worker::subagent_mcp::run_mcp_stdio(&socket),
+        WorkerCommand::SubagentMcp { socket, harness } => {
+            mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness)
+        }
         WorkerCommand::Diff {
             repository,
             base,

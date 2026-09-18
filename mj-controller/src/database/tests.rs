@@ -4347,3 +4347,103 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     assert!(empty.items.is_empty());
     assert_eq!(empty.next_after_seq, 6);
 }
+
+/// A parent, a child, and the relation between them, written the way the
+/// controller writes them.
+fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
+    let parent = session("11111111111111111111111111111111", "bundle-1");
+    let mut child = session("22222222222222222222222222222222", "bundle-1");
+    child.title = "child session".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "probe".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "say ready".into(),
+            request_key: "probe-1".into(),
+            created_at: "2026-09-18T00:00:00Z".into(),
+            noticed_turn: None,
+        },
+    );
+    save_state_to(path, &state).unwrap();
+    (parent, child)
+}
+
+/// Deleting a child takes its sub-agent relation with it, so this is not how
+/// a relation is left behind. Kept as the control for the test below.
+#[test]
+fn deleting_a_child_session_deletes_its_subagent_relation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hel.sqlite3");
+    let (_parent, child) = subagent_pair(&path);
+
+    delete_session_from(&path, &child.id).unwrap();
+
+    let state = load_state_from(&path).unwrap();
+    assert!(!state.sessions.contains_key(&child.id));
+    assert!(
+        state.subagents.is_empty(),
+        "the foreign key cascade removes the relation with the child"
+    );
+}
+
+/// A sub-agent relation with no child session refuses the whole state load,
+/// and every later operation fails with it. That is how a spawn came to be
+/// answered "sub-agent ... has no child session" long after the child in
+/// question was gone (#1065).
+///
+/// The row is seeded with the foreign key off, because the schema's cascade is
+/// what normally prevents it; the point of the test is what the load does when
+/// the row exists anyway, whatever left it there.
+#[test]
+fn a_subagent_relation_with_no_session_does_not_refuse_the_whole_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hel.sqlite3");
+    let (parent, child) = subagent_pair(&path);
+
+    let connection = open(&path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .unwrap();
+    connection
+        .execute("DELETE FROM sessions WHERE session_id = ?1", [&child.id])
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        count_rows(&path, "subagent_sessions"),
+        1,
+        "the residue this test is about"
+    );
+
+    let state = load_state_from(&path).expect("residue must not refuse the load");
+
+    assert!(state.sessions.contains_key(&parent.id));
+    assert!(
+        state.subagents.is_empty(),
+        "a relation with no child session describes nothing and is dropped"
+    );
+    state
+        .validate()
+        .expect("the loaded state must pass its own check");
+
+    // The next save clears the row durably, so the residue does not come back.
+    save_state_to(&path, &state).unwrap();
+    assert_eq!(count_rows(&path, "subagent_sessions"), 0);
+}
+
+fn count_rows(path: &Path, table: &str) -> i64 {
+    let connection = open(path).unwrap();
+    connection
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}

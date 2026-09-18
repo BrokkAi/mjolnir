@@ -365,6 +365,39 @@ pub(super) fn podman_pull_argument(template: &ContainerTemplate) -> Option<Strin
         .then(|| format!("--pull={}", pull_policy.podman_value()))
 }
 
+/// Processes and threads a Mjolnir session container may hold.
+///
+/// Podman and Docker default to 2048, which was never a choice Mjolnir made
+/// and is far too small for what it puts in one container. Measured on a
+/// local Podman target: one session's tree is about 700 threads, because its
+/// worker, its ACP supervisor and the harness's own Node process each hold a
+/// thread pool sized to the host's CPU count. Two sessions in a container had
+/// already taken 1521 of the 2048, and a parent may hold six sub-agent
+/// children by default, which needs roughly 4,900.
+///
+/// Past the limit every `fork` fails with EAGAIN, which reached users as
+/// "sh: 1: Cannot fork", as "Resource temporarily unavailable" launching the
+/// ACP bridge, and as sub-agent starts that simply never reported a harness
+/// inside their 300-second wait. A limit is not a reservation, so this costs
+/// nothing until the container actually needs the room.
+const CONTAINER_PIDS_LIMIT: u32 = 8192;
+
+/// The pids-limit flag for a Mjolnir-created container, unless the template
+/// already sets one: an operator who chose a number keeps it.
+fn container_pids_limit_args(engine: &str, template: &ContainerTemplate) -> Vec<String> {
+    if !matches!(engine, "podman" | "docker") {
+        return Vec::new();
+    }
+    if template
+        .extra_run_args
+        .iter()
+        .any(|argument| argument.starts_with("--pids-limit"))
+    {
+        return Vec::new();
+    }
+    vec![format!("--pids-limit={CONTAINER_PIDS_LIMIT}")]
+}
+
 // Every argument is an independent input the engine needs: the template, the
 // resource identity, the mounts, and the workspace the session runs in.
 #[allow(clippy::too_many_arguments)]
@@ -397,6 +430,7 @@ pub(super) fn container_run_args(
         args.push(format!("--pull={pull}"));
         args.push("--init".to_owned());
     }
+    args.extend(container_pids_limit_args(engine, template));
     args.extend(["--detach".to_owned(), "--name".to_owned(), name.to_owned()]);
     args.extend(managed_resource_identity_args(
         ManagedResourceKind::Container,
@@ -519,6 +553,71 @@ pub(super) fn at_boundary(boundary: ExecutionBoundary<'_>, args: Vec<String>) ->
             ];
             remote.extend(args);
             ssh_command_owned(ssh, remote)
+        }
+    }
+}
+
+#[cfg(test)]
+mod pids_limit_tests {
+    use super::*;
+
+    /// A session container holds a parent and its sub-agent children, each with a
+    /// worker, an ACP supervisor and a harness process that all size their thread
+    /// pools to the host. The engine default of 2048 fits about two sessions, so
+    /// Mjolnir asks for room for the concurrency it allows (#1065).
+    #[test]
+    fn a_session_container_asks_for_more_processes_than_the_engine_default() {
+        for engine in ["podman", "docker"] {
+            let args = container_run_args(
+                engine,
+                &pids_limit_template(Vec::new()),
+                "mj-test",
+                "0123456789abcdef0123456789abcdef",
+                &[],
+                None,
+                None,
+                "/workspace",
+            )
+            .unwrap();
+            assert!(
+                args.iter().any(|argument| argument == "--pids-limit=8192"),
+                "{engine} run args must raise the process limit: {args:?}"
+            );
+        }
+    }
+
+    /// An operator who chose a number keeps it.
+    #[test]
+    fn a_configured_process_limit_is_left_alone() {
+        let args = container_run_args(
+            "podman",
+            &pids_limit_template(vec!["--pids-limit=256".to_owned()]),
+            "mj-test",
+            "0123456789abcdef0123456789abcdef",
+            &[],
+            None,
+            None,
+            "/workspace",
+        )
+        .unwrap();
+
+        assert!(args.iter().any(|argument| argument == "--pids-limit=256"));
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.starts_with("--pids-limit"))
+                .count(),
+            1,
+            "{args:?}"
+        );
+    }
+
+    fn pids_limit_template(extra_run_args: Vec<String>) -> ContainerTemplate {
+        ContainerTemplate {
+            build_cache: None,
+            image: "example.invalid/agent:latest".into(),
+            pull_policy: Default::default(),
+            workspace_storage: Default::default(),
+            extra_run_args,
         }
     }
 }

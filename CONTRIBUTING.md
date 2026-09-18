@@ -37,7 +37,7 @@ cargo build --release
 
 Use `scripts/run.sh` when exercising sessions: on Linux it builds the native
 controller plus the dedicated musl worker, while macOS builds both binaries
-natively for `local-bare` development.
+natively for local bare-runtime development.
 
 `scripts/install.sh` installs the same binaries from the checkout into Cargo's
 install root, so managed targets find the portable worker beside `mj`. Both

@@ -224,7 +224,9 @@ class TmuxController:
         failure: ScenarioFailure | None = None
         try:
             if self.has_session():
-                self.send_key("M-q")
+                # Detach is the prefix chord: ctrl+b arms, then q quits.
+                self.send_key("C-b")
+                self.send_key("q")
                 self.wait_until(lambda: not self.has_session(), "tmux dashboard to detach")
         except ScenarioFailure as error:
             failure = error
@@ -344,17 +346,17 @@ def install_fake_podman(lab: Lab) -> None:
 def overlay_container_target(lab: Lab) -> None:
     path = lab.config / "config.toml"
     body = path.read_text()
-    pattern = r'(?m)^\[targets\.localhost\]\nkind = "local-bare"\n'
+    pattern = r'(?m)^\[targets\.localhost\]\nkind = "bare"\n'
     replacement = (
         '[targets.localhost]\n'
-        'kind = "local-podman"\n'
+        'kind = "podman"\n'
         'image = "local/hel-live-fixture:component"\n'
         'pull_policy = "never"\n'
     )
     changed, count = re.subn(pattern, replacement, body)
     if count != 1:
         raise ScenarioFailure(
-            "fixture setup gap: expected exactly one local-bare localhost target; "
+            "fixture setup gap: expected exactly one bare localhost runtime; "
             "the container editor needs a container-backed target"
         )
     _write_text(path, changed)

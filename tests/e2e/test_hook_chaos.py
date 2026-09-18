@@ -323,9 +323,9 @@ def finish(lab: Lab) -> None:
     if lab.daemon_pid is not None:
         lab.stop_daemon()
     lab.integrity()
-    leaks = lab.owned_pids()
+    leaks = lab.leak_report()
     if leaks:
-        raise ScenarioFailure(f"owned processes remained after cleanup: {leaks}")
+        raise ScenarioFailure(leaks)
     lab.capture_process_tree()
     lab.trace["finished_at"] = lab.timestamp()
     lab.trace["outcome"] = "passed"
@@ -344,10 +344,12 @@ def run_one(binary: pathlib.Path, hook: str, seed: int) -> None:
         lab.trace["outcome"] = "failed"
         lab.trace["failure"] = str(error)
         lab.write_trace()
+        # Before cleanup, not after: cleanup kills whatever leaked, and a tree
+        # captured then shows a tidy machine and explains nothing.
+        lab.capture_process_tree()
         lab.cleanup_owned()
         with contextlib.suppress(Exception):
             lab.integrity()
-        lab.capture_process_tree()
         lab.preserve_runtime()
         lab.remove_runtime()
         print(f"hook-chaos: failed hook={hook}: {error}", file=sys.stderr)

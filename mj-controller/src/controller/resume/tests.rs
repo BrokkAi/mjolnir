@@ -1557,13 +1557,17 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
     // A conversion installs a bundle for the checkout it converts, and
     // reuses it on a retry. Nothing else about the configuration moves.
     let mut expected_config = original_config.clone();
-    let (bundle_id, bundle) = mj_core::config::Config::load()
-        .unwrap()
+    let saved = mj_core::config::Config::load().unwrap();
+    let (bundle_id, bundle) = saved
         .bundles
+        .clone()
         .into_iter()
         .next()
         .expect("the conversion installed a bundle for the checkout");
     expected_config.bundles.insert(bundle_id, bundle);
+    // Saving named the SSH host the configured targets share, which a config
+    // assembled in memory never spelled out.
+    expected_config.machines = saved.machines;
     assert_eq!(
         controller.config,
         expected_config.clone().with_local_targets()

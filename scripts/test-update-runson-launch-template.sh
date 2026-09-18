@@ -113,11 +113,14 @@ run_helper >"$test_root/first-run.out"
 run_helper >"$test_root/second-run.out"
 
 config_file="$config_root/mjolnir/config.toml"
-assert_contains 'Added Mjolnir target targets.aws-runson' "$test_root/first-run.out"
+assert_contains 'Added Mjolnir machine machines.aws-runson and target targets.aws-runson' "$test_root/first-run.out"
 assert_contains 'Mjolnir target targets.aws-runson already exists' "$test_root/second-run.out"
+assert_contains '[machines.aws-runson]' "$config_file"
 assert_contains '[targets.aws-runson]' "$config_file"
+assert_contains 'machine = "aws-runson"' "$config_file"
 assert_contains 'launch_template = "mj-runson"' "$config_file"
 [[ "$(grep -Fc '[targets.aws-runson]' "$config_file")" == 1 ]]
+[[ "$(grep -Fc '[machines.aws-runson]' "$config_file")" == 1 ]]
 
 assert_contains 'Name=tag:MjolnirSourceAmi,Values=ami-1234abcd' "$aws_log"
 assert_contains '--name mjolnir-runson-' "$aws_log"

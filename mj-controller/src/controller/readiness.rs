@@ -8,24 +8,46 @@ use crate::session_manager::StandaloneSession;
 use crate::targets::{self, CommandExecutor, CommandSpec, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayExecutionState;
 
-use super::worker_binary::worker_last_words;
+use super::worker_binary::{WorkerProbe, probe_worker};
 
 /// A harness such as Codex can spend minutes on its first launch, so the
 /// readiness wait has to outlast a slow harness boot rather than a fast one.
 const NATIVE_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A freshly started worker binds its control socket only after it recovers
-/// durable state, so the first connection attempt is retried for this long.
+/// How long a worker that has said nothing at all is waited for. A worker that
+/// is recording startup progress is waited for longer; see
+/// [`WORKER_STARTUP_PROGRESS_GRACE`].
 const WORKER_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a worker may stay on one startup step before the wait gives up.
+/// Recovering a large durable journal is one legitimately slow step.
+const WORKER_STARTUP_PROGRESS_GRACE: Duration = Duration::from_secs(60);
+
+/// The longest a worker may take to accept a connection however much progress
+/// it reports. This is the same ceiling the ACP runtime wait uses, so the two
+/// cannot disagree about when a startup has gone on too long.
+const WORKER_STARTUP_CONNECT_CEILING: Duration = NATIVE_SESSION_STARTUP_TIMEOUT;
 
 /// Delay between connection attempts against a worker that is still starting.
 const WORKER_STARTUP_CONNECT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How often the worker itself is looked at while the wait runs. A probe is a
+/// command on the target, which on a container or SSH target is a round trip,
+/// so it does not run once per connection attempt. The first failed attempt is
+/// probed at once, so a worker that is already dead is reported immediately.
+const WORKER_STARTUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How often a wait loop looks for cancellation while it is idle.
 pub(super) const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Marker that opens the exit record a dying worker writes to its root.
 pub(super) const WORKER_EXIT_RECORD_MARKER: &str = "--- worker-exit.json ---";
+
+/// Marker that opens the startup record a starting worker writes to its root.
+pub(super) const WORKER_STARTUP_RECORD_MARKER: &str = "--- worker-startup.json ---";
+
+/// Marker that opens the probe's report of whether the worker is running.
+pub(super) const WORKER_PROCESS_MARKER: &str = "--- worker process ---";
 
 pub(super) enum NativeSessionReadiness {
     Waiting,
@@ -135,15 +157,16 @@ pub(super) async fn wait_for_native_session_in_stage(
 }
 
 /// One connection attempt against a worker that was started moments ago, plus
-/// a way to notice that the worker already died so the retry loop can stop.
+/// a look at the worker itself so the retry loop can tell a worker that is
+/// still starting from one that is never going to answer.
 trait StartingWorkerProbe {
     type Relay;
 
     async fn connect(&mut self) -> Result<Self::Relay>;
 
-    /// Diagnostics from a worker that already recorded its exit, or `None`
-    /// while the worker has not reported a death.
-    fn death_report(&self) -> Option<String>;
+    /// What the worker looks like on the target right now, or `None` when the
+    /// target could not be asked.
+    fn inspect(&self) -> Option<WorkerProbe>;
 }
 
 struct StartingWorkerConnection<'a, E: CommandExecutor> {
@@ -161,9 +184,8 @@ impl<E: CommandExecutor> StartingWorkerProbe for StartingWorkerConnection<'_, E>
         StandaloneSession::connect_command(self.spec, self.session_id).await
     }
 
-    fn death_report(&self) -> Option<String> {
-        worker_last_words(self.executor, self.locator, self.worker_root)
-            .filter(|last_words| last_words.contains(WORKER_EXIT_RECORD_MARKER))
+    fn inspect(&self) -> Option<WorkerProbe> {
+        probe_worker(self.executor, self.locator, self.worker_root)
     }
 }
 
@@ -209,13 +231,84 @@ pub(super) async fn connect_started_worker_with_timeout(
     connect_to_starting_worker(&mut connection, executor, timeout).await
 }
 
+/// Marker on a failure from the startup connect wait, saying whether the
+/// worker had got as far as publishing its control socket.
+///
+/// A worker that never did has no relay, no durable journal and no harness, so
+/// starting a new one over the same root cannot duplicate or corrupt work. A
+/// caller that wants to retry a failed start needs exactly this fact, and only
+/// this wait knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::controller) struct WorkerStartupFailure {
+    pub reached_socket: bool,
+}
+
+impl std::fmt::Display for WorkerStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.reached_socket {
+            formatter.write_str("the worker had published its control socket")
+        } else {
+            formatter.write_str("the worker never published a control socket")
+        }
+    }
+}
+
+impl std::error::Error for WorkerStartupFailure {}
+
+/// Whether a startup step means the worker had already published its socket.
+fn reached_socket(step: Option<&str>) -> bool {
+    matches!(step, Some("bind-socket" | "serving"))
+}
+
+/// What one look at the worker says the wait should do next.
+enum StartupVerdict {
+    /// The worker will never answer. The string says why, and a refusal is the
+    /// sentence the worker wrote for whoever asked.
+    Hopeless(String, Option<String>),
+    /// The worker is alive and on this step.
+    Working(Option<String>),
+}
+
+fn verdict(probe: &WorkerProbe) -> StartupVerdict {
+    if probe.exited {
+        // A worker that already wrote its exit record will never accept a
+        // connection, so report the recorded cause instead of waiting it out.
+        return StartupVerdict::Hopeless(probe.diagnostics.clone(), probe.refusal.clone());
+    }
+    if !probe.alive {
+        let step = probe.step.as_deref().unwrap_or("start");
+        return StartupVerdict::Hopeless(
+            format!(
+                "the worker process is gone; it reached the startup step {step:?} \
+                 and left no exit record\n{}",
+                probe.diagnostics
+            ),
+            None,
+        );
+    }
+    StartupVerdict::Working(probe.step.clone())
+}
+
+/// Wait for a worker that was just started to accept a relay connection.
+///
+/// The wait watches the worker, not only the clock. A worker that has died, or
+/// that recorded its own exit, fails immediately with the reason. A worker that
+/// keeps reaching new startup steps is waited for beyond the initial window,
+/// because the steps it is on are proportional to the session's own data, up to
+/// a ceiling. A worker that sits on one step past the grace fails naming that
+/// step, which is a far better answer than "did not accept a connection".
 async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     probe: &mut P,
     executor: &impl CommandExecutor,
     timeout: Duration,
 ) -> Result<P::Relay> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let started = tokio::time::Instant::now();
+    let ceiling = started + std::cmp::max(timeout, WORKER_STARTUP_CONNECT_CEILING);
+    let mut deadline = started + timeout;
+    let mut next_probe = started;
+    let mut step: Option<String> = None;
     let mut last_error: Option<anyhow::Error> = None;
+    let mut stalled_on: Option<String> = None;
     loop {
         if executor.cancellation_requested() {
             bail!("operation cancelled while connecting to the worker relay");
@@ -245,10 +338,39 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             // The attempt was still pending when the window closed.
             None => break,
         };
-        // A worker that already wrote its exit record will never accept a
-        // connection, so report the recorded cause instead of waiting it out.
-        if let Some(death_report) = probe.death_report() {
-            return Err(error.context(death_report));
+        let now = tokio::time::Instant::now();
+        if now >= next_probe {
+            next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
+            match probe.inspect().map(|probe| verdict(&probe)) {
+                Some(StartupVerdict::Hopeless(reason, refusal)) => {
+                    let error = error.context(reason).context(WorkerStartupFailure {
+                        reached_socket: reached_socket(step.as_deref()),
+                    });
+                    // A refusal is a precondition the caller can fix, so its
+                    // sentence travels to the caller as a 409 rather than
+                    // stopping at the daemon log.
+                    return Err(match refusal {
+                        Some(refusal) => {
+                            error.context(mj_core::refusal::Refusal::precondition(refusal))
+                        }
+                        None => error,
+                    });
+                }
+                Some(StartupVerdict::Working(reported)) => {
+                    if reported != step {
+                        // The worker is getting somewhere. Let it, up to the
+                        // ceiling: what it is doing takes as long as the
+                        // session's own data takes.
+                        step = reported;
+                        deadline = std::cmp::min(ceiling, now + WORKER_STARTUP_PROGRESS_GRACE);
+                        stalled_on = None;
+                    } else if step.is_some() {
+                        stalled_on = step.clone();
+                    }
+                }
+                // The target could not be asked; keep waiting on the clock.
+                None => {}
+            }
         }
         last_error = Some(error);
         if executor.cancellation_requested() {
@@ -276,12 +398,29 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             }
         }
     }
-    let waited = timeout.as_secs();
+    let waited = started.elapsed().as_secs();
+    let gave_up = match stalled_on {
+        Some(step) => format!(
+            "the worker has been on the startup step {step:?} for {}s without progress",
+            WORKER_STARTUP_PROGRESS_GRACE.as_secs()
+        ),
+        None => match &step {
+            Some(step) => format!(
+                "worker relay did not accept a connection in {waited}s; \
+                 its last startup step was {step:?}"
+            ),
+            None => format!(
+                "worker relay did not accept a connection in {waited}s; \
+                 it recorded no startup step at all"
+            ),
+        },
+    };
+    let marker = WorkerStartupFailure {
+        reached_socket: reached_socket(step.as_deref()),
+    };
     match last_error {
-        Some(error) => Err(error.context(format!(
-            "worker relay did not accept a connection in {waited}s"
-        ))),
-        None => bail!("worker relay did not accept a connection in {waited}s"),
+        Some(error) => Err(error.context(gave_up).context(marker)),
+        None => Err(anyhow::Error::new(marker).context(gave_up)),
     }
 }
 
@@ -410,12 +549,20 @@ mod tests {
         );
     }
     /// Scripted stand-in for a worker that is still binding its control
-    /// socket. It fails every connection until `accepts_after_attempts`, and
-    /// reports a recorded death once `death_after_attempts` attempts ran.
+    /// socket. It fails every connection until `accepts_after_attempts`,
+    /// reports a recorded death once `death_after_attempts` attempts ran, and
+    /// otherwise looks alive on the step `steps` names for that attempt.
     struct FakeStartingWorker {
         attempts: usize,
         accepts_after_attempts: Option<usize>,
         death_after_attempts: Option<usize>,
+        vanishes_after_attempts: Option<usize>,
+        /// Reports this same step every time: a worker that is not moving.
+        stuck_step: Option<&'static str>,
+        /// Reports a different step every attempt: a worker that is moving.
+        progressing: bool,
+        /// The sentence a refusing worker left in its exit record.
+        refusal: Option<&'static str>,
         cancel_on_attempt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
     impl FakeStartingWorker {
@@ -424,6 +571,10 @@ mod tests {
                 attempts: 0,
                 accepts_after_attempts: None,
                 death_after_attempts: None,
+                vanishes_after_attempts: None,
+                stuck_step: None,
+                progressing: false,
+                refusal: None,
                 cancel_on_attempt: None,
             }
         }
@@ -449,13 +600,34 @@ mod tests {
             }
         }
 
-        fn death_report(&self) -> Option<String> {
-            let died_after = self.death_after_attempts?;
-            (self.attempts >= died_after).then(|| {
+        fn inspect(&self) -> Option<WorkerProbe> {
+            let exited = self
+                .death_after_attempts
+                .is_some_and(|died_after| self.attempts >= died_after);
+            let gone = self
+                .vanishes_after_attempts
+                .is_some_and(|gone_after| self.attempts >= gone_after);
+            let step = if self.progressing {
+                Some(format!("step-{}", self.attempts))
+            } else {
+                self.stuck_step.map(ToOwned::to_owned)
+            };
+            let diagnostics = if exited {
                 format!(
                     "worker diagnostics:\n{WORKER_EXIT_RECORD_MARKER}\n\
-                         {{\"reason\":\"durable relay open failed\"}}"
+                     {{\"reason\":\"durable relay open failed\"}}"
                 )
+            } else {
+                "worker diagnostics:\n--- worker process ---\nabsent".to_owned()
+            };
+            Some(WorkerProbe {
+                alive: !exited && !gone,
+                step,
+                exited,
+                refusal: exited
+                    .then(|| self.refusal.map(ToOwned::to_owned))
+                    .flatten(),
+                diagnostics,
             })
         }
     }
@@ -494,6 +666,37 @@ mod tests {
         assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
         assert!(reported.contains("connect attempt 1 refused"), "{reported}");
     }
+
+    /// A worker that stopped on a precondition wrote a sentence for whoever
+    /// asked. It has to reach the caller as a refusal, or a 409 with that
+    /// sentence becomes a 500 with nothing.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_carries_a_refusing_workers_own_sentence() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            death_after_attempts: Some(1),
+            refusal: Some("turn review cannot cover /work: it has 400000 untracked files"),
+            ..FakeStartingWorker::never_accepts()
+        };
+
+        let error =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap_err();
+
+        let refusal =
+            mj_core::refusal::Refusal::of(&error).expect("the refusal reached the caller");
+        assert!(
+            refusal.message().contains("400000 untracked files"),
+            "{refusal}"
+        );
+        assert_eq!(
+            refusal.kind(),
+            mj_core::refusal::RefusalKind::Precondition,
+            "a workspace the user can clean is a precondition, not an unusable request"
+        );
+    }
     #[tokio::test(start_paused = true)]
     async fn startup_connect_stops_as_soon_as_cancellation_is_observed() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -516,6 +719,84 @@ mod tests {
             "{error:#}"
         );
     }
+    /// A worker whose startup steps keep changing is doing work proportional
+    /// to the session's own data, so the wait must outlast its first window
+    /// rather than reporting a healthy worker as a failure.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_waits_past_the_first_window_for_a_worker_that_is_progressing() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        // 100 attempts at 500ms is 50 seconds, well past the 30-second window.
+        let mut worker = FakeStartingWorker {
+            progressing: true,
+            ..FakeStartingWorker::accepting_after(100)
+        };
+        let started = tokio::time::Instant::now();
+
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
+
+        assert_eq!(relay, "relay");
+        assert!(
+            started.elapsed() > WORKER_STARTUP_CONNECT_TIMEOUT,
+            "the wait must have outlasted its first window, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A worker whose process is gone will never answer, so the wait ends at
+    /// once and says which step it got to rather than timing out.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_reports_a_worker_whose_process_vanished() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            vanishes_after_attempts: Some(1),
+            stuck_step: Some("login-environment"),
+            ..FakeStartingWorker::never_accepts()
+        };
+        let started = tokio::time::Instant::now();
+
+        let error =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap_err();
+
+        assert_eq!(worker.attempts, 1);
+        assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
+        let reported = format!("{error:#}");
+        assert!(
+            reported.contains("the worker process is gone"),
+            "{reported}"
+        );
+        assert!(reported.contains("login-environment"), "{reported}");
+    }
+
+    /// A worker that is alive but has not moved for the grace period is stuck.
+    /// Naming the step it is stuck on is the whole point of the record.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_reports_the_step_a_live_worker_is_stuck_on() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            stuck_step: Some("review-baseline"),
+            ..FakeStartingWorker::never_accepts()
+        };
+
+        let error =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap_err();
+
+        let reported = format!("{error:#}");
+        assert!(
+            reported.contains("review-baseline") && reported.contains("without progress"),
+            "{reported}"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn startup_connect_gives_up_with_the_last_error_after_the_deadline() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

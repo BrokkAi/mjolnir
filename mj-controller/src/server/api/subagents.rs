@@ -87,13 +87,7 @@ pub(super) async fn spawn_subagent(
             },
         )
         .await?;
-    let session = {
-        let snapshot = state.snapshot_rx.borrow();
-        ApiSession::from(require_session_record(
-            &snapshot,
-            &relation.child_session_id,
-        )?)
-    };
+    let session = await_session_record(&state, &relation.child_session_id).await?;
     Ok((
         StatusCode::CREATED,
         Json(SubagentView {
@@ -103,6 +97,46 @@ pub(super) async fn spawn_subagent(
             session,
         }),
     ))
+}
+
+/// How long a just-created session is waited for in the viewer snapshot.
+///
+/// The snapshot is republished on a tick, so a child registered a moment ago
+/// is usually not in it yet. Answering "unknown session" for a spawn that
+/// succeeded tells the caller its child does not exist while that child is
+/// starting, and invites it to spawn a second one.
+const SNAPSHOT_CATCH_UP: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn await_session_record(
+    state: &ServerState,
+    session_id: &str,
+) -> Result<ApiSession, ApiFailure> {
+    let mut snapshot_rx = state.snapshot_rx.clone();
+    let deadline = tokio::time::Instant::now() + SNAPSHOT_CATCH_UP;
+    loop {
+        // The borrow ends before the await: a watch guard may not be held
+        // across one, and holding it would block every other reader.
+        let found = {
+            let snapshot = snapshot_rx.borrow();
+            snapshot
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(ApiSession::from)
+        };
+        if let Some(session) = found {
+            return Ok(session);
+        }
+        if tokio::time::timeout_at(deadline, snapshot_rx.changed())
+            .await
+            .is_err()
+        {
+            let snapshot = snapshot_rx.borrow();
+            return Ok(ApiSession::from(require_session_record(
+                &snapshot, session_id,
+            )?));
+        }
+    }
 }
 
 pub(super) async fn list_subagents(

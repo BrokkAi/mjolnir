@@ -139,6 +139,7 @@ pub(crate) fn render_onboarding_surface(frame: &mut Frame, dashboard: &mut Dashb
         frame,
         Rect::new(layout[0].x, layout[0].y, layout[0].width, 1),
         &dashboard.workspace_name,
+        &dashboard.version_label,
     );
     crate::surface_controls::render_onboarding_actions(
         frame,
@@ -203,11 +204,13 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
     dashboard.frame_surfaces = surfaces;
 }
 
-fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str) {
+fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str, version: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ MJOLNIR", theme::title(true)),
-            Span::styled(format!("  /  {workspace_name}"), theme::muted()),
+            // The first-run screen has no workspace pane to carry the build
+            // number, so the brand line names it here instead.
+            Span::styled(format!("  {version}  /  {workspace_name}"), theme::muted()),
         ]))
         .alignment(Alignment::Center),
         area,

@@ -241,6 +241,8 @@ impl Fixture {
             additional_directories: Vec::new(),
             worker_executable: bridge,
             harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+            review_capture: true,
+            untracked_at_start: Default::default(),
         }));
         Self {
             _temp: temp,
@@ -1471,6 +1473,8 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
         additional_directories: Vec::new(),
         worker_executable: PathBuf::from("/bin/false"),
         harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
+        review_capture: true,
+        untracked_at_start: Default::default(),
     }));
     let _guard = unix::serve_review_dispatch(&worker_root, sidecar.clone()).unwrap();
     let socket = worker_root

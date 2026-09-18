@@ -910,14 +910,18 @@ details.block-fold > pre {
   flex: 0 0 var(--touch);
 }
 
+.menu,
+.menu-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .menu {
   position: absolute;
   top: 100%;
   right: 0;
   z-index: 10;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   padding: 6px;
   background: var(--surface-raised);
   border: 1px solid var(--border-strong);
@@ -931,6 +935,16 @@ details.block-fold > pre {
   font-weight: 400;
   text-align: left;
   border: 1px solid transparent;
+}
+
+/* The build this viewer is talking to, under the menu's actions rather than
+   among them: it is a label, not something to press. */
+.menu-version {
+  margin: 2px 0 0;
+  padding: 6px 0 0;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 0.8rem;
 }
 
 /* ---- workspace tabs ---- */

@@ -35,7 +35,11 @@ pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
             instructions: "Launch read-only specialist reviewers for the turn under review. The tool returns immediately; their reports arrive as later messages in this session.",
             tools: vec![tool_definition()],
             dispatch: crate::mcp_stdio::Dispatch::Sequential,
-            call: move |params: Option<&Value>| call_tool(&socket, params),
+            progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
+            // This tool returns at once, so it has no progress to report.
+            call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
+                call_tool(&socket, params)
+            },
         },
     )
 }

@@ -24,7 +24,7 @@ if [[ "${1:-}" == --inside ]]; then
   done
   printf '%s\n' "$screen"
   [[ "$ready" == 1 ]] || { echo 'CLI did not render its dashboard' >&2; exit 1; }
-  tmux -L mj-compat send-keys -t smoke M-q
+  tmux -L mj-compat send-keys -t smoke C-b q
   for ((i=0; i<40; i++)); do
     if [[ -f /tmp/mj-exit ]]; then
       [[ "$(cat /tmp/mj-exit)" == 0 ]] || { echo 'CLI exited unsuccessfully' >&2; exit 1; }
@@ -33,7 +33,7 @@ if [[ "${1:-}" == --inside ]]; then
     fi
     sleep 0.5
   done
-  echo 'CLI did not exit after Alt-Q' >&2
+  echo 'CLI did not exit after the detach chord (ctrl+b q)' >&2
   exit 1
 fi
 

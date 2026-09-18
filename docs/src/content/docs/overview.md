@@ -103,36 +103,39 @@ workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
 Kimi Code and Muse Code do not provide a guardian approval mode. They should
-not be used on a raw, unsandboxed target. Muse Code currently accepts one
+not be used on a bare, unsandboxed runtime. Muse Code currently accepts one
 workspace root, so use either a one-repository bundle or one bare project
 directory, without attached directories.
 
-## Supported targets
+## Supported machines and runtimes
 
-| Target | Config kind | Runs on | Execution policy | Session boundary |
+A machine is a host: `local` (this computer), `ssh` (a named host), or
+`aws-ec2` (a launch template). A runtime says how the session runs on it.
+
+| What you get | Runtime | Machine | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
-| Local Git worktree | `local-bare` | Linux or macOS controller host | Configured approvals | A Mjolnir-managed local worktree |
-| Podman container | `local-podman` | Linux or WSL2 | Unconstrained | Disposable container |
-| Docker container | `local-docker` | Linux or WSL2 | Unconstrained | Disposable container |
-| Apple container | `apple-container` | macOS 26+ on Apple silicon | Unconstrained | Disposable container |
-| SSH machine | `ssh-bare` | Named Linux host | Guardian or unconstrained | Managed workspace on the named host |
-| Podman over SSH | `ssh-podman` | Named Linux host | Unconstrained | Disposable remote container |
-| Docker over SSH | `ssh-docker` | Named Linux host | Unconstrained | Disposable remote container |
-| AWS EC2 | `aws-ec2` | Your AWS account | Unconstrained | Disposable instance |
+| Local Git worktree | `bare` | `local`, on a Linux or macOS controller host | Configured approvals | A Mjolnir-managed local worktree |
+| Podman container | `podman` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
+| Docker container | `docker` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
+| Apple container | `apple-container` | `local`, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
+| Remote Git worktree | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Managed workspace on the named host |
+| Podman over SSH | `podman` | an `ssh` machine | Unconstrained | Disposable remote container |
+| Docker over SSH | `docker` | an `ssh` machine | Unconstrained | Disposable remote container |
+| AWS EC2 | `bare` | an `aws-ec2` machine, in your AWS account | Unconstrained | Disposable instance |
 
 “Configured approvals” means the harness profile remains in control of its
 approval behavior. “Unconstrained” means Mjolnir deliberately selects the
-harness's full-access mode and relies on the target boundary to contain the
+harness's full-access mode and relies on the runtime boundary to contain the
 blast radius. The exact controls and data boundaries are documented in
 [Security boundaries](/security/).
 
 Use a raw local worktree when you specifically want the agent to operate on
 your machine under its normal approvals. Use a container for a disposable
 full-access environment. Use SSH or EC2 when the work needs a different host,
-architecture, or capacity pool. Target-specific requirements are collected in
+architecture, or capacity pool. Per-runtime requirements are collected in
 the [Targets guide](/targets/).
 
-The controller, viewer, and local-bare worker run on Linux and macOS. On macOS,
+The controller, viewer, and local bare worker run on Linux and macOS. On macOS,
 Apple Container and remote targets are also available. Native Windows is not
 supported; run Mjolnir under WSL2 instead.
 

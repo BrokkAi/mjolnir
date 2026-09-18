@@ -35,6 +35,9 @@ const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 18;
 const PADDING: u16 = 14;
 const TERMINAL_BACKGROUND: &str = "#0b1220";
+/// Stands in for the build number on every capture. It reads as a placeholder
+/// so nobody mistakes a screenshot for a claim about the version they run.
+const DOCUMENTATION_VERSION: &str = "vX.Y.Z";
 
 #[test]
 #[ignore = "writes the committed documentation screenshots"]
@@ -73,7 +76,7 @@ fn generate_documentation_screenshots() {
     capture(
         &output.join("setup.svg"),
         "Mjolnir Settings",
-        "The compact Settings modal with Interface, Advanced, Agent Profiles, Machines and Runtimes, Projects, Code Review, and Web Access settings.",
+        "The compact Settings modal with Interface, Advanced, Agent Profiles, Projects, Machines, Runtimes, Code Review, and Web Access settings.",
         &mut setup,
     );
 
@@ -204,6 +207,11 @@ fn documentation_dashboard() -> DashboardState {
         },
         quotas,
     );
+    // A capture is committed documentation, so it names a placeholder rather
+    // than whichever build happened to render it: the real version would be
+    // wrong in these files from the next release onwards, and it would make
+    // every regeneration a diff even when the surface had not changed.
+    dashboard.version_label = DOCUMENTATION_VERSION.into();
     dashboard.set_workspace_name("Mjolnir docs".into());
     dashboard.set_workspace_names(BTreeMap::from([
         ("default".into(), "Docs".into()),

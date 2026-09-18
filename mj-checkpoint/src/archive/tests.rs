@@ -2108,10 +2108,12 @@ fn review_capture_sees_tracked_modified_and_untracked_changes_without_touching_t
         "capture leaves the real index exactly as the user left it: {}",
         String::from_utf8_lossy(&status_after)
     );
-    assert_eq!(
-        git_line(repository.path(), &["rev-parse", REVIEW_CAPTURE_REF]),
-        current,
-        "the capture ref pins the tree so gc cannot collect it"
+    // A capture is consumed by the review that took it, so it is not pinned:
+    // Mjolnir leaves no ref of its own in a user's repository beyond the one
+    // baseline a running session depends on.
+    assert!(
+        git(repository.path(), &["for-each-ref", "refs/hel"]).is_empty(),
+        "a capture must not write a ref into the user's repository"
     );
     assert!(
         !repository

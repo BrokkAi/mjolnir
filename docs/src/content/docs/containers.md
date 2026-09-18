@@ -10,7 +10,7 @@ container: local Podman or Docker on Linux or WSL2, Apple's `container`
 runtime on macOS 26 or newer on Apple silicon, or Podman over SSH. Container
 isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
-only available for raw `ssh-bare` targets. Mjolnir translates the policy into the
+only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, or Grok Build's `--always-approve`
 launch flag. Every one of those approves every call. Note that Kimi Code's
@@ -95,7 +95,7 @@ Create a session and choose a local runtime in the target picker. Mjolnir checks
 its availability in the background and blocks unavailable choices. Start a
 stopped service, then press **prefix+shift+r** to recheck. No `mj setup` command is required.
 
-Use **prefix+s Settings → Machines and Runtimes** to override the container image,
+Use **prefix+s Settings → Runtimes** to override the container image,
 resource defaults, or environment, or to add an SSH or EC2 connection. The
 optional CLI setup command remains available.
 

@@ -1,5 +1,6 @@
 //! In-memory setup form. Discovery and persistence run in supervised workers.
 mod schema;
+mod search;
 
 use crate::{
     DashboardAction, DashboardState, Mode,
@@ -10,7 +11,7 @@ use crate::{
     },
     widgets::{centered_modal_fixed, dismissible_modal_title},
 };
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mj_chat::components::PathField;
 use mj_chat::components::{
     ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
@@ -24,7 +25,8 @@ use mj_core::config::Config;
 use ratatui::{
     Frame,
     layout::Rect,
-    text::Line,
+    style::Modifier,
+    text::{Line, Span},
     widgets::{List as RatatuiList, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
@@ -62,6 +64,11 @@ pub(crate) enum SetupControl {
     List,
     Field,
     Choices,
+    Search,
+    Results,
+    /// Not a drawn control: the key that opens the search, routed through the
+    /// same interaction path as the dialog's other shortcuts.
+    OpenSearch,
     Back,
     Add,
     Remove,
@@ -111,6 +118,50 @@ struct Editor {
     adding: bool,
 }
 
+/// The open search: the query, the index it filters, and the row the arrows
+/// are on. It replaces the page body while it is up; the page underneath keeps
+/// its own path so closing the search returns to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchState {
+    input: TextInput,
+    entries: Vec<search::SearchEntry>,
+    /// Indices into `entries`, in the order they are drawn.
+    matches: Vec<usize>,
+    selected: usize,
+}
+
+impl SearchState {
+    fn new(draft: &Value) -> Self {
+        let entries = search::index(draft);
+        let matches = search::matches(&entries, "");
+        Self {
+            input: TextInput::new(),
+            entries,
+            matches,
+            selected: 0,
+        }
+    }
+
+    fn refilter(&mut self) {
+        self.matches = search::matches(&self.entries, self.input.value());
+        self.selected = self.selected.min(self.matches.len().saturating_sub(1));
+    }
+
+    fn selected_entry(&self) -> Option<&search::SearchEntry> {
+        self.matches
+            .get(self.selected)
+            .and_then(|index| self.entries.get(*index))
+    }
+}
+
+/// What activating a search result leaves for the caller to do, because Code
+/// Review is opened through its own dialog rather than as a page of values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Jump {
+    Done,
+    OpenReview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SetupSize {
     width: u16,
@@ -125,6 +176,7 @@ pub(crate) struct SetupDialog {
     path: Vec<String>,
     selected: usize,
     editor: Option<Editor>,
+    search: Option<SearchState>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
@@ -211,28 +263,112 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
         choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
     }
+    // The Machines page always shows this machine. Until it carries a setting
+    // of its own it is the implied machine, not an entry, so it does not turn
+    // an untouched draft into a change.
+    if let Some(machines) = draft["machines"].as_object_mut()
+        && machines
+            .get(mj_core::config::LOCAL_MACHINE_ID)
+            .and_then(|local| local["build_cache"].as_object())
+            .is_some_and(|cache| cache.values().all(Value::is_null))
+    {
+        machines.remove(mj_core::config::LOCAL_MACHINE_ID);
+    }
     serde_json::from_value(draft)
+}
+
+/// The first page's groups, in the order they are drawn.
+///
+/// A root key no group names is still listed, under `Other`, so a setting
+/// added to the configuration can never go missing by being forgotten here.
+const ROOT_GROUPS: &[(&str, &[&str])] = &[
+    ("Setup", &["profiles", "bundles", "targets", "machines"]),
+    (
+        "Sessions",
+        &["review", "subagents", "sessionwiki", "build_cache", "phone"],
+    ),
+    ("Display", &["interface", "advanced"]),
+];
+
+/// A row of a settings page. The first page puts a heading above each group
+/// and a blank line between them; every page below it is a plain list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageRow {
+    Heading(&'static str),
+    Gap,
+    /// An index into the page's keys.
+    Setting(usize),
+}
+
+/// Every row `keys` draws on the page `path`, in order.
+fn page_plan(path: &[String], keys: &[String]) -> Vec<PageRow> {
+    if !path.is_empty() {
+        return (0..keys.len()).map(PageRow::Setting).collect();
+    }
+    let mut plan = Vec::new();
+    let mut group = None;
+    for (index, key) in keys.iter().enumerate() {
+        let heading = root_group(key);
+        if group != Some(heading) {
+            if group.is_some() {
+                plan.push(PageRow::Gap);
+            }
+            plan.push(PageRow::Heading(heading));
+            group = Some(heading);
+        }
+        plan.push(PageRow::Setting(index));
+    }
+    plan
+}
+
+/// The group heading a first-page row belongs under.
+fn root_group(key: &str) -> &'static str {
+    ROOT_GROUPS
+        .iter()
+        .find(|(_, keys)| keys.contains(&key))
+        .map_or("Other", |(heading, _)| *heading)
+}
+
+/// Root keys the page never lists: the file's version, the three settings the
+/// synthetic Interface page gathers, the keybindings, and the deprecated
+/// stopped-session flag that Advanced now owns.
+fn hidden_root_key(key: &str) -> bool {
+    matches!(
+        key,
+        "version"
+            | "advanced"
+            | "sessions_side"
+            | "spinner"
+            | "theme"
+            | "keys"
+            | "show_stopped_sessions"
+    )
 }
 
 fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     if path.is_empty() {
-        let mut keys = vec!["interface".to_owned(), "advanced".to_owned()];
-        keys.extend(
-            value
-                .as_object()
-                .into_iter()
-                .flat_map(|entries| {
-                    entries.keys().filter(|key| {
-                        key.as_str() != "version"
-                            && !matches!(
-                                key.as_str(),
-                                "advanced" | "sessions_side" | "spinner" | "theme" | "keys"
-                            )
-                            && key.as_str() != "show_stopped_sessions"
-                    })
-                })
-                .cloned(),
-        );
+        let object = value.as_object();
+        // `interface` is synthetic and `advanced` is always offered, so both
+        // are listed whether or not the draft stores a key for them.
+        let present = |key: &str| {
+            matches!(key, "interface" | "advanced")
+                || object.is_some_and(|entries| entries.contains_key(key))
+        };
+        let mut keys = ROOT_GROUPS
+            .iter()
+            .flat_map(|(_, keys)| keys.iter())
+            .filter(|key| present(key))
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        let ungrouped = object
+            .into_iter()
+            .flat_map(|entries| entries.keys())
+            .filter(|key| {
+                !hidden_root_key(key) && !keys.iter().any(|placed| placed == key.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.extend(ungrouped);
         return keys;
     }
     if path == ["interface"] {
@@ -246,11 +382,113 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
         Value::Object(entries) => entries
             .keys()
             .filter(|key| key.as_str() != "version")
+            .filter(|key| !hidden_key(path, value, key))
             .cloned()
             .collect(),
         Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Settings that exist in the stored shape but have no meaning on this entry,
+/// so showing them would invite a value that does nothing.
+fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        // This machine is always this machine; its type is not a choice.
+        ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
+        // Approvals are a remote-machine setting: a bare runtime here always
+        // uses the configured approvals.
+        ["targets", _] => {
+            key == "permissions"
+                && value["machine"]
+                    .as_str()
+                    .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                    == mj_core::config::LOCAL_MACHINE_ID
+        }
+        _ => false,
+    }
+}
+
+/// One row of a settings page: its name on the left and what it is set to on
+/// the right, against the far edge, so the column reads down the page.
+///
+/// Nothing here may depend on whether the row is selected. A list identifies
+/// its contents by the text it draws (`Form::set_list_contents`), so a caret
+/// in the gutter would read as a different list the moment the selection
+/// moved, cancelling the gesture a double-click is halfway through.
+fn setting_row(name: &str, value: &str, width: u16) -> Line<'static> {
+    let width = usize::from(width).max(SETTING_GUTTER.len() + 4);
+    let name = truncate(name, width.saturating_sub(SETTING_GUTTER.len() + 4));
+    let room = width.saturating_sub(SETTING_GUTTER.len() + name.chars().count() + 2);
+    let value = truncate(value, room);
+    let gap = room.saturating_sub(value.chars().count()) + 1;
+    Line::from(vec![
+        Span::raw(SETTING_GUTTER),
+        Span::raw(name),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(value, theme::muted()),
+        Span::raw(" "),
+    ])
+}
+
+const SETTING_GUTTER: &str = "  ";
+
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    text.chars()
+        .take(width.saturating_sub(1))
+        .chain(['…'])
+        .collect()
+}
+
+/// Whether `path` lists entries the user named rather than fixed settings.
+fn is_collection(path: &[String], value: &Value) -> bool {
+    value.is_array()
+        || (path.len() == 1
+            && matches!(
+                path[0].as_str(),
+                "profiles" | "machines" | "targets" | "bundles"
+            ))
+        || path.last().is_some_and(|key| key == "environment")
+}
+
+/// The name a row carries on the page `path`.
+///
+/// The label table is keyed by the last segment of a path, so a name the user
+/// chose must never be looked up in it: a machine called `local` is that
+/// machine, not the "Local repository directory" setting that shares the key.
+fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) -> String {
+    if parent.is_array() {
+        return value
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1));
+    }
+    if is_collection(path, parent) {
+        return key.to_owned();
+    }
+    schema::label(key)
+}
+
+/// What one row reports, which on the first page is the state of a whole
+/// section rather than the size of it.
+fn row_summary(
+    path: &[String],
+    key: &str,
+    value: &Value,
+    draft: &Value,
+    automatic: Option<String>,
+) -> String {
+    if path.is_empty()
+        && let Some(summary) = schema::section_summary(key, draft)
+    {
+        return summary;
+    }
+    value_summary(path, key, value, draft, automatic)
 }
 
 /// `automatic` replaces the placeholder for an unset value when its resolved
@@ -295,13 +533,10 @@ fn value_summary(
 }
 
 fn preferred_size(draft: &Value) -> SetupSize {
-    fn walk(
-        path: &[String],
-        value: &Value,
-        draft: &Value,
-        max_width: &mut usize,
-        max_height: &mut u16,
-    ) {
+    fn walk(path: &mut Vec<String>, draft: &Value, max_width: &mut usize, max_height: &mut u16) {
+        let Some(value) = draft.pointer(&pointer(path)) else {
+            return;
+        };
         let keys = visible_keys(path, value);
         let breadcrumb = std::iter::once("Settings".to_owned())
             .chain(path.iter().map(|key| schema::label(key)))
@@ -309,62 +544,42 @@ fn preferred_size(draft: &Value) -> SetupSize {
             .join(" › ");
         *max_width = (*max_width).max(Line::raw(breadcrumb).width());
         *max_height = (*max_height).max(
-            u16::try_from(keys.len())
+            u16::try_from(page_plan(path, &keys).len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(10),
         );
         for key in keys {
-            let child = if let Some(entries) = value.as_object() {
-                entries.get(&key)
-            } else {
-                key.parse::<usize>().ok().and_then(|index| value.get(index))
-            };
-            if path.is_empty() && key == "interface" {
-                let interface = json!({
-                    "sessions_side": draft["sessions_side"].clone(),
-                    "spinner": draft["spinner"].clone(),
-                    "theme": draft["theme"].clone(),
-                });
-                walk(
-                    &["interface".to_owned()],
-                    &interface,
-                    draft,
-                    max_width,
-                    max_height,
-                );
+            let parent = path.clone();
+            path.push(key.clone());
+            let Some(child) = draft.pointer(&pointer(path)) else {
+                path.pop();
                 continue;
-            }
-            let Some(child) = child else { continue };
-            let name = if value.is_array() {
-                child
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1))
-            } else {
-                schema::label(&key)
             };
-            let mut child_path = path.to_vec();
-            child_path.push(key.clone());
-            let mut summary = value_summary(path, &key, child, draft, None);
+            let name = row_label(&parent, value, &key, Some(child));
+            let mut summary = row_summary(&parent, &key, child, draft, None);
             if !child.is_object()
                 && !child.is_array()
                 && !child.is_boolean()
-                && schema::choices(&storage_path(&child_path), draft).is_empty()
+                && schema::choices(&storage_path(path), draft).is_empty()
             {
                 summary = summary.chars().take(24).collect();
             }
-            let line = format!("{name:<32}  {summary}");
+            // The gutter, the name, the gap the value is pushed away by, and
+            // the trailing column the row ends with.
+            let line = format!("{}{name}    {summary} ", SETTING_GUTTER);
             *max_width = (*max_width).max(Line::raw(line).width());
-            if child.is_object() || child.is_array() {
-                walk(&child_path, child, draft, max_width, max_height);
+            // `interface` resolves to the draft root, which holds the three
+            // settings its page gathers; every other page is its own value.
+            if (child.is_object() || child.is_array()) && path.as_slice() != ["review"] {
+                walk(path, draft, max_width, max_height);
             }
+            path.pop();
         }
     }
 
     let mut max_width = 0usize;
     let mut max_height = 20;
-    walk(&[], draft, draft, &mut max_width, &mut max_height);
+    walk(&mut Vec::new(), draft, &mut max_width, &mut max_height);
     // The page's own actions stack in a column at its right edge, so the
     // dialog is as wide as the widest page body plus that column. Back and the
     // commit sit in the footer row instead and take no width here.
@@ -393,6 +608,30 @@ fn preferred_size(draft: &Value) -> SetupSize {
     }
 }
 
+/// A configuration with no machines of its own still has this machine, so the
+/// Machines page always has an entry to open. The key is placed where the file
+/// keeps it, before the runtimes that name it, so the page list reads in the
+/// same order as the file.
+fn ensure_local_machine(draft: &mut Value) {
+    let root = draft.as_object_mut().expect("a configuration is an object");
+    if !root.contains_key("machines") {
+        let mut rebuilt = serde_json::Map::new();
+        for (key, value) in std::mem::take(root) {
+            if key == "targets" {
+                rebuilt.insert("machines".to_owned(), json!({}));
+            }
+            rebuilt.insert(key, value);
+        }
+        rebuilt.entry("machines").or_insert_with(|| json!({}));
+        *root = rebuilt;
+    }
+    root["machines"]
+        .as_object_mut()
+        .expect("machines is an object")
+        .entry(mj_core::config::LOCAL_MACHINE_ID)
+        .or_insert_with(|| json!({"kind": "local"}));
+}
+
 fn changed_profile_ids(draft: &Config, current: &Config) -> std::collections::BTreeSet<String> {
     draft
         .profiles
@@ -407,6 +646,7 @@ impl SetupDialog {
     fn new(config: &Config) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
+        ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
         populate_subagent_profile_choices(&mut draft);
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -418,6 +658,7 @@ impl SetupDialog {
             path: Vec::new(),
             selected: 0,
             editor: None,
+            search: None,
             review_editor: None,
             review_validation: None,
             form: RefCell::new(Dialog::default()),
@@ -450,10 +691,7 @@ impl SetupDialog {
     }
 
     fn collection(&self) -> bool {
-        self.current().is_array()
-            || (self.path.len() == 1
-                && matches!(self.path[0].as_str(), "profiles" | "targets" | "bundles"))
-            || self.path.last().is_some_and(|key| key == "environment")
+        is_collection(&self.path, self.current())
     }
 
     /// The one action set for the current screen. Buttons appear only on the
@@ -461,6 +699,14 @@ impl SetupDialog {
     /// popup, and `prepare` all read this list so they cannot drift apart.
     fn actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
         use SetupControl::*;
+        // The search covers the page, so the page's own actions go with it and
+        // Back means "leave the search" rather than "leave this page".
+        if self.search.is_some() {
+            return vec![
+                (Back, "Back", true),
+                (Save, self.save_label(), !self.saving),
+            ];
+        }
         if let Some(editor) = &self.editor
             && editor.choices.is_empty()
         {
@@ -505,16 +751,16 @@ impl SetupDialog {
                 interactive && !self.discovering && !self.saving,
             ));
         }
-        actions.push((
-            Save,
-            if self.saving {
-                "Saving…"
-            } else {
-                "Save and Close"
-            },
-            !self.saving,
-        ));
+        actions.push((Save, self.save_label(), !self.saving));
         actions
+    }
+
+    fn save_label(&self) -> &'static str {
+        if self.saving {
+            "Saving…"
+        } else {
+            "Save and Close"
+        }
     }
 
     /// The actions drawn in the dialog's footer row: the way back out of a
@@ -541,6 +787,25 @@ impl SetupDialog {
             return;
         }
         use SetupControl::*;
+        if let Some(search) = &self.search {
+            let len = search.matches.len();
+            let selected = search.selected;
+            let query = search.input.value().to_owned();
+            let actions = self.actions();
+            let form = self.form.get_mut();
+            form.begin_frame();
+            form.declare(Search, ControlKind::TextField);
+            form.declare_with_enabled(Results, ControlKind::ChoiceList { len, selected }, len > 0);
+            // A new query is a new list, so the viewport starts at its top
+            // rather than wherever the previous results were scrolled to.
+            form.set_list_identity(Results, format!("search/{query}"));
+            form.set_menu(true);
+            for (id, _, enabled) in actions {
+                form.declare_with_enabled(id, ControlKind::Button, enabled);
+            }
+            form.end_frame(Search);
+            return;
+        }
         let len = self.keys().len();
         self.selected = self.selected.min(len.saturating_sub(1));
         let actions = self.actions();
@@ -647,6 +912,43 @@ impl SetupDialog {
         });
     }
 
+    fn open_search(&mut self) {
+        self.search = Some(SearchState::new(&self.draft));
+        self.form = RefCell::new(Dialog::default());
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.form = RefCell::new(Dialog::default());
+    }
+
+    /// Moves the dialog to `path` and opens it the way its own page would, so
+    /// a search result lands exactly where browsing to it would have.
+    fn jump_to(&mut self, path: &[String]) -> Jump {
+        let Some((key, parent)) = path.split_last() else {
+            return Jump::Done;
+        };
+        self.close_search();
+        self.path = parent.to_vec();
+        let Some(index) = self.keys().iter().position(|candidate| candidate == key) else {
+            return Jump::Done;
+        };
+        self.selected = index;
+        if path == ["review"] {
+            return Jump::OpenReview;
+        }
+        // Opening a boolean row is what toggles it, so a search only selects
+        // one: finding a setting must never be the same as changing it.
+        let toggles = self
+            .draft
+            .pointer(&pointer(path))
+            .is_some_and(Value::is_boolean);
+        if !toggles {
+            self.open_selected();
+        }
+        Jump::Done
+    }
+
     fn back(&mut self) -> bool {
         let selected_key = if let Some(editor) = self.editor.take() {
             editor.path.last().cloned()
@@ -716,33 +1018,59 @@ impl SetupDialog {
         {
             return Ok(None);
         }
-        let target: mj_core::config::TargetTemplate =
-            serde_json::from_value(self.draft["targets"][&editor.path[1]].clone())
-                .map_err(|e| e.to_string())?;
+        let machine = self
+            .machine_for_path(&editor.path)
+            .ok_or_else(|| "This setting has no machine to resolve the path on".to_owned())?;
         self.notice = Some("Resolving path…".into());
         Ok(Some(DashboardAction::ResolveSetupPath {
             generation: self.generation,
             draft: self.draft.clone(),
             path: editor.path.clone(),
             value: editor.input.value().to_owned(),
-            target: Box::new(target),
+            machine: Box::new(machine),
         }))
     }
 
-    /// The target whose build cache page is showing, with the settings its
+    /// The machine a draft path belongs to: the machine itself under
+    /// `machines`, and the machine a runtime names under `targets`.
+    fn machine_for_path(&self, path: &[String]) -> Option<mj_core::config::Machine> {
+        let machine_id = match path.first().map(String::as_str)? {
+            "machines" => path.get(1)?.clone(),
+            "targets" => self.draft["targets"][path.get(1)?]["machine"]
+                .as_str()
+                .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                .to_owned(),
+            _ => return None,
+        };
+        self.machine(&machine_id)
+    }
+
+    /// One machine from the draft. This machine is always available, whether
+    /// or not the draft spells it out.
+    fn machine(&self, machine_id: &str) -> Option<mj_core::config::Machine> {
+        match self.draft["machines"].get(machine_id) {
+            Some(machine) => serde_json::from_value(machine.clone()).ok(),
+            None if machine_id == mj_core::config::LOCAL_MACHINE_ID => {
+                Some(mj_core::config::Machine::Local { build_cache: None })
+            }
+            None => None,
+        }
+    }
+
+    /// The machine whose build cache page is showing, with the settings its
     /// preview depends on.
     fn build_cache_page(&self) -> Option<(String, Value)> {
-        let [section, target_id, page] = self.path.as_slice() else {
+        let [section, machine_id, page] = self.path.as_slice() else {
             return None;
         };
-        if section != "targets" || page != "build_cache" {
+        if section != "machines" || page != "build_cache" {
             return None;
         }
         let key = serde_json::json!({
-            "target": self.draft["targets"][target_id],
+            "machine": self.draft["machines"][machine_id],
             "global": self.draft["build_cache"],
         });
-        Some((target_id.clone(), key))
+        Some((machine_id.clone(), key))
     }
 
     /// Start resolving the build cache page's automatic values on the target's
@@ -758,23 +1086,23 @@ impl SetupDialog {
         {
             return DashboardAction::None;
         }
-        let target: mj_core::config::TargetTemplate =
-            match serde_json::from_value(key["target"].clone()) {
-                Ok(target) => target,
-                // A draft that does not parse yet has nothing to resolve.
-                Err(_) => return DashboardAction::None,
-            };
+        let machine: mj_core::config::Machine = match serde_json::from_value(key["machine"].clone())
+        {
+            Ok(machine) => machine,
+            // A draft that does not parse yet has nothing to resolve.
+            Err(_) => return DashboardAction::None,
+        };
         let global: mj_core::config::BuildCacheConfig =
             serde_json::from_value(key["global"].clone()).unwrap_or_default();
         self.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: BuildCachePreviewResult::Resolving,
         });
-        self.notice = Some("Resolving the build cache defaults on the target's host…".into());
+        self.notice = Some("Resolving the build cache defaults on the machine…".into());
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
-            target: Box::new(target),
+            machine: Box::new(machine),
             global,
         }
     }
@@ -791,7 +1119,7 @@ impl SetupDialog {
         let label = match &preview.result {
             BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
             BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "Not available for this target kind".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
                 "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
                 "enabled" => "On".to_owned(),
@@ -1347,13 +1675,22 @@ impl DashboardState {
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(Interaction::Activate(Save))
                     }
-                    KeyCode::Backspace if dialog.editor.is_none() => {
+                    // Every shortcut below is a bare key, so none of them may
+                    // fire while the search query has the keyboard.
+                    KeyCode::Char('/')
+                        if dialog.editor.is_none()
+                            && dialog.search.is_none()
+                            && key.modifiers.is_empty() =>
+                    {
+                        Some(Interaction::Activate(OpenSearch))
+                    }
+                    KeyCode::Backspace if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Back))
                     }
-                    KeyCode::Char('a') if dialog.editor.is_none() => {
+                    KeyCode::Char('a') if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Add))
                     }
-                    KeyCode::Delete if dialog.editor.is_none() => {
+                    KeyCode::Delete if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Remove))
                     }
                     _ => None,
@@ -1361,9 +1698,31 @@ impl DashboardState {
             }
             _ => None,
         };
-        let form_result = shortcut
-            .is_none()
-            .then(|| dialog.form.get_mut().handle(&event));
+        // Arrows browse the results while the query keeps the keyboard, which
+        // is how the command palette's search behaves.
+        let browse = match &event {
+            Event::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && dialog.search.is_some()
+                    && dialog.form.borrow().is_focused(Search)
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
+            {
+                Some(KeyEvent::new(key.code, KeyModifiers::NONE))
+            }
+            _ => None,
+        };
+        let form_result = shortcut.is_none().then(|| {
+            let form = dialog.form.get_mut();
+            match browse {
+                Some(browse) => {
+                    form.focus(Results);
+                    let result = form.handle(&Event::Key(browse));
+                    form.focus(Search);
+                    result
+                }
+                None => form.handle(&event),
+            }
+        });
         if let Some(result) = &form_result {
             self.last_event_consumed.set(result.consumed);
         }
@@ -1379,6 +1738,40 @@ impl DashboardState {
         };
         let mut action = DashboardAction::None;
         match interaction {
+            Some(Interaction::Activate(OpenSearch)) => {
+                dialog.open_search();
+            }
+            Some(Interaction::Cancel) | Some(Interaction::Activate(Back))
+                if dialog.search.is_some() =>
+            {
+                dialog.close_search();
+            }
+            Some(Interaction::Edit(Search, edit)) => {
+                if let Some(search) = &mut dialog.search
+                    && TextField::apply(&mut search.input, edit)
+                        == mj_chat::components::EditOutcome::Changed
+                {
+                    search.refilter();
+                    self.record_event_handled();
+                }
+            }
+            Some(Interaction::Select(Results, index)) => {
+                if let Some(search) = &mut dialog.search {
+                    search.selected = index;
+                }
+            }
+            Some(Interaction::Activate(Search | Results) | Interaction::Toggle(Results)) => {
+                let target = dialog
+                    .search
+                    .as_ref()
+                    .and_then(SearchState::selected_entry)
+                    .map(|entry| entry.path.clone());
+                if let Some(path) = target
+                    && dialog.jump_to(&path) == Jump::OpenReview
+                {
+                    action = dialog.open_review(self);
+                }
+            }
             Some(Interaction::Cancel) if dialog.editor.is_some() => {
                 dialog.back();
             }
@@ -1437,18 +1830,24 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
-                    match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
-                        Value::Object(object) => {
-                            object.remove(&key);
+                    // This machine is where Mjolnir runs; it cannot be taken
+                    // out of the list.
+                    if dialog.path == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
+                        dialog.notice = Some("This machine is always available.".into());
+                    } else {
+                        match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
+                            Value::Object(object) => {
+                                object.remove(&key);
+                            }
+                            Value::Array(array) => {
+                                array.remove(dialog.selected);
+                            }
+                            _ => {}
                         }
-                        Value::Array(array) => {
-                            array.remove(dialog.selected);
+                        if dialog.path.first().is_some_and(|path| path == "profiles") {
+                            let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
+                            dialog.invalidate_review_validation_for(Some(&profile_id));
                         }
-                        _ => {}
-                    }
-                    if dialog.path.first().is_some_and(|path| path == "profiles") {
-                        let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
-                        dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
                 }
             }
@@ -1704,7 +2103,7 @@ fn detection_notice(scope: DetectScope, added: &[String], rejected: &[RejectedRu
         let names = added.join(", ");
         sentences.push(match scope {
             DetectScope::Profiles => format!("Added agent profiles: {names}."),
-            DetectScope::Runtimes => format!("Added machines and runtimes: {names}."),
+            DetectScope::Runtimes => format!("Added runtimes: {names}."),
         });
     }
     for runtime in rejected {
@@ -1801,6 +2200,10 @@ pub(crate) fn render_setup(
         form.end_frame(initial);
         return;
     }
+    if dialog.search.is_some() {
+        render_search(frame, popup, inner, dialog);
+        return;
+    }
     let text_editor = dialog
         .editor
         .as_ref()
@@ -1833,15 +2236,27 @@ pub(crate) fn render_setup(
         Rect::new(inner.x, help_y, inner.width, 2),
     );
     let body_y = help_y + 3;
+    // Back and the commit share the dialog's bottom row; the page's own
+    // actions stack in a column beside the body.
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
     let band = Rect::new(
         inner.x,
         body_y,
         inner.width,
         inner.height.saturating_sub(7 + u16::from(nested)).max(1),
     );
-    // Back and the commit share the dialog's bottom row; the page's own
-    // actions stack in a column beside the body.
-    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    // The three rows a notice would occupy belong to the page while no notice
+    // is showing in them, never to the footer's row.
+    let band = if dialog.notice.is_some() {
+        band
+    } else {
+        Rect::new(
+            band.x,
+            band.y,
+            band.width,
+            footer_row.y.saturating_sub(band.y).max(1),
+        )
+    };
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
     let footer = dialog.footer_actions();
@@ -1873,7 +2288,12 @@ pub(crate) fn render_setup(
         theme::title(true),
         !dialog.saving && !choice_editor,
     );
-    frame.render_widget(theme::modal().title(title), popup);
+    frame.render_widget(
+        theme::modal()
+            .title(title)
+            .title_bottom(mj_chat::components::DialogShell::hints(false)),
+        popup,
+    );
     let mut initial;
     let mut background_offset = form.list_offset(List);
     if text_editor {
@@ -1908,57 +2328,55 @@ pub(crate) fn render_setup(
         }
         initial = Field;
     } else {
-        let rows = dialog
-            .keys()
-            .iter()
-            .map(|key| {
-                let value = dialog
-                    .current()
-                    .as_object()
-                    .and_then(|object| object.get(key))
-                    .or_else(|| {
-                        key.parse::<usize>()
-                            .ok()
-                            .and_then(|index| dialog.current().get(index))
-                    });
-                let interface = dialog.path.is_empty() && key == "interface";
-                let name = if dialog.current().is_array() {
-                    value
-                        .and_then(|value| value.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1)
-                        })
-                } else {
-                    schema::label(key)
-                };
-                Line::raw(format!(
-                    "{name:<32}  {}",
-                    if interface {
-                        "3 settings  ›".to_owned()
-                    } else if let Some(value) = value {
-                        value_summary(
-                            &dialog.path,
-                            key,
-                            value,
-                            &dialog.draft,
-                            dialog
-                                .build_cache_automatic_label(key)
-                                .or_else(|| dialog.archive_space_automatic_label(key)),
-                        )
-                    } else {
-                        String::new()
-                    }
-                ))
-            })
-            .collect::<Vec<_>>();
+        let keys = dialog.keys();
+        let mut rows = Vec::new();
+        let mut row_map = Vec::new();
+        for row in page_plan(&dialog.path, &keys) {
+            let index = match row {
+                PageRow::Gap => {
+                    rows.push(Line::raw(""));
+                    row_map.push(None);
+                    continue;
+                }
+                PageRow::Heading(heading) => {
+                    rows.push(Line::styled(
+                        format!("{SETTING_GUTTER}{heading}"),
+                        theme::muted().add_modifier(Modifier::BOLD),
+                    ));
+                    row_map.push(None);
+                    continue;
+                }
+                PageRow::Setting(index) => index,
+            };
+            let key = &keys[index];
+            let mut child_path = dialog.path.clone();
+            child_path.push(key.clone());
+            let value = dialog.draft.pointer(&pointer(&child_path));
+            let name = row_label(&dialog.path, dialog.current(), key, value);
+            let summary = match value {
+                Some(value) => row_summary(
+                    &dialog.path,
+                    key,
+                    value,
+                    &dialog.draft,
+                    dialog
+                        .build_cache_automatic_label(key)
+                        .or_else(|| dialog.archive_space_automatic_label(key)),
+                ),
+                None => String::new(),
+            };
+            rows.push(setting_row(&name, &summary, body.width));
+            row_map.push(Some(index));
+        }
         if choice_editor {
             // The page remains visible behind a choice popup, but its controls
             // must not remain interactive through the overlay.
+            let selected_row = row_map
+                .iter()
+                .position(|item| *item == Some(dialog.selected));
             let mut state = ListState::default()
                 .with_offset(background_offset)
-                .with_selected(Some(dialog.selected));
+                .with_selected(selected_row);
             frame.render_stateful_widget(
                 RatatuiList::new(rows.iter().cloned().map(ListItem::new).collect::<Vec<_>>())
                     .highlight_style(theme::selection(false)),
@@ -1967,7 +2385,16 @@ pub(crate) fn render_setup(
             );
             background_offset = state.offset();
         } else {
-            ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+            ChoiceList::render_with_rows(
+                frame,
+                body,
+                &rows,
+                dialog.selected,
+                &row_map,
+                &[],
+                &mut form,
+                List,
+            );
         }
         initial = List;
     }
@@ -2035,6 +2462,81 @@ pub(crate) fn render_setup(
         );
     }
     form.end_frame(initial);
+}
+
+/// Draws the search in place of the page: the query, then every setting that
+/// matches it with the section it lives in and the value it holds now.
+fn render_search(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDialog) {
+    use SetupControl::*;
+    let search = dialog.search.as_ref().expect("an open search");
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Settings",
+        theme::title(true),
+        !dialog.saving,
+    );
+    frame.render_widget(
+        theme::modal().title(title).title(
+            Line::styled(
+                format!(" {} settings ", search.matches.len()),
+                theme::muted(),
+            )
+            .right_aligned(),
+        ),
+        popup,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Search every setting by name, by what it does, or by its value. Esc returns to the list.",
+        )
+            .wrap(Wrap { trim: false })
+            .style(theme::muted()),
+        Rect::new(inner.x, inner.y, inner.width, 2),
+    );
+    let query = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    TextField::render(frame, query, &search.input, &mut form, Search);
+    if search.input.is_empty() {
+        frame.render_widget(
+            Line::styled(
+                "Type to filter…",
+                theme::muted().add_modifier(Modifier::ITALIC),
+            ),
+            query,
+        );
+    }
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    let top = inner.y + 4;
+    let results = Rect::new(
+        inner.x,
+        top,
+        inner.width,
+        footer_row.y.saturating_sub(top).max(1),
+    );
+    if search.matches.is_empty() {
+        frame.render_widget(Line::raw("No matching setting"), results);
+        form.register(
+            Results,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            results,
+            false,
+        );
+    } else {
+        let rows = search
+            .matches
+            .iter()
+            .filter_map(|index| search.entries.get(*index))
+            .map(|entry| search::row(entry, results.width))
+            .collect::<Vec<_>>();
+        ChoiceList::render(frame, results, &rows, search.selected, &mut form, Results);
+    }
+    Dialog::render_actions(frame, footer_row, &dialog.footer_actions(), &mut form);
+    form.end_frame(Search);
 }
 
 /// Splits a settings page into its body and the stacked column of `actions`.

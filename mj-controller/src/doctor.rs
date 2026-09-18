@@ -1,7 +1,7 @@
 //! Actionable host and configuration prerequisite checks.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -198,6 +198,7 @@ pub fn run_with_config_path(
     checks.extend(worker_binary_checks(config.as_ref()));
     checks.push(daemon_build_check());
     checks.extend(worker_freshness_checks(config.as_ref()));
+    checks.extend(review_residue_checks(config.as_ref()));
     checks.push(apple_container_check(
         &apple_platform,
         executor,
@@ -2128,3 +2129,158 @@ pub fn current_apple_platform(executor: &impl CommandExecutor) -> ApplePlatform 
 
 #[cfg(test)]
 mod tests;
+
+/// What one repository still holds from a Mjolnir review capture.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReviewResidue {
+    /// `refs/hel/*` refs in the repository.
+    pub refs: Vec<String>,
+    /// Scratch index files left in the Git directory by an interrupted capture.
+    pub scratch_indexes: Vec<PathBuf>,
+}
+
+impl ReviewResidue {
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty() && self.scratch_indexes.is_empty()
+    }
+}
+
+/// Read what a repository still holds from Mjolnir's review captures.
+///
+/// Releases before this one staged the whole working tree into the user's own
+/// object store and pinned it with two refs, and a capture that was killed
+/// partway left its scratch index behind. Both are the user's to remove, so
+/// this only reads.
+pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
+    let mut residue = ReviewResidue::default();
+    let git_dir = repository.join(".git");
+    if !git_dir.exists() {
+        return residue;
+    }
+    for reference in ["review-baseline", "review-capture"] {
+        if git_dir.join("refs/hel").join(reference).is_file() {
+            residue.refs.push(format!("refs/hel/{reference}"));
+        }
+    }
+    // A packed ref survives `git pack-refs`, which a `git gc` runs.
+    if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
+        for line in packed.lines() {
+            if let Some((_, reference)) = line.split_once(' ')
+                && reference.starts_with("refs/hel/")
+                && !residue.refs.iter().any(|known| known == reference)
+            {
+                residue.refs.push(reference.to_owned());
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hel-review-index-"))
+            {
+                residue.scratch_indexes.push(entry.path());
+            }
+        }
+    }
+    residue.refs.sort();
+    residue.scratch_indexes.sort();
+    residue
+}
+
+/// Report Mjolnir's own leftovers in the repositories the configuration names.
+///
+/// This deletes nothing. Removing refs and running `git gc` in someone else's
+/// repository without asking is the same mistake as writing to it without
+/// asking, which is what left this residue in the first place.
+fn review_residue_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    let mut repositories: Vec<PathBuf> = config
+        .bundles
+        .values()
+        .flat_map(|bundle| bundle.repositories.iter())
+        .filter_map(|repository| repository.local.clone())
+        .collect();
+    // A session started with `--project-directory` has no bundle, and those
+    // are exactly the repositories a person works in by hand, so they are the
+    // ones where leftovers matter most. A daemon-less machine has no session
+    // database, which is not a reason to skip the configured repositories.
+    if let Ok(state) = crate::database::load_state() {
+        repositories.extend(
+            state
+                .sessions
+                .values()
+                .filter_map(|session| session.project_directory.clone()),
+        );
+    }
+    repositories.sort();
+    repositories.dedup();
+    if repositories.is_empty() {
+        return Vec::new();
+    }
+    let found = repositories
+        .into_iter()
+        .map(|repository| {
+            let residue = review_residue(&repository);
+            (repository, residue)
+        })
+        .filter(|(_, residue)| !residue.is_empty())
+        .collect::<Vec<_>>();
+    if found.is_empty() {
+        return vec![DoctorCheck::ready(
+            "review.residue",
+            "Review leftovers in your repositories",
+            "No Mjolnir refs or scratch index files were found in the configured repositories.",
+        )];
+    }
+    let detail = found
+        .iter()
+        .map(|(repository, residue)| {
+            let mut parts = Vec::new();
+            if !residue.refs.is_empty() {
+                parts.push(residue.refs.join(", "));
+            }
+            if !residue.scratch_indexes.is_empty() {
+                parts.push(format!(
+                    "{} leftover scratch index file(s)",
+                    residue.scratch_indexes.len()
+                ));
+            }
+            format!("{}: {}", repository.display(), parts.join("; "))
+        })
+        .collect::<Vec<_>>()
+        .join(". ");
+    let commands = found
+        .iter()
+        .flat_map(|(repository, residue)| {
+            let repository = repository.display().to_string();
+            let mut commands = residue
+                .refs
+                .iter()
+                .map(|reference| format!("git -C {repository} update-ref -d {reference}"))
+                .collect::<Vec<_>>();
+            commands.extend(
+                residue
+                    .scratch_indexes
+                    .iter()
+                    .map(|index| format!("rm -f {}", index.display())),
+            );
+            commands.push(format!("git -C {repository} gc --prune=now"));
+            commands
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![DoctorCheck::fixable(
+        "review.residue",
+        "Review leftovers in your repositories",
+        format!(
+            "Mjolnir left these in repositories it does not own: {detail}. \
+             A running session's own `refs/hel/review-baseline` is in use; \
+             remove that one only when no session is working in that repository."
+        ),
+        format!("Remove them yourself when you are ready:\n{commands}"),
+    )]
+}

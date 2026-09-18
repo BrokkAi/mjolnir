@@ -26,7 +26,9 @@ def parse_args() -> argparse.Namespace:
 def start_dashboard(lab: Lab):
     client = lab.start_tui("tui-1")
     # Startup opens the last workspace directly, including its empty state.
-    client.wait_for("Alt-S resume")
+    # The footer's chord group is what proves the dashboard finished drawing;
+    # its heading names the prefix key rather than any one command's letter.
+    client.wait_for("ctrl+b then:")
     return client
 
 
@@ -229,9 +231,9 @@ def run(lab: Lab) -> None:
             raise ScenarioFailure(f"dashboard quit took {quit_elapsed:.3f}s")
         lab.stop_daemon()
         lab.integrity()
-        leaks = lab.owned_pids()
+        leaks = lab.leak_report()
         if leaks:
-            raise ScenarioFailure(f"owned processes remained after cleanup: {leaks}")
+            raise ScenarioFailure(leaks)
         lab.trace["finished_at"] = lab.timestamp()
         lab.trace["outcome"] = "passed"
         lab.write_trace()
@@ -256,10 +258,12 @@ def main() -> int:
         lab.trace["outcome"] = "failed"
         lab.trace["failure"] = str(error)
         lab.write_trace()
+        # Before cleanup, not after: cleanup kills whatever leaked, and a tree
+        # captured then shows a tidy machine and explains nothing.
+        lab.capture_process_tree()
         lab.cleanup_owned()
         with contextlib.suppress(Exception):
             lab.integrity()
-        lab.capture_process_tree()
         lab.preserve_runtime()
         lab.remove_runtime()
         print(f"browser reliability: failed: {error}", file=sys.stderr)

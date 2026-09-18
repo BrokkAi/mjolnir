@@ -54,26 +54,44 @@ fails in under a second with the loader error as its reason.
       (see `Artifacts and Notes`).
 - [x] (2026-09-18 00:05Z) Confirmed from the filesystem that the reported failing workspace
       has never completed a review-baseline pin, and the reported succeeding workspace has.
-- [ ] Milestone 1: worker startup breadcrumbs, so a worker can never die or stall silently.
-- [ ] Milestone 2: readiness wait that watches the process and the breadcrumbs.
+- [x] (2026-09-18 01:50Z) Milestone 1 (de9b1cb2): worker startup breadcrumbs, so a worker can never die or stall silently.
+- [x] (2026-09-18 02:10Z) Milestone 2 (5723c397): readiness wait that watches the process and the breadcrumbs.
 - [x] (2026-09-18 01:10Z) After maintainer review of e5b11913: established what the review
       baseline is for and who reads it, measured the object-store cost, listed every other
       whole-tree walk, and replaced the bounding approach with a root-cause design.
 - [x] (2026-09-18 01:20Z) Reproduced the object-store growth on the unfixed build: a scratch
       repository with 3,000 untracked files gained 3,002 objects and two `refs/hel` refs from
       one session start.
-- [ ] Milestone 3a: capture writes objects into a worker-owned object directory, never the
+- [x] (2026-09-18 02:00Z) Maintainer decisions recorded: capture only for reviewed parent
+      sessions, refuse above 50,000 untracked paths, doctor reports and deletes nothing.
+- [x] (2026-09-18 03:10Z) Milestone 3a, as option (b) (6c180949): capture writes objects into a worker-owned object directory, never the
       user's repository; the two `refs/hel` refs are replaced by `review-baselines.json`.
-- [ ] Milestone 3b: startup baseline costs one stat-walk plus the dirty tracked files.
-- [ ] Milestone 3c: review-time capture costs only the turn's changed paths.
-- [ ] Milestone 3d: a sub-agent child records its own baseline (falls out of 3a).
-- [ ] Milestone 4: carry the real reason back to the parent model.
-- [ ] Milestone 5: bounded automatic retry, and a child the parent can act on.
-- [ ] Milestone 6: retire the relay actor of a session that reached a terminal state.
-- [ ] Milestone 7: re-resolve the worker source per session instead of only at daemon start.
-- [ ] Live acceptance run on `local-bare`, local Podman, and `morannon` ssh-podman.
+- [x] (2026-09-18 02:40Z) Milestone 3b (35a6360b): no capture at all unless the session is reviewed; when it is, the
+      baseline costs one stat-walk plus the dirty tracked files.
+- [x] (2026-09-18 02:55Z) Milestone 3c (69745068): review-time capture costs only the turn's changed paths.
+- [x] (2026-09-18 03:05Z) Milestone 3e (7375d17f): refuse a session whose workspace review cannot cover.
+- [x] (2026-09-18 03:30Z) Milestone 8 (eeb44e4f, cd5c9907): `mj doctor` reports stray `refs/hel/*` and `hel-review-index-*`.
+- [x] (2026-09-18 02:25Z) Milestone 4 (e4711938): carry the real reason back to the parent model.
+- [x] (2026-09-18 03:15Z) Milestone 5 (d0a38a23): bounded automatic retry, and a child the parent can act on.
+- [x] (2026-09-18 03:20Z) Milestone 6 (b05b3c72): retire the relay actor of a session that reached a terminal state.
+- [x] (2026-09-18 03:25Z) Milestone 7 (3c6e6952): re-resolve the worker source per session instead of only at daemon start.
+- [x] (2026-09-18 05:40Z) Live acceptance passes on every target kind: 45 spawns, 45
+      started. `local-bare` 24 of 24, local Podman 14 of 14, `morannon` ssh-podman 7 of 7.
+- [x] (2026-09-18 05:10Z) The container process limit, which was the cause of every
+      concurrent-start failure (190d2b19), and the state residue that refused a spawn
+      (e1933e31).
 
 ## Surprises & Discoveries
+
+- Observation: the liveness probe identified a worker by its command line, so a worker whose
+  command line does not carry the expected text was reported as gone while it was running.
+  Evidence: an injected stuck worker came back as "the worker process is gone" rather than
+  as stuck on its step. Fixed in cd5c9907 by believing the pid the worker records in its
+  startup file, which the launch clears, so that pid can only be this launch's.
+
+- Observation: a daemon pins `MJ_WORKER_BINARY` from the environment it was started with.
+  Changing it for a later `mj new` does nothing until the daemon restarts, which cost one
+  confusing injected-failure result before it was understood.
 
 - Observation: the reported cause in #1065 ("the 30 s relay timeout may be too short when
   the codex bridge has to run `npx -y @brokkai/codex-acp` on a cold cache") is wrong. The
@@ -170,6 +188,24 @@ fails in under a second with the loader error as its reason.
   things, and the root cause has to be fixed rather than bounded.
   Date/Author: 2026-09-17, plan author.
 
+- Decision (maintainer, 2026-09-18): a session that is not reviewed does no Git capture at
+  session start at all, not even a stat-walk. The predicate is
+  `config.review.reviewer_profile().is_some()` (`mj-core/src/config.rs:219`, "whether a turn
+  review can run at all: it needs a reviewer, armed or not"), and a sub-agent child is never
+  reviewed, so a child never does baseline work and never reads a parent's baseline.
+  Rationale: work done for a feature the session cannot use is waste, and it was the whole
+  of the #1065 failure. This also removes the need for a per-child inheritance rule.
+  Date/Author: 2026-09-18, maintainer decision 1.
+
+- Decision (maintainer, 2026-09-18): when review is configured and the working tree has more
+  than 50,000 untracked paths, refuse to start the session with a precondition refusal
+  naming the count and the limit. No partial-coverage mode.
+  Rationale: a review that silently does not cover untracked files is a review the user
+  cannot trust. Refusing is honest and the user has two clear remedies: clean the tree, or
+  run the session without review. The refusal mechanism is `mj_core::refusal::Refusal` from
+  #1057 (commit f0ad7d1e), which answers 409 with the sentence instead of a generic 500.
+  Date/Author: 2026-09-18, maintainer decision 2.
+
 - Decision: session start must not walk or stage the whole working tree, and Mjolnir must
   never write objects into the user's repository.
   Rationale: measured on the workspace in the report, one abandoned capture left 243 MiB of
@@ -197,9 +233,102 @@ fails in under a second with the loader error as its reason.
 
 ## Outcomes & Retrospective
 
-Not started. Fill in at the end of each milestone: what was achieved, what remains, and
-whether the live acceptance run in `Validation and Acceptance` passed on all three target
-kinds.
+### What the volume acceptance measured (2026-09-18, final)
+
+Spawns were driven through the daemon's own HTTP route rather than through a parent model,
+so the numbers measure the spawn path instead of a model's ability to call a tool the right
+number of times. Each child ran one trivial prompt on the `deepseek` profile and was closed.
+
+    target                 set        result      time to running
+    local-bare             20 + 4     24 of 24     1.0-6.0s, mean 1.7s
+    local podman           10 + 4     14 of 14     1.0-7.0s, mean 2.4s
+    morannon ssh-podman     5 + 2      7 of 7      2.0-5.0s, mean 3.9s
+
+Forty-five spawns, forty-five children started, nothing unexplained and nothing explained
+either. The bar is met on every target kind the maintainer uses.
+
+### Where the 300 seconds went
+
+The first podman runs lost two to three of every four concurrent children to
+"ACP runtime did not report session startup within 300s", while the worker itself was
+serving in under 200 milliseconds. Extending the startup trace through the bridge phase
+(96eea216) turned that into a measurement. A healthy child on a container target:
+
+    start              0ms      bind-socket      +125ms    acp-initialized  +507ms
+    re-exec           +28ms     serving          +127ms    acp-session-open +619ms
+    policy            +57ms     login-resolve    +131ms
+    durable-relay     +59ms     harness-resolve  +135ms
+
+That ruled out two of the four suspects at once. Resolving the login environment and
+resolving the managed harness cost four milliseconds between them, because a container
+session runs the image's own harness and never takes the installer lock; the whole of a
+good start is 619 milliseconds.
+
+The slow ones never reached `acp-initialized`, and the worker logs named why:
+"launch supervised ACP bridge sh: Resource temporarily unavailable (os error 11)", then
+"launch ACP bridge ...: Resource temporarily unavailable", and, once the container was
+fuller, "sh: 1: Cannot fork". All of them are EAGAIN from the process limit.
+
+Measured inside the container: `pids.max` was 2048, the engine default, and a container
+holding a parent and one child was already at 1521. One session's tree costs about 700
+threads, because its worker, its ACP supervisor and the harness's own Node process each
+size a thread pool to the host's CPU count. So the engine default fits about two sessions,
+while Mjolnir lets a parent hold six children by default, which needs roughly 4,900. That
+limit was never a choice Mjolnir made; it simply never set one. It now asks for 8192, and a
+template that sets `--pids-limit` itself keeps its own number.
+
+This also explains the earlier two-slot admission gate's partial success: it limited how
+many children *started* at once, but the limit is on how many *exist*, so a burst still ran
+the container out of slots. The gate is kept, because a start is the expensive moment and
+staggering it is cheap, but the room is what made the difference: 11 of 14 became 14 of 14.
+
+### The residue that refused a spawn
+
+`sub-agent "..." has no child session` came from `State::validate`, which `load_state_from`
+calls on every load, so one relation row whose child session the load did not return made
+every later operation on that daemon fail with it, including an unrelated spawn.
+
+Two candidate causes were ruled out with evidence rather than guessed at. The foreign key
+cascade does work: deleting a child session deletes its relation, which a control test now
+asserts, and every connection sets `PRAGMA foreign_keys = ON`. A session cannot lose its
+context row either: the `sessions` foreign key blocks that delete, so the load's inner join
+against `session_contexts` cannot drop a live session. A live reproduction of the sequence
+from the volume run, spawning children, closing them and destroying their parent, left the
+database consistent at every step, so the residue is rarer than the sequence and was not
+caught in the act.
+
+What was certain is where the damage was done, and that is what is fixed (e1933e31): the
+load no longer refuses an entire state because of one row that describes nothing. Such a row
+is dropped with a warning, exactly as the load already skips a session whose harness it
+cannot parse, and the next save deletes it. Whatever writes it, it can no longer stop a
+daemon from working.
+
+### Other things the runs found
+
+**A spawn over the HTTP route answered 404 for a child that had started** (93de6b7b). The
+handler built its answer from the viewer snapshot, which is republished on a tick, so a
+child registered milliseconds earlier was almost never in it. A caller that retried on 404
+would have spawned a duplicate.
+
+**A child close is accepted asynchronously.** `POST /sessions/{id}/close` answers 202 and
+the child's process tree goes some time later. A caller that spawns and closes in a tight
+loop can therefore fill a container with the trees of children that are on their way out;
+that is how the acceptance harness first hit `sh: 1: Cannot fork`. The product behaved
+correctly and said so clearly, but a close is not finished when it is accepted. Recorded
+here for the maintainer to decide whether it deserves its own ticket.
+
+**A daemon pins `MJ_WORKER_BINARY` from the environment it was started with.** Changing it
+for a later `mj new` does nothing until the daemon restarts.
+
+### The original purpose, measured against
+
+A sub-agent spawn that failed used to leave a child permanently in `Error` with
+"worker relay did not accept a connection in 30s", an empty log, and no way to tell a dead
+worker from a slow one. Now a spawn either works or names its own cause: the startup step
+the worker reached, the harness wait that expired, the workspace a review cannot cover, or
+the process limit a container hit. Forty-five spawns across three target kinds all worked,
+and every failure met along the way named itself well enough to be fixed from its own
+message. That is what "spawn working completely" asked for.
 
 ## Context and Orientation
 
@@ -684,9 +813,28 @@ is part of the worker root, so a moved or restored session loses its captured tr
 starts from no baseline, exactly as a repository whose `refs/hel/*` had been garbage
 collected does today. That is the same outcome, reached more predictably.
 
-**3b. Make the startup baseline proportional to the dirty set.** Replace
-`initialize_review_baselines` with a function that does no content reading beyond the files
-that are already dirty:
+**3b. Do nothing at all unless the session is reviewed, and then only what the dirty set
+costs.** First the gate. Add a field `review_capture: bool` to `WorkerLaunchConfig`
+(`mj-core/src/worker_launch.rs`), defaulted to `false` so an older config still parses. The
+controller sets it in `session_launch_config`
+(`mj-controller/src/controller/worker_binary/launch.rs`), beside the existing
+`launch.subagent_tools` line, to
+
+    self.config.review.reviewer_profile().is_some() && subagent.is_none()
+
+`reviewer_profile()` is the repository's own answer to "can a turn review run at all"
+(`mj-core/src/config.rs:219`); `subagent.is_none()` is how that function already
+distinguishes a parent from a child. In `run_daemon`, skip the whole baseline block when
+`review_capture` is false. A session with no `[review] profile`, and every sub-agent child,
+then runs no Git command at startup whatsoever.
+
+In the same commit, make the review host refuse a child explicitly, so the two halves cannot
+drift: add to `refuse_start` (`mj-controller/src/review_host/begin.rs:175`) a check that the
+session has no sub-agent record, refusing with "sub-agent sessions are not reviewed". Without
+it, a `/review` on a child would ask for a delta against a baseline that was never taken.
+
+Then, when the gate is open, replace `initialize_review_baselines` with a function that does
+no content reading beyond the files that are already dirty:
 
 1. Read `git status --porcelain=v1 --untracked-files=all -z` once. This is a stat-walk: one
    `stat` per tracked file and a `readdir` per directory, and it reads no file contents. On
@@ -699,10 +847,8 @@ that are already dirty:
    paths, sizes and modification times in `review-baselines.json` as the
    `untracked_at_start` list, so review can later tell a file created during the turn from
    one that already existed.
-4. Bound the untracked list at 50,000 paths. Past that, record
-   `"untracked_at_start": "unbounded"` and let review say that untracked files are not
-   covered in this repository. Recording half a list would be worse than recording none,
-   because review would mislabel the rest.
+4. Bound the untracked list at 50,000 paths. Past that, refuse to start the session. See
+   Milestone 3e; there is no partial-coverage mode.
 
 Cost at session start becomes one stat-walk and the hashing of the dirty tracked files,
 which is what the user has already changed by hand. In a clean checkout it is a walk and
@@ -726,8 +872,8 @@ only what changed:
    Hashing is bounded by the turn's own changes.
 4. Diff baseline against current as today.
 
-A repository whose `untracked_at_start` is `"unbounded"` falls back to "tracked changes
-only", and the delta carries a flag so the review output can say so in one line.
+Every repository reaching this point has a bounded `untracked_at_start` list, because
+Milestone 3e refuses the session otherwise, so there is no fallback mode to write.
 
 **What review loses.** One thing: for an untracked file that already existed when the session
 started and that the turn modified, the baseline holds no content, so the diff shows the
@@ -754,17 +900,40 @@ the bound of untracked paths asserting the list is recorded as unbounded and rev
 tracked changes only. Keep the blocking-filter fixture from Part A as a regression test that
 startup does not block.
 
-**3d. What a sub-agent child does.** A child that borrows its parent's worktree takes its
-own baseline, and this falls out of 3a for free: baselines now live in
-`<worker root>/review-baselines.json`, and a child has its own worker root, so it records
-its own starting point without any special case. That is also the correct answer on the
-merits. Today the child finds the parent's `refs/hel/review-baseline` already pinned,
-`pinned_review_baseline` makes its capture a no-op, and the child then inherits a baseline
-from before the parent started working, so the parent's in-progress changes are attributed
-to the child's first review. Per-worker baselines fix that silently. The cost of the extra
-baseline is one stat-walk, which is what makes this affordable at all; under today's design
-it would be a second full hash of the parent's tree, which is why the current code avoids
-it. Do not add an inheritance path: it would be more code and a worse answer.
+**3e. Refuse a workspace review cannot cover.** The stat-walk of 3b also counts untracked
+paths. When a repository reports more than 50,000, stop and fail the provision with
+
+    Refusal::precondition(format!(
+        "turn review cannot cover {repository}: it has {count} untracked files and the limit \
+         is {LIMIT}. Commit or ignore them, or start this session without review by clearing \
+         [review] profile in config.toml."
+    ))
+
+`Refusal` is `mj_core::refusal::Refusal` from #1057. A failure carrying one is answered as
+409 with that sentence by `ActionOutcome`, instead of the generic 500, so `mj new` and the
+browser viewer both print it.
+
+Bound the walk itself. Run `git status` under `mj_core::targets::BoundedProcessExecutor` with
+a 120-second deadline, and on timeout refuse with
+
+    Refusal::precondition(format!(
+        "turn review could not read the state of {repository} within {n}s; the working tree \
+         is too large or too slow to review. Start this session without review by clearing \
+         [review] profile in config.toml."
+    ))
+
+so a pathological filesystem is a refusal the user can act on rather than a hang. Keep the
+walk before the socket bind: it is cheap, it is the precondition for starting at all, and
+nothing after it depends on ordering.
+
+The refusal has to reach the controller, and the walk happens in the worker. Carry it the
+way worker startup failures already travel: the worker writes its exit record and exits
+non-zero, and the controller's readiness path reads it. Add a `refusal` field to the exit
+record that `write_worker_exit_record` (`mj-worker/src/main.rs`) writes, and have
+`worker_last_words` and the Milestone 2 progress probe lift it into a `Refusal` on the error
+chain so `provision_subagent_session_controlled` and the ordinary create path both answer
+409. This is the one place the worker needs to say something to the user rather than to the
+log.
 
 ### Milestone 4: carry the real reason back to the parent model
 
@@ -848,6 +1017,28 @@ take it away again.
 
 Test: a unit test that seeds a snapshot whose pinned path has been deleted and asserts the
 resolution is retried and the new path returned.
+
+### Milestone 8: report what earlier releases left in user repositories
+
+Goal: the user can find and remove the objects, refs and stray files Mjolnir wrote into their
+repositories before Milestone 3a, without Mjolnir deleting anything on its own.
+
+Add a check to `mj-controller/src/doctor.rs` that, for each repository reachable from the
+configured bundles and project directories, reports whether it holds
+`refs/hel/review-baseline` or `refs/hel/review-capture`, and whether its Git directory holds
+any `hel-review-index-*` file, with the sizes. Print the exact commands to clear them:
+
+    git -C <repo> update-ref -d refs/hel/review-capture
+    git -C <repo> update-ref -d refs/hel/review-baseline
+    rm -f <git dir>/hel-review-index-*
+    git -C <repo> gc --prune=now
+
+Delete nothing. Deleting refs and running `gc` in someone's repository without asking is the
+same class of mistake as writing to it without asking, which is what this whole milestone
+sequence exists to stop.
+
+Test: a unit test over a temporary repository with one such ref and one such file, asserting
+the report names both and the commands, and that the repository is unchanged afterwards.
 
 ## Concrete Steps
 
@@ -943,8 +1134,12 @@ must be disposable:
     PY
     git count-objects -v > /tmp/before.txt
 
-Start one session whose working directory is `/tmp/bigrepo`, on the `local-bare` target,
-then check both halves of the acceptance:
+Run it twice. **With `[review] profile` unset**, start one session whose working directory is
+`/tmp/bigrepo` on the `local-bare` target: the control socket must appear within seconds, the
+worker must run no Git command at all, and `count-objects` must be unchanged. **With
+`[review] profile` set**, the same session must be refused with HTTP 409 and a sentence
+naming the untracked count and the 50,000 limit, and `count-objects` must still be unchanged.
+Then check both halves of the acceptance:
 
     git -C /tmp/bigrepo count-objects -v > /tmp/after.txt
     diff /tmp/before.txt /tmp/after.txt        # must report no change
@@ -1021,11 +1216,14 @@ The one irreversible thing to avoid: do not run `git add -A` inside
 thousands of objects into that repository's 43 GB object store. The measurements in this
 plan used `git hash-object --stdin-paths` without `-w`, which writes nothing.
 
-One protocol change: Milestone 3c adds `untracked_coverage` to `RepoDelta`. Bump
-`PROTOCOL_VERSION` in `mj-client/src/daemon.rs` by one in that commit, and expect the number
-to be renumbered by a merge if another agent bumps it too. Nothing else here changes the
-protocol: the startup record is a file in the worker root that the controller reads over the
-existing command channel, not a relay message. There is no database migration.
+No protocol change and no database migration. The startup record and the exit record are
+files in the worker root that the controller reads over the existing command channel, not
+relay messages, and the refusal travels on the exit record rather than as a new message.
+`WorkerLaunchConfig` gains `review_capture`, which is a file the controller writes and the
+worker reads, not the daemon protocol; because the worker deserializes it with an implicit
+deny-unknown, a stale worker binary rejects the new field, so rebuild the musl worker and
+restart the daemon before testing container sessions, as
+`.agents/docs` and the repository's own experience with `seed_image_environment` record.
 
 Milestone 3a stops writing `refs/hel/review-baseline` and `refs/hel/review-capture` into user
 repositories, but it does not remove refs that earlier releases already wrote. They are inert
@@ -1214,66 +1412,68 @@ baseline. The results are persisted as `<worker root>/review-baselines.json` wit
 No new crate is needed anywhere in this plan; use `mj_core::targets::BoundedProcessExecutor`
 for the bounds and `mj_core::config::atomic_write` for both JSON records.
 
-`RepoDelta` in `mj-core/src/relay/protocol.rs` gains one field,
-`untracked_coverage: UntrackedCoverage`, so the review output can say when untracked files
-are not covered. That is a relay protocol change: bump `PROTOCOL_VERSION` in
-`mj-client/src/daemon.rs` by one for the commit that adds it, and note in the commit message
-that an older worker omits the field and is read as "covered", which is what it was.
+`RepoDelta` needs no new field: with Milestone 3e refusing a workspace review cannot cover,
+there is no partial-coverage state to report, so the relay protocol is unchanged by this
+plan.
 
-## Decisions that belong to the maintainer
+## Decisions the maintainer has made
 
-1. **Is the loss of untracked-file before-content acceptable?** Under the recommended
-   design, an untracked file that existed at session start and was modified during the turn
-   shows in review as a whole-file addition rather than as a modification, labelled as
-   pre-existing. Recommendation: accept it. The alternative is to hash pre-existing
-   untracked files at session start, which is exactly the cost being removed. A middle
-   option is to hash them lazily on first modification, which needs a filesystem watcher
-   and is a much larger change for a narrow gain.
+These were open questions in c6d6917e and are now settled. They are kept here with their
+reasoning so the next reader does not reopen them.
 
-1b. **What is the right bound on the recorded untracked list?** Recommendation: 50,000
-   paths, past which the repository records "unbounded" and review says untracked files are
-   not covered there. The list is paths, sizes and modification times only, so 50,000
-   entries is a few megabytes of JSON.
+1. **Capture only when review is configured.** A session start does Git work only when
+   `config.review.reviewer_profile().is_some()`, and never for a sub-agent child. With
+   review unconfigured there is no capture and no stat-walk at all.
 
-2. **Should a failed spawn be retried automatically?** Recommendation: yes, exactly once,
-   and only when the worker provably never bound its socket. The alternative is to return
-   the reason and let the parent model decide, which is simpler and avoids doubling the cost
-   of a systematic failure, but it makes every parent prompt responsible for retry logic.
+2. **A workspace review cannot cover is a refusal, not a degraded mode.** More than 50,000
+   untracked paths refuses the session with a 409 naming the count and the limit, and telling
+   the user to clean the tree or clear `[review] profile`. The stat-walk that counts is
+   itself bounded, and its timeout is its own refusal.
 
-3. **Should an errored child be re-promptable under the same id?** Recommendation: no. A
-   fresh `spawn` with a new `request_key` is cleaner and the idempotency key already makes
-   that safe. Re-using the id would need a provisioning path that can start over on a record
-   that is not `Provisioning`.
+3. **The untracked-file before-content loss is accepted.** An untracked file that existed at
+   session start and was modified during the turn shows in review as a whole-file addition,
+   labelled as pre-existing from the `untracked_at_start` record. Hashing those files at
+   start is exactly the cost being removed; hashing them lazily on first modification needs
+   a filesystem watcher and is a much larger change for a narrow gain.
 
-4. **#1068: fail daemon startup when no worker source resolves, or re-resolve per session?**
-   Recommendation: re-resolve per session, and copy the resolved worker into the daemon's
-   own state directory so it cannot be reaped again. Failing daemon startup is the stricter
-   reading of the issue but it would stop a daemon that can still run Grok sessions, which
-   do not use the portable worker.
+4. **`mj doctor` reports, and deletes nothing** (Milestone 8). There is 243 MiB of
+   unreachable loose objects, a 70 MB stray `hel-review-index-*` file and an abandoned
+   temporary object in `brokkbench` right now, and every repository a session has ever run in
+   has two `refs/hel/*` refs. Deleting refs and running `gc` in someone's repository without
+   asking is the same class of mistake as writing to it without asking.
 
-5. **Should `WORKER_STARTUP_CONNECT_TIMEOUT` simply be raised?** Recommendation: no. It is
-   the cheapest change and it would have masked #1065 for a while, but the blocking step is
-   proportional to the user's workspace, so no constant is right. Raising it also makes
-   every genuinely dead worker take longer to report. The progress-aware wait of Milestone 2
-   gives both a fast failure and an unlimited-in-practice patience for real progress.
+5. **A failed spawn is retried once**, and only when the worker provably never bound its
+   socket (Milestone 5).
 
-6. **How much of #1078 to take here?** Recommendation: take item 1 (Milestone 6), because a
-   permanent reconnect loop for a failed child is part of "spawn working completely". Leave
-   item 2 (CLI/daemon protocol mismatch) out; it has a clear message already and belongs
+6. **An errored child is not re-promptable**; the parent spawns a fresh child with a new
+   `request_key` (Milestone 5).
+
+7. **Worker sources are re-resolved per session** rather than failing daemon startup
+   (Milestone 7), because a daemon with no portable worker can still run Grok sessions.
+
+8. **#1078 item 1 only** (Milestone 6). The CLI and daemon protocol mismatch belongs
    with #1039.
 
-7. **Should Mjolnir clean up what earlier releases wrote into user repositories?** There is
-   243 MiB of unreachable loose objects, a 70 MB stray `hel-review-index-*` file and an
-   abandoned temporary object in `brokkbench` right now, and every repository a session has
-   ever run in has two `refs/hel/*` refs. Recommendation: add a `mj doctor` check that
-   reports stray `hel-review-index-*` files and `refs/hel/*` refs per repository with the
-   exact `git update-ref -d` and `git gc --prune=now` commands to clear them, and do not
-   delete anything automatically. Deleting refs and running `gc` in someone's repository
-   without asking is the same class of mistake as writing to it without asking. An
-   alternative is to delete only the refs Mjolnir itself created, on session close, which is
-   safe but does nothing for repositories whose sessions are long gone.
+9. **`WORKER_STARTUP_CONNECT_TIMEOUT` is not simply raised.** The blocking step was
+   proportional to the user's workspace, so no constant was right; Milestone 2 replaces the
+   constant with a progress-aware wait.
 
 ---
+
+Revision note (2026-09-18, third revision, after maintainer decisions on c6d6917e): the
+capture is now gated on review being configured at all, so an unreviewed session and every
+sub-agent child do no Git work at session start, not even a stat-walk; the predicate is
+`config.review.reviewer_profile().is_some()` and a new `review_capture` field on
+`WorkerLaunchConfig`. Partial coverage is gone: a reviewed session whose workspace has more
+than 50,000 untracked paths is refused with a 409 carrying the count and the limit, using the
+`Refusal` mechanism from #1057, and the walk that counts is bounded with its own refusal on
+timeout. Milestone 3d is dropped, because a child now does no baseline work and must not read
+a parent's. The `mj doctor` report became Milestone 8. The open questions became a settled
+decisions list. `RepoDelta` no longer needs an `untracked_coverage` field, so the plan makes
+no protocol change. The commit order for implementation is: diagnostics (1, 2), the Git
+change (3a, 3b, 3c), the refusal (3e), the retry and actor retirement (5, 6), worker source
+re-resolution (7), and the doctor report (8); Milestone 4 lands with the diagnostics because
+it is what makes them reach the parent model.
 
 Revision note (2026-09-18, second revision, after maintainer review of e5b11913): Milestone 3
 was replaced. The first version moved the review-baseline capture off the startup critical

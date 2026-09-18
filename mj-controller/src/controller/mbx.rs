@@ -141,33 +141,24 @@ fn resolve_host(
     }
 }
 
-/// What the settings screen shows for one target's blank build cache fields:
+/// What the settings screen shows for one machine's blank build cache fields:
 /// the same host inspection a session runs, without creating the directory.
-/// `None` when the target kind cannot share a cache at all.
+/// `None` when the machine has no standing host to share a cache on.
 pub fn preview_build_cache(
-    target: &mj_core::config::TargetTemplate,
+    machine: &mj_core::config::Machine,
     global: &BuildCacheConfig,
     executor: &impl CommandExecutor,
 ) -> Result<Option<BuildCachePreview>> {
-    // Resource allocation and per-session overrides do not affect the host
-    // the cache lives on.
-    let target = super::backend::backend_target(
-        target,
-        None,
-        super::backend::ContainerOverrides {
-            cpus: None,
-            memory: None,
-        },
-    )?;
-    let Some((host, settings)) = supported_host(&target) else {
+    let Some(host) = CacheHost::for_machine(machine) else {
         return Ok(None);
     };
+    let settings = machine.build_cache().cloned().unwrap_or_default();
     if !global.enabled {
         return Ok(Some(BuildCachePreview {
             native_mbx: None,
             directory: None,
             max_size: None,
-            off_reason: Some("the build cache is turned off for every target".into()),
+            off_reason: Some("the build cache is turned off for every machine".into()),
         }));
     }
     inspect_host(&host, &settings, executor).map(|inspection| Some(inspection.preview))
@@ -870,14 +861,14 @@ mod tests {
         TargetTemplate::LocalPodman(container(build_cache))
     }
 
-    /// The settings draft's view of a local Podman target with blank build
-    /// cache fields.
-    fn configured_podman() -> mj_core::config::TargetTemplate {
-        serde_json::from_value(serde_json::json!({
-            "kind": "local-podman",
-            "image": "example/image:latest",
-        }))
-        .unwrap()
+    fn docker(build_cache: Option<TargetBuildCache>) -> TargetTemplate {
+        TargetTemplate::LocalDocker(container(build_cache))
+    }
+
+    /// The settings draft's view of this machine with blank build cache
+    /// fields.
+    fn configured_local_machine() -> mj_core::config::Machine {
+        serde_json::from_value(serde_json::json!({"kind": "local"})).unwrap()
     }
 
     /// The canned answers a host with no native mbx and a reflink-capable
@@ -1071,7 +1062,7 @@ mod tests {
         answers.push(("mj-reflink", 1, ""));
         let executor = ProbeExecutor::new(&answers);
         let preview = preview_build_cache(
-            &configured_podman(),
+            &configured_local_machine(),
             &BuildCacheConfig::default(),
             &executor,
         )
@@ -1111,7 +1102,7 @@ mod tests {
             ("stat -f -c %T", 0, "xfs"),
         ]);
         let preview = preview_build_cache(
-            &configured_podman(),
+            &configured_local_machine(),
             &BuildCacheConfig::default(),
             &executor,
         )
@@ -1153,6 +1144,45 @@ mod tests {
                 &BuildCacheConfig { enabled: false },
                 &executor
             ),
+            None
+        );
+        assert!(executor.ran().is_empty());
+    }
+
+    #[test]
+    fn local_podman_and_local_docker_inspect_one_machine_once() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&plain_host());
+        let settings = BuildCacheConfig::default();
+        let first = resolve(&podman(None), &settings, &executor).unwrap();
+        let ran = executor.ran().len();
+        assert!(ran > 0, "the first resolve inspects the host");
+        let second = resolve(&docker(None), &settings, &executor).unwrap();
+        assert_eq!(
+            first, second,
+            "both engines on this machine share one cache"
+        );
+        assert_eq!(
+            executor.ran().len(),
+            ran,
+            "the second runtime is answered from the machine's recorded inspection: {:?}",
+            executor.ran()
+        );
+    }
+
+    #[test]
+    fn a_machine_without_a_standing_host_has_no_build_cache_preview() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&plain_host());
+        let fleet: mj_core::config::Machine = serde_json::from_value(serde_json::json!({
+            "kind": "aws-ec2",
+            "region": "us-east-1",
+            "launch_template": "lt-1",
+            "ssh_user": "ubuntu",
+        }))
+        .unwrap();
+        assert_eq!(
+            preview_build_cache(&fleet, &BuildCacheConfig::default(), &executor).unwrap(),
             None
         );
         assert!(executor.ran().is_empty());
@@ -1333,7 +1363,7 @@ mod tests {
         let executor = ProbeExecutor::new(&[]);
         let mut record = session(Some("/workspace/session-1"));
         record.build_cache = Some(SessionBuildCache {
-            host: "local-podman".into(),
+            host: "local".into(),
             directory: PathBuf::from("/mnt/fast/mbx-cache"),
             max_size: None,
             target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
@@ -1373,7 +1403,7 @@ mod tests {
         record.build_cache = Some(SessionBuildCache {
             // The host the session was provisioned on, which the target below
             // is not.
-            host: "ssh-podman:dev@example.test".into(),
+            host: "ssh:dev@example.test".into(),
             directory: PathBuf::from("/mnt/fast/mbx-cache"),
             max_size: None,
             target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
@@ -1391,7 +1421,7 @@ mod tests {
         )
         .expect("the destination host qualifies on its own");
 
-        assert_eq!(build_cache.host, "local-podman");
+        assert_eq!(build_cache.host, "local");
         assert_eq!(build_cache.directory, PathBuf::from("/home/dev/.cache/mbx"));
         assert_eq!(build_cache.target_root, None);
         assert_eq!(

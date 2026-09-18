@@ -9,6 +9,8 @@
 //!
 //! * `harness` -- [`HarnessKind`], [`HarnessProfile`] and execution policy.
 //! * `keys` -- the `[keys]` section: the prefix key and every bindable action.
+//! * `machines` -- hosts, the stored runtime shape, and the conversion
+//!   between them and [`TargetTemplate`].
 //! * `targets` -- projects, containers and [`TargetTemplate`].
 //! * `ui` -- terminal appearance settings.
 //! * `loading` -- instance names, directories, and atomic file writes.
@@ -16,12 +18,14 @@
 mod harness;
 mod keys;
 mod loading;
+mod machines;
 mod targets;
 mod ui;
 
 pub use harness::*;
 pub use keys::*;
 pub use loading::*;
+pub use machines::*;
 pub use targets::*;
 pub use ui::*;
 
@@ -320,7 +324,7 @@ impl BuildCacheConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 11;
+pub const CONFIG_VERSION: u32 = 12;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -332,48 +336,260 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
     serde::de::IgnoredAny::deserialize(deserializer).map(|_| ())
 }
 
+/// The resolved configuration every part of Mjolnir works with.
+///
+/// Each entry of `targets` is a [`TargetTemplate`]: a host and a runtime
+/// fused together. The file stores the two apart, so this type is read and
+/// written through [`StoredConfig`], which is what `[machines.<id>]` and
+/// `[targets.<id>]` actually look like. `machines` is carried through from
+/// the file so the Settings screen can edit hosts directly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(into = "StoredConfig", try_from = "StoredConfig")]
 pub struct Config {
     /// Deprecated session filtering preference retained for read compatibility.
     /// It is ignored and omitted from newly written configurations.
-    #[serde(default, skip_serializing)]
     pub show_stopped_sessions: bool,
-    #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     pub sessions_side: SessionsSide,
-    #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
     pub advanced: AdvancedConfig,
     pub version: u32,
     /// Client-side activity animation; omitted configurations retain the classic scan.
-    #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     pub spinner: SpinnerStyle,
-    #[serde(default, skip_serializing_if = "UiTheme::is_default")]
     pub theme: UiTheme,
-    #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     pub phone: PhoneConfig,
-    #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     pub review: ReviewConfig,
-    #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
     pub sessionwiki: SessionWikiConfig,
-    #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
     pub subagents: SubagentConfig,
-    #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
     pub build_cache: BuildCacheConfig,
-    #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
     pub keys: KeysConfig,
+    pub legacy_startup: (),
+    pub profiles: BTreeMap<String, HarnessProfile>,
+    pub bundles: BTreeMap<String, ProjectBundle>,
+    /// The hosts runtimes run on. `local` is implied even when it is absent.
+    pub machines: BTreeMap<String, Machine>,
+    pub targets: BTreeMap<String, TargetTemplate>,
+}
+
+/// The configuration file's own shape: hosts under `[machines.<id>]` and
+/// runtimes under `[targets.<id>]`, each runtime naming its machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredConfig {
+    #[serde(default, skip_serializing)]
+    show_stopped_sessions: bool,
+    #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
+    sessions_side: SessionsSide,
+    #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
+    advanced: AdvancedConfig,
+    version: u32,
+    #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
+    spinner: SpinnerStyle,
+    #[serde(default, skip_serializing_if = "UiTheme::is_default")]
+    theme: UiTheme,
+    #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
+    phone: PhoneConfig,
+    #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
+    review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
+    sessionwiki: SessionWikiConfig,
+    #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
+    subagents: SubagentConfig,
+    #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
+    build_cache: BuildCacheConfig,
+    #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
+    keys: KeysConfig,
     #[serde(
         default,
         rename = "startup",
         skip_serializing,
         deserialize_with = "discard_legacy_startup"
     )]
-    pub legacy_startup: (),
+    legacy_startup: (),
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub profiles: BTreeMap<String, HarnessProfile>,
+    profiles: BTreeMap<String, HarnessProfile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub bundles: BTreeMap<String, ProjectBundle>,
+    bundles: BTreeMap<String, ProjectBundle>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub targets: BTreeMap<String, TargetTemplate>,
+    machines: BTreeMap<String, Machine>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    targets: BTreeMap<String, TargetEntry>,
+}
+
+/// One `[targets.<id>]` table. Reading keeps it raw, because whether an old
+/// `kind` is allowed depends on the file's `version`, which is a sibling key;
+/// writing always produces the current shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum TargetEntry {
+    Stored(Box<StoredTarget>),
+    Raw(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for TargetEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        serde_json::Value::deserialize(deserializer).map(Self::Raw)
+    }
+}
+
+/// A `[targets.<id>]` table read from a file, once its `kind` has been judged
+/// against the file's version.
+enum InterpretedTarget {
+    Stored(StoredTarget),
+    /// A pre-version-12 table, which fuses a host and a runtime and is
+    /// migrated into a machine plus a runtime.
+    Legacy(TargetTemplate),
+}
+
+fn interpret_target(
+    id: &str,
+    value: &serde_json::Value,
+    version: u32,
+) -> Result<InterpretedTarget> {
+    let Some(table) = value.as_object() else {
+        bail!("target {id:?} must be a table");
+    };
+    let Some(kind) = table.get("kind").and_then(serde_json::Value::as_str) else {
+        bail!(
+            "target {id:?} needs a kind: one of {}",
+            STORED_TARGET_KINDS.join(", ")
+        );
+    };
+    if table.contains_key("permissions") && !matches!(kind, "bare" | "ssh-bare") {
+        bail!("target {id:?} sets `permissions`, which only applies to a bare runtime");
+    }
+    // The message must stand alone: a failure here becomes a plain string
+    // inside the TOML or JSON deserializer's own error, which keeps no source
+    // chain.
+    let from_value = || {
+        serde_json::from_value::<StoredTarget>(value.clone())
+            .map_err(|error| anyhow::anyhow!("target {id:?} ({kind}): {error}"))
+    };
+    if STORED_TARGET_KINDS.contains(&kind) {
+        // `apple-container` is spelled the same before and after the split.
+        // In an old file without a `machine` key it is the fused kind.
+        let fused = kind == "apple-container" && !table.contains_key("machine") && version <= 11;
+        if !fused {
+            return from_value().map(InterpretedTarget::Stored);
+        }
+    } else if legacy_kind_advice(kind).is_none() {
+        bail!(
+            "target {id:?} has unknown kind {kind:?}; use one of {}",
+            STORED_TARGET_KINDS.join(", ")
+        );
+    } else if version > 11 {
+        let (new_kind, machine) = legacy_kind_advice(kind).expect("checked above");
+        bail!(
+            "target {id:?} uses the old kind {kind:?}; write kind = {new_kind:?} and machine = {machine:?}"
+        );
+    }
+    serde_json::from_value::<TargetTemplate>(value.clone())
+        .map_err(|error| anyhow::anyhow!("target {id:?} ({kind}): {error}"))
+        .map(InterpretedTarget::Legacy)
+}
+
+impl TryFrom<StoredConfig> for Config {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredConfig) -> Result<Self> {
+        let StoredConfig {
+            show_stopped_sessions,
+            sessions_side,
+            advanced,
+            version,
+            spinner,
+            theme,
+            phone,
+            review,
+            sessionwiki,
+            subagents,
+            build_cache,
+            keys,
+            legacy_startup,
+            profiles,
+            bundles,
+            mut machines,
+            targets,
+        } = stored;
+        let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
+        for (id, entry) in targets {
+            let runtime = match entry {
+                TargetEntry::Stored(target) => *target,
+                TargetEntry::Raw(value) => match interpret_target(&id, &value, version)? {
+                    InterpretedTarget::Stored(target) => target,
+                    // Migration and saving are the same operation, so an old
+                    // file becomes exactly what the next save would write.
+                    InterpretedTarget::Legacy(target) => stored_target(&id, &target, &mut machines),
+                },
+            };
+            runtimes.insert(id, runtime);
+        }
+        let mut resolved = BTreeMap::new();
+        for (id, runtime) in &runtimes {
+            resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
+        }
+        Ok(Self {
+            show_stopped_sessions,
+            sessions_side,
+            advanced,
+            // Versions 1 through 11 acquire this build's defaults in memory
+            // and upgrade on the next ordinary save. Version 12 splits
+            // machines from runtimes.
+            version: if matches!(version, 1..=11) {
+                CONFIG_VERSION
+            } else {
+                version
+            },
+            spinner,
+            theme,
+            phone,
+            review,
+            sessionwiki,
+            subagents,
+            build_cache,
+            keys,
+            legacy_startup,
+            profiles,
+            bundles,
+            machines,
+            targets: resolved,
+        })
+    }
+}
+
+impl From<Config> for StoredConfig {
+    fn from(config: Config) -> Self {
+        let mut machines = config.machines;
+        let mut targets = BTreeMap::new();
+        for (id, target) in &config.targets {
+            let runtime = stored_target(id, target, &mut machines);
+            targets.insert(id.clone(), TargetEntry::Stored(Box::new(runtime)));
+        }
+        // This machine is implied, so a file only names it when it carries
+        // settings of its own.
+        if machines.get(LOCAL_MACHINE_ID) == Some(&Machine::Local { build_cache: None }) {
+            machines.remove(LOCAL_MACHINE_ID);
+        }
+        Self {
+            show_stopped_sessions: config.show_stopped_sessions,
+            sessions_side: config.sessions_side,
+            advanced: config.advanced,
+            version: config.version,
+            spinner: config.spinner,
+            theme: config.theme,
+            phone: config.phone,
+            review: config.review,
+            sessionwiki: config.sessionwiki,
+            subagents: config.subagents,
+            build_cache: config.build_cache,
+            keys: config.keys,
+            legacy_startup: config.legacy_startup,
+            profiles: config.profiles,
+            bundles: config.bundles,
+            machines,
+            targets,
+        }
+    }
 }
 
 impl Default for Config {
@@ -394,6 +610,7 @@ impl Default for Config {
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
+            machines: BTreeMap::new(),
             targets: BTreeMap::new(),
         }
     }
@@ -433,6 +650,12 @@ impl Config {
                 &discovered.bundles,
                 PartialEq::eq,
                 |_, bundle| bundle.primary_repo.clone(),
+            ),
+            machines: additions(
+                &self.machines,
+                &discovered.machines,
+                PartialEq::eq,
+                |id, _| id.to_owned(),
             ),
             targets: additions(
                 &self.targets,
@@ -480,6 +703,7 @@ impl Config {
         for (id, bundle) in &self.bundles {
             bundle.validate(id)?;
         }
+        machines::validate_machines(&self.machines)?;
         for (id, target) in &self.targets {
             target.validate(id)?;
         }
@@ -557,21 +781,20 @@ impl Config {
             );
         }
         reject_removed_profile_overrides(&contents)?;
-        reject_non_bare_permissions(&contents)?;
-        let mut config: Self = toml::from_str(&contents)
-            .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         // Version 2 adds Podman workspace storage; version 3 restores the
         // spinner preference; version 4 adds stopped-session visibility;
         // version 5 adds the terminal theme preference; version 6 adds
         // optional advanced settings; version 7 restores stopped-session
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
-        // SessionWiki section; version 11 adds the key bindings. Earlier
-        // configs acquire defaults in memory and upgrade on the next
-        // ordinary save.
-        if matches!(config.version, 1..=10) {
-            config.version = CONFIG_VERSION;
-        }
+        // SessionWiki section; version 11 adds the key bindings; version 12
+        // splits machines from runtimes. Earlier configs acquire defaults in
+        // memory, and their fused target kinds become machines plus runtimes,
+        // on the next ordinary save. The version bump itself happens in
+        // `TryFrom<StoredConfig>`, which is also what decides whether an old
+        // `kind` is still accepted.
+        let config: Self = toml::from_str(&contents)
+            .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }

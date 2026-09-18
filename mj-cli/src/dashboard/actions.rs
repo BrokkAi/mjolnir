@@ -223,7 +223,7 @@ pub(crate) async fn apply_dashboard_action(
             draft,
             path,
             value,
-            target,
+            machine,
         } => {
             let requested = value.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
@@ -233,8 +233,8 @@ pub(crate) async fn apply_dashboard_action(
                 move |cancelled| {
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
-                    mj_controller::controller::resolve_target_input_path(
-                        &target,
+                    mj_controller::controller::resolve_machine_input_path(
+                        &machine,
                         std::path::Path::new(&requested),
                         &executor,
                     )
@@ -252,7 +252,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::PreviewBuildCache {
             generation,
             key,
-            target,
+            machine,
             global,
         } => {
             // A stale answer is dropped by its key, so the job is not tied
@@ -266,7 +266,7 @@ pub(crate) async fn apply_dashboard_action(
                     // round trip each.
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(60));
-                    mj_controller::controller::preview_build_cache(&target, &global, &executor)
+                    mj_controller::controller::preview_build_cache(&machine, &global, &executor)
                 },
                 move |result| DashboardIoUpdate::BuildCachePreviewed {
                     generation,

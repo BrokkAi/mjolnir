@@ -2733,6 +2733,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -2832,6 +2833,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     };
     let launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -2916,6 +2918,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
     };
     let mut launch = WorkerLaunchConfig {
         subagent_tools: false,
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -3035,4 +3038,49 @@ fn a_remote_recovery_plan_defers_binary_refresh_to_the_recovery_task() {
             panic!("a remote target must defer, not prepare, its binary refresh")
         }
     }
+}
+
+/// A daemon pins its worker sources once, at startup. A pin that no longer
+/// names a file must send the lookup back to resolution rather than failing
+/// every session until someone restarts the daemon (#1068).
+#[test]
+fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
+    let present = PathBuf::from("/pinned/hel");
+    let exists = |path: &Path| path == present;
+
+    let live = Ok(WorkerBinaryAvailability::Local {
+        path: present.clone(),
+        source: "pinned".into(),
+    });
+    assert!(
+        pinned_source_is_usable(&live, &exists),
+        "a pin that still names a file is used as it stands"
+    );
+
+    let reaped = Ok(WorkerBinaryAvailability::Local {
+        path: PathBuf::from("/reaped/build/hel"),
+        source: "pinned".into(),
+    });
+    assert!(
+        !pinned_source_is_usable(&reaped, &exists),
+        "a pin whose build directory was removed must be resolved again"
+    );
+
+    let remote = Ok(WorkerBinaryAvailability::Remote {
+        url: "https://example.invalid/hel".into(),
+        sha256: "a".repeat(64),
+        triple: "x86_64-unknown-linux-musl".into(),
+    });
+    assert!(
+        pinned_source_is_usable(&remote, &exists),
+        "a remote source is a URL and does not stop existing"
+    );
+
+    let never_pinned: Result<WorkerBinaryAvailability> = Err(anyhow::anyhow!(
+        "no Linux worker for x86_64-unknown-linux-musl"
+    ));
+    assert!(
+        !pinned_source_is_usable(&never_pinned, &exists),
+        "a source that never resolved must be tried again, not repeated back"
+    );
 }

@@ -2079,3 +2079,59 @@ async fn remote_session_manager_fans_out_views_and_forwards_commands() {
     assert_eq!(submitted.wait().await.unwrap(), 8);
     remote.shutdown.shutdown().await.unwrap();
 }
+
+/// A relay actor for a session that has ended must stop, not keep reconnecting
+/// to a socket that will never exist again. Without this the daemon logs a
+/// failure for a dead worker every backoff period for as long as it runs,
+/// which is what #1078 reported alongside #1065.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_session_retires_its_relay_actor() {
+    const TERMINAL_ACTOR_CHILD: &str = "MJ_TEST_TERMINAL_ACTOR_CHILD";
+    if std::env::var_os(TERMINAL_ACTOR_CHILD).is_none() {
+        run_in_isolated_child(
+            TERMINAL_ACTOR_CHILD,
+            "a_terminal_session_retires_its_relay_actor",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
+    record.state = mj_core::state::SessionState::Error;
+    record.last_error = Some("sub-agent startup failed: the worker process is gone".into());
+    crate::database::save_session(&record).unwrap();
+
+    let target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.to_owned(),
+        // A worker that is never coming back: every connection attempt fails.
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]).purpose("unreachable test relay worker"),
+        worker_recovery: None,
+        project_memory: None,
+    };
+    let (_commands_tx, commands_rx) = mpsc::channel(4);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, view_rx) = watch::channel(ManagedSessionView::default());
+    let (updates_tx, _updates_rx) = coalesced_update_channel();
+    let actor = tokio::spawn(run_session_actor(
+        target,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates_tx,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(30), actor)
+        .await
+        .expect("the actor of a terminal session must stop reconnecting")
+        .expect("the actor must not panic");
+
+    let view = view_rx.borrow().clone();
+    let reported = format!("{:?}", view.error);
+    assert!(
+        reported.contains("ended as Error") && reported.contains("the worker process is gone"),
+        "the last view must say why the session ended: {reported}"
+    );
+}

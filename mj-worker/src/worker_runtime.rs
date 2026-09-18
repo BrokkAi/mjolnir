@@ -7,7 +7,57 @@ use serde::{Deserialize, Serialize};
 
 use mj_core::config::HarnessKind;
 
-pub use mj_core::relay::WORKER_PID_FILE;
+pub use mj_core::relay::{
+    REVIEW_UNTRACKED_FILE, WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE,
+};
+
+/// Record which startup step this worker is on, in `worker-startup.json` in
+/// the worker root.
+///
+/// A detached worker's only channel before it binds its control socket is its
+/// root directory, and its log stays empty until something logs at `warn`.
+/// Without this file a controller waiting for the socket cannot tell a worker
+/// that is still making progress from one that died without a word: both look
+/// like a directory with nothing in it. Every step is appended, so the record
+/// also says how long each step took, and the login-environment re-exec shows
+/// up as a second `start`.
+///
+/// Best effort by design: a breadcrumb must never be the reason a worker fails
+/// to start.
+pub fn record_startup_step(root: &Path, step: &str) {
+    if !root.is_dir() {
+        return;
+    }
+    let path = root.join(WORKER_STARTUP_FILE);
+    let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut steps = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|record| record.get("steps").cloned())
+        .and_then(|steps| serde_json::from_value::<Vec<serde_json::Value>>(steps).ok())
+        .unwrap_or_default();
+    // A worker that somehow restarted many times would otherwise grow this
+    // file without end.
+    if steps.len() >= 64 {
+        steps.drain(..steps.len() - 63);
+    }
+    steps.push(serde_json::json!({"step": step, "at": at}));
+    let record = serde_json::json!({
+        "step": step,
+        "at": at,
+        "pid": std::process::id(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "steps": steps,
+    });
+    match serde_json::to_vec_pretty(&record) {
+        Ok(bytes) => {
+            if let Err(error) = mj_core::config::atomic_write(&path, &bytes) {
+                eprintln!("Mjolnir: could not record startup step {step}: {error}");
+            }
+        }
+        Err(error) => eprintln!("Mjolnir: could not serialize startup step {step}: {error}"),
+    }
+}
 
 // The launch descriptions and MCP shapes both sides of the relay share live in
 // the foundation. The runtime and its submodules keep naming them here.
@@ -388,6 +438,52 @@ mod model_pin_tests {
             );
             assert_eq!(environment[CODEX_CONFIG_ENV], broken);
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_record_tests {
+    use super::*;
+
+    /// The controller reads this file to decide whether a worker that has not
+    /// answered yet is still making progress, so the latest step and the order
+    /// of the steps are the two things that must hold.
+    #[test]
+    fn the_startup_record_names_the_latest_step_and_keeps_the_order() {
+        let root = tempfile::tempdir().unwrap();
+        record_startup_step(root.path(), "start");
+        record_startup_step(root.path(), "login-environment");
+        record_startup_step(root.path(), "bind-socket");
+
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join(WORKER_STARTUP_FILE)).unwrap())
+                .unwrap();
+
+        assert_eq!(record["step"], "bind-socket");
+        assert_eq!(record["pid"], std::process::id());
+        let steps: Vec<String> = record["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["step"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(steps, ["start", "login-environment", "bind-socket"]);
+        assert!(
+            record["steps"][0]["at"]
+                .as_str()
+                .is_some_and(|at| !at.is_empty()),
+            "every step carries when it happened: {record}"
+        );
+    }
+
+    /// A breadcrumb must never be the reason a worker fails to start, so a
+    /// root that is not there is silently skipped.
+    #[test]
+    fn recording_a_step_without_a_root_is_silent() {
+        record_startup_step(
+            std::path::Path::new("/definitely/not/a/worker/root"),
+            "start",
+        );
     }
 }
 

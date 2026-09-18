@@ -31,11 +31,14 @@
       >
         &#9776;
       </button>
-      <nav id="menu" class="menu hidden" role="menu" aria-label="Mjolnir">
-        <button role="menuitem" data-route="targets">Targets</button>
-        <button role="menuitem" data-route="quota">Quota</button>
-        <button role="menuitem" id="logout">Sign out</button>
-      </nav>
+      <div id="menu" class="menu hidden">
+        <nav class="menu-items" role="menu" aria-label="Mjolnir">
+          <button role="menuitem" data-route="targets">Targets</button>
+          <button role="menuitem" data-route="quota">Quota</button>
+          <button role="menuitem" id="logout">Sign out</button>
+        </nav>
+        <p id="menu-version" class="menu-version">Mjolnir</p>
+      </div>
     </header>
 
     <main id="login" class="card">

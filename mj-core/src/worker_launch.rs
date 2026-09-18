@@ -105,6 +105,15 @@ pub struct WorkerLaunchConfig {
     /// delegation MCP tools and native-subagent suppression.
     #[serde(default)]
     pub subagent_tools: bool,
+    /// Whether a turn review can ever run for this session, which is the only
+    /// reason to spend anything on capturing the working tree.
+    ///
+    /// The controller decides it: `[review] profile` has to name a reviewer,
+    /// and a sub-agent child is never reviewed. A session with this off does
+    /// no Git work at startup at all, which is what makes starting a session
+    /// in a large working tree cheap.
+    #[serde(default)]
+    pub review_capture: bool,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,

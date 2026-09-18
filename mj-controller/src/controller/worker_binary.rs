@@ -27,7 +27,9 @@ use mj_core::worker_launch::{
 };
 
 use super::backend::backend_locator;
-use super::readiness::WORKER_EXIT_RECORD_MARKER;
+use super::readiness::{
+    WORKER_EXIT_RECORD_MARKER, WORKER_PROCESS_MARKER, WORKER_STARTUP_RECORD_MARKER,
+};
 use super::{Controller, execute_checked, target_profile_home};
 
 /// Run a `reqwest::blocking` request on a dedicated OS thread and return its

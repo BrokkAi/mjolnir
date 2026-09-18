@@ -1394,6 +1394,47 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     assert!(instructions.contains("mj doctor --json --smoke"));
     assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
     assert!(instructions.contains("Podman **4.3.0 or newer**"));
-    assert!(instructions.contains("kind = \"local-docker\""));
+    assert!(instructions.contains("kind = \"docker\""));
     assert!(instructions.contains("--opt type=overlay"));
+}
+
+/// Releases before this one wrote Mjolnir's own refs into user repositories
+/// and could leave a scratch index behind. Doctor tells the user what is there
+/// and how to remove it, and changes nothing itself.
+#[test]
+fn review_leftovers_are_reported_and_left_alone() {
+    let repository = tempfile::tempdir().unwrap();
+    let git_dir = repository.path().join(".git");
+    std::fs::create_dir_all(git_dir.join("refs/hel")).unwrap();
+    std::fs::write(git_dir.join("refs/hel/review-capture"), "a".repeat(41)).unwrap();
+    std::fs::write(
+        git_dir.join("packed-refs"),
+        format!("{} refs/hel/review-baseline\n", "b".repeat(40)),
+    )
+    .unwrap();
+    let scratch = git_dir.join("hel-review-index-AbCdEf");
+    std::fs::write(&scratch, b"scratch").unwrap();
+
+    let residue = crate::doctor::review_residue(repository.path());
+
+    assert_eq!(
+        residue.refs,
+        ["refs/hel/review-baseline", "refs/hel/review-capture"]
+    );
+    assert_eq!(residue.scratch_indexes, std::slice::from_ref(&scratch));
+    assert!(
+        scratch.is_file() && git_dir.join("refs/hel/review-capture").is_file(),
+        "doctor reports; it never removes anything from a user's repository"
+    );
+}
+
+#[test]
+fn a_repository_with_no_leftovers_reports_none() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repository.path().join(".git/refs/heads")).unwrap();
+
+    let residue = crate::doctor::review_residue(repository.path());
+
+    assert!(residue.refs.is_empty());
+    assert!(residue.scratch_indexes.is_empty());
 }

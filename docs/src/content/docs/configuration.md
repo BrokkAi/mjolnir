@@ -1,6 +1,6 @@
 ---
 title: Configuration reference
-description: Complete reference for Mjolnir 2 config.toml, including profiles, bundles, targets, review, viewer, paths, and environment overrides.
+description: Complete reference for Mjolnir 2 config.toml, including profiles, bundles, machines, runtimes, review, viewer, paths, and environment overrides.
 ---
 
 Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
@@ -9,10 +9,10 @@ Mjolnir's state database instead; they are not fields in this file.
 
 Open **Settings** with **prefix+s** to add or edit agent profiles, SSH and EC2
 connections, projects, runtime overrides, and interface options. The command
-palette (**prefix+:**) also provides **Manage agent profiles** and **Manage machines
-and runtimes**. No setup command or file editing is required. **Detect machine**
-on the **Machines and Runtimes** page can import existing agent accounts for
-review.
+palette (**prefix+:**) also provides **Manage agent profiles**, **Manage
+machines**, and **Manage runtimes**. No setup command or file editing is
+required. **Detect machine** on the **Agent Profiles** page can import existing
+agent accounts for review.
 
 Standard local targets are supplied automatically: localhost, Podman, Docker,
 and Apple container on macOS. Saved entries override their defaults. The new,
@@ -57,14 +57,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 11
+version = 12
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `11`. |
+| `version` | integer | yes | none | Configuration schema version; use `12`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -76,20 +76,23 @@ The only accepted top-level keys are:
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
-| `targets` | table of named tables | no | empty | Named places where sessions run. |
+| `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
+| `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
+| `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
+| `build_cache` | table | no | default `[build_cache]` values | Global switch for the shared mbx build cache. |
 
 The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
 **Interface**. This is only a presentation grouping; the fields remain at the
 top level in `config.toml`.
 
-A missing or empty file is treated as an empty version 11 configuration. Older
+A missing or empty file is treated as an empty version 12 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
 understands, Mjolnir salvages the sections it can read but treats the file as
 read-only. `mj doctor` reports that state; update Mjolnir before changing it.
 
-Profile, bundle, repository, and target IDs all use the same rule: 1–64 ASCII
+Profile, bundle, repository, machine, and runtime IDs all use the same rule: 1–64 ASCII
 letters, digits, `.`, `-`, or `_`. The IDs `.` and `..` are not allowed. IDs are
 the TOML table names, for example `work` in `[profiles.work]`.
 
@@ -418,31 +421,149 @@ existing Git project directory instead. `git_ref` is no longer accepted; remove
 it and use the source remote's default branch. See [Workspaces and bundles](/workspaces-bundles/)
 for network remotes, isolated clones, and project memory.
 
-## Targets `[targets.<id>]`
+## Machines `[machines.<id>]`
 
-Every target requires a `kind`. The accepted fields after it depend on that
-kind. `permissions` is valid only on `ssh-bare`; setting it on another target is
-an error.
+A machine is a host sessions run on: this computer, an SSH host, or an EC2
+launch template. It owns the connection details, the remote workspace
+directory bare runtimes use, and the mbx build cache every runtime on it
+shares.
+
+The machine `local` is this computer. It always exists, so a file only names
+it when it carries a setting of its own.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `local-bare`, `local-podman`, `local-docker`, `apple-container`, `ssh-bare`, `ssh-podman`, or `aws-ec2`. |
+| `kind` | string enum | yes | none | `local`, `ssh`, or `aws-ec2`. Only the id `local` may hold `kind = "local"`. |
 
-### `local-bare`
+### `local`
+
+```toml
+[machines.local.build_cache]
+max_size = "50GiB"
+```
+
+The only setting is the shared build cache below. Omit the table entirely to
+use this machine's own defaults.
+
+### `ssh`
+
+```toml
+[machines.builder]
+kind = "ssh"
+host = "builder.example.com"
+user = "ubuntu"
+identity_file = "/home/me/.ssh/mjolnir"
+extra_args = ["-o", "ServerAliveInterval=30"]
+workspace_prefix = ".local/share/hel/workspaces"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `host` | string | yes | none | OpenSSH host or config alias; non-blank and contains no whitespace. |
+| `user` | string | no | unset (SSH/config default) | Cannot be empty, contain whitespace, or contain `@`. |
+| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
+| `extra_args` | array of strings | no | empty | Additional OpenSSH arguments, passed in order. |
+| `workspace_prefix` | path string | no | `".local/share/hel/workspaces"` | Per-session lifecycle/cleanup path prefix for bare runtimes on this machine. It does not select or relocate the remote Git project. May be home-relative or safely absolute. |
+
+`host` and `user` are combined as `user@host`; put only the host or alias in
+`host`. `workspace_prefix` cannot be empty, `/`, `.`, bare `~`/`~/`, or contain
+`..`. A leading `~/` on a longer path is interpreted relative to the remote
+login home.
+
+Two machines may not describe the same SSH connection; one machine is one
+host.
+
+### `aws-ec2`
+
+```toml
+[machines.fleet]
+kind = "aws-ec2"
+aws_profile = "default"
+region = "eu-west-1"
+launch_template = "lt-0123456789abcdef0"
+# launch_template_version = "3"
+ssh_user = "ubuntu"
+address_source = "public-dns"
+# identity_file = "/home/me/.ssh/mjolnir-ec2"
+ssh_args = ["-o", "ServerAliveInterval=30"]
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `aws_profile` | string | no | unset (runtime uses `"default"`) | AWS CLI profile; cannot be an empty string when set. |
+| `region` | string | yes | none | Non-blank AWS region. |
+| `launch_template` | string | yes | none | Non-blank launch-template ID or name. |
+| `launch_template_version` | string | no | unset (runtime uses `"$Default"`) | Cannot be an empty string when set. |
+| `ssh_user` | string | yes | none | Non-blank login user for the launched instance. |
+| `address_source` | string enum | no | `"public-dns"` | `public-dns`, `public-ip`, `private-dns`, or `private-ip`. |
+| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
+| `ssh_args` | array of strings | no | empty | Additional SSH arguments, passed in order. Note the field name differs from an SSH machine's `extra_args`. |
+
+The launch template owns networking, security groups, storage, AMI, and any
+default instance type. The new-session wizard may override the instance type
+for one session. An EC2 machine runs a bare harness only: it accepts no
+container runtime and no build cache, because each session gets its own
+instance. See [AWS EC2](/aws/).
+
+### Build cache `[machines.<id>.build_cache]`
+
+Every container runtime on a machine shares one mbx build cache, so the
+settings belong to the machine.
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | unset (decided by the machine's filesystem) | `false` runs sessions on this machine without the cache. |
+| `directory` | path string | no | unset (the machine's native mbx cache, else `~/.cache/mbx`) | Must be absolute. It is a path on that machine, not on the controller. |
+| `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. |
+
+A section with every field unset is the same as no section at all.
+
+## Runtimes `[targets.<id>]`
+
+A runtime says how a session runs on a machine: a bare checkout, Podman,
+Docker, or Apple `container`. Every runtime requires a `kind` and names the
+machine it runs on; `machine` defaults to `local` and is omitted from the file
+when it is `local`.
+
+| Field | TOML type | Required | Default | Accepted values |
+| --- | --- | --- | --- | --- |
+| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
+| `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
+
+`permissions` is valid only on `bare`; setting it on another runtime is an
+error. Build cache settings are valid only on a machine; setting them on a
+runtime is an error.
+
+### `bare`
 
 ```toml
 [targets.localhost]
-kind = "local-bare"
+kind = "bare"
 ```
 
-There are no additional fields. The new-session wizard asks for an existing
-absolute Git project directory. The harness retains its configured approval
-behavior because there is no container or instance boundary.
+```toml
+[targets.builder]
+kind = "bare"
+machine = "builder"
+permissions = "guardian"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables approval and sandbox checks. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
+
+The new-session wizard asks for an existing absolute Git project directory on
+the runtime's machine. On `local` the harness retains its configured approval
+behavior because there is no container or instance boundary. On an SSH machine
+the wizard separately asks for an existing absolute remote Git directory; when
+**Create managed worktree** is checked on the final review, the new checkout is
+created below the repository's own `.mj/worktrees/` tree. A bare runtime on an
+EC2 machine launches one instance per session. See
+[SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
 ### Common container fields
 
-`local-podman`, `local-docker`, `apple-container`, and `ssh-podman` accept the
-same container fields. SSH Podman also requires the SSH fields described below.
+`podman`, `docker`, and `apple-container` accept the same container fields.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -452,7 +573,7 @@ same container fields. SSH Podman also requires the SSH fields described below.
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
 | `memory` | string | no | unset (no template override) | Runtime memory value, for example `"32g"`. Per-session selection can override it. |
 | `environment` | table of strings | no | empty | Environment placed inside the target container. Keys cannot be blank or contain `=`. |
-| `workspace_storage` | table | no | `{ kind = "podman-volume" }` | All variants work on local or SSH Podman. Docker and Apple Container reject non-default variants. |
+| `workspace_storage` | table | no | `{ kind = "podman-volume" }` | Podman accepts all variants. Docker and Apple Container reject non-default variants. |
 
 The schema checks that `image` is non-blank but leaves CPU, memory, and platform
 syntax to the selected runtime. Profile `environment` and target `environment`
@@ -462,9 +583,9 @@ target values become container environment variables.
 Pull-policy behavior:
 
 - `auto` starts from an existing image and pulls only when absent. The daemon
-  refreshes eligible moving tags for Podman, Docker, and SSH Podman in the
-  background. Versioned tags, digest references, and local images remain pinned
-  or cached. Apple Container resolves `auto` during provisioning.
+  refreshes eligible moving tags for Podman and Docker in the background.
+  Versioned tags, digest references, and local images remain pinned or cached.
+  Apple Container resolves `auto` during provisioning.
 - `always` and `newer` request a launch-time refresh; Docker treats `newer` like
   `always` because it has no distinct newer-only mode.
 - `missing` pulls only when no local copy exists.
@@ -489,11 +610,11 @@ The inline table's `kind` is a required string enum:
 See [Container targets](/containers/) and [Custom images](/custom-images/) for
 runtime behavior.
 
-### `local-podman`
+### `podman`
 
 ```toml
 [targets.podman]
-kind = "local-podman"
+kind = "podman"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 platform = "linux/amd64"
@@ -505,14 +626,24 @@ workspace_storage = { kind = "podman-volume" }
 EXAMPLE = "value"
 ```
 
-All common container fields are accepted. `workspace_storage` supports all
-three Podman variants. See [Podman](/podman/).
+All common container fields are accepted, and `workspace_storage` supports all
+three Podman variants. On an SSH machine the container and any workspace volume
+live on that host, so supplemental directory sources are paths on it rather
+than on the controller. It always runs the harness unconstrained inside the
+container boundary. See [Podman](/podman/) and [SSH and SSH Podman](/ssh/).
 
-### `local-docker`
+```toml
+[targets.remote-podman]
+kind = "podman"
+machine = "builder"
+image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
+```
+
+### `docker`
 
 ```toml
 [targets.docker]
-kind = "local-docker"
+kind = "docker"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 platform = "linux/amd64"
@@ -523,8 +654,8 @@ memory = "32g"
 EXAMPLE = "value"
 ```
 
-All common fields except a non-default `workspace_storage` are supported. See
-[Docker](/docker/).
+All common fields except a non-default `workspace_storage` are supported, on
+this machine or on an SSH machine. See [Docker](/docker/).
 
 ### `apple-container`
 
@@ -541,112 +672,28 @@ memory = "32g"
 EXAMPLE = "value"
 ```
 
-All common fields except a non-default `workspace_storage` are supported. See
-[Apple container](/apple-container/).
+All common fields except a non-default `workspace_storage` are supported. Apple
+`container` runs only on this machine. See [Apple container](/apple-container/).
 
-### Common SSH fields
+### Files written before version 12
 
-`ssh-bare` and `ssh-podman` accept:
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `host` | string | yes | none | OpenSSH host or config alias; non-blank and contains no whitespace. |
-| `user` | string | no | unset (SSH/config default) | Cannot be empty, contain whitespace, or contain `@`. |
-| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
-| `extra_args` | array of strings | no | empty | Additional OpenSSH arguments, passed in order. |
-
-`host` and `user` are combined as `user@host`; put only the host or alias in
-`host`.
-
-### `ssh-bare`
-
-```toml
-[targets.builder]
-kind = "ssh-bare"
-host = "builder.example.com"
-user = "ubuntu"
-identity_file = "/home/me/.ssh/mjolnir"
-extra_args = ["-o", "ServerAliveInterval=30"]
-permissions = "guardian"
-workspace_prefix = ".local/share/hel/workspaces"
-```
-
-In addition to the common SSH fields:
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `permissions` | string enum | yes | none | `guardian` preserves harness approvals; `yolo` disables approval and sandbox checks. |
-| `workspace_prefix` | path string | no | `".local/share/hel/workspaces"` | Per-session lifecycle/cleanup path prefix. It does not select or relocate the remote Git project. May be home-relative or safely absolute. |
-
-`workspace_prefix` cannot be empty, `/`, `.`, bare `~`/`~/`, or contain `..`.
-A leading `~/` on a longer path is interpreted relative to the remote login
-home. The wizard separately asks for an existing absolute remote Git directory;
-when **Create managed worktree** is checked on the final review, the new
-checkout is created below the repository’s own `.mj/worktrees/` tree. The legacy
-`hel` segment shown above is the current default. See [SSH and SSH Podman](/ssh/).
-
-### `ssh-podman`
-
-```toml
-[targets.remote-podman]
-kind = "ssh-podman"
-host = "builder.example.com"
-user = "ubuntu"
-identity_file = "/home/me/.ssh/mjolnir"
-extra_args = ["-o", "ServerAliveInterval=30"]
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-pull_policy = "auto"
-platform = "linux/amd64"
-cpus = "8"
-memory = "32g"
-workspace_storage = { kind = "podman-volume" }
-
-[targets.remote-podman.environment]
-EXAMPLE = "value"
-```
-
-This kind combines every common SSH field with every common container field,
-including all Podman workspace-storage variants. It always runs the harness
-unconstrained inside the container boundary. See [SSH and SSH Podman](/ssh/).
-
-### `aws-ec2`
-
-```toml
-[targets.aws]
-kind = "aws-ec2"
-aws_profile = "default"
-region = "eu-west-1"
-launch_template = "lt-0123456789abcdef0"
-# launch_template_version = "3"
-ssh_user = "ubuntu"
-address_source = "public-dns"
-# identity_file = "/home/me/.ssh/mjolnir-ec2"
-ssh_args = ["-o", "ServerAliveInterval=30"]
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `aws_profile` | string | no | unset (runtime uses `"default"`) | AWS CLI profile; cannot be an empty string when set. |
-| `region` | string | yes | none | Non-blank AWS region. |
-| `launch_template` | string | yes | none | Non-blank launch-template ID or name. |
-| `launch_template_version` | string | no | unset (runtime uses `"$Default"`) | Cannot be an empty string when set. |
-| `ssh_user` | string | yes | none | Non-blank login user for the launched instance. |
-| `address_source` | string enum | no | `"public-dns"` | `public-dns`, `public-ip`, `private-dns`, or `private-ip`. |
-| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
-| `ssh_args` | array of strings | no | empty | Additional SSH arguments, passed in order. Note the field name differs from SSH targets' `extra_args`. |
-
-The launch template owns networking, security groups, storage, AMI, and any
-default instance type. The new-session wizard may override the instance type
-for one session. EC2 targets do not accept container fields or a target
-`environment` table. See [AWS EC2](/aws/).
+Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
+with kinds named `local-bare`, `local-podman`, `local-docker`,
+`apple-container`, `ssh-bare`, `ssh-podman`, `ssh-docker`, and `aws-ec2`.
+Mjolnir still reads such a file when its `version` is 11 or lower: it derives
+the machines, moves each container's `build_cache` onto the machine that owns
+it, and writes the new shape on the next save. A file that already says
+`version = 12` must use the new kinds; an old one is refused with the spelling
+to write instead.
 
 ## Complete compact example
 
-This example contains the sections most installations need. Add other target
-kinds from the examples above rather than mixing fields between variants.
+This example contains the sections most installations need. Add other machine
+and runtime kinds from the examples above rather than mixing fields between
+variants.
 
 ```toml
-version = 11
+version = 12
 
 [phone]
 enabled = true
@@ -674,11 +721,14 @@ id = "product"
 github = "acme/product"
 destination = "product"
 
+[machines.local.build_cache]
+max_size = "100GiB"
+
 [targets.localhost]
-kind = "local-bare"
+kind = "bare"
 
 [targets.podman]
-kind = "local-podman"
+kind = "podman"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 ```
@@ -712,8 +762,8 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `GIT_SSH_COMMAND` | Overrides Mjolnir's non-interactive SSH command for checkpoint/archive Git operations. |
 
 Worker lookup checks `MJ_WORKER_BINARY`, `MJ_WORKER_DIR`, packaged or sibling
-workers, the native `mj-worker` companion for `local-bare`, and finally the
-verified URL fallback.
+workers, the native `mj-worker` companion for a bare runtime on this machine,
+and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 

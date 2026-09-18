@@ -1313,3 +1313,51 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
     );
     downloader.join().expect("the download thread finishes");
 }
+
+/// Which sub-agent start failures may be tried again. A second start is safe
+/// only when the first worker never published a control socket: it then owns
+/// no relay, no journal and no harness, so nothing can be duplicated.
+#[test]
+fn only_a_worker_that_never_started_is_retried() {
+    use crate::controller::readiness::WorkerStartupFailure;
+
+    let pre_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
+        reached_socket: false,
+    });
+    assert!(subagent_start_is_retryable(&pre_socket));
+
+    let after_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
+        reached_socket: true,
+    });
+    assert!(
+        !subagent_start_is_retryable(&after_socket),
+        "a worker that published its socket may own durable state"
+    );
+
+    let unmarked = anyhow::anyhow!("installing the worker binary failed");
+    assert!(
+        !subagent_start_is_retryable(&unmarked),
+        "a failure that is not a startup wait says nothing about what it left behind"
+    );
+
+    let refused = anyhow::anyhow!("connect refused")
+        .context(WorkerStartupFailure {
+            reached_socket: false,
+        })
+        .context(mj_core::refusal::Refusal::precondition(
+            "turn review cannot cover /work",
+        ));
+    assert!(
+        !subagent_start_is_retryable(&refused),
+        "a refusal names a precondition a second attempt would meet the same way"
+    );
+
+    let cancelled = anyhow::anyhow!("operation cancelled while connecting to the worker relay")
+        .context(WorkerStartupFailure {
+            reached_socket: false,
+        });
+    assert!(
+        !subagent_start_is_retryable(&cancelled),
+        "a cancelled operation was not asked to keep going"
+    );
+}
