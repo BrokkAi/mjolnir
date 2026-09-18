@@ -819,8 +819,8 @@ fn render_combined_themed(
     let focus_borders = pane_bands.len() > 1;
     let mut drawn_sessions = Vec::new();
     let mut chat_drew_footer = false;
-    // The focused pane draws last: its conversation may open an overlay over
-    // the whole frame, and that overlay belongs on top of its neighbours.
+    // The focused pane draws last so its focus border wins where two panes
+    // meet. Its conversation's dialogs stay inside its own rectangle.
     for (pane_id, pane_rect, pane_focused, transcript_area, prompt_area) in pane_bands
         .iter()
         .filter(|(_, _, focused, _, _)| !focused)
@@ -935,13 +935,9 @@ fn render_combined_themed(
         }
         // The lone pane offers a close only while it holds a conversation:
         // closing it empties it, which is nothing to ask for when it is
-        // already empty. A chat modal owns the frame, so the chip stands down.
+        // already empty.
         let zoom_chip = dashboard.conversation_zoomed();
-        let close_chip = (pane_bands.len() > 1 || dashboard.pane_session(pane_id).is_some())
-            && !focused_chat_session
-                .as_deref()
-                .and_then(|session_id| chats.get(session_id))
-                .is_some_and(|chat| chat.component_modal_open());
+        let close_chip = pane_bands.len() > 1 || dashboard.pane_session(pane_id).is_some();
         chat_drew_footer = if launch_standby_drawn {
             render_launch_standby_surface(
                 frame,
@@ -997,7 +993,7 @@ fn render_combined_themed(
                                 functions: &[],
                                 banner: banner.as_ref(),
                             }),
-                            overlay: area,
+                            overlay: pane_rect,
                             title_controls: title_controls(close_chip)
                                 + zoom_title_controls(zoom_chip),
                             pane_focused: focus_borders,
@@ -1018,14 +1014,10 @@ fn render_combined_themed(
                             }
                         }
                     }
-                    // A chat-local modal may own the frame's interaction. Questions
-                    // deliberately leave this flag clear so the navigator and other
-                    // dashboard panes remain selectable beside the question area.
-                    if chat.frame_surfaces_exclusive() {
-                        dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
-                    } else {
-                        dashboard.frame_surfaces.append(chat.frame_surfaces());
-                    }
+                    // A chat's dialogs live inside its own pane, so its
+                    // surfaces join the frame's rather than replacing them:
+                    // the navigator and the other panes stay selectable.
+                    dashboard.frame_surfaces.append(chat.frame_surfaces());
                     prompt_focused
                 }
                 None => {

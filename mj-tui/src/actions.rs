@@ -1189,19 +1189,6 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
         .collect()
 }
 
-/// Whether a bound command still answers while the conversation owns a modal
-/// of its own.
-///
-/// Help and detach have always answered from every surface, and the pane
-/// preset only changes the layout underneath, so all three survive it;
-/// refreshing only asks the daemon for fresh figures.
-pub fn survives_chat_modal(id: CommandId) -> bool {
-    matches!(
-        id,
-        CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh
-    )
-}
-
 impl DashboardState {
     /// Whether a bound command still answers with the current dialog open.
     ///

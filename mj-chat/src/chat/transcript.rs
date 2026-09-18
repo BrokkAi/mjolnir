@@ -497,10 +497,10 @@ impl ChatState {
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
     pub fn transcript_scrollbar_dragging(&self) -> bool {
-        self.transcript_scrollbar.dragging && !self.transcript_scrollbar_modal_blocked()
+        self.transcript_scrollbar.dragging && !self.transcript_scrollbar_covered()
     }
 
-    fn transcript_scrollbar_modal_blocked(&self) -> bool {
+    fn transcript_scrollbar_covered(&self) -> bool {
         self.elicitation.is_none()
             && (self.config_picker_active()
                 || (self.second_opinion_active() && !self.second_opinion_split())
@@ -514,7 +514,7 @@ impl ChatState {
         &mut self,
         mouse: crossterm::event::MouseEvent,
     ) -> bool {
-        if self.transcript_scrollbar_modal_blocked() {
+        if self.transcript_scrollbar_covered() {
             let was_dragging = self.transcript_scrollbar.dragging;
             self.transcript_scrollbar.clear_geometry();
             return was_dragging;
@@ -684,7 +684,7 @@ impl ChatState {
         top: AnchorRow,
         anchor: TranscriptAnchor,
     ) -> Option<ScrollbarGeometry> {
-        if track.width == 0 || track.height == 0 || self.transcript_scrollbar_modal_blocked() {
+        if track.width == 0 || track.height == 0 || self.transcript_scrollbar_covered() {
             self.transcript_scrollbar.clear_geometry();
             return None;
         }

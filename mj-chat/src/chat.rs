@@ -154,12 +154,13 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
 /// border. While busy, the transcript's last row holds activity above the
 /// prompt. `footer` is `Some` only when the host wants the chat to own the
 /// footer row, which it does while the composer has focus. `overlay` is the
-/// whole frame: modals and the autocomplete popup are centred and clamped
-/// inside it rather than inside the bands above. `title_controls` is how many
-/// columns the host draws its own chips into at the right of the transcript's
-/// title row, which the title must stop short of. `pane_focused` says the
-/// host has given this pane the keyboard and wants the transcript's border
-/// drawn in the focused style; a host with a single pane leaves it clear.
+/// rectangle this conversation owns: dialogs and the autocomplete popup are
+/// centred and clamped inside it rather than inside the bands above.
+/// `title_controls` is how many columns the host draws its own chips into at
+/// the right of the transcript's title row, which the title must stop short
+/// of. `pane_focused` says the host has given this pane the keyboard and wants
+/// the transcript's border drawn in the focused style; a host with a single
+/// pane leaves it clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatRegions<'a> {
     pub transcript: Rect,
@@ -566,7 +567,7 @@ pub struct ChatState {
     /// the display so the primary can surface immediately when that review
     /// request is answered or withdrawn.
     pending_elicitations: Vec<ElicitationRequest>,
-    /// The second-opinion view, when one is open. It owns the frame while it
+    /// The second-opinion view, when one is open. It owns this pane while it
     /// is up, so the composer and the elicitation dialog stand down.
     second_opinion: Option<SecondOpinion>,
     /// Where the reviewer pane sat on the last frame, so hover can decide
@@ -578,7 +579,7 @@ pub struct ChatState {
     /// Distinguishes the command ids the review's own steps submit.
     second_opinion_sequence: u64,
     /// The turn-review view, when one is open. Like the second opinion, it
-    /// owns the frame while it is up, which is what makes review synchronous:
+    /// owns this pane while it is up, which is what makes review synchronous:
     /// findings can never land in the middle of the next conversation.
     turn_review: Option<Box<TurnReview>>,
     /// Where the turn review's action buttons sat on the last frame.
@@ -671,11 +672,6 @@ pub struct ChatState {
     pub(super) frame_surfaces: FrameSurfaces,
     /// Visible host shortcuts, indexed through chords followed by function keys.
     footer_command_areas: RefCell<Vec<(usize, Rect)>>,
-    /// Whether the last frame's surfaces replace everything behind them. The
-    /// host uses this only for chat-local modals that truly own the frame;
-    /// questions stay in the session content area and remain mergeable with
-    /// navigator surfaces.
-    pub(super) frame_surfaces_exclusive: bool,
     /// The row space transcript selections are measured in, re-pinned by every
     /// frame the engine is not holding a transcript selection through.
     transcript_selection: Option<TranscriptSelectionSpace>,
@@ -810,7 +806,6 @@ impl ChatState {
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             footer_command_areas: RefCell::new(Vec::new()),
-            frame_surfaces_exclusive: false,
             transcript_selection: None,
             transcript_selection_invalid: false,
             render_cache_generation: 0,

@@ -70,7 +70,7 @@ mod docs_screenshots;
 #[cfg(test)]
 mod test_support;
 
-pub use crate::actions::{CommandId, survives_chat_modal};
+pub use crate::actions::CommandId;
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;

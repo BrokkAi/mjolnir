@@ -525,7 +525,7 @@ impl super::ChatState {
 
     /// Opens the waterfall for `captured`.
     pub(super) fn open_second_opinion(&mut self, captured: CapturedProposal, setup: ReviewerSetup) {
-        // The waterfall owns the frame; a value selector left open underneath
+        // The waterfall owns the pane; a value selector left open underneath
         // would fight it for keys when the review closes.
         self.config_picker = None;
         self.second_opinion = Some(SecondOpinion::Setup {
