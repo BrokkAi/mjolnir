@@ -2709,3 +2709,110 @@ fn a_restored_layout_never_shows_one_session_in_two_panes() {
     assert_eq!(restored.pane_session(first), Some("session-1"));
     assert_eq!(restored.pane_session(second), None);
 }
+
+/// The keys herdr uses for panes: `prefix+v` splits beside, `prefix+x`
+/// closes. The split itself belongs to the controller, which opens the
+/// session in the new pane, so the test does that step the way `mj-cli`
+/// does and then closes the pane with its own key.
+#[test]
+fn the_pane_keys_split_beside_the_conversation_and_close_the_pane() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    dashboard.select_active_session("session-2");
+    dashboard.focus_prompt();
+    let first = dashboard.focused_pane();
+
+    let action = chord(&mut dashboard, CommandId::OpenSessionSplitRight);
+
+    let DashboardAction::OpenSessionInSplit {
+        session_id,
+        direction,
+    } = action
+    else {
+        panic!("the split key should ask for a split: {action:?}");
+    };
+    assert_eq!(session_id, "session-2");
+    assert_eq!(direction, ratatui::layout::Direction::Horizontal);
+    let second = dashboard
+        .split_focused_pane(direction, Some(&session_id))
+        .expect("the test conversation area has room for two panes");
+    assert_eq!(dashboard.conversation_layout.pane_count(), 2);
+    assert_eq!(dashboard.focused_pane(), second);
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ClosePane),
+        DashboardAction::ClosePane
+    );
+    assert_eq!(dashboard.close_focused_pane().as_deref(), Some("session-2"));
+    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.focused_pane(), first);
+}
+
+/// `prefix+minus` stacks instead of sitting beside, and the focus keys move
+/// between the two panes from the composer.
+#[test]
+fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    dashboard.select_active_session("session-2");
+    dashboard.focus_prompt();
+    let first = dashboard.focused_pane();
+
+    let action = chord(&mut dashboard, CommandId::OpenSessionSplitBelow);
+
+    let DashboardAction::OpenSessionInSplit { direction, .. } = action else {
+        panic!("the stacked split key should ask for a split: {action:?}");
+    };
+    assert_eq!(direction, ratatui::layout::Direction::Vertical);
+    dashboard
+        .split_focused_pane(direction, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusPaneUp),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+    assert_eq!(dashboard.focused_pane(), first);
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+}
+
+/// A split key pressed with nothing selected still splits; the new pane is
+/// simply empty. The controller answers `SplitPane` by splitting and leaving
+/// the leaf without a session.
+#[test]
+fn a_split_key_with_no_selection_asks_for_an_empty_pane() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.state.sessions.clear();
+    dashboard.clamp_selections();
+    dashboard.focus_prompt();
+
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::OpenSessionSplitRight),
+        DashboardAction::SplitPane {
+            direction: ratatui::layout::Direction::Horizontal
+        }
+    );
+}
+
+/// A restored arrangement comes back with the keyboard in the pane it named
+/// and the Sessions highlight on that pane's session. Without the highlight
+/// following, the controller's "open what is selected" step would pull the
+/// first row's conversation into the restored focus pane.
+#[test]
+fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    let saved = dashboard.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID);
+    assert_eq!(saved.focus, second.raw());
+
+    let mut restored = dashboard_with_two_sessions();
+    restored.cache_workspace_layout(mj_core::workspace::DEFAULT_WORKSPACE_ID, saved);
+
+    assert_eq!(restored.focused_pane(), second);
+    assert_eq!(restored.current_session_id(), Some("session-2"));
+    assert_eq!(restored.selected_session_id(), Some("session-2"));
+}

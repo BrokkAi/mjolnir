@@ -91,6 +91,19 @@ impl DashboardState {
         Some(pane)
     }
 
+    /// The split commands, whether they came from a palette or a key.
+    ///
+    /// With a session selected the split shows it, which is what "Open in
+    /// split" means. From a key there may be no selection at all — the
+    /// Sessions list can be empty — and the split then makes an empty pane
+    /// rather than doing nothing.
+    pub(crate) fn split_command(&mut self, direction: Direction) -> DashboardAction {
+        if self.selected_session().is_some() {
+            return self.open_selected_session_in_split(direction);
+        }
+        DashboardAction::SplitPane { direction }
+    }
+
     /// Remove the focused pane and report the session it showed. The last
     /// pane is emptied rather than removed: the conversation area always has
     /// somewhere to open the next session.
@@ -237,6 +250,14 @@ impl DashboardState {
             .filter(|(_, session_id)| self.state.sessions.contains_key(session_id))
             .filter(|(_, session_id)| claimed.insert(session_id.clone()))
             .collect();
+        // The highlight follows the keyboard, and the keyboard is in the pane
+        // the arrangement named. Without this the clamp below would leave the
+        // highlight on the first row, and following that selection would pull
+        // its conversation into the restored focus pane.
+        if let Some(session_id) = self.pane_sessions.get(&self.conversation_layout.focused()) {
+            let session_id = session_id.clone();
+            self.select_active_session(&session_id);
+        }
     }
 
     /// Start over with one empty pane, for a workspace with nothing stored.

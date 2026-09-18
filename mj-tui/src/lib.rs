@@ -122,6 +122,11 @@ pub enum DashboardAction {
         session_id: String,
         direction: ratatui::layout::Direction,
     },
+    /// Split the focused conversation pane and leave the new pane empty.
+    /// The keyboard split falls back to this when no session is selected.
+    SplitPane {
+        direction: ratatui::layout::Direction,
+    },
     /// Remove the focused conversation pane, saving what it held.
     ClosePane,
     /// The conversation panes were focused or resized. The controller saves

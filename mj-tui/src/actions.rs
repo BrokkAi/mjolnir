@@ -409,11 +409,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         id: CommandId::OpenSessionSplitRight,
         label: "Open in split right",
         description: "Show the selected session beside the conversation you are in.",
-        // No key in this milestone: the split commands are reached from the
-        // session row's menu and the command palette.
         scope: Scope::Session,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::SplitVertical),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -425,7 +423,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Show the selected session under the conversation you are in.",
         scope: Scope::Session,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::SplitHorizontal),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -437,7 +435,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Remove the conversation pane you are in; the last one is emptied instead.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::ClosePane),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -449,7 +447,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the keyboard to the conversation pane left this one.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::FocusPaneLeft),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -461,7 +459,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the keyboard to the conversation pane below this one.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::FocusPaneDown),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -473,7 +471,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the keyboard to the conversation pane above this one.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::FocusPaneUp),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -485,7 +483,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the keyboard to the conversation pane right this one.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::FocusPaneRight),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -497,7 +495,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the border of the conversation pane you are in left one step.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::ResizePaneLeft),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -509,7 +507,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the border of the conversation pane you are in down one step.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::ResizePaneDown),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -521,7 +519,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the border of the conversation pane you are in up one step.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::ResizePaneUp),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -533,7 +531,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         description: "Move the border of the conversation pane you are in right one step.",
         scope: Scope::Pane,
         pane_keys: &[],
-        action: None,
+        action: Some(KeyAction::ResizePaneRight),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -1124,10 +1122,10 @@ impl DashboardState {
         match id {
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::OpenSessionSplitRight => {
-                self.open_selected_session_in_split(ratatui::layout::Direction::Horizontal)
+                self.split_command(ratatui::layout::Direction::Horizontal)
             }
             CommandId::OpenSessionSplitBelow => {
-                self.open_selected_session_in_split(ratatui::layout::Direction::Vertical)
+                self.split_command(ratatui::layout::Direction::Vertical)
             }
             CommandId::ClosePane => DashboardAction::ClosePane,
             CommandId::FocusPaneLeft => self.focus_pane_command(NavDirection::Left),
@@ -1409,6 +1407,38 @@ mod tests {
             if let Some(action) = entry.action {
                 assert_eq!(command_for_action(action), entry.id);
             }
+        }
+    }
+
+    /// The conversation-pane commands answer herdr's letters, so a herdr user
+    /// splits, closes, and moves between panes without learning anything new.
+    /// The resize commands are bindable but unbound, like the other commands
+    /// a mis-hit should not run.
+    #[test]
+    fn the_pane_commands_carry_herdrs_letters() {
+        let dashboard = dashboard_with_session(running_session());
+        for (id, label) in [
+            (CommandId::OpenSessionSplitRight, "ctrl+b v"),
+            (CommandId::OpenSessionSplitBelow, "ctrl+b -"),
+            (CommandId::ClosePane, "ctrl+b x"),
+            (CommandId::FocusPaneLeft, "ctrl+b h"),
+            (CommandId::FocusPaneDown, "ctrl+b j"),
+            (CommandId::FocusPaneUp, "ctrl+b k"),
+            (CommandId::FocusPaneRight, "ctrl+b l"),
+        ] {
+            assert_eq!(dashboard.key_labels(id), vec![label.to_owned()], "{id:?}");
+        }
+        for id in [
+            CommandId::ResizePaneLeft,
+            CommandId::ResizePaneDown,
+            CommandId::ResizePaneUp,
+            CommandId::ResizePaneRight,
+        ] {
+            assert!(spec(id).action.is_some(), "{id:?} must be bindable");
+            assert!(
+                dashboard.key_labels(id).is_empty(),
+                "{id:?} must be unbound"
+            );
         }
     }
 

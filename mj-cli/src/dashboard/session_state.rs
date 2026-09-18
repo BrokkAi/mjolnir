@@ -114,6 +114,15 @@ impl DashboardContext {
     /// Follow a changed selection once. A failed open needs an explicit retry,
     /// rather than another attempt on every render or background completion.
     pub(crate) fn follow_selected_session(&mut self) {
+        // Until the startup pick has run, the highlighted row is only where
+        // the clamp left it, not a choice anyone made. Following it would open
+        // that conversation in the focused pane and, when a restored
+        // arrangement shows it somewhere else, move the keyboard out of the
+        // pane the arrangement named. Any user input cancels the pick, so this
+        // only holds back the automatic follow.
+        if self.startup.pick_pending() {
+            return;
+        }
         let Some(selected) = self.dashboard.selected_session_id().map(str::to_owned) else {
             return;
         };

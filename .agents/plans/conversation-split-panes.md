@@ -19,7 +19,8 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 - [x] (2026-09-17) M3: the model in `mj-tui` (`DashboardState` holds the tile layout and its pane sessions) and many warm chats in the controller (`mj-cli`), keyed by session id, all pumped and acknowledged. Rendering still draws only the focused pane and no command creates a split; both are M4.
 - [x] (2026-09-17) M4: rendering of several panes and the pane commands in
   `mj-tui`, reachable from the F2 palette and the session row `⋯` menu.
-- [ ] M5: prefix keybindings. Blocked until the prefix-key work from the `hel3` worktree merges into this branch.
+- [x] (2026-09-17) M5: prefix keybindings for the pane commands, the saved
+  focus honoured after a restart, docs and screenshots.
 
 ## Surprises & Discoveries
 
@@ -40,9 +41,19 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 - M4: a restarted `mj` opened only the conversation the startup picker chose,
   so a restored two-pane arrangement came back with one pane empty. Startup now
   opens each restored pane's session in its pane and skips the picker.
-- M4: after a restart the keyboard lands in the first pane rather than the pane
-  the saved arrangement named. The arrangement and its conversations come back
-  correctly; only the saved focus is not honoured. Left as it is.
+- M4/M5: after a restart the keyboard landed in the first pane rather than the
+  pane the saved arrangement named. M5 found the cause and fixed it. Two things
+  were wrong, both upstream of the startup pick. First, the main loop calls
+  `follow_selected_session` on every iteration, and before the startup pick has
+  run the highlighted row is only where `clamp_selections` left it — the first
+  visible session. Following it opened that conversation, and because the
+  session was already in another pane, `open_chat_session` moved the keyboard
+  to that pane. `maybe_open_startup_session` then read the already-moved focus
+  as the one to restore. The follow now waits for the pick, which any user
+  input cancels, so only the automatic follow is held back. Second,
+  `restore_conversation_layout` left the Sessions highlight wherever the clamp
+  put it; it now moves it onto the focused pane's session, so the highlight and
+  the keyboard agree from the first frame.
 - M4: `Scope::Pane` already existed and already applied from every focus; it
   is the group the support-pane size and focus commands sit in. The new pane
   commands reuse it and gate themselves through their `available` function
@@ -84,6 +95,50 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 
 ## Decision Log
 
+
+- Decision: the stacked-split default is written `"prefix+-"` rather than
+  `"prefix+minus"`, and the documentation says both spellings parse.
+  Rationale: `minus` and `-` both parse, but `format_key_combo` prints `-`, and
+  `format_key_combo_round_trips_every_default_binding` requires every default
+  to be its own canonical spelling. Writing the canonical form keeps that
+  invariant and makes the help overlay's `ctrl+b -` the same string the
+  configuration holds.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: the four resize actions are bindable but unbound by default, and
+  the seven others take herdr's letters exactly.
+  Rationale: the plan reserved `v`, `minus`, `x`, `h`, `j`, `k`, `l` for this,
+  and all seven were still free in the merged table. A resize is a fine
+  adjustment with no herdr equivalent worth spending a letter on; `[keys]`
+  gives it one for anyone who wants it.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: `CONFIG_VERSION` is not bumped for the eleven new `[keys]` fields.
+  Rationale: the precedent the prefix plan set is that a new top-level *section*
+  bumps the version. The section already exists at version 11, and a bump would
+  make every existing configuration file fail its version check.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: a split key pressed with nothing selected returns a new
+  `DashboardAction::SplitPane { direction }`, which the controller answers by
+  splitting and leaving the new leaf empty.
+  Rationale: `open_session_in_split` is built around a session to move, and
+  `open_selected_session_into` returns `DashboardAction::None` with no
+  selection, so the key would have done nothing. One more action carries "split
+  with nothing in it" without teaching the session path about an absent
+  session. The `available` gate stays `selected_session_ready`, which is what
+  keeps the two commands out of the palette when there is no row to act on;
+  the prefix router dispatches without consulting it, so the key still works
+  from the composer and from an empty Sessions list.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: the automatic "follow the selection" step waits for the startup
+  pick, rather than the startup pick re-asserting the focus it wanted.
+  Rationale: fixing it at the pick would leave an attach started against the
+  wrong pane and a conversation opened that nobody asked for. The highlight
+  before the pick is not a choice, so nothing should act on it. Any key, mouse
+  or paste event cancels the pick, so a user who acts first is unaffected.
+  Date/Author: 2026-09-17, Opus implementing M5.
 
 - Decision: `render_combined` takes the whole warm-chat map plus the per-pane
   in-flight attaches, decides for itself which pane draws which conversation,
@@ -262,10 +317,43 @@ circular: the panes need the band, and the band's height needs the panes'
 composer heights. It is not circular, because pane widths do not depend on the
 band's height. Finding that took longer than writing it.
 
-What is left. M5 (prefix keybindings) is still blocked on the `hel3`
-prefix-router work merging into this branch. Zoom, drag-resizing a border,
-selecting text in an unfocused pane, swapping panes, and showing one session in
-two panes all remain deliberately out of scope.
+What was left at that point. M5 (prefix keybindings) was still blocked on the
+`hel3` prefix-router work merging into this branch.
+
+### M5 and the plan as a whole (2026-09-17)
+
+What landed in M5. The eleven pane commands have keys. `prefix+v` splits
+beside, `prefix+-` splits below, `prefix+x` closes, and `prefix+h`/`j`/`k`/`l`
+move the keyboard between panes — herdr's letters, all of which the prefix plan
+had reserved. The four resize commands are bindable and unbound. The two split
+keys act on the Sessions selection from any focus, and split into an empty pane
+when nothing is selected. The saved focus is now honoured after a restart, with
+the Sessions highlight on that pane's session. `docs/src/content/docs/
+terminal-surface.mdx` and the `[keys]` reference in `configuration.md` describe
+all of it, and the command-palette screenshot was regenerated because it now
+prints the new keys.
+
+The plan as a whole. Six milestones, six commits, each revertible on its own and
+each fully validated before the next started. Nothing had to reach back into an
+earlier milestone, which is the strongest evidence that the layering — tree,
+store, model, view, keys — was cut in the right places.
+
+What the whole plan taught. The hard part of this feature was never the tiling;
+it was the single Sessions selection meeting several panes. M4's end-to-end run
+found three defects there, and M5's restart bug was a fourth of exactly the same
+shape: a piece of code that was right when "the selection" and "the conversation
+with the keyboard" were the same thing. Two of the four were invisible to unit
+tests because they needed a controller loop and a restart. Running the thing was
+not a formality in this plan; it was where half the defects came from.
+
+Waiting for the prefix router was right. Two routers fighting over `prefix+v`
+would have cost more than the wait, and when the merge came, M5 was an afternoon:
+eleven rows in one macro table, eleven `action` fields, one new action for the
+empty split, and the documentation.
+
+What is left. Zoom, drag-resizing a border, selecting text in an unfocused pane,
+swapping panes, and showing one session in two panes all remain deliberately out
+of scope.
 
 ## Context and Orientation
 
@@ -431,6 +519,19 @@ Every milestone is additive until M3, which replaces the single-chat field; M3 a
 
 ## Artifacts and Notes
 
+
+M5 landed in: `mj-core/src/config/keys.rs` (eleven `key_actions!` rows),
+`mj-tui/src/keybinds.rs` (`command_for_action`), `mj-tui/src/actions.rs` (the
+eleven `CommandSpec.action` fields and the split dispatch),
+`mj-tui/src/dashboard_conversation.rs` (`split_command`, and the restored
+highlight in `restore_conversation_layout`), `mj-tui/src/lib.rs`
+(`DashboardAction::SplitPane`), `mj-cli/src/dashboard.rs`
+(`split_empty_pane`, `StartupSession::pick_pending`),
+`mj-cli/src/dashboard/actions.rs`, `mj-cli/src/dashboard/session_state.rs`
+(the follow waits for the startup pick), the documentation in
+`docs/src/content/docs/terminal-surface.mdx` and
+`docs/src/content/docs/configuration.md`, and the regenerated
+`docs/src/assets/screenshots/{command-palette,setup}.svg`.
 
 M4 landed in: `mj-tui/src/dashboard_standby.rs` (`set_pane_session`),
 `mj-cli/src/dashboard/io.rs` (an attach lands in the pane that asked),

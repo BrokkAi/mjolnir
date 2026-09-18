@@ -178,6 +178,13 @@ The default bindings:
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
 | `toggle_dictation` | `prefix+m` | Start or stop dictation |
+| `split_vertical` | `prefix+v` | Open the selected session in a pane beside this one |
+| `split_horizontal` | `prefix+-` | Open the selected session in a pane below this one |
+| `close_pane` | `prefix+x` | Close the conversation pane you are in |
+| `focus_pane_left` | `prefix+h` | Move the keyboard to the pane on the left |
+| `focus_pane_down` | `prefix+j` | Move the keyboard to the pane below |
+| `focus_pane_up` | `prefix+k` | Move the keyboard to the pane above |
+| `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
 | `stop_session` | unbound | Stop the selected session |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |
@@ -187,10 +194,18 @@ The default bindings:
 | `manage_targets` | unbound | Open target management |
 | `change_go_setup` | unbound | Change the `mj go` fast-start setup |
 | `cycle_spinner` | unbound | Cycle the activity spinner style |
+| `resize_pane_left` | unbound | Move the conversation pane's border left |
+| `resize_pane_down` | unbound | Move the conversation pane's border down |
+| `resize_pane_up` | unbound | Move the conversation pane's border up |
+| `resize_pane_right` | unbound | Move the conversation pane's border right |
 
-The last nine actions are unbound by default because they are destructive or
-infrequent enough that a mis-hit key should not run them; use the command
-palette (`prefix+:`) instead, or bind them here.
+The thirteen actions listed as unbound have no default key because they are
+destructive, infrequent, or fine adjustments that a mis-hit key should not run;
+use the command palette (`prefix+:`) instead, or bind them here.
+
+The conversation-pane keys follow herdr and tmux; see [Conversation
+panes](/terminal-surface/#conversation-panes). `prefix+-` can also be written
+`prefix+minus`.
 
 `Config::validate` rejects an invalid `[keys]` table fatally, the same as any
 other configuration error, with one exception: a binding you write silently

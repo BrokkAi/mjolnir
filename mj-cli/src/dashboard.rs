@@ -132,6 +132,12 @@ impl StartupSession {
         self.open_pending = false;
     }
 
+    /// Whether the pick is still to come. While it is, nothing else may open a
+    /// conversation on the surface's behalf.
+    fn pick_pending(&self) -> bool {
+        self.open_pending
+    }
+
     /// Whether the pick should run now. Answering `true` once retires the
     /// choice, so a later tick cannot open a second conversation.
     fn ready(&mut self, now: std::time::Instant) -> bool {
@@ -938,6 +944,18 @@ impl DashboardContext {
         }
         self.dashboard.focus_pane(new_pane);
         self.open_chat_session(session_id);
+        self.sync_opening_session();
+        self.save_active_workspace_layout();
+    }
+
+    /// Splits the focused pane and leaves the new pane empty, which is what
+    /// the split keys do when the Sessions list has nothing selected.
+    pub(crate) fn split_empty_pane(&mut self, direction: Direction) {
+        if self.dashboard.split_focused_pane(direction, None).is_none() {
+            self.dashboard.set_notice("Not enough room to split");
+            return;
+        }
+        self.selection.clear();
         self.sync_opening_session();
         self.save_active_workspace_layout();
     }

@@ -1430,6 +1430,30 @@ fn the_startup_pick_waits_for_its_summaries_then_gives_up() {
     assert!(stalled.ready(start + STARTUP_SESSION_WAIT));
 }
 
+/// Nothing may open a conversation on the surface's behalf until the pick has
+/// run. `follow_selected_session` reads this: before the pick, the highlighted
+/// row is only where the clamp left it, and following it would move the
+/// keyboard out of the pane a restored arrangement named.
+#[test]
+fn the_pick_holds_the_automatic_follow_back_until_it_has_run() {
+    let start = std::time::Instant::now();
+    let mut startup = StartupSession::begin(["session-a".to_owned()], start);
+
+    assert!(startup.pick_pending());
+    startup.summary_arrived("session-a");
+    assert!(startup.pick_pending(), "the pick has still to run");
+    assert!(startup.ready(start));
+    assert!(!startup.pick_pending(), "the pick has run");
+
+    // A user who acts first takes the choice, and the follow resumes at once.
+    let mut acted = StartupSession::begin(["session-a".to_owned()], start);
+    acted.cancel();
+    assert!(!acted.pick_pending());
+
+    // An empty workspace has nothing to wait for.
+    assert!(!StartupSession::begin(std::iter::empty(), start).pick_pending());
+}
+
 /// The user acting is the strongest signal there is about which
 /// conversation they want, so it takes the choice away.
 #[test]

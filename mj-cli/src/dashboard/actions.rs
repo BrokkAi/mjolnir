@@ -866,6 +866,7 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             context.open_session_in_split(&session_id, direction);
         }
+        DashboardAction::SplitPane { direction } => context.split_empty_pane(direction),
         DashboardAction::ClosePane => context.close_focused_pane(),
         DashboardAction::ConversationPanesChanged { focus_moved } => {
             if focus_moved {

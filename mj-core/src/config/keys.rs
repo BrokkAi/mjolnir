@@ -390,6 +390,13 @@ key_actions! {
     RenameSession / rename_session = "prefix+shift+t",
     ToggleTranscriptRendering / toggle_transcript_rendering = "prefix+t",
     ToggleDictation / toggle_dictation = "prefix+m",
+    SplitVertical / split_vertical = "prefix+v",
+    SplitHorizontal / split_horizontal = "prefix+-",
+    ClosePane / close_pane = "prefix+x",
+    FocusPaneLeft / focus_pane_left = "prefix+h",
+    FocusPaneDown / focus_pane_down = "prefix+j",
+    FocusPaneUp / focus_pane_up = "prefix+k",
+    FocusPaneRight / focus_pane_right = "prefix+l",
     StopSession / stop_session = "",
     RestartSession / restart_session = "",
     MoveSession / move_session = "",
@@ -399,6 +406,10 @@ key_actions! {
     ManageTargets / manage_targets = "",
     ChangeGoSetup / change_go_setup = "",
     CycleSpinner / cycle_spinner = "",
+    ResizePaneLeft / resize_pane_left = "",
+    ResizePaneDown / resize_pane_down = "",
+    ResizePaneUp / resize_pane_up = "",
+    ResizePaneRight / resize_pane_right = "",
 }
 
 /// Whether a binding fires on its own or only after the prefix key.
