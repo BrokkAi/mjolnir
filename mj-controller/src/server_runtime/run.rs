@@ -178,8 +178,14 @@ pub async fn run_server(
         fallback_reason,
     };
 
-    let serve = crate::web_viewer::serve(options, ready, &daemon_runtime.web_viewer, |access| {
-        daemon_runtime.publish_web_access(access);
+    let mut serve = ViewerServer::spawn({
+        let daemon_runtime = daemon_runtime.clone();
+        async move {
+            crate::web_viewer::serve(options, ready, &daemon_runtime.web_viewer, |access| {
+                daemon_runtime.publish_web_access(access);
+            })
+            .await
+        }
     });
     let conversation_projection_shutdown = termination.child_token();
     let control = async {
@@ -1579,9 +1585,12 @@ pub async fn run_server(
     };
     let result = tokio::select! {
         result = api_activity::record_activity_stream(activity_snapshots) => result.context("native API activity recorder stopped"),
-        result = serve => result,
+        result = serve.stopped() => result,
         result = control => result,
     };
+    // Dropping the handle aborts the server task, which is what dropping the
+    // server future used to do when this `select!` owned it directly.
+    drop(serve);
     conversation_projection_shutdown.cancel();
     renewal_cancellation.cancel();
     if let Some(task) = renewal_task
@@ -1595,4 +1604,39 @@ pub async fn run_server(
         .context("shut down phone server session manager")?;
     result?;
     Ok(())
+}
+
+/// The viewer's HTTP server, running on a task of its own.
+///
+/// The listener must not share a task with the control loop above: whatever
+/// the loop is doing during one of its turns, a server polled by the same
+/// `select!` cannot accept a connection until that turn ends. A cheap read
+/// such as `GET /api/v1/sessions` then waits for unrelated work — the stall
+/// reported in issue 1061, where a list request timed out at ten seconds
+/// while a session was provisioning and answered instantly on the next try.
+/// On its own task the listener is scheduled independently, so a slow turn in
+/// the control loop can only make an answer stale, never late.
+pub(crate) struct ViewerServer(tokio::task::JoinHandle<Result<()>>);
+
+impl ViewerServer {
+    pub(crate) fn spawn(
+        server: impl std::future::Future<Output = Result<()>> + Send + 'static,
+    ) -> Self {
+        Self(tokio::spawn(server))
+    }
+
+    /// Resolves when the server stops on its own, with whatever it stopped
+    /// for. A panicked server is a failure rather than a silent exit.
+    pub(crate) async fn stopped(&mut self) -> Result<()> {
+        match (&mut self.0).await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::Error::new(error).context("the web viewer task failed")),
+        }
+    }
+}
+
+impl Drop for ViewerServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
