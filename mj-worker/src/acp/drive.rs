@@ -1112,16 +1112,6 @@ impl AgentOutputCount {
     }
 }
 
-/// The stop reason recorded for a turn the harness ended without answering.
-///
-/// A reason of its own, like `harness_inactive` for a stalled turn, so
-/// `mj wait`, the session summary and the recorded events all name what
-/// happened and automation can tell this apart from any other error. Any stop
-/// reason that is not a known completion already classifies as an error
-/// (`mj_core::state::classify_prompt_completion`), so nothing has to learn
-/// this string to keep working.
-pub(super) const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
-
 /// What the person is told when the harness ended a turn without answering.
 ///
 /// It leads with the stable marker `mj_core::credentials` matches on, then
