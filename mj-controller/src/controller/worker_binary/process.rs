@@ -227,6 +227,9 @@ pub(in crate::controller) struct WorkerProbe {
     pub step: Option<String>,
     /// The worker recorded its own death.
     pub exited: bool,
+    /// A sentence the worker wrote for whoever asked, when it stopped on a
+    /// precondition the caller can fix rather than on an internal failure.
+    pub refusal: Option<String>,
     /// Exit record, log tail and process state, for an error to carry.
     pub diagnostics: String,
 }
@@ -246,8 +249,20 @@ pub(in crate::controller) fn probe_worker(
         alive: process_section(&text).is_some_and(|section| section.starts_with("alive")),
         step: startup_step(&text),
         exited: text.contains(WORKER_EXIT_RECORD_MARKER),
+        refusal: exit_refusal(&text),
         diagnostics: text,
     })
+}
+
+/// The sentence a refusing worker wrote in its exit record, when it wrote one.
+fn exit_refusal(text: &str) -> Option<String> {
+    let (_, rest) = text.split_once(WORKER_EXIT_RECORD_MARKER)?;
+    let body = rest.split("\n--- ").next().unwrap_or(rest);
+    let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    record
+        .get("refusal")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 /// The text under the process marker, which is `alive (...)` or `absent`.

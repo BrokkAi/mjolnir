@@ -142,7 +142,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             let mut workspace_roots = vec![config.cwd.clone()];
             workspace_roots.extend(config.additional_directories.iter().cloned());
             let recorded = tokio::task::spawn_blocking(move || {
-                let git = mj_checkpoint::archive::SystemGit;
+                // Bounded: this runs before the control socket exists, so a Git
+                // command that never returns would be a session that never
+                // starts and never says why.
+                let git = crate::review::capture::BoundedGit::new(
+                    crate::review::capture::WORKSPACE_STATE_TIMEOUT,
+                );
                 let repositories =
                     crate::review::capture::discover_repositories(&git, &workspace_roots);
                 crate::review::capture::initialize_review_baselines(&git, &repositories)

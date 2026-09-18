@@ -233,8 +233,9 @@ pub(super) async fn connect_started_worker_with_timeout(
 
 /// What one look at the worker says the wait should do next.
 enum StartupVerdict {
-    /// The worker will never answer. The string says why.
-    Hopeless(String),
+    /// The worker will never answer. The string says why, and a refusal is the
+    /// sentence the worker wrote for whoever asked.
+    Hopeless(String, Option<String>),
     /// The worker is alive and on this step.
     Working(Option<String>),
 }
@@ -243,15 +244,18 @@ fn verdict(probe: &WorkerProbe) -> StartupVerdict {
     if probe.exited {
         // A worker that already wrote its exit record will never accept a
         // connection, so report the recorded cause instead of waiting it out.
-        return StartupVerdict::Hopeless(probe.diagnostics.clone());
+        return StartupVerdict::Hopeless(probe.diagnostics.clone(), probe.refusal.clone());
     }
     if !probe.alive {
         let step = probe.step.as_deref().unwrap_or("start");
-        return StartupVerdict::Hopeless(format!(
-            "the worker process is gone; it reached the startup step {step:?} \
-             and left no exit record\n{}",
-            probe.diagnostics
-        ));
+        return StartupVerdict::Hopeless(
+            format!(
+                "the worker process is gone; it reached the startup step {step:?} \
+                 and left no exit record\n{}",
+                probe.diagnostics
+            ),
+            None,
+        );
     }
     StartupVerdict::Working(probe.step.clone())
 }
@@ -309,7 +313,18 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
         if now >= next_probe {
             next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
             match probe.inspect().map(|probe| verdict(&probe)) {
-                Some(StartupVerdict::Hopeless(reason)) => return Err(error.context(reason)),
+                Some(StartupVerdict::Hopeless(reason, refusal)) => {
+                    let error = error.context(reason);
+                    // A refusal is a precondition the caller can fix, so its
+                    // sentence travels to the caller as a 409 rather than
+                    // stopping at the daemon log.
+                    return Err(match refusal {
+                        Some(refusal) => {
+                            error.context(mj_core::refusal::Refusal::precondition(refusal))
+                        }
+                        None => error,
+                    });
+                }
                 Some(StartupVerdict::Working(reported)) => {
                     if reported != step {
                         // The worker is getting somewhere. Let it, up to the
@@ -512,6 +527,8 @@ mod tests {
         stuck_step: Option<&'static str>,
         /// Reports a different step every attempt: a worker that is moving.
         progressing: bool,
+        /// The sentence a refusing worker left in its exit record.
+        refusal: Option<&'static str>,
         cancel_on_attempt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
     impl FakeStartingWorker {
@@ -523,6 +540,7 @@ mod tests {
                 vanishes_after_attempts: None,
                 stuck_step: None,
                 progressing: false,
+                refusal: None,
                 cancel_on_attempt: None,
             }
         }
@@ -572,6 +590,9 @@ mod tests {
                 alive: !exited && !gone,
                 step,
                 exited,
+                refusal: exited
+                    .then(|| self.refusal.map(ToOwned::to_owned))
+                    .flatten(),
                 diagnostics,
             })
         }
@@ -611,6 +632,37 @@ mod tests {
         assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
         assert!(reported.contains("connect attempt 1 refused"), "{reported}");
     }
+
+    /// A worker that stopped on a precondition wrote a sentence for whoever
+    /// asked. It has to reach the caller as a refusal, or a 409 with that
+    /// sentence becomes a 500 with nothing.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_carries_a_refusing_workers_own_sentence() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            death_after_attempts: Some(1),
+            refusal: Some("turn review cannot cover /work: it has 400000 untracked files"),
+            ..FakeStartingWorker::never_accepts()
+        };
+
+        let error =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap_err();
+
+        let refusal =
+            mj_core::refusal::Refusal::of(&error).expect("the refusal reached the caller");
+        assert!(
+            refusal.message().contains("400000 untracked files"),
+            "{refusal}"
+        );
+        assert_eq!(
+            refusal.kind(),
+            mj_core::refusal::RefusalKind::Precondition,
+            "a workspace the user can clean is a precondition, not an unusable request"
+        );
+    }
     #[tokio::test(start_paused = true)]
     async fn startup_connect_stops_as_soon_as_cancellation_is_observed() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -647,9 +699,10 @@ mod tests {
         };
         let started = tokio::time::Instant::now();
 
-        let relay = connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
 
         assert_eq!(relay, "relay");
         assert!(
@@ -680,7 +733,10 @@ mod tests {
         assert_eq!(worker.attempts, 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
-        assert!(reported.contains("the worker process is gone"), "{reported}");
+        assert!(
+            reported.contains("the worker process is gone"),
+            "{reported}"
+        );
         assert!(reported.contains("login-environment"), "{reported}");
     }
 

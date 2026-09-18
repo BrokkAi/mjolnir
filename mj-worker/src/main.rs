@@ -149,11 +149,23 @@ enum WorkerCommand {
 }
 
 fn write_worker_exit_record(root: &Path, reason: &str) {
+    write_worker_exit_record_with_refusal(root, reason, None);
+}
+
+/// The exit record, plus the sentence a refusal wants the person who asked to
+/// read.
+///
+/// A worker refuses before it has a control socket, so this file is its only
+/// way to say anything. The controller lifts `refusal` back onto the error
+/// chain, which turns the failure into a 409 carrying this text instead of a
+/// generic 500.
+fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Option<&str>) {
     if !root.is_dir() {
         return;
     }
     let record = serde_json::json!({
         "reason": reason,
+        "refusal": refusal,
         "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "version": env!("CARGO_PKG_VERSION"),
     });
@@ -323,7 +335,12 @@ fn main() -> Result<()> {
     }
     if let Err(error) = &result {
         if let Some(root) = &exit_root {
-            write_worker_exit_record(root, &format!("{error:#}"));
+            let refusal = mj_core::refusal::Refusal::of(error);
+            write_worker_exit_record_with_refusal(
+                root,
+                &format!("{error:#}"),
+                refusal.as_ref().map(mj_core::refusal::Refusal::message),
+            );
         }
         tracing::error!(
             error = format!("{error:#}"),

@@ -5,6 +5,7 @@ use mj_checkpoint::archive::{
     CaptureBase, GitCommandRunner, REVIEW_BASELINE_REF, capture_paths, diff_between_trees,
     pin_review_tree,
 };
+use mj_core::refusal::Refusal;
 use mj_core::relay::RepoDelta;
 use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
@@ -12,6 +13,7 @@ use mj_review::delta::{captured_trees, has_changes};
 use mj_review::{LANE_DIFF_LIMIT, bound_review_section};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Captures every repository in `repositories` against `baselines`.
 ///
@@ -91,7 +93,16 @@ pub fn initialize_review_baselines(
         // The untracked list is recorded even when a baseline tree is already
         // pinned: a restarted worker still has to know which untracked files
         // predate it, or it would report all of them as this turn's work.
-        let state = read_workspace_state(git, root)?;
+        let state = read_workspace_state(git, root).map_err(|error| {
+            error.context(Refusal::precondition(format!(
+                "turn review could not read the state of {} in {}s; the working tree is too \
+                 large or too slow to review. Start this session without review by clearing \
+                 [review] profile in config.toml.",
+                root.display(),
+                WORKSPACE_STATE_TIMEOUT.as_secs()
+            )))
+        })?;
+        refuse_unreviewable_workspace(root, &state)?;
         untracked_at_start.insert(root.clone(), state.untracked);
         if pinned_review_baseline(git, root).is_some() {
             continue;
@@ -105,6 +116,24 @@ pub fn initialize_review_baselines(
             .with_context(|| format!("pin the startup review baseline of {}", root.display()))?;
     }
     Ok(untracked_at_start)
+}
+
+/// Refuses a workspace a turn review cannot honestly cover.
+///
+/// There is no partial-coverage mode: a review that silently leaves untracked
+/// files out is one the user cannot trust. The sentence names the count, the
+/// limit, and both ways out, and travels to the caller as a 409.
+fn refuse_unreviewable_workspace(repository: &Path, state: &WorkspaceState) -> Result<()> {
+    if state.untracked.len() <= UNTRACKED_REVIEW_LIMIT {
+        return Ok(());
+    }
+    let count = state.untracked.len();
+    Err(anyhow::Error::new(Refusal::precondition(format!(
+        "turn review cannot cover {}: it has {count} untracked files and the limit is \
+         {UNTRACKED_REVIEW_LIMIT}. Commit or ignore them, or start this session without \
+         review by clearing [review] profile in config.toml.",
+        repository.display()
+    ))))
 }
 
 /// Returns the tree held by the worker's durable baseline ref, if it still
@@ -412,6 +441,43 @@ mod capture_tests {
             .sum()
     }
 
+    /// A workspace with more untracked files than the list can hold is refused
+    /// rather than reviewed without coverage, and the sentence names the count,
+    /// the limit, and both ways out.
+    #[test]
+    fn a_workspace_review_cannot_cover_is_refused_with_both_remedies() {
+        let temp = repository();
+        let roots = [temp.path().to_path_buf()];
+        // Asserting on the real 50,000-file limit would mean creating 50,001
+        // files, so the refusal is driven through the same code with a
+        // workspace state that reports more than the limit.
+        let state = WorkspaceState {
+            dirty_tracked: Vec::new(),
+            untracked: (0..=UNTRACKED_REVIEW_LIMIT)
+                .map(|index| UntrackedEntry {
+                    path: PathBuf::from(format!("file-{index}")),
+                    size: 0,
+                    modified_ms: 0,
+                })
+                .collect(),
+        };
+
+        let error = refuse_unreviewable_workspace(&roots[0], &state).unwrap_err();
+
+        let refusal = Refusal::of(&error).expect("an oversized workspace is a refusal");
+        let message = refusal.message();
+        assert!(
+            message.contains(&(UNTRACKED_REVIEW_LIMIT + 1).to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&UNTRACKED_REVIEW_LIMIT.to_string()),
+            "{message}"
+        );
+        assert!(message.contains("[review] profile"), "{message}");
+        assert!(message.contains("Commit or ignore"), "{message}");
+    }
+
     /// The cost of a capture must be the session's own changes, not the size
     /// of the working tree. This is #1065: a workspace with hundreds of
     /// thousands of untracked files made every session start read, hash and
@@ -607,4 +673,70 @@ fn changed_untracked(start: &[UntrackedEntry], now: &[UntrackedEntry]) -> Vec<Pa
         })
         .map(|entry| entry.path.clone())
         .collect()
+}
+
+/// How many untracked paths a repository may hold and still be reviewable.
+///
+/// The list of untracked paths is what lets a review tell a file the turn
+/// created from one that was already there. Past this many, recording it is no
+/// longer a cheap stat-walk and the workspace is not one anybody reviews a turn
+/// in; the session is refused instead of quietly reviewing without coverage.
+pub const UNTRACKED_REVIEW_LIMIT: usize = 50_000;
+
+/// How long reading one repository's status may take before the session is
+/// refused. This is a backstop against a pathological filesystem, not the
+/// design: the read is a stat-walk and takes a couple of seconds even on a
+/// half-million-file tree.
+pub const WORKSPACE_STATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A Git runner that gives every command a deadline.
+///
+/// The startup baseline runs before the worker can be reached, so a Git command
+/// that never returns is a session that never starts and never says why. With a
+/// deadline it becomes a refusal the user can act on.
+pub struct BoundedGit {
+    timeout: Duration,
+}
+
+impl BoundedGit {
+    #[must_use]
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl GitCommandRunner for BoundedGit {
+    fn run(
+        &self,
+        repository: &Path,
+        command: &mj_checkpoint::archive::GitCommand,
+    ) -> Result<mj_checkpoint::archive::GitOutput> {
+        let mut spec = mj_core::targets::CommandSpec::new(
+            "git",
+            command
+                .arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        )
+        .purpose("read the workspace state for a review baseline");
+        spec.cwd = Some(repository.to_path_buf());
+        for (name, value) in mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV {
+            spec.env.insert(name.to_owned(), value.to_owned());
+        }
+        for (name, value) in &command.env {
+            spec.env.insert(
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            );
+        }
+        let output = mj_core::targets::CommandExecutor::execute(
+            &mj_core::targets::BoundedProcessExecutor::new(self.timeout),
+            &spec,
+        )?;
+        Ok(mj_checkpoint::archive::GitOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
