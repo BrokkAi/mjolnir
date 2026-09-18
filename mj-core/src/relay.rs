@@ -77,6 +77,13 @@ pub const RESTORED_RELAY_SEED_FILE: &str = "relay-seed.json";
 /// worker root. Session teardown reads it to stop that daemon before the root
 /// it writes to is removed.
 pub const WORKER_PID_FILE: &str = "worker.pid";
+/// File in which a starting worker daemon records the step it is on, inside
+/// its worker root. It exists from the first moment of the process, before the
+/// control socket, so a controller waiting for that socket can tell a worker
+/// that is still making progress from one that died without a word.
+pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
+/// File a dying worker daemon writes with the reason it stopped.
+pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
 pub const RELAY_ACTIVE_SEGMENT: &str = "active.jsonl";
 pub const RELAY_SEGMENT_BYTE_LIMIT: u64 = 1024 * 1024;
 /// Journal bytes a restart may have to replay before the snapshot is rewritten.

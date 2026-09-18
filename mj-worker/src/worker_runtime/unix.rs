@@ -85,6 +85,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
     let checkpoint_only = config.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
+    super::record_startup_step(&root, "policy");
     if !checkpoint_only {
         super::enforce_execution_policy(&mut config)?;
     }
@@ -122,6 +123,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // review that was interrupted. A restored relay has no state file yet, so
     // its restored worktree is a safe fresh-session boundary.
     if !relay_state_exists && !checkpoint_only {
+        super::record_startup_step(&root, "review-baseline");
         let mut workspace_roots = vec![config.cwd.clone()];
         workspace_roots.extend(config.additional_directories.iter().cloned());
         tokio::task::spawn_blocking(move || {
@@ -135,6 +137,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     }
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
+    super::record_startup_step(&root, "durable-relay");
     let mut durable_relay = if checkpoint_only {
         DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
     } else {
@@ -188,6 +191,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         std::fs::remove_file(&exit_record)
             .with_context(|| format!("clear stale exit record {}", exit_record.display()))?;
     }
+    super::record_startup_step(&root, "bind-socket");
     let listener = bind_unix_listener(&socket)
         .with_context(|| format!("bind worker socket {}", socket.display()))?;
     listener
@@ -201,6 +205,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    super::record_startup_step(&root, "serving");
 
     if restarting
         && durable_relay.operational_state().execution

@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use mj_checkpoint::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use mj_core::worker_launch::WorkerLaunchConfig;
 use mj_worker::worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor,
-    run_daemon,
+    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, record_startup_step,
+    run_acp_supervisor, run_daemon,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -164,7 +164,7 @@ fn write_worker_exit_record(root: &Path, reason: &str) {
             return;
         }
     };
-    if let Err(error) = std::fs::write(root.join("worker-exit.json"), bytes) {
+    if let Err(error) = std::fs::write(root.join(mj_core::relay::WORKER_EXIT_FILE), bytes) {
         eprintln!("Mjolnir: could not write worker exit record: {error}");
     }
 }
@@ -273,6 +273,9 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         } else {
             std::env::current_exe()?
         };
+        if let WorkerCommand::Run { root, .. } = &args.command {
+            record_startup_step(root, "re-exec");
+        }
         let mut arguments = std::env::args_os();
         let argv0 = arguments
             .next()
@@ -306,8 +309,9 @@ fn main() -> Result<()> {
     };
     if let Some(root) = &exit_root {
         install_worker_last_words(root);
+        record_startup_step(root, "start");
     }
-    let result = run_worker(cli);
+    let result = run_worker(cli, exit_root.as_deref());
     if let Err(error) = &result
         && let Some(refusal) = error.downcast_ref::<ExportRefused>()
     {
@@ -329,8 +333,14 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_worker(cli: Cli) -> Result<()> {
+fn run_worker(cli: Cli, exit_root: Option<&Path>) -> Result<()> {
+    if let Some(root) = exit_root {
+        record_startup_step(root, "login-environment");
+    }
     bootstrap_login_environment(&cli).context("initialize worker environment")?;
+    if let Some(root) = exit_root {
+        record_startup_step(root, "runtime");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

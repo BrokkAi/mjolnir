@@ -62,12 +62,21 @@ pub(super) fn start_worker_command(
     let config = format!("{worker_root}/launch.json");
     // These files describe the worker's previous life. Clear them as part of
     // the launch, before the new daemon can be probed: a stale exit record
-    // aborts startup, while a stale socket makes a recovering daemon look
-    // ready and invites the reconnect actor to kill it as unresponsive.
+    // aborts startup, a stale socket makes a recovering daemon look ready and
+    // invites the reconnect actor to kill it as unresponsive, and a stale
+    // startup record would be read as this launch's progress even if the new
+    // process never ran at all.
     let clear_stale_runtime = format!(
-        "rm -f {} {}; ",
-        targets::join_remote_command(&[format!("{worker_root}/worker-exit.json")]),
+        "rm -f {} {} {}; ",
+        targets::join_remote_command(&[format!(
+            "{worker_root}/{}",
+            mj_core::relay::WORKER_EXIT_FILE
+        )]),
         targets::join_remote_command(&[format!("{worker_root}/control.sock")]),
+        targets::join_remote_command(&[format!(
+            "{worker_root}/{}",
+            mj_core::relay::WORKER_STARTUP_FILE
+        )]),
     );
     let detached_script = format!(
         "{clear_stale_runtime}nohup {} >{} 2>&1 </dev/null &",
