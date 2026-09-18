@@ -1358,6 +1358,23 @@ impl ImagePullPolicy {
         }
     }
 
+    /// What this policy does to `image`, in the words a settings screen can
+    /// show. `Auto` is derived rather than an alias, so it names the launch
+    /// behavior and the background refresh it implies, from the same image
+    /// reading `resolve` uses.
+    pub fn describe(self, image: &str) -> &'static str {
+        match self {
+            Self::Always => "Pull every launch",
+            Self::Newer => "Pull when the registry is newer",
+            Self::Missing => "Pull only if missing",
+            Self::Never => "Never pull",
+            Self::Auto => match self.resolve(image) {
+                Self::Newer => "Pull if missing at launch; refresh :latest in background",
+                _ => "Pull if missing",
+            },
+        }
+    }
+
     /// Podman's spelling of an already-resolved policy.
     pub fn podman_value(self) -> &'static str {
         match self {

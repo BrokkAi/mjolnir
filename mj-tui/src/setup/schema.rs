@@ -234,6 +234,19 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
     {
         return theme.label().into();
     }
+    // A download policy is shown by what it does to this target's own image:
+    // `auto` is derived from the image reference, not an alias.
+    if let ["targets", target, "pull_policy"] = path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+        && let Ok(policy) =
+            serde_json::from_value::<mj_core::config::ImagePullPolicy>(Value::String(value.into()))
+    {
+        let image = draft["targets"][target]["image"].as_str().unwrap_or("");
+        return policy.describe(image).to_owned();
+    }
     // An agent kind is named once, by the harness itself.
     if path.first().is_some_and(|key| key == "profiles")
         && let Ok(kind) =
@@ -374,6 +387,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Largest the cache may grow, such as 100GiB. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
+        "pull_policy" => {
+            "When Mjolnir downloads this image. The first choice is derived from the image: it never delays a launch, pulling only a missing image, while the daemon refreshes a remote :latest image in the background."
+        }
         "context_window_bytes" => {
             "Optional positive byte limit for transcript compaction. Leave blank for the default."
         }

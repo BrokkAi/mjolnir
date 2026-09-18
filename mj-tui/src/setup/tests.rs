@@ -1491,6 +1491,44 @@ fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
 }
 
 #[test]
+fn the_automatic_download_policy_shows_what_it_does_to_this_image() {
+    let draft = json!({"targets": {
+        "latest": {"kind": "local-podman", "image": "ghcr.io/example/dev:latest", "pull_policy": "auto"},
+        "pinned": {"kind": "local-podman", "image": "ghcr.io/example/dev@sha256:abc", "pull_policy": "auto"},
+    }});
+    let path = |target: &str| {
+        vec![
+            "targets".to_owned(),
+            target.to_owned(),
+            "pull_policy".to_owned(),
+        ]
+    };
+    // A remote :latest image is the one case the daemon refreshes on its own.
+    assert_eq!(
+        schema::choice_label(&path("latest"), &json!("auto"), &draft),
+        "Pull if missing at launch; refresh :latest in background"
+    );
+    assert_eq!(
+        schema::choice_label(&path("pinned"), &json!("auto"), &draft),
+        "Pull if missing"
+    );
+    // An explicit policy reads the same whatever the image is.
+    assert_eq!(
+        schema::choice_label(&path("latest"), &json!("never"), &draft),
+        "Never pull"
+    );
+    assert_eq!(
+        schema::choice_label(&path("pinned"), &json!("newer"), &draft),
+        "Pull when the registry is newer"
+    );
+    // The stored value is untouched: only the display changes.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("targets", None);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.draft["targets"]["podman"]["pull_policy"], "auto");
+}
+
+#[test]
 fn the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim() {
     use mj_core::state::ArchiveSpacePreview;
     let used = ArchiveSpacePreview {
