@@ -90,6 +90,14 @@ status details together; the output shows the latest reply, tool activity, or
 prompt. A minimized Sessions pane uses two lines per row, retaining the status
 and queue count in the compact form.
 
+The metadata line also carries the checkout's branch once it has been read,
+as `⎇ feature/x ↑1 ↓2 ±4`: the branch, commits ahead of and behind its
+upstream, and the number of changed files. Mjolnir reads a visible live
+session's checkout on its target about once a minute, so the branch is right
+even after the agent switches branches. `prefix+d` opens the full list for
+the selected session: each file with its kind and its added and removed
+lines, `r` or **Refresh** to read again, and `Esc` to close.
+
 Terminal scrollbars are intentionally slim. The transcript, list panes, and
 dialogs keep their scrollbar rails for mouse and keyboard scrolling without
 letting the rail take space from the content.
@@ -159,6 +167,7 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+u` | Show the web viewer address and access code |
 | `prefix+shift+t` | Rename the selected session |
 | `prefix+t` | Toggle the transcript between rendered and raw text |
+| `prefix+d` | List the selected session's changed files, branch, and distance from upstream |
 | `prefix+m` | Start or stop dictation when voice input is available |
 | `prefix+q` | Detach this terminal while the daemon and sessions continue |
 

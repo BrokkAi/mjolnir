@@ -27,6 +27,7 @@ pub enum CommandId {
     RestartSession,
     ResumeDialog,
     RenameSession,
+    ChangedFiles,
     ContainerSettings,
     StopSession,
     MoveSession,
@@ -291,6 +292,19 @@ fn move_session_available(dashboard: &DashboardState) -> Availability {
     session_idle(dashboard)
 }
 
+/// A selected session whose target is running, which is what reading its
+/// checkout needs.
+fn live_session(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.selected_session() else {
+        return Availability::Hidden;
+    };
+    if session.state.is_active() && session.target.is_some() {
+        Availability::Ready
+    } else {
+        Availability::Blocked("the session's target is not running")
+    }
+}
+
 fn container_session(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_container_session() else {
         return Availability::Hidden;
@@ -518,6 +532,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: session_idle,
+    },
+    CommandSpec {
+        id: CommandId::ChangedFiles,
+        label: "Changed files",
+        description: "List the files the selected session's checkout has changed, with the branch and its distance from upstream.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::ChangedFiles),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: live_session,
     },
     CommandSpec {
         id: CommandId::ContainerSettings,
@@ -1075,6 +1101,7 @@ impl DashboardState {
                 self.begin_container_edit();
                 DashboardAction::None
             }
+            CommandId::ChangedFiles => self.begin_changed_files(),
             CommandId::MoveSession => self.begin_move(),
             CommandId::StopSession => {
                 let Some(session_id) = self.selected_session().map(|session| session.id.clone())

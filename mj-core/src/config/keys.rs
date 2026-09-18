@@ -392,6 +392,7 @@ key_actions! {
     RenameSession / rename_session = "prefix+shift+t",
     ToggleTranscriptRendering / toggle_transcript_rendering = "prefix+t",
     ToggleDictation / toggle_dictation = "prefix+m",
+    ChangedFiles / changed_files = "prefix+d",
     StopSession / stop_session = "",
     RestartSession / restart_session = "",
     MoveSession / move_session = "",

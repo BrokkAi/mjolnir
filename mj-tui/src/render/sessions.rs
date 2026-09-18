@@ -238,6 +238,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 });
                 let operation = dashboard.session_operations.get(&session.id);
                 let target = targets.get(index).cloned().unwrap_or_default();
+                let git = dashboard.git_row_text(&session.id);
                 let permission = session_permission_badge(session, operation, &dashboard.config);
                 // The selection drives which conversation is on screen, so
                 // the caret marks it in both forms.
@@ -343,6 +344,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         &prefix,
                         spinner,
                         dashboard.config.advanced.detailed_activity_clocks,
+                        git.as_deref(),
                     );
                 } else {
                     compact_session_lines(
@@ -400,6 +402,7 @@ pub(crate) fn expanded_session_lines(
     prefix: &str,
     spinner: Option<&'static str>,
     detailed_activity_clocks: bool,
+    git: Option<&str>,
 ) {
     let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
@@ -407,17 +410,29 @@ pub(crate) fn expanded_session_lines(
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
     let title_width = width.saturating_sub(3);
-    lines.push(Line::styled(
-        format!(
-            "{prefix}{}",
-            truncate_to_cells(
-                &name,
-                usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
-                Truncate::PLAIN
-            )
-        ),
-        style,
-    ));
+    let name_room = usize::from(title_width).saturating_sub(Line::raw(prefix).width());
+    let title = truncate_to_cells(&name, name_room, Truncate::PLAIN);
+    let mut title_spans = vec![Span::styled(format!("{prefix}{title}"), style)];
+    // The branch follows the name when the line has room: the whole text,
+    // else the branch alone, else nothing. A name is rarely as wide as the
+    // sidebar, so this is where the branch costs nothing.
+    if let Some(git) = git {
+        let free = name_room.saturating_sub(Line::raw(title.as_str()).width() + 2);
+        let branch_only = git.split(" ↑").next().unwrap_or(git);
+        let branch_only = branch_only.split(" ↓").next().unwrap_or(branch_only);
+        let branch_only = branch_only.split(" ±").next().unwrap_or(branch_only);
+        let text = if Line::raw(git).width() <= free {
+            Some(git)
+        } else if Line::raw(branch_only).width() <= free {
+            Some(branch_only)
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
+        }
+    }
+    lines.push(Line::from(title_spans));
     lines.push(session_activity_line(
         "  ",
         session,

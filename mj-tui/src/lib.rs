@@ -31,8 +31,9 @@ use mj_client::review::RuntimeReviewView;
 use mj_core::targets::AdditionalMount;
 
 use crate::dialogs::{
-    ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor, ImportBundleConfirmation,
-    ImportProgress, RenameEditor, RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
+    ImportBundleConfirmation, ImportProgress, RenameEditor, RepositoryOriginDialog,
+    TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -174,6 +175,11 @@ pub enum DashboardAction {
         session_id: String,
     },
     RestartSession {
+        session_id: String,
+    },
+    /// Read the session checkout's branch and changed files on its target.
+    /// The host runs it off the loop and answers with `set_git_status`.
+    ProbeGitStatus {
         session_id: String,
     },
     /// A prompt typed into a standby composer while its session was still
@@ -616,6 +622,8 @@ pub(crate) enum Mode {
     Web(WebDialog),
     WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
+    /// The selected session's changed files, branch, and upstream distance.
+    ChangedFiles(ChangedFilesDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
@@ -785,6 +793,12 @@ pub struct DashboardState {
     pub(crate) go: Option<go::GoMode>,
     pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
+    /// What each session's checkout looked like when last read, for the
+    /// branch on its row and the changed-files overlay.
+    pub(crate) git_status: BTreeMap<String, Result<mj_core::local_git::SessionGitStatus, String>>,
+    /// When each session's checkout was last asked about, so the host reads
+    /// a visible session's status about once a minute and no more.
+    pub(crate) git_probe_at: BTreeMap<String, Instant>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -892,6 +906,8 @@ impl DashboardState {
             go: None,
             go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),
+            git_status: BTreeMap::new(),
+            git_probe_at: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,

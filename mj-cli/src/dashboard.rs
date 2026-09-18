@@ -252,6 +252,9 @@ pub(crate) struct DashboardContext {
     startup: StartupSession,
     go_context_refresh: Option<(String, std::time::Instant)>,
     go_context_in_flight: bool,
+    /// Sessions whose checkout is being read right now, so a slow target is
+    /// asked once rather than once per tick.
+    git_probes_in_flight: BTreeSet<String>,
     go_selection_requested: Option<String>,
     go_selection_in_flight: bool,
     /// The notice generation the frame on screen was drawn from. Background
@@ -742,6 +745,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             // things to go and open, so the transcript follows its selection.
             context.follow_selected_session();
             context.refresh_go_context();
+            context.refresh_git_status();
         }
         context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
@@ -1065,6 +1069,7 @@ impl DashboardContext {
             startup: StartupSession::idle(),
             go_context_refresh: None,
             go_context_in_flight: false,
+            git_probes_in_flight: BTreeSet::new(),
             go_selection_requested: None,
             go_selection_in_flight: false,
             drawn_notice_generation: 0,

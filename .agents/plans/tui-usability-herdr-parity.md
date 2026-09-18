@@ -18,7 +18,7 @@ Milestone numbers match the "Plan of Work" section.
 - [x] (2026-09-18 23:10Z) M2 Notifications: `[notify]` config (mode off/terminal/system, bell, delay, title), BEL and window title from the terminal loop after each frame, macOS/Linux desktop notification via `osascript`/`notify-send` off the loop, suppression for the visible session, Setup section under Display, documented in configuration and terminal-surface pages.
 - [x] (2026-09-19 00:20Z) M3 Finding things: `/` search in the Sessions pane with `b w i d a` state letters and an empty-result hint, fuzzy palette ranking (prefix, then in-order label match scored by word starts and adjacency, then description) with a Recent group of the last five commands, Create/Resume/Workspaces listed in the palette. Naming: left as is (see Decision Log); the Manage runtimes description now says "target" so either word finds it.
 - [x] (2026-09-19 01:30Z) M4 Keyboard consistency: one-time tmux/screen prefix collision notice (client-hints.json beside config.toml), a letter for every confirmation button derived from its label and printed under the text, `manage_machines` and `restart_daemon` bindable, Stop and Restart ask only while the agent is mid-turn, Esc closes help when its filter is empty, Esc on a pane clears the notice. The first-launch prefix hint from M7 landed here too because it shares the hints store.
-- [ ] M5 Per-session context: git branch and ahead/behind on session rows, `prefix+d` changed-files overlay, context-window usage per session when the harness reports it.
+- [x] (2026-09-19 03:00Z) M5 Per-session context: the checkout's branch, upstream distance, and changed-file count on the session title line (read on the target about once a minute per visible live session, through the same executor path go mode uses), and a `prefix+d` changed-files overlay with per-file kinds and line counts. Context-window usage was dropped (see Surprises & Discoveries).
 - [ ] M6 Layout and terminal integration: notice history overlay and stacked failure notices, `NO_COLOR` plus ASCII symbol set, stacked narrow layout under 80 columns, read-only second transcript column at 160 columns or more.
 - [ ] M7 Onboarding and docs: Terminal surface page corrections (remaining: the Commands-button drift). The first-launch prefix hint landed in M4; per-feature docs landed with each milestone.
 
@@ -28,6 +28,10 @@ Milestone numbers match the "Plan of Work" section.
   Evidence: the module doc at `mj-tui/src/render_changes.rs:1-7`.
 - Observation: The palette hides the four commands new users type first (Create session, Resume, Workspaces, Switch workspace) on purpose, because each has a visible button. Typing "create" in the palette matches nothing.
   Evidence: `PALETTE_HIDDEN` at `mj-tui/src/actions.rs:835-841`.
+- Observation: Provider-reported usage deliberately excludes context occupancy: `mj-core/src/usage.rs` opens with "Context occupancy is deliberately excluded", and no harness reports a context-window percentage over the relay. Showing an estimate would be a guess, so the per-session context figure was dropped from M5.
+  Evidence: `mj-core/src/usage.rs:1`.
+- Observation: The controller already reads a session's checkout branch on its target for `mj go` (`session_working_context`), through the target's own process executor, so container and SSH sessions get a branch without any host-side git.
+  Evidence: `mj-controller/src/controller/backend.rs`, `session_working_context`; the git status probe is its sibling `session_git_status`.
 - Observation: The delete confirmation has three buttons but its body text advertises only `Y` and `N`; the third button (delete the branch too) is reachable only by Tab.
   Evidence: `mj-tui/src/dialogs/render.rs:1006-1014` and `mj-tui/src/dialogs.rs:1158-1180`.
 
@@ -225,6 +229,7 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-19: M5 complete. The branch went onto the session title line rather than the metadata line: at a 40-column sidebar the target and profile already fill the metadata line, and names rarely do the same to the title line. A narrow sidebar keeps the branch and drops the counts.
 - 2026-09-19: M4 complete. Confirmation letters come from one table (`confirmation_accelerators`) and are printed by `confirmation_key_line`, replacing the hand-written `Y: Yes N / Esc: No` line.
 - 2026-09-19: M3 complete. Palette search ranks instead of excluding, so a query that prefix-matches one label still lists weaker matches below it; two registry tests were updated to that rule.
 - 2026-09-18: M2 complete. `[notify]` has `bell` rather than Herdr's sound-file fields, and the title is independent of the mode.

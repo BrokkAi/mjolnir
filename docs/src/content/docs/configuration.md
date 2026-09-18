@@ -186,6 +186,7 @@ The default bindings:
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
 | `toggle_dictation` | `prefix+m` | Start or stop dictation |
+| `changed_files` | `prefix+d` | List the selected session's changed files |
 | `stop_session` | unbound | Stop the selected session |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |

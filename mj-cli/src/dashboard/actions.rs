@@ -352,6 +352,9 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::RestartDaemon => {
             spawn_daemon_restart(context);
         }
+        DashboardAction::ProbeGitStatus { session_id } => {
+            context.spawn_git_probe(session_id);
+        }
         DashboardAction::CancelWebAccess => {
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);

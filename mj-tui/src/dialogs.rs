@@ -71,6 +71,8 @@ pub(crate) enum DialogControl {
     WebStop,
     WebConfirmStop,
     WebCancelStop,
+    ChangedFilesRefresh,
+    ChangedFilesClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,17 @@ pub struct ImportProfileOption {
     pub sessions: Vec<ImportSessionOption>,
     pub scan_progress: Option<(usize, usize)>,
     pub error: Option<String>,
+}
+
+/// The changed-files overlay for one session. The data lives on the
+/// dashboard (`git_status`), so a probe that answers while the overlay is
+/// open, or after it closed, lands in the same place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChangedFilesDialog {
+    pub(crate) session_id: String,
+    /// First listed file drawn, for a list longer than the overlay.
+    pub(crate) scroll: usize,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1086,6 +1099,73 @@ impl DashboardState {
                 DialogControl::Field,
             ),
         });
+    }
+
+    /// Opens the changed-files overlay for the selected session and asks the
+    /// host to read its checkout, so the list is fresh even when a row was
+    /// probed a while ago.
+    pub(crate) fn begin_changed_files(&mut self) -> DashboardAction {
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return DashboardAction::None;
+        };
+        self.mode = Mode::ChangedFiles(ChangedFilesDialog {
+            session_id: session_id.clone(),
+            scroll: 0,
+            form: RefCell::new(Dialog::default()),
+        });
+        self.request_git_probe(&session_id)
+    }
+
+    pub(crate) fn handle_changed_files_event(
+        &mut self,
+        event: Event,
+        mut dialog: ChangedFilesDialog,
+    ) -> DashboardAction {
+        let files = self
+            .git_status
+            .get(&dialog.session_id)
+            .and_then(|status| status.as_ref().ok())
+            .map_or(0, |status| status.changed.len());
+        if let Event::Key(key) = &event
+            && key.kind != KeyEventKind::Release
+        {
+            let last = files.saturating_sub(1);
+            let scrolled = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(dialog.scroll.saturating_add(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(dialog.scroll.saturating_sub(1)),
+                KeyCode::PageDown => Some(dialog.scroll.saturating_add(10)),
+                KeyCode::PageUp => Some(dialog.scroll.saturating_sub(10)),
+                KeyCode::Home => Some(0),
+                KeyCode::End => Some(last),
+                KeyCode::Char('r') => {
+                    let session_id = dialog.session_id.clone();
+                    self.mode = Mode::ChangedFiles(dialog);
+                    return self.request_git_probe(&session_id);
+                }
+                _ => None,
+            };
+            if let Some(scroll) = scrolled {
+                dialog.scroll = scroll.min(last);
+                self.record_event_handled();
+                self.mode = Mode::ChangedFiles(dialog);
+                return DashboardAction::None;
+            }
+        }
+        let result = dialog.form.get_mut().handle(&event);
+        self.last_event_consumed.set(result.consumed);
+        match result.action {
+            Some(Interaction::Cancel)
+            | Some(Interaction::Activate(DialogControl::ChangedFilesClose)) => {
+                self.cancel_modal();
+            }
+            Some(Interaction::Activate(DialogControl::ChangedFilesRefresh)) => {
+                let session_id = dialog.session_id.clone();
+                self.mode = Mode::ChangedFiles(dialog);
+                return self.request_git_probe(&session_id);
+            }
+            _ => self.mode = Mode::ChangedFiles(dialog),
+        }
+        DashboardAction::None
     }
 
     pub(crate) fn handle_rename_event(

@@ -391,6 +391,142 @@ fn render_text_prompt(
     form.end_frame(DialogControl::Field);
 }
 
+/// The changed-files overlay: the branch line, the totals, then one row per
+/// file with its kind and line counts.
+pub(crate) fn render_changed_files(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    dialog: &ChangedFilesDialog,
+    surfaces: &mut FrameSurfaces,
+) {
+    let status = dashboard.git_status.get(&dialog.session_id);
+    let files = status
+        .and_then(|status| status.as_ref().ok())
+        .map(|status| status.changed.as_slice())
+        .unwrap_or_default();
+    let popup_height = u16::try_from(files.len().saturating_add(7).clamp(9, 40)).unwrap_or(40);
+    let popup = centered_modal(frame, surfaces, 80, popup_height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 3 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let name = dashboard
+        .state
+        .sessions
+        .get(&dialog.session_id)
+        .map(|session| session.display_title().to_owned())
+        .unwrap_or_else(|| dialog.session_id.clone());
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        format!("Changed files · {name}"),
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width.saturating_sub(1),
+        inner.height.saturating_sub(4),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let header_line = match status {
+        None => Line::styled("Reading the checkout…", theme::muted()),
+        Some(Err(error)) => Line::styled(
+            format!("Could not read the checkout: {error}"),
+            Style::default().fg(theme::palette().warning),
+        ),
+        Some(Ok(status)) => {
+            let (added, removed) = status.totals();
+            let branch = status.row_text();
+            let branch = if branch.is_empty() {
+                status.branch.clone()
+            } else {
+                branch
+            };
+            Line::from(vec![
+                Span::styled(branch, theme::title(true)),
+                Span::styled(
+                    format!(
+                        "   {} file{} · +{added} −{removed}",
+                        status.changed.len(),
+                        if status.changed.len() == 1 { "" } else { "s" }
+                    ),
+                    theme::muted(),
+                ),
+            ])
+        }
+    };
+    frame.render_widget(Paragraph::new(header_line), header);
+
+    if files.is_empty() {
+        let text = match status {
+            Some(Ok(_)) => "Nothing has changed since the last commit.",
+            _ => "",
+        };
+        frame.render_widget(Paragraph::new(text).style(theme::muted()), list_area);
+    } else {
+        let kind_width = 8;
+        let count_width = 12;
+        let path_width = usize::from(list_area.width).saturating_sub(kind_width + count_width + 2);
+        let rows = files
+            .iter()
+            .skip(dialog.scroll)
+            .take(usize::from(list_area.height))
+            .map(|file| {
+                let counts = match (file.added, file.removed) {
+                    (Some(added), Some(removed)) => format!("+{added} −{removed}"),
+                    _ => String::new(),
+                };
+                Line::from(vec![
+                    Span::styled(format!("{:<kind_width$}", file.kind()), theme::muted()),
+                    Span::raw(truncate_to_cells(&file.path, path_width, Truncate::PLAIN)),
+                    Span::styled(
+                        format!(
+                            "{:>width$}",
+                            counts,
+                            width = usize::from(list_area.width)
+                                .saturating_sub(
+                                    kind_width + path_width.min(file.path.chars().count())
+                                )
+                                .min(count_width + 2)
+                        ),
+                        theme::muted(),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(rows), list_area);
+        crate::render::sessions::render_session_scrollbar(
+            frame,
+            Rect::new(list_area.right(), list_area.y, 1, list_area.height),
+            files.len(),
+            dialog.scroll,
+            usize::from(list_area.height).max(1),
+        );
+    }
+    Dialog::render_actions(
+        frame,
+        footer,
+        &[
+            (DialogControl::ChangedFilesRefresh, "Refresh (r)", true),
+            (DialogControl::ChangedFilesClose, "Close", true),
+        ],
+        &mut form,
+    );
+    form.end_frame(DialogControl::ChangedFilesClose);
+}
+
 pub(crate) fn render_rename_editor(
     frame: &mut Frame,
     area: Rect,

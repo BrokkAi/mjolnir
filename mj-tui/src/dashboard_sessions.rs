@@ -641,6 +641,62 @@ impl DashboardState {
         self.open_selected_session()
     }
 
+    /// Records a fresh reading of a session's checkout, or why there is none.
+    pub fn set_git_status(
+        &mut self,
+        session_id: String,
+        result: Result<mj_core::local_git::SessionGitStatus, String>,
+    ) {
+        if self.state.sessions.contains_key(&session_id) {
+            self.git_status.insert(session_id, result);
+        }
+    }
+
+    /// Asks the host to read one session's checkout now, and remembers the
+    /// request so the periodic probe does not repeat it straight away.
+    pub(crate) fn request_git_probe(&mut self, session_id: &str) -> DashboardAction {
+        self.git_probe_at
+            .insert(session_id.to_owned(), Instant::now());
+        DashboardAction::ProbeGitStatus {
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    /// The visible live sessions whose checkout has not been read in the last
+    /// minute, oldest reading first. The host reads a few of these per tick.
+    pub fn git_probe_candidates(&mut self, now: Instant) -> Vec<String> {
+        const REFRESH: Duration = Duration::from_secs(60);
+        let mut due = self
+            .ordered_sessions()
+            .into_iter()
+            .filter(|session| session.state.is_active() && session.target.is_some())
+            .filter(|session| !self.session_operations.contains_key(&session.id))
+            .filter(|session| self.transition_kind(&session.id).is_none())
+            .map(|session| {
+                (
+                    self.git_probe_at.get(&session.id).copied(),
+                    session.id.clone(),
+                )
+            })
+            .filter(|(probed, _)| probed.is_none_or(|probed| now.duration_since(probed) >= REFRESH))
+            .collect::<Vec<_>>();
+        due.sort();
+        for (_, id) in &due {
+            self.git_probe_at.insert(id.clone(), now);
+        }
+        due.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The branch text a session row carries, when its checkout has been
+    /// read and is a repository.
+    pub(crate) fn git_row_text(&self, session_id: &str) -> Option<String> {
+        self.git_status
+            .get(session_id)
+            .and_then(|status| status.as_ref().ok())
+            .map(mj_core::local_git::SessionGitStatus::row_text)
+            .filter(|text| !text.is_empty())
+    }
+
     pub(crate) fn mark_all_read(&mut self) -> DashboardAction {
         let mut receipts = Vec::new();
         for (session_id, detail) in &mut self.session_details {

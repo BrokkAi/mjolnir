@@ -2992,3 +2992,150 @@ fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
     dashboard.handle_key(key(KeyCode::Esc));
     assert_eq!(dashboard.notices.current(), None);
 }
+
+fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
+    mj_core::local_git::parse_git_status(
+        std::path::PathBuf::from("/work"),
+        "feature/x",
+        Some("2\t1"),
+        "12\t3\tsrc/main.rs\n",
+        " M src/main.rs\n?? notes.md\n",
+    )
+}
+
+#[test]
+fn session_rows_carry_the_branch_once_the_checkout_was_read() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
+
+    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  ⎇ feature/x ↑1 ↓2 ±2")),
+        "{lines:#?}"
+    );
+    // A narrow sidebar keeps the branch and drops the counts.
+    let lines = drawn(&mut dashboard, 100, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  ⎇ feature/x") && !line.contains("±2")),
+        "{lines:#?}"
+    );
+    // A checkout that is not a repository adds nothing to the row.
+    dashboard.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/work".into(),
+            "not a git checkout",
+            None,
+            "",
+            "",
+        )),
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
+}
+
+#[test]
+fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    let start = std::time::Instant::now();
+    assert_eq!(dashboard.git_probe_candidates(start), ["session-1"]);
+    assert!(dashboard.git_probe_candidates(start).is_empty());
+    assert!(
+        dashboard
+            .git_probe_candidates(start + std::time::Duration::from_secs(30))
+            .is_empty()
+    );
+    assert_eq!(
+        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61)),
+        ["session-1"]
+    );
+    // A stopped session's target is gone, so there is nothing to read.
+    dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
+    assert!(
+        dashboard
+            .git_probe_candidates(start + std::time::Duration::from_secs(200))
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ChangedFiles),
+        DashboardAction::ProbeGitStatus {
+            session_id: "session-1".into()
+        }
+    );
+    assert!(matches!(dashboard.mode, Mode::ChangedFiles(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Reading the checkout")),
+        "{lines:#?}"
+    );
+
+    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("modified")
+            && line.contains("src/main.rs")
+            && line.contains("+12 −3")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("new") && line.contains("notes.md")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("2 files · +12 −3")),
+        "{lines:#?}"
+    );
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('r'))),
+        DashboardAction::ProbeGitStatus {
+            session_id: "session-1".into()
+        }
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+
+    // Without a running target the command explains itself instead of
+    // opening an overlay that can never fill.
+    dashboard
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .target = None;
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(!lines.iter().any(|line| line.contains("Changed files ·")));
+    assert!(matches!(
+        (crate::actions::spec(CommandId::ChangedFiles).available)(&dashboard),
+        crate::actions::Availability::Blocked(_)
+    ));
+}

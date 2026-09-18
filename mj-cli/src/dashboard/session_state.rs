@@ -231,6 +231,41 @@ impl DashboardContext {
         );
     }
 
+    /// Reads the checkout of the visible sessions that are due, a couple per
+    /// pass so a workspace full of sessions never floods a slow target.
+    pub(crate) fn refresh_git_status(&mut self) {
+        if self.shutdown_requested {
+            return;
+        }
+        let due = self
+            .dashboard
+            .git_probe_candidates(std::time::Instant::now());
+        for session_id in due.into_iter().take(2) {
+            self.spawn_git_probe(session_id);
+        }
+    }
+
+    pub(crate) fn spawn_git_probe(&mut self, session_id: String) {
+        if !self.git_probes_in_flight.insert(session_id.clone()) {
+            return;
+        }
+        let report_id = session_id.clone();
+        io::spawn_io(
+            "reading session git status",
+            self.dashboard_io_tx.clone(),
+            move || {
+                let executor = mj_controller::targets::CancellableProcessExecutor::with_timeout(
+                    Duration::from_secs(8),
+                );
+                Controller::load()?.session_git_status(&session_id, &executor)
+            },
+            move |result| io::DashboardIoUpdate::GitStatus {
+                session_id: report_id,
+                result,
+            },
+        );
+    }
+
     pub(crate) fn remember_go_selection(&mut self) {
         if self.go_selection_in_flight {
             return;

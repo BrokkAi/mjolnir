@@ -134,6 +134,7 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::RenameSession => CommandId::RenameSession,
         KeyAction::ToggleTranscriptRendering => CommandId::ToggleTranscriptRendering,
         KeyAction::ToggleDictation => CommandId::ToggleDictation,
+        KeyAction::ChangedFiles => CommandId::ChangedFiles,
         KeyAction::StopSession => CommandId::StopSession,
         KeyAction::RestartSession => CommandId::RestartSession,
         KeyAction::MoveSession => CommandId::MoveSession,
