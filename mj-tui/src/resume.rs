@@ -1325,17 +1325,6 @@ impl DashboardState {
                 }
             }
         }
-        let event = match event {
-            Event::Key(mut key) if focused == Sessions && key.modifiers.is_empty() => {
-                key.code = match key.code {
-                    KeyCode::Char('j') => KeyCode::Down,
-                    KeyCode::Char('k') => KeyCode::Up,
-                    code => code,
-                };
-                Event::Key(key)
-            }
-            event => event,
-        };
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;

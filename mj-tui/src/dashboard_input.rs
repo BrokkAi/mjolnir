@@ -380,12 +380,24 @@ impl DashboardState {
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
+                // `ctrl+d` and `ctrl+u` page by half a screen, as they do in
+                // every other list on the surface.
+                (KeyCode::Char('u'), true) => {
+                    self.move_selection(-8);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::Char('d'), true) => {
+                    self.move_selection(8);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
                 (KeyCode::Home, _) => {
                     self.set_selection_for(self.focus, 0);
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
-                (KeyCode::End, _) => {
+                (KeyCode::End, _) | (KeyCode::Char('G'), false) => {
                     let len = self.focus_len_for(self.focus);
                     self.set_selection_for(self.focus, len.saturating_sub(1));
                     self.record_event_handled();

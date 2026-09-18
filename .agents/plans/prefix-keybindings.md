@@ -25,7 +25,7 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - [x] (2026-09-17) M1: `mj-core` key-string parser, `KeysConfig`, `Keybinds`, defaults, validation, unit tests; `Config.keys` wired; Settings modal hides the section.
 - [x] (2026-09-17) M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated with `\x02q`.
 - [x] (2026-09-17) M3: `Alt-T` and `Alt-V` leave the composer; `ToggleTranscriptRendering` and `ToggleDictation` reach the visible conversation through mj-cli's action executor.
-- [ ] M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
+- [x] (2026-09-17) M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
 - [ ] M5: user docs, hint strings, README, troubleshooting, config reference, regenerated screenshots.
 - [ ] Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile, outside the sandbox; retrospective written.
 
@@ -85,6 +85,48 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 
 - Observation: `ActiveChat::open` needs a Tokio reactor, so the new mj-cli test is a `#[tokio::test]`.
   Evidence: it first panicked with "there is no reactor running" at `mj-chat/src/chat/active.rs:716`.
+
+- Observation: the readline audit the M4 section asked for holds with nothing to
+  change. Every row of herdr's text-field table is implemented twice, once in the
+  composer and once in `TextField`.
+  Evidence: `mj-chat/src/chat/keys.rs` matches Ctrl-A/E, Ctrl-B/F, Ctrl-H, Ctrl-D,
+  Ctrl-U, Ctrl-K, Ctrl-W, Ctrl-Y, Ctrl-Left/Right, Ctrl-Backspace, Ctrl-Delete,
+  Ctrl-P/N and Ctrl-R under `CONTROL`, and Alt-B/F, Alt-D, Alt-Delete,
+  Alt-Backspace, Alt-Enter and Alt-Up under `ALT`; `mj-chat/src/text_input.rs`
+  matches the same set (`Char('w') | Backspace` under `CONTROL` covers Ctrl-W and
+  Ctrl-Backspace together) plus the unmodified Left/Right/Home/End/Backspace/Delete
+  rows. Consequence: no code change in M4.
+
+- Observation: two of the four call sites of the shared `list_selection` walk
+  display rows rather than item indices, so "eight down" cannot be arithmetic
+  there; a heading or a disabled row would be counted as a step.
+  Evidence: `Form::list_selection` in `mj-chat/src/components/scope.rs` falls back
+  to the free function only when `row_map` is empty. Consequence: the row-mapped
+  path gained `step_rows`, which walks one selectable row at a time and stops at
+  the end of the list, and the existing Up/Down arms now call it with `times` of 1
+  rather than repeating their own `find`.
+
+- Observation: giving the palette `ctrl+u` for list paging takes it away from the
+  query field, where it was readline's kill-to-line-start.
+  Evidence: `handle_palette_event` in `mj-tui/src/palette.rs` chooses `browse`
+  before the form sees the key, so the `TextField` never receives it.
+  Consequence: accepted, because the plan asks for exactly the two ctrl keys here
+  and Backspace still clears a short query; if this turns out to be missed, the
+  fix is to take `ctrl+u` only while the query is empty.
+
+- Observation: the help overlay's filter line cannot be part of the scrolled
+  paragraph, because scrolling would carry it off the top of the frame.
+  Evidence: `render_help` scrolls one `Paragraph` by `overlay.scroll`.
+  Consequence: the block is rendered on its own, the filter line is drawn into the
+  first inner row, and the list is drawn into what is left, with the popup one row
+  taller while the filter is showing.
+- Observation: the committed documentation screenshots under `docs/` still carry the
+  old help-overlay footer, because M4 changed its text and the regeneration test is
+  `#[ignore]`d.
+  Evidence: `generate_documentation_screenshots` in `mj-tui/src/docs_screenshots.rs`
+  is the only test that writes the SVGs, and it is ignored; no non-ignored test
+  asserts on the overlay's frame text, so `cargo test` stays green either way.
+  Consequence: left for M5, which already regenerates them.
 
 ## Decision Log
 
@@ -151,6 +193,22 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - Decision: mj-cli routes both variants through one `apply_chat_toggle` helper with a `ChatToggle` enum, instead of two inline arms.
   Rationale: the "No conversation is open." notice is written once, and the helper is the only part of the executor a unit test can reach without a terminal.
   Date/Author: 2026-09-17, Opus implementing M3.
+
+- Decision: the help overlay's filter keeps `j`, `k` and `?` as filter text while it
+  has focus, and only the keys that cannot be text — the arrows, the Page keys,
+  Home and End — still scroll.
+  Rationale: a filter that swallowed the letters a reader was typing would be worse
+  than no filter. `Enter` closes from either state, because that is what the plan
+  specifies and because a reader who has found the row wants the overlay gone.
+  Date/Author: 2026-09-17, Opus implementing M4.
+
+- Decision: the vim keys live in the shared `list_selection` rather than in the two
+  dialogs that had their own `j`/`k` remaps, and those remaps are deleted.
+  Rationale: the remaps rewrote the key event before the form saw it, so `G` and the
+  ctrl pages would have needed the same rewrite in every dialog. One table means the
+  resume picker, the wizard pickers, the combo boxes and every future list answer the
+  same keys without knowing about them.
+  Date/Author: 2026-09-17, Opus implementing M4.
 
 ## Outcomes & Retrospective
 
@@ -482,6 +540,30 @@ The PTY suite, run on its own afterwards:
 `cargo clippy --all-targets -- -D warnings` exits 0.
 
 Record here, as the work proceeds: the final footer string at full width, the help overlay text with defaults, a `cargo test` summary line per milestone, and the validation error text produced by the conflicting-bindings example.
+
+M4, `cargo test` (dev profile, outside the sandbox), the crates this milestone
+touched:
+
+    mj_chat  test result: ok. 529 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.59s
+    mj_tui   test result: ok. 507 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+The PTY suite, run on its own afterwards:
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.44s
+
+`cargo clippy --all-targets -- -D warnings` exits 0.
+
+M4 help overlay while the filter is focused on `palette`, at the top of the
+popup:
+
+    filter: palette▏
+    prefix: ctrl+b   (edit [keys] in config.toml)
+
+    Anywhere
+      ctrl+b :                Command palette
+
+    ↑↓ scroll · / filter · Esc closes
+
 
 ## Interfaces and Dependencies
 

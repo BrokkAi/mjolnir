@@ -252,22 +252,29 @@ impl DashboardState {
                     && palette.form.borrow().is_focused(PaletteControl::Query) =>
             {
                 match key.code {
-                    KeyCode::Up | KeyCode::Down => Some(key.code),
+                    KeyCode::Up | KeyCode::Down => {
+                        Some(KeyEvent::new(key.code, KeyModifiers::NONE))
+                    }
                     KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                        Some(KeyCode::Up)
+                        Some(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
                     }
                     KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-                        Some(KeyCode::Down)
+                        Some(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                    }
+                    // The query owns every letter, so the list only borrows
+                    // the two paging chords, which no text edit claims here.
+                    KeyCode::Char('d' | 'u') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(*key)
                     }
                     _ => None,
                 }
             }
             _ => None,
         };
-        let interaction = if let Some(code) = browse {
+        let interaction = if let Some(browse) = browse {
             let form = palette.form.get_mut();
             form.focus(PaletteControl::Commands);
-            let result = form.handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            let result = form.handle(&Event::Key(browse));
             form.focus(PaletteControl::Query);
             self.last_event_consumed.set(result.consumed);
             result.action

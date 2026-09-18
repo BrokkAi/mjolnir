@@ -683,3 +683,91 @@ fn expanded_combobox_escape_is_local_and_popup_rows_commit() {
         Some(Interaction::ComboBoxDismiss(1))
     );
 }
+
+/// A key press carrying modifiers, which the shared `key` fixture cannot make.
+fn chord(code: KeyCode, modifiers: KeyModifiers) -> Event {
+    Event::Key(KeyEvent::new(code, modifiers))
+}
+
+/// A list of `len` rows, one display row per item, all selectable.
+fn long_list(len: usize) -> Form<u8> {
+    let mut form = Form::new();
+    form.register_with_rows(
+        1,
+        ControlKind::ChoiceList { len, selected: 0 },
+        Rect::new(0, 0, 10, 10),
+        true,
+        (0..len).map(Some).collect(),
+        vec![true; len],
+    );
+    form.end_frame(1);
+    form
+}
+
+/// Every list on the surface answers the vim keys, but a focused text field
+/// sees them first and keeps them as text: the letters must stay typable
+/// wherever typing is what they mean.
+#[test]
+fn vim_keys_move_a_choice_list_but_a_text_field_keeps_them_as_text() {
+    let mut list = list_form();
+    assert_eq!(
+        list.handle(&key(KeyCode::Char('j'))).action,
+        Some(Interaction::Select(1, 1))
+    );
+    assert_eq!(
+        list.handle(&key(KeyCode::Char('j'))).action,
+        Some(Interaction::Select(1, 2))
+    );
+    assert_eq!(
+        list.handle(&key(KeyCode::Char('k'))).action,
+        Some(Interaction::Select(1, 1))
+    );
+
+    // `form()` focuses the text field, which answers before list handling.
+    let mut fields = form();
+    for character in ['j', 'k', 'G'] {
+        assert_eq!(
+            fields.handle(&key(KeyCode::Char(character))).action,
+            Some(Interaction::Edit(
+                1,
+                FieldEdit::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+            )),
+        );
+    }
+}
+
+/// `G` goes to the end and the two ctrl chords page by eight, on both the
+/// plain lists and the ones that map display rows to items.
+#[test]
+fn shift_g_jumps_to_the_last_row_and_ctrl_d_u_page_by_eight() {
+    for mut form in [list_form(), long_list(3)] {
+        assert_eq!(
+            form.handle(&chord(KeyCode::Char('G'), KeyModifiers::SHIFT))
+                .action,
+            Some(Interaction::Select(1, 2))
+        );
+    }
+
+    let mut form = long_list(20);
+    assert_eq!(
+        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .action,
+        Some(Interaction::Select(1, 8))
+    );
+    assert_eq!(
+        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .action,
+        Some(Interaction::Select(1, 16))
+    );
+    // The last page stops at the end of the list rather than running past it.
+    assert_eq!(
+        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .action,
+        Some(Interaction::Select(1, 19))
+    );
+    assert_eq!(
+        form.handle(&chord(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .action,
+        Some(Interaction::Select(1, 11))
+    );
+}

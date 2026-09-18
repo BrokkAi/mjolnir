@@ -465,19 +465,6 @@ impl DashboardState {
         if key.code == KeyCode::Backspace && picker_focused {
             return self.activate_wizard_control(wizard, WizardControl::Back);
         }
-        if matches!(key.code, KeyCode::Char('j' | 'k')) && picker_focused {
-            let code = if key.code == KeyCode::Char('j') {
-                KeyCode::Down
-            } else {
-                KeyCode::Up
-            };
-            let result = wizard
-                .form_mut()
-                .handle(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-            if let Some(interaction) = result.action {
-                return self.apply_wizard_interaction(wizard, interaction);
-            }
-        }
         if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
             wizard.note_draft_change(self, DraftChange::AttachmentRemoved);
             remove_selected_mount(wizard.mounts_mut());
