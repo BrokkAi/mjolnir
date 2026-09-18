@@ -623,7 +623,7 @@ impl DashboardContext {
                         .transition_failure_kind(&session_id)
                         .is_some()
                 {
-                    self.dashboard.set_current_session(None);
+                    self.dashboard.set_pane_session(pane, None);
                     self.defer_chat_open();
                     return;
                 }
@@ -655,7 +655,9 @@ impl DashboardContext {
                         // was in flight is handed over now.
                         self.refresh_chat_context();
                         self.apply_runtime_review_to_chat(&session_id);
-                        self.dashboard.set_current_session(Some(&session_id));
+                        // The chat belongs to the pane that asked for it, not
+                        // to whichever pane has the focus now.
+                        self.dashboard.set_pane_session(pane, Some(&session_id));
                         self.dashboard.clear_notice();
                         self.acknowledge_visible_chats();
                     }

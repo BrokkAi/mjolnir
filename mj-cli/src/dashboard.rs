@@ -256,6 +256,10 @@ pub(crate) struct DashboardContext {
     /// runs its own attach, so opening one conversation never cancels
     /// another.
     pub(crate) opening_chat_sessions: BTreeMap<PaneId, String>,
+    /// What each pane showed before its current session. The Sessions
+    /// selection replaces the focused pane's conversation, so this is what
+    /// "open this beside what I was reading" has to put back.
+    pub(crate) previous_pane_sessions: BTreeMap<PaneId, String>,
     attachments: BTreeMap<PaneId, attachment::SessionAttachment>,
     /// The sessions the last frame drew a conversation for. Read receipts
     /// follow what was on screen, which is one pane today and every drawn
@@ -798,7 +802,7 @@ impl DashboardContext {
 
     /// Keeps the dashboard's single in-flight-attach report on the focused
     /// pane, which is the pane whose empty conversation is drawn.
-    fn sync_opening_session(&mut self) {
+    pub(crate) fn sync_opening_session(&mut self) {
         let opening = self
             .opening_chat_sessions
             .get(&self.dashboard.focused_pane())
@@ -872,35 +876,74 @@ impl DashboardContext {
         }
     }
 
-    /// Opens a session in a new pane beside the focused one. A session
-    /// already open somewhere moves the focus there instead of appearing
-    /// twice, and a conversation area with no room for two panes says so.
-    #[allow(dead_code, reason = "the pane commands that call this land in M4")]
+    /// Opens a session in a new pane beside the focused one.
+    ///
+    /// Selecting a session row already moves that conversation into the
+    /// focused pane, so by the time this runs the session usually sits in the
+    /// pane the user wanted it moved out of. The split then gives it the new
+    /// pane and returns the pane it came from to the conversation it was
+    /// showing before the selection followed. A session open in a different
+    /// pane moves the focus there instead of appearing twice, and a
+    /// conversation area with no room for two panes says so.
     pub(crate) fn open_session_in_split(&mut self, session_id: &str, direction: Direction) {
-        if let Some(pane) = self.dashboard.pane_for_session(session_id) {
+        let focused = self.dashboard.focused_pane();
+        if let Some(pane) = self.dashboard.pane_for_session(session_id)
+            && pane != focused
+        {
             self.dashboard.focus_pane(pane);
             self.sync_opening_session();
             self.save_active_workspace_layout();
             return;
         }
-        if self.dashboard.split_focused_pane(direction, None).is_none() {
+        let moving = self.dashboard.pane_session(focused) == Some(session_id);
+        let displaced = moving
+            .then(|| self.previous_pane_sessions.get(&focused).cloned())
+            .flatten();
+        let Some(new_pane) = self.dashboard.split_focused_pane(direction, None) else {
             self.dashboard.set_notice("Not enough room to split");
             return;
+        };
+        if moving {
+            // The conversation is where the selection put it, not where the
+            // user asked for it. Take it out of that pane first; opening it
+            // in the new one reuses it when it is warm and restarts an attach
+            // still in flight for the pane that now owns it.
+            self.dashboard.focus_pane(focused);
+            self.dashboard.set_current_session(None);
+            self.cancel_chat_open();
+            self.previous_pane_sessions.remove(&focused);
         }
-        self.sync_opening_session();
+        // The pane the user came from goes back first, so the Sessions
+        // selection ends on the session they asked to split out — which is
+        // what the focused pane shows.
+        if let Some(previous) = displaced {
+            self.dashboard.focus_pane(focused);
+            self.open_chat_session(&previous);
+        }
+        self.dashboard.focus_pane(new_pane);
         self.open_chat_session(session_id);
+        self.sync_opening_session();
         self.save_active_workspace_layout();
+    }
+
+    /// Moves the keyboard into one conversation pane and its composer. The
+    /// arrangement is saved, because which pane has the focus is part of it.
+    pub(crate) fn focus_conversation_pane(&mut self, pane: PaneId) {
+        if self.dashboard.focused_pane() != pane {
+            self.dashboard.focus_pane(pane);
+            self.selection.clear();
+            self.sync_opening_session();
+            self.save_active_workspace_layout();
+        }
+        self.dashboard.focus_prompt();
     }
 
     /// Closes the focused pane, saving and dropping the conversation it held.
     /// The last pane is emptied rather than removed.
-    #[allow(
-        dead_code,
-        reason = "the Close pane command that calls this lands in M4"
-    )]
     pub(crate) fn close_focused_pane(&mut self) {
         let pane = self.dashboard.focused_pane();
         self.opening_chat_sessions.remove(&pane);
+        self.previous_pane_sessions.remove(&pane);
         self.attachments.remove(&pane);
         if let Some(session_id) = self.dashboard.close_focused_pane() {
             self.record_chat_detach(&session_id);
@@ -1252,6 +1295,7 @@ impl DashboardContext {
             composer_drafts: ComposerDraftCache::default(),
             draft_save_failures: BTreeMap::new(),
             opening_chat_sessions: BTreeMap::new(),
+            previous_pane_sessions: BTreeMap::new(),
             attachments: BTreeMap::new(),
             drawn_chat_sessions: Vec::new(),
             startup: StartupSession::idle(),
@@ -1539,13 +1583,18 @@ fn dispatch_event(
         && (chat_modal
             || match &event {
                 Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-                    let over_chat = context
+                    let over_pane = context
                         .dashboard
                         .chat_region_contains(mouse.column, mouse.row);
-                    if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        context.dashboard.focus_prompt();
+                    if let Some(pane) = over_pane
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    {
+                        // A click in a pane takes the keyboard there before
+                        // the event reaches a conversation, so it reaches the
+                        // conversation the user just pointed at.
+                        context.focus_conversation_pane(pane);
                     }
-                    over_chat
+                    over_pane.is_some()
                         || context
                             .visible_chat()
                             .is_some_and(|chat| chat.component_handles_mouse(*mouse))

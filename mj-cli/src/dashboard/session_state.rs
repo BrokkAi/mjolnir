@@ -273,6 +273,24 @@ impl DashboardContext {
         if !self.startup.ready(std::time::Instant::now()) {
             return false;
         }
+        // A restored arrangement already says which conversation belongs in
+        // which pane. Open each one where it belongs instead of picking a
+        // conversation to start on.
+        let restored = self.dashboard.pane_sessions();
+        if !restored.is_empty() {
+            let focused = self.dashboard.focused_pane();
+            self.dashboard.focus_prompt();
+            for (pane, session_id) in restored {
+                self.dashboard.focus_pane(pane);
+                self.open_chat_session(&session_id);
+            }
+            self.dashboard.focus_pane(focused);
+            if let Some(session_id) = self.dashboard.pane_session(focused).map(str::to_owned) {
+                self.dashboard.select_active_session(&session_id);
+            }
+            self.sync_opening_session();
+            return true;
+        }
         let Some(session_id) = startup_session_choice(
             self.dashboard.active_workspace_id(),
             self.controller.state.sessions.values().filter(|session| {

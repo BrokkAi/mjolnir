@@ -9,9 +9,21 @@ impl DashboardState {
     /// Records the conversation the focused pane shows, which decides which
     /// project the compact Sessions list belongs to.
     pub fn set_current_session(&mut self, session_id: Option<&str>) {
-        let pane = self.conversation_layout.focused();
+        self.set_pane_session(self.conversation_layout.focused(), session_id);
+    }
+
+    /// Records the conversation one named pane shows. An attach that started
+    /// for a pane lands in that pane, whichever one has the focus by the time
+    /// it arrives.
+    pub fn set_pane_session(&mut self, pane: crate::tile_layout::PaneId, session_id: Option<&str>) {
         if self.pane_sessions.get(&pane).map(String::as_str) == session_id {
             return;
+        }
+        // A session belongs to one pane, so moving it into this one takes it
+        // out of any other.
+        if let Some(session_id) = session_id {
+            self.pane_sessions
+                .retain(|other, shown| *other == pane || shown != session_id);
         }
         match session_id {
             Some(session_id) => {

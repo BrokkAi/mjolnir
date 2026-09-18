@@ -18,38 +18,24 @@ impl DashboardContext {
             selection_text,
             ..
         } = self;
-        let opening = opening_chat_sessions
-            .get(&dashboard.focused_pane())
-            .map(String::as_str);
-        let selected_session = dashboard.selected_session_id().map(str::to_owned);
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
-        // Only the focused pane draws a conversation until the panes render
-        // themselves; the list is what the read receipts follow.
-        let focused_chat = dashboard
-            .current_session_id()
-            .and_then(|session_id| chats.get_mut(session_id))
-            .filter(|chat| {
-                chat_is_visible(opening, chat.session_id())
-                    && dashboard.transition_kind(chat.session_id()).is_none()
-                    && dashboard
-                        .transition_failure_kind(chat.session_id())
-                        .is_none()
-                    && selected_session.as_deref() == Some(chat.session_id())
-            });
-        // A launch standby covers the conversation the pane holds, so that
-        // conversation was not on screen and its read receipt stays put.
-        let drawn = focused_chat
-            .as_ref()
-            .filter(|_| !dashboard.launch_standby_capturing())
-            .map(|chat| chat.session_id().to_owned());
+        // The renderer decides which pane draws which conversation and reports
+        // back what it drew; that list is what the read receipts follow.
+        let mut drawn = Vec::new();
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
         terminal.terminal.draw(|frame| {
-            render_combined(frame, dashboard, focused_chat, transcript_selected);
+            drawn = render_combined(
+                frame,
+                dashboard,
+                chats,
+                opening_chat_sessions,
+                transcript_selected,
+            );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })?;
-        self.drawn_chat_sessions = drawn.into_iter().collect();
+        self.drawn_chat_sessions = drawn;
         self.dashboard.acknowledge_render();
         if let Some(chat) = self.visible_chat() {
             chat.acknowledge_render();

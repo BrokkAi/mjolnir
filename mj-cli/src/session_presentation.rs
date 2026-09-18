@@ -260,7 +260,13 @@ mod tests {
         dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
         terminal
             .draw(|frame| {
-                render_combined(frame, dashboard, None, false);
+                render_combined(
+                    frame,
+                    dashboard,
+                    &mut BTreeMap::new(),
+                    &BTreeMap::new(),
+                    false,
+                );
             })
             .expect("render dashboard");
         let buffer = terminal.backend().buffer();

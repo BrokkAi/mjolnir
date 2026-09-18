@@ -15,12 +15,24 @@ use mj_chat::components::EventResult;
 use mj_core::state::SessionTransitionKind;
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
+use crate::tile_layout::NavDirection;
 use crate::{DashboardAction, DashboardState, Focus};
 
 /// One thing the surface can be asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
     OpenSession,
+    OpenSessionSplitRight,
+    OpenSessionSplitBelow,
+    ClosePane,
+    FocusPaneLeft,
+    FocusPaneDown,
+    FocusPaneUp,
+    FocusPaneRight,
+    ResizePaneLeft,
+    ResizePaneDown,
+    ResizePaneUp,
+    ResizePaneRight,
     NewSessionWizard,
     ChangeGoSetup,
     RestartSession,
@@ -239,6 +251,17 @@ fn spinner_available(dashboard: &DashboardState) -> Availability {
     }
 }
 
+/// The gate the conversation-pane commands share. They act on the pane the
+/// conversation is in, so they apply where a conversation is what the
+/// keyboard is near: the composer itself, or the Sessions list beside it.
+fn conversation_pane_ready(dashboard: &DashboardState) -> Availability {
+    if matches!(dashboard.focus, Focus::Prompt | Focus::Sessions) {
+        Availability::Ready
+    } else {
+        Availability::Hidden
+    }
+}
+
 fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     if dashboard.selected_session().is_some() {
         Availability::Ready
@@ -405,6 +428,129 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: selected_session_ready,
+    },
+    CommandSpec {
+        id: CommandId::OpenSessionSplitRight,
+        label: "Open in split right",
+        description: "Show the selected session beside the conversation you are in.",
+        // No key in this milestone: the split commands are reached from the
+        // session row's menu and the command palette.
+        scope: Scope::Session,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
+        id: CommandId::OpenSessionSplitBelow,
+        label: "Open in split below",
+        description: "Show the selected session under the conversation you are in.",
+        scope: Scope::Session,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
+        id: CommandId::ClosePane,
+        label: "Close pane",
+        description: "Remove the conversation pane you are in; the last one is emptied instead.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusPaneLeft,
+        label: "Focus pane left",
+        description: "Move the keyboard to the conversation pane left this one.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusPaneDown,
+        label: "Focus pane down",
+        description: "Move the keyboard to the conversation pane below this one.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusPaneUp,
+        label: "Focus pane up",
+        description: "Move the keyboard to the conversation pane above this one.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusPaneRight,
+        label: "Focus pane right",
+        description: "Move the keyboard to the conversation pane right this one.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ResizePaneLeft,
+        label: "Resize pane left",
+        description: "Move the border of the conversation pane you are in left one step.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ResizePaneDown,
+        label: "Resize pane down",
+        description: "Move the border of the conversation pane you are in down one step.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ResizePaneUp,
+        label: "Resize pane up",
+        description: "Move the border of the conversation pane you are in up one step.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ResizePaneRight,
+        label: "Resize pane right",
+        description: "Move the border of the conversation pane you are in right one step.",
+        scope: Scope::Pane,
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
     },
     CommandSpec {
         id: CommandId::NewSessionWizard,
@@ -933,6 +1079,21 @@ impl DashboardState {
         }
         match id {
             CommandId::OpenSession => self.open_selected_session(),
+            CommandId::OpenSessionSplitRight => {
+                self.open_selected_session_in_split(ratatui::layout::Direction::Horizontal)
+            }
+            CommandId::OpenSessionSplitBelow => {
+                self.open_selected_session_in_split(ratatui::layout::Direction::Vertical)
+            }
+            CommandId::ClosePane => DashboardAction::ClosePane,
+            CommandId::FocusPaneLeft => self.focus_pane_command(NavDirection::Left),
+            CommandId::FocusPaneDown => self.focus_pane_command(NavDirection::Down),
+            CommandId::FocusPaneUp => self.focus_pane_command(NavDirection::Up),
+            CommandId::FocusPaneRight => self.focus_pane_command(NavDirection::Right),
+            CommandId::ResizePaneLeft => self.resize_pane_command(NavDirection::Left),
+            CommandId::ResizePaneDown => self.resize_pane_command(NavDirection::Down),
+            CommandId::ResizePaneUp => self.resize_pane_command(NavDirection::Up),
+            CommandId::ResizePaneRight => self.resize_pane_command(NavDirection::Right),
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
             CommandId::RestartSession => self

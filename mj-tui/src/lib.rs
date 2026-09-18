@@ -113,6 +113,20 @@ pub enum DashboardAction {
     Open {
         session_id: String,
     },
+    /// Open a session in a new conversation pane beside or under the focused
+    /// one. `Horizontal` puts the new pane to the right, `Vertical` below.
+    OpenSessionInSplit {
+        session_id: String,
+        direction: ratatui::layout::Direction,
+    },
+    /// Remove the focused conversation pane, saving what it held.
+    ClosePane,
+    /// The conversation panes were focused or resized. The controller saves
+    /// the arrangement, and a focus move also re-reads which conversation the
+    /// keyboard is now in.
+    ConversationPanesChanged {
+        focus_moved: bool,
+    },
     RestartSession {
         session_id: String,
     },
@@ -656,11 +670,10 @@ pub struct DashboardState {
     /// to a different row than the highlight.
     opening_session: Option<String>,
     pub(crate) pane_areas: Option<[Rect; DASHBOARD_PANE_COUNT]>,
-    /// Where the conversation's transcript and composer sat on the last
+    /// Where each conversation pane's transcript and composer sat on the last
     /// frame, so the controller can route a mouse event by what the pointer
-    /// is over rather than by what has focus.
-    pub(crate) chat_transcript_area: Option<Rect>,
-    pub(crate) chat_prompt_area: Option<Rect>,
+    /// is over rather than by what has focus, and to the pane it is over.
+    pub(crate) conversation_pane_areas: Vec<(tile_layout::PaneId, Rect, Rect)>,
     /// The whole conversation band from the last frame: the rectangle the
     /// tiled panes are laid out in. Splits and directional pane focus are
     /// computed against it.
@@ -837,8 +850,7 @@ impl DashboardState {
             pane_sessions: BTreeMap::new(),
             opening_session: None,
             pane_areas: None,
-            chat_transcript_area: None,
-            chat_prompt_area: None,
+            conversation_pane_areas: Vec::new(),
             conversation_area: None,
             resume_sessions_area: None,
             frame_surfaces: FrameSurfaces::new(),

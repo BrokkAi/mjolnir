@@ -298,7 +298,9 @@ mod tests {
         dashboard.focus_sessions();
         dashboard.handle_key(key(KeyCode::F(1)));
 
-        let rendered = drawn(&mut dashboard, 200, 60).join("\n");
+        // Tall enough for the whole registry: the overlay scrolls, and this
+        // reference test reads it all at once.
+        let rendered = drawn(&mut dashboard, 200, 90).join("\n");
         for spec in COMMANDS {
             assert!(rendered.contains(spec.label), "missing {}", spec.label);
             if let Some(hint) = spec.keys.first() {

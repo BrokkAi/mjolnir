@@ -220,7 +220,9 @@ fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str) {
 /// workspace with no live session, which is what this stands for.
 #[cfg(test)]
 pub(crate) fn render(frame: &mut Frame, dashboard: &mut DashboardState) {
-    crate::combined::render_combined(frame, dashboard, None, false);
+    let mut chats = std::collections::BTreeMap::new();
+    let opening = std::collections::BTreeMap::new();
+    crate::combined::render_combined(frame, dashboard, &mut chats, &opening, false);
 }
 
 pub(crate) const MINIMUM_TERMINAL_WIDTH: u16 = 80;

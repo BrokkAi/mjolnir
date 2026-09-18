@@ -697,7 +697,7 @@ fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
         dashboard.focus_sessions();
         let standard = drawn(&mut dashboard, 120, height).join("\n");
         let standard_panes = dashboard.pane_areas.unwrap();
-        let standard_transcript = dashboard.chat_transcript_area.unwrap();
+        let standard_transcript = dashboard.focused_transcript_area().unwrap();
         assert!(standard.contains("Idle"), "{standard}");
         assert!(standard.contains("codex-1"), "{standard}");
 
@@ -708,7 +708,7 @@ fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
         assert_eq!(compact_panes[1].height, 1);
         assert_eq!(compact_panes[2].height, 1);
         assert!(compact_panes[0].width < standard_panes[0].width);
-        assert!(dashboard.chat_transcript_area.unwrap().height > standard_transcript.height);
+        assert!(dashboard.focused_transcript_area().unwrap().height > standard_transcript.height);
         assert!(!compact.contains("You:"), "{compact}");
         assert!(!compact.contains("Agent:"), "{compact}");
         assert!(!dashboard.session_row_areas.is_empty());
@@ -716,7 +716,10 @@ fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
         dashboard.handle_key(alt_key('g'));
         drawn(&mut dashboard, 120, height);
         assert_eq!(dashboard.pane_areas.unwrap(), standard_panes);
-        assert_eq!(dashboard.chat_transcript_area.unwrap(), standard_transcript);
+        assert_eq!(
+            dashboard.focused_transcript_area().unwrap(),
+            standard_transcript
+        );
     }
 }
 
@@ -733,8 +736,8 @@ fn tab_focus_never_changes_band_geometry() {
     drawn(&mut dashboard, 120, 44);
     let expected = (
         dashboard.pane_areas,
-        dashboard.chat_transcript_area,
-        dashboard.chat_prompt_area,
+        dashboard.focused_transcript_area(),
+        dashboard.focused_prompt_area(),
     );
     for _ in 0..4 {
         dashboard.cycle_focus(false);
@@ -742,8 +745,8 @@ fn tab_focus_never_changes_band_geometry() {
         assert_eq!(
             (
                 dashboard.pane_areas,
-                dashboard.chat_transcript_area,
-                dashboard.chat_prompt_area,
+                dashboard.focused_transcript_area(),
+                dashboard.focused_prompt_area(),
             ),
             expected
         );
@@ -1736,8 +1739,8 @@ fn the_session_sidebar_spans_all_other_panes_on_either_side() {
             dashboard.config.sessions_side = side;
             let lines = drawn(&mut dashboard, width, height);
             let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
-            let transcript = dashboard.chat_transcript_area.unwrap();
-            let prompt = dashboard.chat_prompt_area.unwrap();
+            let transcript = dashboard.focused_transcript_area().unwrap();
+            let prompt = dashboard.focused_prompt_area().unwrap();
             assert_eq!(sessions.y, 3);
             assert!(sessions.height > 0);
             assert!(sessions.width > 0 && transcript.width > 0);
@@ -3943,4 +3946,82 @@ fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
     assert!(row.contains("70%"), "{row:?}");
     assert!(row.contains("2d"), "{row:?}");
     assert!(row.contains("1h 5m"), "{row:?}");
+}
+
+/// Two panes are two conversations on one screen: each draws its own bordered
+/// panel, in the rectangle the layout tree says it owns.
+#[test]
+fn two_panes_draw_two_conversation_panels_at_the_rectangles_the_layout_reports() {
+    let mut second = running_session();
+    second.id = "session-2".into();
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard
+        .state
+        .sessions
+        .insert(second.id.clone(), second.clone());
+    dashboard.set_current_session(Some("session-1"));
+    drawn(&mut dashboard, 160, 44);
+    let first = dashboard.focused_pane();
+    let right = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("a 160-column frame has room for two panes");
+
+    let lines = drawn(&mut dashboard, 160, 44);
+
+    let band = dashboard.conversation_area.expect("the conversation band");
+    let expected = dashboard.conversation_layout.panes(band);
+    assert_eq!(expected.len(), 2);
+    for pane in &expected {
+        let (transcript, prompt) = dashboard.pane_bands(pane.id).expect("the pane drew");
+        assert_eq!(transcript.x, pane.rect.x);
+        assert_eq!(transcript.width, pane.rect.width);
+        assert_eq!(transcript.y, pane.rect.y);
+        assert_eq!(prompt.x, pane.rect.x);
+        assert_eq!(prompt.width, pane.rect.width);
+        assert_eq!(transcript.bottom(), prompt.y);
+        assert_eq!(prompt.bottom(), pane.rect.bottom());
+        assert!(transcript.height >= 3 && prompt.height >= 3);
+    }
+    // Both panels are on screen at once, side by side on the same rows.
+    let panels = lines
+        .iter()
+        .filter(|line| line.matches(" Conversation ").count() == 2)
+        .count();
+    assert!(panels > 0, "{lines:#?}");
+    assert_ne!(first, right);
+}
+
+/// The focused pane is the one the user is typing into: only it wears the
+/// focused border, and only it hands its keys to the footer.
+#[test]
+fn only_the_focused_pane_draws_the_focused_border() {
+    let mut second = running_session();
+    second.id = "session-2".into();
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.state.sessions.insert(second.id.clone(), second);
+    dashboard.set_current_session(Some("session-1"));
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 160, 44);
+    let first = dashboard.focused_pane();
+    let right = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("a 160-column frame has room for two panes");
+    dashboard.focus_prompt();
+
+    let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw the two panes");
+    let buffer = terminal.backend().buffer();
+
+    let border_style = |pane| {
+        let (_, prompt) = dashboard.pane_bands(pane).expect("the pane drew");
+        buffer[(prompt.x, prompt.y)].style()
+    };
+    assert_eq!(dashboard.focused_pane(), right);
+    assert_ne!(
+        border_style(right),
+        border_style(first),
+        "the focused pane's composer is drawn differently from its neighbour's"
+    );
 }

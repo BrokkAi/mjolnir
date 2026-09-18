@@ -105,6 +105,7 @@ impl DashboardContext {
             .map(str::to_owned);
         if let Some(outgoing) = outgoing {
             self.selection.clear();
+            self.previous_pane_sessions.insert(pane, outgoing.clone());
             // The pane is changing session. Save what the conversation
             // leaving it holds, then drop it unless another pane shows it —
             // which it cannot, since a session is in at most one pane.

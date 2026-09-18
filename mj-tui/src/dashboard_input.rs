@@ -1,13 +1,40 @@
 use super::*;
 
 impl DashboardState {
-    /// Whether the pointer is over the conversation the surface is drawing.
-    /// A click there belongs to the chat, whatever has focus.
-    pub fn chat_region_contains(&self, column: u16, row: u16) -> bool {
-        [self.chat_transcript_area, self.chat_prompt_area]
-            .into_iter()
-            .flatten()
-            .any(|area| rect_contains(area, column, row))
+    /// The conversation pane the pointer is over, if any. A click there
+    /// belongs to that pane's chat, whatever has focus.
+    pub fn chat_region_contains(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<crate::tile_layout::PaneId> {
+        self.conversation_pane_areas
+            .iter()
+            .find(|(_, transcript, prompt)| {
+                rect_contains(*transcript, column, row) || rect_contains(*prompt, column, row)
+            })
+            .map(|(pane, _, _)| *pane)
+    }
+
+    /// Where the focused pane's transcript sat on the last frame.
+    #[cfg(test)]
+    pub(crate) fn focused_transcript_area(&self) -> Option<Rect> {
+        self.pane_bands(self.focused_pane()).map(|(area, _)| area)
+    }
+
+    /// Where the focused pane's composer sat on the last frame.
+    #[cfg(test)]
+    pub(crate) fn focused_prompt_area(&self) -> Option<Rect> {
+        self.pane_bands(self.focused_pane()).map(|(_, area)| area)
+    }
+
+    /// The transcript and composer rectangles one pane drew into.
+    #[cfg(test)]
+    pub(crate) fn pane_bands(&self, pane: crate::tile_layout::PaneId) -> Option<(Rect, Rect)> {
+        self.conversation_pane_areas
+            .iter()
+            .find(|(id, _, _)| *id == pane)
+            .map(|(_, transcript, prompt)| (*transcript, *prompt))
     }
 
     /// Opens the web-access dialog and asks the controller to load it.
@@ -505,6 +532,24 @@ impl DashboardState {
     /// resume wizard this used to do - the row is red, and the dialog says
     /// what failed.
     pub(crate) fn open_selected_session(&mut self) -> DashboardAction {
+        self.open_selected_session_into(None)
+    }
+
+    /// Opens the selected session in a new pane beside or under the focused
+    /// one, through the same guards Enter uses.
+    pub(crate) fn open_selected_session_in_split(
+        &mut self,
+        direction: ratatui::layout::Direction,
+    ) -> DashboardAction {
+        self.open_selected_session_into(Some(direction))
+    }
+
+    /// `split` of `None` opens into the focused pane; `Some(direction)` asks
+    /// for a new pane in that direction first.
+    fn open_selected_session_into(
+        &mut self,
+        split: Option<ratatui::layout::Direction>,
+    ) -> DashboardAction {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
@@ -570,6 +615,12 @@ impl DashboardState {
         }
         let session_id = session.id.clone();
         self.focus_prompt();
-        DashboardAction::Open { session_id }
+        match split {
+            Some(direction) => DashboardAction::OpenSessionInSplit {
+                session_id,
+                direction,
+            },
+            None => DashboardAction::Open { session_id },
+        }
     }
 }

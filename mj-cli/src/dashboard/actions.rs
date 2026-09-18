@@ -825,6 +825,22 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
         }
+        DashboardAction::OpenSessionInSplit {
+            session_id,
+            direction,
+        } => {
+            context.open_session_in_split(&session_id, direction);
+        }
+        DashboardAction::ClosePane => context.close_focused_pane(),
+        DashboardAction::ConversationPanesChanged { focus_moved } => {
+            if focus_moved {
+                // The keyboard is in a different conversation now, so the
+                // in-flight-attach report and any selection follow it.
+                context.sync_opening_session();
+                context.selection.clear();
+            }
+            context.save_active_workspace_layout();
+        }
         action @ DashboardAction::ResumeSession { .. } => start_session_launch(context, action),
         action @ DashboardAction::MoveSession {
             preparation_request_id: Some(_),

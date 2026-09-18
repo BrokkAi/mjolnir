@@ -36,6 +36,14 @@ impl DashboardState {
             .map(|(pane, _)| *pane)
     }
 
+    /// Each pane that shows a session, with the session it shows.
+    pub fn pane_sessions(&self) -> Vec<(PaneId, String)> {
+        self.pane_sessions
+            .iter()
+            .map(|(pane, session_id)| (*pane, session_id.clone()))
+            .collect()
+    }
+
     /// Every session the layout currently shows.
     pub fn pane_session_ids(&self) -> BTreeSet<String> {
         self.pane_sessions.values().cloned().collect()
@@ -92,6 +100,16 @@ impl DashboardState {
         if self.conversation_layout.pane_count() > 1 {
             self.conversation_layout.close_focused();
         }
+        // The Sessions highlight follows the keyboard, and the keyboard is now
+        // in the surviving pane. Leaving it on the closed pane's session would
+        // pull that conversation into the pane that took the focus.
+        if let Some(surviving) = self
+            .pane_sessions
+            .get(&self.conversation_layout.focused())
+            .cloned()
+        {
+            self.select_active_session(&surviving);
+        }
         self.mark_layout_modified();
         self.clamp_selections();
         session_id
@@ -117,6 +135,23 @@ impl DashboardState {
         };
         self.focus_pane(target);
         true
+    }
+
+    /// Move the focus toward `nav`, reporting the work the controller owes
+    /// the change: saving the arrangement and re-reading which conversation
+    /// the keyboard is now in. Nothing to move to changes nothing.
+    pub(crate) fn focus_pane_command(&mut self, nav: NavDirection) -> DashboardAction {
+        if self.focus_pane_toward(nav) {
+            DashboardAction::ConversationPanesChanged { focus_moved: true }
+        } else {
+            DashboardAction::None
+        }
+    }
+
+    /// Move the focused pane's border toward `nav` by one step.
+    pub(crate) fn resize_pane_command(&mut self, nav: NavDirection) -> DashboardAction {
+        self.resize_focused_pane(nav);
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
     }
 
     /// The band the panes are laid out in. Before the first frame, and while
@@ -193,9 +228,14 @@ impl DashboardState {
     pub(crate) fn restore_conversation_layout(&mut self, layout: &ConversationLayout) {
         let (tree, sessions) = TileLayout::from_conversation_layout(layout);
         self.conversation_layout = tree;
+        // A session belongs to one pane. A stored arrangement that names the
+        // same session twice keeps the first pane and empties the rest, so the
+        // same conversation is never drawn in two places.
+        let mut claimed = BTreeSet::new();
         self.pane_sessions = sessions
             .into_iter()
             .filter(|(_, session_id)| self.state.sessions.contains_key(session_id))
+            .filter(|(_, session_id)| claimed.insert(session_id.clone()))
             .collect();
     }
 
