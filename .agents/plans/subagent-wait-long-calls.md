@@ -25,13 +25,20 @@ with no child result returned and no way for the parent to tell whether the chil
 failed, finished, or are still working.
 
 After this change a parent can wait for a child of any duration without a spurious
-failure. Every `wait` call is answered within the time the caller asked for, by the
-process nearest the caller, and the answer says plainly either "these children are
-finished, here is each one's report" or "still running, call `wait` again". The advertised
-limit equals the limit every supported harness honours, and while a call is in flight the
-server sends MCP progress notifications so a harness that watches for silence sees
-activity. You can see it working with a scaled-down live test (45-second wait, daemon
-restarted underneath it) that fails on today's build and passes after the change.
+failure, and it can still ask for the full hour the tool advertises. While a `wait` is
+open the server sends an MCP progress notification every 30 seconds, so Claude Code's
+idle timer never fires and the call survives to its own deadline. Every `wait` is answered
+within the time the caller asked for, by the process nearest the caller, and the answer
+says plainly either "these children are finished, here is each one's report" or "still
+running, call `wait` again". You can see it working with a scaled-down live test
+(45-second wait, daemon restarted underneath it) that fails on today's build and passes
+after the change, and with one real wait past the old 1800-second abort point on each
+harness.
+
+The limit stays at 3600 seconds for every harness. Lowering it for everyone because one
+client watches for silence would make every parent pay for a client-specific limit; the
+progress notification removes that limit instead. A cap is applied only where a harness is
+measured to need one, from the harness kind the worker already knows.
 
 ## Progress
 
@@ -41,12 +48,16 @@ restarted underneath it) that fails on today's build and passes after the change
       a live Codex session.
 - [x] (2026-09-17) Reproduced the server missing its own deadline live at 45-second
       scale in a private instance.
-- [ ] Milestone 1: one shared timeout rule and an unambiguous result shape.
+- [x] (2026-09-18) Revised after the maintainer's decision: no 600-second cap, progress
+      notifications are the fix rather than defence in depth, and any cap is per harness
+      and only where measured.
+- [ ] Milestone 1: one shared timeout rule, an unambiguous result shape, the daemon's
+      deadline counted from the caller's request, and one log line per wait.
 - [ ] Milestone 2: the worker answers at the caller's deadline even when the daemon does
       not.
 - [ ] Milestone 3: MCP progress notifications while a call is in flight.
-- [ ] Milestone 4: the daemon's own wait deadline survives a restart, plus one log line
-      per wait.
+- [ ] Milestone 4: measure the real ceiling on each harness with one wait past 1900
+      seconds, and cap only a harness that is measured to need it.
 
 ## Surprises & Discoveries
 
@@ -166,20 +177,33 @@ restarted underneath it) that fails on today's build and passes after the change
   (it stops pointless work) but is no longer what the model depends on.
   Date/Author: 2026-09-17, plan author.
 
-- Decision: lower the advertised and effective `wait` ceiling to a value every supported
-  harness honours, and teach the model to call `wait` again, instead of trying to make
-  one call survive for an hour.
-  Rationale: progress notifications fix Claude Code (confirmed) but the Codex ceiling is
-  unknown and unreachable over ACP, so a single long call cannot be made reliable across
-  both clients. A bounded call that always returns is reliable on any client whose
-  ceiling is above the cap.
-  Date/Author: 2026-09-17, plan author.
+- Decision (superseded): lower the advertised and effective `wait` ceiling to 600 seconds
+  for every harness and teach the model to call `wait` again.
+  Rationale at the time: the Codex ceiling was unknown, so a bounded call looked like the
+  only thing reliable on both clients.
+  Superseded by the maintainer on 2026-09-18: the ceiling stays at 3600 for every
+  harness. Claude Code's limit is a limit on *silence*, and the protocol has a way to
+  break silence, so the fix is to use it rather than to shorten everyone's waits. A cap
+  is only justified where a harness is measured to enforce a total limit that progress
+  does not reset, and then only for that harness.
+  Date/Author: 2026-09-17 proposed, 2026-09-18 superseded.
 
-- Decision: add progress notifications anyway, as defence in depth rather than as the
-  fix.
-  Rationale: they are cheap, they are ignored by clients that do not ask for them, and
-  they keep a call alive if a future cap is raised or a call overruns.
-  Date/Author: 2026-09-17, plan author.
+- Decision: MCP progress notifications are the main fix. The server reports every 30
+  seconds while a `wait` is open, and only when the client supplied a `progressToken` in
+  the call's `_meta`, as the protocol requires.
+  Rationale: Claude Code's watchdog resets on a progress notification (confirmed in the
+  shipped client, quoted above), so a call that reports every half minute never reaches
+  the 1800-second idle limit whatever the caller asked for. A client that did not ask for
+  progress is sent none, so nothing is pushed at a client that would not expect it.
+  Date/Author: 2026-09-18, maintainer's decision.
+
+- Decision: any cap is per harness, measured, and computed from the harness kind the
+  worker already knows.
+  Rationale: a harness that enforces a *total* call timeout cannot be rescued by progress,
+  and the honest response is to bound the wait for that harness only. The measurement is
+  part of the live test: one real wait past 1900 seconds per harness, which is past the
+  point where the reported failure occurred.
+  Date/Author: 2026-09-18, maintainer's decision.
 
 - Decision: a deadline reached is a *result*, never a tool error.
   Rationale: the issue's requirement is that the parent must not mistake a timeout for
@@ -188,19 +212,23 @@ restarted underneath it) that fails on today's build and passes after the change
   `next_action`.
   Date/Author: 2026-09-17, plan author.
 
-- Decision: introduce a separate constant for the sub-agent tool ceiling instead of
-  lowering `MAX_WAIT_SECONDS`.
-  Rationale: `MAX_WAIT_SECONDS` is also the cap of the HTTP endpoint used by `mj wait`
+- Decision: `MAX_WAIT_SECONDS` keeps its value of 3600 and its two users. The shim, the
+  worker and the daemon all resolve a caller's `timeout_seconds` through one function,
+  `mj_core::subagent::subagent_wait_timeout`, so the three cannot disagree about when an
+  answer is due.
+  Rationale: the constant is also the cap of the HTTP endpoint behind `mj wait`
   (`mj-controller/src/server/api/wait.rs`, via the `MAX_WAIT_SECS` re-export in
-  `mj-controller/src/server/api.rs:59`). That surface has no MCP client and no 1800-second
-  limit, and lowering it would be an unrelated regression.
-  Date/Author: 2026-09-17, plan author.
+  `mj-controller/src/server/api.rs:59`). One shared resolver is what was actually missing;
+  three copies of a clamp is how the three processes came to disagree.
+  Date/Author: 2026-09-18, plan author.
 
 ## Outcomes & Retrospective
 
-To be written when the milestones land. The bar: a live run of the Milestone 2 test
-answers a 45-second wait in about 45 seconds while the daemon is restarted underneath it,
-and the same run on the unfixed build answers at about 61 seconds.
+To be written when the milestones land. The bar has two parts. A live run of the
+Milestone 2 scenario answers a 45-second wait in about 45 seconds while the daemon is
+restarted underneath it, where the unfixed build answers at about 61 seconds. And one real
+wait of at least 1900 seconds returns its own answer on each harness, where today Claude
+Code abandons the call at 1800 seconds.
 
 ## Context and Orientation
 
@@ -261,14 +289,20 @@ returns either the answer or "not yet, ask again".
 
 The work is four ordered, separately testable commits. Each one is useful on its own.
 
-**Milestone 1: one timeout rule and one unambiguous answer shape.** In
-`mj-core/src/subagent.rs`, add `pub const MAX_SUBAGENT_WAIT_SECONDS: u64 = 600;` with a
-comment stating why the number is what it is (Claude Code aborts a silent stdio call at
-1800 s; Codex's ceiling is unknown but measured above 150 s; the cap must leave room for
-grace on top). Add `pub fn subagent_wait_timeout(requested: Option<u64>) -> Duration`,
-which clamps to `1..=MAX_SUBAGENT_WAIT_SECONDS` and defaults to `DEFAULT_WAIT_SECONDS`,
-and make the shim (`reply_timeout`) and the daemon (`api.rs`) both call it so the three
-processes cannot disagree. Leave `MAX_WAIT_SECONDS` and the HTTP endpoint alone.
+**Milestone 1: one timeout rule, one unambiguous answer shape, and a deadline that counts
+from the caller's request.** In `mj-core/src/subagent.rs`, keep `MAX_WAIT_SECONDS` at
+3600 and add `pub fn subagent_wait_timeout(requested: Option<u64>) -> Duration`, which
+defaults to `DEFAULT_WAIT_SECONDS` and clamps to `1..=MAX_WAIT_SECONDS`. The shim
+(`reply_timeout`), the worker and the daemon all call it, so the three processes cannot
+disagree about when an answer is due. Add
+`pub fn remaining_subagent_wait(created_at_ms, requested, now_ms) -> Duration`, clamped
+into `0..=requested` so clock skew between a remote worker and the daemon can neither
+extend a wait nor make it negative, and use it in `mj-controller/src/server_runtime/api.rs`
+in place of `Instant::now() + timeout`. A request executed again after a daemon restart
+then answers at the caller's original deadline instead of starting over. Add one
+`tracing::info!` when a wait starts (children, requested seconds, remaining budget) and
+one when it answers (complete, waited seconds); with the existing warning on a failed
+delivery, that is enough to settle the unexplained part of the issue if it recurs.
 
 Still in Milestone 1, change what the model reads. In `api.rs`, replace the wait result
 with
@@ -279,18 +313,16 @@ with
                 "output":<string or null>}],
      "next_action":"<one sentence>"}
 
-where `next_action` for `still_running` is "Two of three children are still running. Call
-wait again with the same child_session_ids to keep waiting." and for `complete` is "All
-children finished; their reports are in output." Drop `timed_out`; `status` carries the
-same fact without reading as a failure. In `mj-worker/src/subagent_mcp.rs`, stop handing
-the model the `SubagentToolResult` envelope: when `message` parses as a JSON object,
-return that object as the tool's structured content (merging `request_id` into it so retry
-advice still has an id), otherwise return the envelope as today. Update the `wait` tool
-description and `SERVER_INSTRUCTIONS` to state the ceiling and the loop: "wait blocks
-until the named children finish their current turn or until timeout_seconds, whichever
-comes first. timeout_seconds defaults to 300 and is capped at 600. If the answer says
-status still_running, call wait again with the same child_session_ids; a child can run far
-longer than one wait call."
+where `next_action` for `still_running` names how many children are still running, says
+that this is not a failure, and tells the caller to call `wait` again, and for `complete`
+says the reports are in each agent's `output`. Drop `timed_out`; `status` carries the same
+fact without reading as a failure. In `mj-worker/src/subagent_mcp.rs`, stop handing the
+model the `SubagentToolResult` envelope: when `message` parses as a JSON object, return
+that object as the tool's structured content (merging `request_id` into it so retry advice
+still has an id), otherwise return the envelope as today. Update the `wait` tool
+description and `SERVER_INSTRUCTIONS` to state the loop: the timeout is still up to 3600
+seconds, and a child may run far longer than any single wait, so `still_running` means
+call `wait` again.
 
 **Milestone 2: the worker answers at the caller's deadline.** In
 `mj-worker/src/worker_runtime/subagents.rs`, give `serve_one` its own deadline instead of
@@ -307,35 +339,37 @@ give-up answer the same still-running result with `is_error` false, instead of
 milestone the model gets a correct, honest answer inside its deadline no matter what the
 daemon does.
 
-**Milestone 3: progress notifications.** In `mj-worker/src/mcp_stdio.rs`, read
-`params._meta.progressToken` from a `tools/call` request and pass a progress handle to the
-call handler. The handle owns the token and a closure that writes one JSON line under the
-existing output mutex:
+**Milestone 3: progress notifications, which is what makes a long wait survive.** In
+`mj-worker/src/mcp_stdio.rs`, read `params._meta.progressToken` from a `tools/call`
+request and pass a `Progress` handle to the call handler. The handle owns the token and a
+closure that writes one JSON line under the existing output mutex:
 
     {"jsonrpc":"2.0","method":"notifications/progress",
      "params":{"progressToken":<token>,"progress":<seconds elapsed>,
-               "message":"waiting for child sessions"}}
+               "total":<the call's timeout in seconds>,
+               "message":"waiting for 2 child session(s) to finish their turn:
+                          7e93…, ab12…; 120s elapsed"}}
 
-With no token, the handle does nothing. Add a `progress_interval: Duration` field to
-`McpServer` (default 30 seconds) so tests can shorten it; do not use an environment
+With no token the handle does nothing, because MCP only allows progress for a request
+whose caller asked for it. Add a `progress_interval: Duration` field to `McpServer`
+(`PROGRESS_INTERVAL`, 30 seconds) so tests can shorten it; do not use an environment
 variable. In `mj-worker/src/subagent_mcp.rs`, run the socket exchange on a helper thread
-and loop on `mpsc::Receiver::recv_timeout(progress_interval)`, emitting one progress
-notification per tick until the reply arrives. The other two servers
-(`mj-worker/src/memory_mcp.rs`, `mj-worker/src/review/mcp.rs`) only need their handler
-signatures updated; they emit nothing.
+and loop on `mpsc::Receiver::recv_timeout(progress.interval())`, emitting one notification
+per tick until the reply arrives. The message must be worth reading: it names the children
+being waited on and how long the call has been open. The other two servers
+(`mj-worker/src/memory_mcp.rs`, `mj-worker/src/review/mcp.rs`) answer at once and only need
+their handler signatures updated; they report nothing.
 
-**Milestone 4: the daemon stops restarting its own clock, and says what it did.** In
-`mj-controller/src/server_runtime/api.rs`, compute the wait deadline from the request's
-`created_at_ms` instead of from "now": add
-`pub fn remaining_subagent_wait(created_at_ms: i64, requested: Option<u64>, now_ms: i64) -> Duration`
-to `mj-core/src/subagent.rs`, clamped to `0..=MAX_SUBAGENT_WAIT_SECONDS` so that a clock
-skew between a remote worker and the daemon can neither extend a wait nor make it negative,
-and pass `created_at_ms` through `execute_subagent_tool`. A re-executed request then
-answers at, or immediately after, the caller's original deadline rather than starting over.
-Add one `tracing::info!` per wait recording `request_id`, `parent_session_id`, requested
-timeout, computed remaining budget and whether the completion was delivered, and keep the
-existing warning when delivery fails. This is what would settle the unexplained part of
-the issue if it recurs.
+**Milestone 4: measure each harness's real ceiling, and cap only where one exists.** The
+first three milestones are the fix; this one establishes whether any harness still needs a
+bound. Run one real wait per harness, Claude and Codex, with `timeout_seconds` at 3600 (or
+at least 1900, which is past the point where the reported failure happened) against a child
+that stays busy that long, and record when the call returns. If a harness returns the
+answer at its own deadline, it needs no cap. If a harness aborts at a fixed total time that
+progress did not reset, add a cap for that harness alone: the worker knows its own harness
+kind in `mj_core::worker_launch`, so the shim can clamp `timeout_seconds` from it, and the
+`wait` tool description must then state the real number for that harness. Record the
+measured numbers in `Surprises & Discoveries` either way.
 
 ## Concrete Steps
 
@@ -352,92 +386,97 @@ that test alone before treating it as yours.
 
 New or changed unit tests, all of which run in milliseconds:
 
-- `mj-core/src/subagent.rs`: `subagent_wait_timeout_clamps_to_the_advertised_ceiling`
-  and `remaining_subagent_wait_survives_clock_skew_in_both_directions`.
-- `mj-worker/src/subagent_mcp.rs`: change
-  `wait_advertises_the_shared_runtime_timeout_limit` to assert the schema maximum equals
-  `MAX_SUBAGENT_WAIT_SECONDS`; change `wait_calls_get_their_own_timeout_plus_grace` to the
-  new clamp; replace `an_unanswered_call_becomes_a_tool_error_instead_of_hanging` with
-  `an_unanswered_wait_becomes_a_still_running_result_the_model_can_retry`, which uses the
-  existing fake worker that never answers, a 200 ms budget, and asserts `is_error` is
-  false, `status` is `still_running`, and `next_action` tells the model to call wait again.
+- `mj-core/src/subagent.rs`: `a_wait_timeout_is_clamped_into_the_advertised_range`,
+  `the_remaining_wait_counts_from_the_callers_request_and_survives_clock_skew`, and
+  `the_still_running_answer_names_the_children_and_tells_the_model_to_ask_again`.
+- `mj-worker/src/subagent_mcp.rs`: keep
+  `wait_advertises_the_shared_runtime_timeout_limit` (the schema maximum stays
+  `MAX_WAIT_SECONDS`); keep `wait_calls_get_their_own_timeout_plus_grace` against the
+  shared resolver; keep `an_unanswered_call_becomes_a_tool_error_instead_of_hanging` for a
+  non-wait action and add `an_unanswered_wait_is_a_still_running_answer_rather_than_a_failure`,
+  which uses the fake worker that never answers, a 200 ms budget, and asserts `is_error` is
+  false, `status` is `still_running`, and `next_action` tells the model to call wait again;
+  add `the_models_answer_is_the_payload_itself_not_the_result_envelope`.
 - `mj-worker/src/mcp_stdio.rs`:
   `a_call_with_a_progress_token_gets_progress_lines_before_its_response` (handler sleeps
-  300 ms, `progress_interval` 50 ms, assert at least two `notifications/progress` lines
-  carrying the client's token appear before the response line and that the response still
-  parses) and `a_call_without_a_progress_token_gets_no_notifications`.
+  120 ms, `progress_interval` 20 ms, assert at least two `notifications/progress` lines
+  carrying the client's token arrive before the response line, with the `total` the caller
+  is working towards) and
+  `a_call_without_a_progress_token_is_answered_with_no_notifications`.
 - `mj-worker/src/worker_runtime/subagents.rs`: a `#[tokio::test(start_paused = true)]`
-  that enqueues a `WaitAgents` request with `timeout_seconds: 45`, never completes it,
-  advances time, and asserts the socket answer arrives at 50 seconds of virtual time with
-  `status` `still_running` and the requested child ids listed.
-- `mj-controller/src/server_runtime/api/tests.rs`: a unit test of
-  `remaining_subagent_wait` covering a request created 40 seconds ago with a 45-second
-  timeout yielding about 5 seconds, and one created 10 minutes ago yielding zero.
+  that sends a `WaitAgents` request with `timeout_seconds: 45` over a real Unix socket,
+  never completes it, and asserts the answer arrives between 45 and 55 seconds of virtual
+  time with `status` `still_running` and the requested child ids listed.
 
 Live test (this is the one that fails on the unfixed build). Everything runs in a private
-instance named `plan1034` on port 4134; never touch another instance.
+instance named `fix1034` on port 4134; never touch another instance. The config is
+prepared at `~/.config/mjolnir/instances/fix1034/config.toml` with a `localhost`
+local-bare target; it holds an API key, so do not print or commit it.
 
 1. Build everything, because a local-bare session runs `target/debug/mj-worker` and
    `cargo test` does not rebuild it:
 
        cargo build
 
-2. Create the instance config by copying an existing one and pointing it at port 4134 and
-   a local target. The source file contains an API key; do not print or commit it:
-
-       mkdir -p ~/.config/mjolnir/instances/plan1034
-       cp ~/.config/mjolnir/instances/campaign0916/config.toml \
-          ~/.config/mjolnir/instances/plan1034/config.toml
-       # edit: [phone] bind = "127.0.0.1:4134"; add [targets.localhost] kind = "local-bare"
-
-3. In a tmux session named `plan1034`, run the TUI once so the instance has a workspace
+2. In a tmux session named `fix1034`, run the TUI once so the instance has a workspace
    (`mj new` on a fresh instance otherwise fails with a generic 500, #1080):
 
-       tmux new-session -d -s plan1034 -x 160 -y 45
-       tmux send-keys -t plan1034 'export MJ_INSTANCE=plan1034 && \
+       tmux new-session -d -s fix1034 -x 160 -y 45
+       tmux send-keys -t fix1034 'export MJ_INSTANCE=fix1034 && \
          export MJ_WORKER_BINARY=$PWD/target/debug/mj-worker && ./target/debug/mj go' Enter
 
    Press Escape to dismiss the new-session dialog.
 
-4. Create a parent session and a long-running child:
+3. Create a parent session per harness under test:
 
-       MJ_INSTANCE=plan1034 MJ_WORKER_BINARY=$PWD/target/debug/mj-worker \
+       MJ_INSTANCE=fix1034 MJ_WORKER_BINARY=$PWD/target/debug/mj-worker \
          ./target/debug/mj new --profile deepseek --target localhost \
-         --project-directory $PWD --title plan1034-parent
+         --project-directory $PWD --title fix1034-codex
 
-   Note the session id; the worker root is
-   `~/.local/share/mjolnir/instances/plan1034/workers/<session id>` and the socket is
-   `subagents.sock` inside it. Confirm the running worker is your build, for example
-   `strings <worker root>/hel | grep still_running`.
+   and the same with `--profile claude2` for the Claude parent. Note each session id; a
+   worker root is `~/.local/share/mjolnir/instances/fix1034/workers/<session id>` and the
+   socket is `subagents.sock` inside it. Confirm the running worker is your build, for
+   example `strings <worker root>/hel | grep still_running`; `cargo build --bin mj` and
+   `cargo test` do not rebuild `target/debug/mj-worker`, so a stale worker is the usual
+   reason a live test seems to prove nothing.
 
-5. Drive the real MCP shim with the script in "Artifacts and Notes". Spawn a child that
-   sleeps for 900 seconds, then run the restart scenario: start a `wait` with
-   `timeout_seconds: 45`, and 15 seconds later run
-   `MJ_INSTANCE=plan1034 ./target/debug/mj daemon stop` followed by
-   `MJ_INSTANCE=plan1034 ./target/debug/mj sessions` to bring the daemon back.
+4. Deadline scenario, driven through the real MCP shim with the script in "Artifacts and
+   Notes". Spawn a child that sleeps for 900 seconds, then start a `wait` with
+   `timeout_seconds: 45` and, 15 seconds later, run
+   `MJ_INSTANCE=fix1034 ./target/debug/mj daemon stop` followed by
+   `MJ_INSTANCE=fix1034 ./target/debug/mj sessions` to bring the daemon back.
 
-   On today's build the shim answers after about 61 seconds:
+   On today's build the shim answers after about 61 seconds, because the restarted daemon
+   began the 45-second wait again:
 
        [wait] answered after 61.0s
 
-   After Milestone 2 it answers at about 50 seconds (45 plus the worker's 5-second grace)
-   with `"status": "still_running"`, and after Milestone 4 the daemon's own answer also
-   lands at about 45 seconds. A run with no restart answers at about 45 seconds both
+   After Milestones 1 and 2 it answers at about 45 to 50 seconds with
+   `"status": "still_running"`. A run with no restart answers at about 45 seconds both
    before and after, which is the control.
 
-6. Clean up completely: close both sessions with `mj close --session <id> --force`, stop
+5. Ceiling scenario, one per harness, through the harness itself rather than the script,
+   because it is the harness's own MCP client that is under test. Spawn a child that
+   stays busy for at least 2000 seconds, then prompt the parent to call `wait` once with
+   `timeout_seconds` at 3600 (or at least 1900). Record when the call returns and what it
+   returned. Passing means the call survives past 1800 seconds and comes back with
+   `status: still_running` or `complete`, rather than with the harness's abort message.
+   Read the emitted progress on the Claude side in its MCP log if you want to see the
+   notifications arriving.
+
+6. Clean up completely: close every session with `mj close --session <id> --force`, stop
    the daemon, kill the tmux session, check for survivors with
-   `pgrep -af instances/plan1034`, and remove
-   `~/.config/mjolnir/instances/plan1034` and `~/.local/share/mjolnir/instances/plan1034`.
+   `pgrep -af instances/fix1034`, and remove the instance's config and data directories.
 
 ## Validation and Acceptance
 
 Acceptance is behavioural, in this order.
 
-A `wait` call with `timeout_seconds` above the ceiling is accepted and answered at the
-ceiling, and `tools/list` advertises that same ceiling, so the schema and reality agree.
-Check by calling `tools/list` through the shim and reading
-`inputSchema.properties.timeout_seconds.maximum`.
+A `wait` with `timeout_seconds: 3600` runs to its own deadline on a real harness instead
+of being abandoned at 1800 seconds. This is the issue's headline and the reason progress
+notifications exist here. `tools/list` still advertises a maximum of 3600, so the schema
+and reality agree — that is now true because the limit was removed, not because the
+advertised number was lowered.
 
 A `wait` on children that are still working returns within its own timeout, with
 `"status": "still_running"` at the top level of the tool's structured content, each child
@@ -449,13 +488,15 @@ A `wait` on children that have finished returns `"status": "complete"` with each
 own report in `output`, unchanged from the behaviour that commit 529a5144 established
 (the report is the child's last finished turn, bounded by that turn's span).
 
-The deadline holds under interference: the live restart scenario above answers at about 50
-seconds instead of about 61. Run it on the unfixed build first to see the failure.
+The deadline holds under interference: the live restart scenario above answers at about 45
+to 50 seconds instead of about 61. Run it on the unfixed build first to see the failure.
 
 While a call is in flight, a client that sent a `progressToken` receives
-`notifications/progress` lines about every 30 seconds. Verify with the unit test and, if
-you want to see it end to end, by sending a `tools/call` whose params include
-`"_meta":{"progressToken":1}` through the shim script and watching the emitted lines.
+`notifications/progress` lines about every 30 seconds, each naming the children being
+waited on and how long the call has been open, and a client that sent no token receives
+none. Verify with the unit tests and, end to end, by sending a `tools/call` whose params
+include `"_meta":{"progressToken":1}` through the shim script and watching the lines
+arrive.
 
 `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the dev profile.
 
@@ -525,21 +566,18 @@ times each call. Save it outside the repository and do not commit it:
     print("answered after %.1fs" % (got - sent) if msg else "no response")
     print(json.dumps(msg, indent=2)[:2000])
 
-The cost of the long-poll loop, for the record. Each extra `wait` call is one tool call and
-one small result: roughly 300 to 600 tokens including the model's own framing. At a
-600-second ceiling a three-hour child costs about 18 extra calls, near 10000 tokens; at a
-300-second ceiling it costs twice that. That is the price of never losing a result, and it
-is why the ceiling should be as high as the clients allow rather than as low as possible.
+The cost of calling `wait` again, for the record. Each extra call is one tool call and one
+small result: roughly 300 to 600 tokens including the model's own framing. With the
+ceiling left at 3600 seconds a three-hour child costs two or three extra calls; a parent
+that keeps the 300-second default pays about 36. Nothing forces the loop to be expensive,
+which is the argument for leaving the ceiling where the tool advertises it.
 
 ## Interfaces and Dependencies
 
-In `mj-core/src/subagent.rs`, define:
+In `mj-core/src/subagent.rs`, keep `MAX_WAIT_SECONDS = 3_600` and define:
 
-    /// Longest a single `mj-agents wait` call may block. Claude Code aborts a
-    /// silent stdio MCP call after 1800 s; Codex's ceiling is unknown but is
-    /// above 150 s by measurement. The cap must stay far enough below both that
-    /// the worker's and shim's grace still fit underneath them.
-    pub const MAX_SUBAGENT_WAIT_SECONDS: u64 = 600;
+    pub const WAIT_STATUS_COMPLETE: &str = "complete";
+    pub const WAIT_STATUS_STILL_RUNNING: &str = "still_running";
 
     pub fn subagent_wait_timeout(requested: Option<u64>) -> std::time::Duration;
 
@@ -548,6 +586,14 @@ In `mj-core/src/subagent.rs`, define:
         requested: Option<u64>,
         now_ms: i64,
     ) -> std::time::Duration;
+
+    pub fn still_running_payload(
+        child_session_ids: &[String],
+        waited_seconds: u64,
+        note: Option<&str>,
+    ) -> serde_json::Value;
+
+    pub fn next_action(complete: bool, unfinished: usize, total: usize) -> String;
 
 In `mj-worker/src/mcp_stdio.rs`, extend the server description:
 
@@ -560,22 +606,29 @@ In `mj-worker/src/mcp_stdio.rs`, extend the server description:
         pub call: F,
     }
 
+    pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
+
     /// Writes `notifications/progress` for one in-flight call. Does nothing when
     /// the client sent no `_meta.progressToken`.
-    pub struct Progress { /* token + writer */ }
+    pub struct Progress { /* token + interval + writer */ }
 
     impl Progress {
-        pub fn notify(&self, elapsed: Duration, message: &str);
+        pub fn interval(&self) -> Duration;
+        pub fn notify(&self, elapsed: u64, total: Option<u64>, message: &str);
     }
 
-with `F: Fn(Option<&Value>, &Progress) -> Result<(Value, bool)> + Send + Sync + 'static`.
+with `F: Fn(Option<&Value>, &Progress) -> Result<(Value, bool)> + Send + Sync + 'static`
+and `W: Write + Send + Sync + 'static`, because the writer is now shared with the
+notification path as well as the response path.
 
 In `mj-worker/src/worker_runtime/subagents.rs`, `serve_one` gains a per-action deadline and
 a fallback answer builder:
 
     const WORKER_WAIT_GRACE: Duration = Duration::from_secs(5);
 
-    fn still_running_result(request_id: &str, child_session_ids: &[String], note: &str)
+    fn wait_budget(action: &SubagentToolAction) -> Duration;
+    fn waiting_children(action: &SubagentToolAction) -> Option<Vec<String>>;
+    fn late_daemon_reply(request_id: &str, child_session_ids: &[String], waited_seconds: u64)
         -> SubagentToolResult;
 
 In `mj-controller/src/server_runtime/api.rs`, `execute_subagent_tool` takes the request's
@@ -583,35 +636,37 @@ In `mj-controller/src/server_runtime/api.rs`, `execute_subagent_tool` takes the 
 `remaining_subagent_wait`, returning the `status` / `waited_seconds` / `agents` /
 `next_action` shape described above.
 
-## Open questions for the maintainer
+## Decisions the maintainer has taken
 
-1. The ceiling. 600 seconds is the recommendation: comfortably under Claude Code's 1800,
-   above the 150 seconds measured on Codex, and it halves the number of re-calls compared
-   with today's 300-second default. 300 is the conservative choice (it is what works today
-   in practice), 900 is the aggressive one. Recommendation: 600, with the Codex ceiling
-   verified once during the live test by a single `timeout_seconds: 600` call.
+The ceiling stays at 3600 seconds for every harness. Progress notifications remove
+Claude Code's idle limit rather than every parent paying for it, and a cap is added only
+where a harness is measured to enforce a total limit that progress does not reset,
+computed from the harness kind rather than applied to all.
 
-2. The result shape. Replacing `timed_out` with `status` / `next_action`, and unwrapping
-   the `SubagentToolResult` envelope so the payload is the tool's structured content,
-   changes what every `mj-agents` tool returns to the model. Recommendation: do it; it is
-   model-facing only, nothing persists it, and the double encoding is a direct cause of
-   "timeout read as failure".
+The result shape changes: `status` and `next_action` replace `timed_out`, and the
+`SubagentToolResult` envelope is unwrapped so the payload is the tool's structured
+content. This is model-facing only and nothing persists it.
 
-3. Should the staged Claude config also carry a per-server `timeout`
-   (`configure_claude_subagent_mcp`)? It would raise Claude's idle window, but only for
-   Claude, and it makes behaviour differ between the two harnesses. Recommendation: no.
-   Keep one cap that holds everywhere; revisit if the ceiling ever needs to exceed 1800.
+The staged Claude config does not carry a per-server `timeout`
+(`configure_claude_subagent_mcp` is left alone). Progress makes it unnecessary, and a
+Claude-only knob would hide the difference rather than fix it.
 
-4. Is "do only part" acceptable? Milestones 1 and 2 alone remove the reported failure;
-   3 and 4 are hardening. Recommendation: land all four, but if time is short, stop after
-   2 and keep 4's log line, because without it the unexplained part of the issue stays
-   unexplained.
+`wait` still does not take a `request_key`. A wait that always answers makes restarting
+the wait the simpler contract, and a stale key would return a stale snapshot of the
+children.
 
-5. Should `wait` keep accepting an explicit `request_key` for idempotency, so a repeated
-   wait after a client abort can collect the original call's answer instead of starting a
-   new one? `spawn` already has this; `wait` passes `None`. Recommendation: no, not now.
-   With a bounded wait that always answers, restarting the wait is the simpler contract,
-   and a stale key would return a stale snapshot of the children.
+---
+
+Revision note, 2026-09-18: revised after the maintainer rejected the 600-second cap. The
+previous version treated Claude Code's idle timer as a constraint every harness had to be
+shortened to fit, which is backwards: the protocol has a way to break silence, and the
+client resets its timer on it. Progress notifications are now the main fix, the advertised
+3600-second ceiling stays for every harness, and a cap is only added where a harness is
+measured to enforce a total limit that progress does not reset. The worker-authoritative
+deadline, the result shape and the log line are unchanged from the first version; the
+milestones were reordered so the daemon's deadline lands with the shared timeout rule, and
+the live test now includes one real wait past 1900 seconds per harness. Nothing in
+`Surprises & Discoveries` changed: the evidence is the reason the decision could be taken.
 
 ---
 
