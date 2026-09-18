@@ -2903,6 +2903,124 @@ fn attention_levels_rank_a_question_above_unread_above_idle() {
 }
 
 #[test]
+fn a_failure_outranks_a_question_and_an_unreachable_worker_sits_between_them() {
+    let mut dashboard = dashboard_with_attention_mix();
+    // "asks" already has a pending question. A review that failed on the same
+    // session must win, so the row, the queue, and the badge all say failure.
+    dashboard.set_session_reviews([mj_client::review::RuntimeReviewView {
+        session_id: "asks".into(),
+        tier: mj_core::review::lanes::ReviewTier::Quick,
+        phase: mj_core::review::driver::TurnReviewPhase::Verdict(
+            mj_core::review::verdict::ReviewVerdict::Failed {
+                reason: "the reviewer never answered".into(),
+            },
+        ),
+        roles: Vec::new(),
+        status: "the review failed".into(),
+        verdict: None,
+    }]);
+    dashboard.set_session_connectivity("remote", false);
+
+    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Failed);
+    assert_eq!(
+        dashboard.attention_level("remote"),
+        AttentionLevel::Unreachable,
+        "an unreachable worker is its own level, above a question"
+    );
+    assert!(AttentionLevel::Failed > AttentionLevel::Unreachable);
+    assert!(AttentionLevel::Unreachable > AttentionLevel::Waiting);
+
+    let queue = dashboard
+        .attention_queue()
+        .into_iter()
+        .map(|entry| entry.session_id)
+        .collect::<Vec<_>>();
+    assert_eq!(queue, vec!["asks", "remote", "done"]);
+}
+
+#[test]
+fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
+    let mut dashboard = dashboard_with_attention_mix();
+    let session = dashboard.state.sessions.get_mut("quiet").unwrap();
+    session.state = SessionState::Closing;
+    session.last_error = Some("the worker would not stop".into());
+
+    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
+    assert_eq!(
+        dashboard
+            .attention_queue()
+            .first()
+            .map(|entry| &*entry.session_id),
+        Some("quiet")
+    );
+}
+
+#[test]
+fn a_badge_names_the_most_urgent_level_and_counts_every_flagged_session() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Default holds one question and one unread answer.
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Waiting, 2))
+    );
+
+    dashboard.set_session_connectivity("done", false);
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Unreachable, 2))
+    );
+
+    let session = dashboard.state.sessions.get_mut("quiet").unwrap();
+    session.state = SessionState::Error;
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 3))
+    );
+
+    let badge =
+        crate::render::sessions::attention_badge(dashboard.workspace_attention_summary("default"))
+            .expect("a workspace with three flagged sessions carries a badge");
+    assert_eq!(badge.content, " \u{d7}3");
+    assert_eq!(
+        badge.style.fg,
+        Some(mj_chat::theme::palette().session_error),
+        "a failure badge is red, not the attention colour"
+    );
+
+    let quiet = dashboard_with_session(running_session());
+    assert_eq!(quiet.workspace_attention_summary("default"), None);
+    assert!(crate::render::sessions::attention_badge(None).is_none());
+}
+
+#[test]
+fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Mark all read advances the read marker to the materialized transcript.
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .materialized_applied_event_ordinal = Some(4);
+    assert_eq!(
+        dashboard.sessions_attention_summary(),
+        Some((AttentionLevel::Waiting, 2))
+    );
+
+    chord(&mut dashboard, CommandId::MarkAllRead);
+    assert_eq!(
+        dashboard.attention_level("asks"),
+        AttentionLevel::Waiting,
+        "a pending question survives mark all read"
+    );
+    assert_eq!(
+        dashboard.sessions_attention_summary(),
+        Some((AttentionLevel::Waiting, 1))
+    );
+}
+
+#[test]
 fn next_attention_opens_the_waiting_session_and_wraps_through_the_queue() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
@@ -3011,7 +3129,9 @@ fn the_footer_names_the_next_key_only_while_something_waits() {
     dashboard.set_active_workspace(Some("default".into()));
     let lines = drawn(&mut dashboard, 120, 40);
     let footer = lines.last().unwrap();
-    assert!(footer.contains("o next (3)"), "{footer}");
+    // The hint carries the same badge as the tabs: the most urgent glyph and
+    // how many sessions need a person.
+    assert!(footer.contains("o next (!3)"), "{footer}");
 
     let mut quiet = dashboard_with_session(running_session());
     let lines = drawn(&mut quiet, 120, 40);
@@ -3031,7 +3151,9 @@ fn workspace_tabs_and_folded_headings_carry_attention_badges() {
         .iter()
         .find(|line| line.contains("Default") && line.contains("Other"))
         .expect("workspace tab row");
-    assert!(tabs.contains("Default !1"), "{tabs}");
+    // A tab shows its most urgent glyph and the total it is flagging: the
+    // default workspace holds one question and one unread answer.
+    assert!(tabs.contains("Default !2"), "{tabs}");
     assert!(tabs.contains("Other !1"), "{tabs}");
 
     // Folding the project that holds the unread session puts its count on

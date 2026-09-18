@@ -385,11 +385,14 @@ fn cancel_footer(dashboard: &DashboardState) -> Option<String> {
 }
 
 /// The footer names the next-attention key only while something is actually
-/// waiting, and says how many sessions are, so the hint is a signal as well
-/// as a reminder of the key.
+/// waiting, and carries the same badge as the tabs, so the hint is a signal
+/// as well as a reminder of the key.
 fn attention_footer(dashboard: &DashboardState) -> Option<String> {
-    let waiting = dashboard.attention_queue().len();
-    (waiting > 0).then(|| format!("next ({waiting})"))
+    let (level, count) = dashboard.attention_badge_summary()?;
+    Some(format!(
+        "next ({}{count})",
+        crate::render::sessions::attention_glyph(level)
+    ))
 }
 
 fn operation_in_flight(dashboard: &DashboardState) -> Availability {
@@ -608,7 +611,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::MarkAllRead,
         label: "Mark all read",
-        description: "Clear the unread marker on every session at once.",
+        description: "Clear the unread marker on every session at once; questions, failures, and unreachable sessions stay flagged.",
         scope: Scope::Sessions,
         pane_keys: &[],
         action: Some(KeyAction::MarkAllRead),

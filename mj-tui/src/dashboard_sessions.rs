@@ -8,19 +8,22 @@ use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhaus
 
 /// How much a session needs a person right now, from least to most.
 ///
-/// The order is the order a person wants to be interrupted in: a question the
-/// agent cannot proceed without, then a failure, then a finished answer they
-/// have not read, then work in progress, then idle, then anything stopped or
-/// still starting. It is one scale for the row symbol, the priority sort, the
-/// attention queue, and the badges, so they can never disagree.
+/// The order is the order a person wants to be interrupted in: a failure
+/// first, then a session nothing can be learned about because its worker is
+/// unreachable, then a question the agent cannot proceed without, then a
+/// finished answer nobody has read, then work in progress, then idle, then
+/// anything stopped or still starting. It is one scale for the row symbol,
+/// the band colour, the priority sort, the attention queue, and the badges,
+/// so they can never disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttentionLevel {
     Inactive,
     Idle,
     Working,
     Unread,
-    Failed,
     Waiting,
+    Unreachable,
+    Failed,
 }
 
 impl AttentionLevel {
@@ -42,16 +45,22 @@ pub struct AttentionEntry {
 ///
 /// `in_operation` is a launch, resume, move, or stop the daemon is running
 /// for the session; the session is busy on the person's behalf, not waiting.
+/// `transition_failed` is a launch, resume, move, or stop that stopped with
+/// an error, which the row already draws as a failure.
 pub(crate) fn attention_level(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     state: SessionState,
     unreachable: bool,
     in_operation: bool,
+    transition_failed: bool,
 ) -> AttentionLevel {
     use mj_core::review::driver::TurnReviewPhase;
     use mj_core::review::verdict::ReviewVerdict;
 
+    if transition_failed {
+        return AttentionLevel::Failed;
+    }
     if in_operation {
         return AttentionLevel::Working;
     }
@@ -59,30 +68,36 @@ pub(crate) fn attention_level(
         SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
             return AttentionLevel::Failed;
         }
+        SessionState::Disconnected => return AttentionLevel::Unreachable,
         SessionState::Stopped
         | SessionState::Provisioning
         | SessionState::Checkpointing
         | SessionState::Closing
-        | SessionState::Destroying
-        | SessionState::Disconnected => return AttentionLevel::Inactive,
+        | SessionState::Destroying => return AttentionLevel::Inactive,
         SessionState::Running => {}
     }
     if unreachable {
+        return AttentionLevel::Unreachable;
+    }
+    // A review that failed outranks a pending question, so the row, the queue,
+    // and the badge all report the failure first.
+    let review_level = review
+        .filter(|review| review.activity_label().is_some())
+        .map(|review| match &review.phase {
+            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
+            | TurnReviewPhase::Forwarding { error: Some(_), .. } => AttentionLevel::Failed,
+            _ if review.is_working() => AttentionLevel::Working,
+            TurnReviewPhase::Verdict(ReviewVerdict::Clean) => AttentionLevel::Unread,
+            _ => AttentionLevel::Waiting,
+        });
+    if review_level == Some(AttentionLevel::Failed) {
         return AttentionLevel::Failed;
     }
     if detail.is_some_and(|detail| !detail.pending_elicitations.is_empty()) {
         return AttentionLevel::Waiting;
     }
-    if let Some(review) = review.filter(|review| review.activity_label().is_some()) {
-        if review.is_working() {
-            return AttentionLevel::Working;
-        }
-        return match &review.phase {
-            TurnReviewPhase::Verdict(ReviewVerdict::Clean) => AttentionLevel::Unread,
-            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
-            | TurnReviewPhase::Forwarding { error: Some(_), .. } => AttentionLevel::Failed,
-            _ => AttentionLevel::Waiting,
-        };
+    if let Some(level) = review_level {
+        return level;
     }
     let Some(detail) = detail else {
         return AttentionLevel::Idle;
@@ -497,6 +512,7 @@ impl DashboardState {
             self.unreachable_sessions.contains(session_id),
             self.session_operations.contains_key(session_id)
                 || self.transition_kind(session_id).is_some(),
+            self.transition_failure_kind(session_id).is_some(),
         )
     }
 
@@ -540,38 +556,58 @@ impl DashboardState {
             .collect()
     }
 
-    /// Waiting and unread counts over `sessions`, for a badge.
-    fn attention_counts<'a>(
+    /// The most urgent level among `sessions` and how many of them need a
+    /// person at all, for a badge. `None` when none of them do.
+    fn attention_summary<'a>(
         &self,
         sessions: impl IntoIterator<Item = &'a SessionRecord>,
-    ) -> (usize, usize) {
+    ) -> Option<(AttentionLevel, usize)> {
         sessions
             .into_iter()
-            .fold((0, 0), |(waiting, unread), session| {
-                match self.attention_level(&session.id) {
-                    AttentionLevel::Waiting | AttentionLevel::Failed => (waiting + 1, unread),
-                    AttentionLevel::Unread => (waiting, unread + 1),
-                    _ => (waiting, unread),
-                }
+            .filter_map(|session| {
+                let level = self.attention_level(&session.id);
+                level.needs_person().then_some(level)
+            })
+            .fold(None, |summary, level| match summary {
+                Some((top, count)) => Some((top.max(level), count + 1)),
+                None => Some((level, 1)),
             })
     }
 
-    /// Waiting and unread counts for the sessions of one workspace, for the
-    /// badge on its tab.
-    pub(crate) fn workspace_attention_counts(&self, workspace_id: &str) -> (usize, usize) {
-        self.attention_counts(self.state.sessions.values().filter(|session| {
+    /// The badge for the sessions of one workspace, for its tab.
+    pub(crate) fn workspace_attention_summary(
+        &self,
+        workspace_id: &str,
+    ) -> Option<(AttentionLevel, usize)> {
+        self.attention_summary(self.state.sessions.values().filter(|session| {
             session.workspace_id == workspace_id && !self.state.subagents.contains_key(&session.id)
         }))
     }
 
-    /// Waiting and unread counts for the visible sessions of one project, for
-    /// the badge on a folded heading.
-    pub(crate) fn project_attention_counts(&self, project_key: &str) -> (usize, usize) {
-        self.attention_counts(
+    /// The badge for the visible sessions of one project, for a folded
+    /// heading.
+    pub(crate) fn project_attention_summary(
+        &self,
+        project_key: &str,
+    ) -> Option<(AttentionLevel, usize)> {
+        self.attention_summary(
             self.ordered_sessions()
                 .into_iter()
                 .filter(|session| self.project_source(session).key == project_key),
         )
+    }
+
+    /// The badge for every session the Sessions pane is showing, for its
+    /// title while the pane is minimized.
+    pub(crate) fn sessions_attention_summary(&self) -> Option<(AttentionLevel, usize)> {
+        self.attention_summary(self.ordered_sessions())
+    }
+
+    /// The badge for every session that needs a person, anywhere.
+    pub(crate) fn attention_badge_summary(&self) -> Option<(AttentionLevel, usize)> {
+        let queue = self.attention_queue();
+        let top = queue.iter().map(|entry| entry.level).max()?;
+        Some((top, queue.len()))
     }
 
     /// Moves to the next (`1`) or previous (`-1`) session in the attention
@@ -720,7 +756,7 @@ impl DashboardState {
             self.set_notice("No unread sessions.");
             DashboardAction::None
         } else {
-            self.set_notice("Marked all sessions read.");
+            self.set_notice("Marked all sessions read; questions and failures stay flagged.");
             DashboardAction::MarkAllRead { receipts }
         }
     }
