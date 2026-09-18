@@ -144,6 +144,10 @@ fn account_path_apply_expands_home_before_config_and_quota_use() {
 #[test]
 fn remote_path_apply_preserves_failed_and_newer_drafts() {
     let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.machines.insert(
+        "builder".into(),
+        serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
+    );
     dashboard.config.targets.insert(
         "remote-path".into(),
         serde_json::from_value(
@@ -152,8 +156,8 @@ fn remote_path_apply_preserves_failed_and_newer_drafts() {
         .unwrap(),
     );
     dashboard.begin_setup();
-    choose(&mut dashboard, "targets");
-    choose(&mut dashboard, "remote-path");
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "builder");
     choose(&mut dashboard, "workspace_prefix");
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
@@ -193,7 +197,7 @@ fn remote_path_apply_preserves_failed_and_newer_drafts() {
         panic!("settings");
     };
     assert_eq!(
-        dialog.draft["targets"]["remote-path"]["workspace_prefix"],
+        dialog.draft["machines"]["builder"]["workspace_prefix"],
         "/remote/work"
     );
 }
@@ -211,7 +215,8 @@ fn setup_root_renders_virtual_interface_without_physical_interface_rows() {
     assert!(text.contains("Advanced"), "{text}");
     for section in [
         "Agent Profiles",
-        "Machines and Runtimes",
+        "Machines",
+        "Runtimes",
         "Projects",
         "Code Review",
         "Web Access",
@@ -590,6 +595,11 @@ fn detecting_runtimes_names_what_it_added_and_what_it_skipped() {
         "{notice}"
     );
     assert!(notice.contains("Start Docker Desktop"), "{notice}");
+    // A detected runtime lands in the stored shape, on this machine.
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["targets"]["localhost"],
+        json!({"kind": "bare", "machine": "local", "permissions": null})
+    );
 
     // A second run finds nothing new and says so rather than claiming an
     // addition.
@@ -678,22 +688,9 @@ fn stopped_session_visibility_is_only_editable_under_advanced() {
 fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
-    choose(&mut dashboard, "targets");
+    choose(&mut dashboard, "machines");
     dashboard.handle_key(key(KeyCode::Char('a')));
     dashboard.handle_paste("builder");
-    dashboard.handle_key(key(KeyCode::Enter));
-    choose(&mut dashboard, "kind");
-    let Mode::Setup(dialog) = &mut dashboard.mode else {
-        panic!("settings");
-    };
-    let editor = dialog.editor.as_mut().unwrap();
-    let selected = editor
-        .choices
-        .iter()
-        .position(|value| value == "ssh-docker")
-        .unwrap();
-    assert!(editor.combo.preview(SetupControl::Choices, selected));
-    dialog.prepare();
     dashboard.handle_key(key(KeyCode::Enter));
     let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
         KeyCode::Char('s'),
@@ -707,6 +704,20 @@ fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_dra
     choose(&mut dashboard, "host");
     dashboard.handle_paste("builder.example.test");
     dashboard.handle_key(key(KeyCode::Enter));
+    activate(&mut dashboard, SetupControl::Back);
+    activate(&mut dashboard, SetupControl::Back);
+
+    // A runtime on the new machine: Docker, chosen from the runtime kinds,
+    // and the machine, chosen from the machines the draft now has.
+    choose(&mut dashboard, "targets");
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_paste("builder-docker");
+    dashboard.handle_key(key(KeyCode::Enter));
+    choose(&mut dashboard, "kind");
+    select_choice(&mut dashboard, "docker");
+    choose(&mut dashboard, "machine");
+    select_choice(&mut dashboard, "builder");
+
     let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
         KeyCode::Char('s'),
         KeyModifiers::CONTROL,
@@ -716,7 +727,7 @@ fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_dra
     };
     let saved: Config = serde_json::from_str(&updated).unwrap();
     assert!(
-        matches!(&saved.targets["builder"], mj_core::config::TargetTemplate::SshDocker { ssh, .. } if ssh.host == "builder.example.test")
+        matches!(&saved.targets["builder-docker"], mj_core::config::TargetTemplate::SshDocker { ssh, .. } if ssh.host == "builder.example.test")
     );
     let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
     dashboard.setup_saved(generation, Err("disk full".into()));
@@ -725,10 +736,84 @@ fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_dra
     };
     assert!(!dialog.saving);
     assert_eq!(
-        dialog.draft["targets"]["builder"]["host"],
+        dialog.draft["machines"]["builder"]["host"],
         "builder.example.test"
     );
     assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
+}
+
+/// Open the selected field's choice list and commit `wanted`.
+fn select_choice(dashboard: &mut DashboardState, wanted: &str) {
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    let editor = dialog.editor.as_mut().expect("a choice editor is open");
+    let selected = editor
+        .choices
+        .iter()
+        .position(|value| value == wanted)
+        .unwrap_or_else(|| panic!("{wanted:?} is not offered: {:?}", editor.choices));
+    assert!(editor.combo.preview(SetupControl::Choices, selected));
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn a_runtime_chooses_its_machine_from_the_configured_machines() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.machines.insert(
+        "builder".into(),
+        serde_json::from_value(json!({"kind":"ssh","host":"builder.example.test"})).unwrap(),
+    );
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(
+        schema::choices(
+            &[
+                "targets".to_owned(),
+                "podman".to_owned(),
+                "machine".to_owned()
+            ],
+            &dialog.draft
+        ),
+        vec![json!("local"), json!("builder")]
+    );
+}
+
+#[test]
+fn a_runtime_naming_a_machine_that_is_gone_is_refused_on_save() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.draft["targets"]["podman"]["machine"] = json!("builder");
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert_eq!(action, DashboardAction::None);
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    let notice = dialog.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("which is not defined"), "{notice}");
+}
+
+#[test]
+fn this_machine_is_always_listed_and_cannot_be_removed() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.keys(), ["local"]);
+    dialog.selected = 0;
+    activate(&mut dashboard, SetupControl::Remove);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.keys(), ["local"]);
+    assert_eq!(
+        dialog.notice.as_deref(),
+        Some("This machine is always available.")
+    );
+    // Its type is not a choice, and it carries the shared build cache.
+    choose(&mut dashboard, "local");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.keys(), ["build_cache"]);
 }
 
 fn action_labels(dashboard: &DashboardState) -> Vec<&'static str> {
@@ -859,8 +944,8 @@ fn the_root_page_takes_the_full_width_and_shows_only_the_footer_action() {
     let row = format!("{:<32}  {summary}", schema::label("targets"));
     let line = lines
         .iter()
-        .find(|line| line.contains("Machines and Runtimes"))
-        .unwrap_or_else(|| panic!("missing the machines row in\n{}", lines.join("\n")));
+        .find(|line| line.contains("Runtimes"))
+        .unwrap_or_else(|| panic!("missing the runtimes row in\n{}", lines.join("\n")));
     assert!(line.contains(&row), "the page row was clipped: {line:?}");
     let text = lines.join("\n");
     // Save and Close is the only action the root page offers, and it sits in
@@ -974,7 +1059,7 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
             .unwrap();
         let lines = buffer_lines(terminal.backend().buffer());
         let text = lines.join("\n");
-        assert!(text.contains("Settings › Machines and Runtimes"), "{text}");
+        assert!(text.contains("Settings › Runtimes"), "{text}");
         // Every page action keeps its own row in one column at the dialog's
         // right edge, on top of each other rather than spread along a row.
         let labels = ["Add", "Remove", "Detect runtimes"];
@@ -1263,8 +1348,8 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             .unwrap(),
     );
     dashboard.begin_setup();
-    choose(&mut dashboard, "targets");
-    choose(&mut dashboard, "podman-host");
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
@@ -1327,7 +1412,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
-    dialog.draft["targets"]["podman-host"]["build_cache"]["max_size"] = json!("1GiB");
+    dialog.draft["machines"]["local"]["build_cache"]["max_size"] = json!("1GiB");
     assert!(matches!(
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::PreviewBuildCache { .. }
@@ -1366,20 +1451,23 @@ fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     // One target of every kind and one blank repository, so every optional
     // field in the schema takes part in the walk below.
-    for kind in [
-        "local-bare",
-        "local-podman",
-        "local-docker",
-        "apple-container",
-        "ssh-bare",
-        "ssh-podman",
-        "ssh-docker",
-        "aws-ec2",
-    ] {
+    for kind in ["ssh", "aws-ec2"] {
+        dialog.draft["machines"]
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("every-{kind}"), json!({"kind": kind}));
+    }
+    for kind in ["bare", "podman", "docker", "apple-container"] {
         dialog.draft["targets"]
             .as_object_mut()
             .unwrap()
             .insert(format!("every-{kind}"), json!({"kind": kind}));
+        // The same runtime on another machine, so the remote spellings of
+        // every blank are covered too.
+        dialog.draft["targets"].as_object_mut().unwrap().insert(
+            format!("every-remote-{kind}"),
+            json!({"kind": kind, "machine": "every-ssh"}),
+        );
     }
     for bundle in dialog.draft["bundles"]
         .as_object_mut()
@@ -1453,20 +1541,26 @@ fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
             .1
             .clone()
     };
-    assert_eq!(summary("targets.every-ssh-podman.cpus"), "No limit");
+    assert_eq!(summary("targets.every-remote-podman.cpus"), "No limit");
     assert_eq!(
-        summary("targets.every-aws-ec2.launch_template_version"),
+        summary("machines.every-aws-ec2.launch_template_version"),
         "$Default"
     );
     assert_eq!(summary("review.model"), "Not set");
     assert_eq!(
-        summary("targets.every-ssh-podman.identity_file"),
+        summary("machines.every-ssh.identity_file"),
         "OpenSSH default keys"
     );
     assert_eq!(
-        summary("targets.every-local-podman.platform"),
+        summary("targets.every-podman.platform"),
         format!("Engine default ({})", std::env::consts::ARCH)
     );
+    // A runtime on another machine cannot know that machine's architecture.
+    assert_eq!(
+        summary("targets.every-remote-podman.platform"),
+        "Engine default"
+    );
+    assert!(summary("targets.every-remote-bare.permissions").starts_with("Ask for approvals"));
     assert!(
         summary("profiles.codex-1.context_window_bytes").starts_with("262144"),
         "the context budget shows the number it defaults to"
@@ -1493,8 +1587,8 @@ fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
 #[test]
 fn the_automatic_download_policy_shows_what_it_does_to_this_image() {
     let draft = json!({"targets": {
-        "latest": {"kind": "local-podman", "image": "ghcr.io/example/dev:latest", "pull_policy": "auto"},
-        "pinned": {"kind": "local-podman", "image": "ghcr.io/example/dev@sha256:abc", "pull_policy": "auto"},
+        "latest": {"kind": "podman", "machine": "local", "image": "ghcr.io/example/dev:latest", "pull_policy": "auto"},
+        "pinned": {"kind": "podman", "machine": "local", "image": "ghcr.io/example/dev@sha256:abc", "pull_policy": "auto"},
     }});
     let path = |target: &str| {
         vec![

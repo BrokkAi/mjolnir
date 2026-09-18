@@ -766,7 +766,7 @@ pub fn local_runtime_target(runtime: RuntimeKind, image: &str) -> (&'static str,
     }
 }
 
-/// The same default `serde` applies to a hand-written `ssh-bare` target.
+/// The same default `serde` applies to a hand-written SSH machine.
 fn default_ssh_workspace_prefix() -> PathBuf {
     PathBuf::from(".local/share/hel/workspaces")
 }

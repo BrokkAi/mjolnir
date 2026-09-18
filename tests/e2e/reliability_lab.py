@@ -564,7 +564,7 @@ for line in sys.stdin:
 """
         )
         bridge.chmod(0o700)
-        # The local-bare target now resolves the exact managed Codex harness
+        # The local bare runtime now resolves the exact managed Codex harness
         # before startup, so PATH alone cannot replace its bridge. Seed the
         # worker's isolated managed cache with the same manifest/entrypoint
         # shape the worker validates, while retaining this Python fake and no
@@ -639,7 +639,7 @@ for line in sys.stdin:
                 f"tls_cert = {json.dumps(str(certificate))}\n"
                 f"tls_key = {json.dumps(str(private_key))}\n"
             )
-        config = f'''version = 1
+        config = f'''version = 12
 
 [phone]
 enabled = true
@@ -661,7 +661,7 @@ local = {json.dumps(str(self.project))}
 destination = "fixture"
 
 [targets.localhost]
-kind = "local-bare"
+kind = "bare"
 '''
         (self.config / "config.toml").write_text(config)
         self.record_action("prepared", port=port)

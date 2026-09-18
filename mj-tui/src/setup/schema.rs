@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -28,9 +28,8 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         "profiles" if path.len() == 2 => {
             json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
         }
-        "targets" if path.len() == 2 => {
-            target_defaults(value["kind"].as_str().unwrap_or("local-bare"))
-        }
+        "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
+        "targets" if path.len() == 2 => target_defaults(value["kind"].as_str().unwrap_or("podman")),
         "targets" if key == "workspace_storage" => {
             if value["kind"] == "host-helper" {
                 json!({"kind":"host-helper","root":"","helper":[]})
@@ -48,36 +47,51 @@ pub(super) fn repository_default() -> Value {
     json!({"id":"main","github":null,"local":null,"destination":"main"})
 }
 
-fn target_defaults(kind: &str) -> Value {
+fn build_cache_defaults() -> Value {
+    json!({"enabled":null,"directory":null,"max_size":null})
+}
+
+/// The fields one machine kind needs. A machine owns the host settings every
+/// runtime on it shares, which is why the build cache lives here.
+fn machine_defaults(kind: &str) -> Value {
     let mut fields = json!({"kind":kind});
-    if matches!(
-        kind,
-        "local-podman" | "local-docker" | "apple-container" | "ssh-podman" | "ssh-docker"
-    ) {
+    let object = fields.as_object_mut().unwrap();
+    match kind {
+        "ssh" => {
+            object.extend(
+                json!({"host":"","user":null,"identity_file":null,"extra_args":[],
+                       "workspace_prefix":".local/share/hel/workspaces",
+                       "build_cache":build_cache_defaults()})
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
+        "aws-ec2" => {
+            object.extend(json!({"aws_profile":null,"region":"","launch_template":"","launch_template_version":null,"ssh_user":"ubuntu","address_source":"public-dns","identity_file":null,"ssh_args":[]}).as_object().unwrap().clone());
+        }
+        // This machine, which has nothing to connect to.
+        _ => {
+            object.insert("build_cache".to_owned(), build_cache_defaults());
+        }
+    }
+    fields
+}
+
+/// The fields one runtime kind needs. Every runtime names the machine it runs
+/// on; the host settings are on that machine, not here.
+fn target_defaults(kind: &str) -> Value {
+    let mut fields = json!({"kind":kind, "machine":mj_core::config::LOCAL_MACHINE_ID});
+    if kind == "bare" {
+        fields
+            .as_object_mut()
+            .unwrap()
+            .insert("permissions".to_owned(), Value::Null);
+    } else {
         fields.as_object_mut().unwrap().extend(json!({
             "image":mj_client::target::DEFAULT_IMAGE,"pull_policy":"auto","platform":null,
-            "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"},
-            "build_cache":{"enabled":null,"directory":null,"max_size":null}
+            "cpus":null,"memory":null,"environment":{},"workspace_storage":{"kind":"podman-volume"}
         }).as_object().unwrap().clone());
-    }
-    if kind.starts_with("ssh-") {
-        fields.as_object_mut().unwrap().extend(
-            json!({"host":"","user":null,"identity_file":null,"extra_args":[]})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-    }
-    if kind == "ssh-bare" {
-        fields.as_object_mut().unwrap().extend(
-            json!({"permissions":"guardian","workspace_prefix":".local/share/hel/workspaces"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-    }
-    if kind == "aws-ec2" {
-        fields.as_object_mut().unwrap().extend(json!({"aws_profile":null,"region":"","launch_template":"","launch_template_version":null,"ssh_user":"ubuntu","address_source":"public-dns","identity_file":null,"ssh_args":[]}).as_object().unwrap().clone());
     }
     fields
 }
@@ -103,6 +117,15 @@ pub(super) fn expand(value: &mut Value, path: &mut Vec<String>) {
     }
 }
 
+/// Whether the runtime `target` runs on this machine, which is what decides
+/// the settings the screen can resolve without asking another host.
+pub(super) fn is_local_runtime(draft: &Value, target: &str) -> bool {
+    draft["targets"][target]["machine"]
+        .as_str()
+        .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+        == mj_core::config::LOCAL_MACHINE_ID
+}
+
 pub(super) fn label(key: &str) -> String {
     match key {
         "interface" => "Interface",
@@ -123,7 +146,9 @@ pub(super) fn label(key: &str) -> String {
         "max_concurrent" => "Maximum concurrent children",
         "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
-        "targets" => "Machines and Runtimes",
+        "machines" => "Machines",
+        "targets" => "Runtimes",
+        "machine" => "Machine",
         "bundles" => "Projects",
         "enabled" => "Enabled",
         "profile" => "Agent profile",
@@ -150,7 +175,7 @@ pub(super) fn label(key: &str) -> String {
         "identity_file" => "SSH key file",
         "extra_args" | "ssh_args" => "SSH arguments",
         "permissions" => "Agent permissions",
-        "workspace_prefix" => "Remote workspace directory",
+        "workspace_prefix" => "Workspace directory for bare runtimes",
         "aws_profile" => "AWS account profile",
         "region" => "AWS region",
         "launch_template" => "EC2 launch template",
@@ -182,22 +207,24 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
         // for the whole machine.
         ["targets", _, "cpus" | "memory"] => "No limit".to_owned(),
         ["targets", target, "platform"] => {
-            let kind = draft["targets"][target]["kind"].as_str().unwrap_or("");
-            // A local engine runs this machine's architecture; a remote one
-            // runs whatever its own host is, which setup cannot know.
-            if matches!(kind, "local-podman" | "local-docker" | "apple-container") {
+            // A runtime on this machine runs this machine's architecture; one
+            // on another machine runs whatever that host is, which setup
+            // cannot know.
+            if is_local_runtime(draft, target) {
                 format!("Engine default ({})", std::env::consts::ARCH)
             } else {
                 "Engine default".to_owned()
             }
         }
-        ["targets", _, "user"] => "From ~/.ssh/config, else current user".to_owned(),
-        ["targets", _, "identity_file"] => "OpenSSH default keys".to_owned(),
-        ["targets", _, "aws_profile"] => "AWS CLI default profile".to_owned(),
-        ["targets", _, "launch_template_version"] => "$Default".to_owned(),
-        // Until the target's host has been inspected, all the screen can say
-        // is where the value comes from.
-        ["targets", _, "build_cache", _] => "From the target host's mbx setup".to_owned(),
+        // A bare runtime on an SSH machine takes the guardian default.
+        ["targets", _, "permissions"] => "Ask for approvals".to_owned(),
+        ["machines", _, "user"] => "From ~/.ssh/config, else current user".to_owned(),
+        ["machines", _, "identity_file"] => "OpenSSH default keys".to_owned(),
+        ["machines", _, "aws_profile"] => "AWS CLI default profile".to_owned(),
+        ["machines", _, "launch_template_version"] => "$Default".to_owned(),
+        // Until the machine has been inspected, all the screen can say is
+        // where the value comes from.
+        ["machines", _, "build_cache", _] => "From the machine's own mbx setup".to_owned(),
         ["phone", "tls_cert" | "tls_key"] => "None (HTTP only)".to_owned(),
         // A repository needs exactly one of these two, so a blank one is not
         // a default but a choice not yet made.
@@ -254,15 +281,18 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
     {
         return kind.display_name().to_owned();
     }
+    // A machine id is shown as the user named it.
+    if path.last().is_some_and(|key| key == "machine") {
+        return value.to_owned();
+    }
     match value {
-        "local-bare" => "Local worktree",
-        "local-podman" => "Local Podman",
-        "local-docker" => "Local Docker",
-        "apple-container" => "Apple container",
-        "ssh-bare" => "Remote SSH worktree",
-        "ssh-podman" => "Remote SSH + Podman",
-        "ssh-docker" => "Remote SSH + Docker",
+        "local" => "This machine",
+        "ssh" => "SSH host",
         "aws-ec2" => "Amazon EC2",
+        "bare" => "Bare checkout",
+        "podman" => "Podman",
+        "docker" => "Docker",
+        "apple-container" => "Apple container",
         "guardian" => "Ask for approvals",
         "yolo" => "Allow all actions",
         "left" => "Left",
@@ -296,16 +326,8 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
             &["codex", "claude", "kimi", "grok", "muse"]
         }
-        "kind" => &[
-            "local-bare",
-            "local-podman",
-            "local-docker",
-            "apple-container",
-            "ssh-bare",
-            "ssh-podman",
-            "ssh-docker",
-            "aws-ec2",
-        ],
+        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
+        "kind" => &["bare", "podman", "docker", "apple-container"],
         _ => &[],
     };
     if path.len() == 1 && key == "theme" {
@@ -325,6 +347,19 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
                 return choices;
             }
         }
+    }
+    if key == "machine" {
+        let mut values = vec![Value::String(mj_core::config::LOCAL_MACHINE_ID.to_owned())];
+        if let Some(entries) = draft["machines"].as_object() {
+            values.extend(
+                entries
+                    .keys()
+                    .filter(|id| id.as_str() != mj_core::config::LOCAL_MACHINE_ID)
+                    .cloned()
+                    .map(Value::String),
+            );
+        }
+        return values;
     }
     if key == "profile" {
         let mut values = vec![Value::Null];
@@ -347,9 +382,13 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "home" => {
             "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
         }
-        "targets" => {
-            "Add a machine or runtime, or use Detect runtimes to find this machine's usable container runtimes. Choose its Type to see the settings it needs."
+        "machines" => {
+            "Add an SSH host or an EC2 launch template. This machine is always listed as local. Build cache settings live here because every runtime on a machine shares them."
         }
+        "targets" => {
+            "Add a runtime and choose the machine it runs on, or use Detect runtimes to find this machine's usable container engines."
+        }
+        "machine" => "Which machine this runtime runs on.",
         "phone" => {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
@@ -378,10 +417,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share one mbx build cache between the Rust container sessions on each host. Leave the target settings blank to use that host's defaults."
+            "Share one mbx build cache between the Rust container sessions on each machine. Leave a machine's settings blank to use its own defaults."
         }
         "directory" => {
-            "Cache directory on the target's own host. Blank uses that host's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
+            "Cache directory on the machine itself. Blank uses that machine's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
         }
         "max_size" => {
             "Largest the cache may grow, such as 100GiB. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
@@ -414,11 +453,11 @@ pub(super) fn path_kind(path: &[String]) -> Option<PathKind> {
     match parts.as_slice() {
         ["profiles", _, "home"]
         | ["phone", "tls_cert" | "tls_key"]
-        | ["targets", _, "identity_file"]
+        | ["machines", _, "identity_file"]
         | ["bundles", _, "repositories", _, "local"] => Some(Local),
-        ["targets", _, "workspace_prefix"]
-        | ["targets", _, "workspace_storage", "root"]
-        | ["targets", _, "build_cache", "directory"] => Some(Target),
+        ["machines", _, "workspace_prefix"]
+        | ["machines", _, "build_cache", "directory"]
+        | ["targets", _, "workspace_storage", "root"] => Some(Target),
         ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
         _ => None,
     }

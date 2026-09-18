@@ -3,7 +3,7 @@ title: Apple container targets
 description: Install and verify Apple's container runtime for disposable Mjolnir sessions on Apple silicon.
 ---
 
-An `apple-container` target runs each session in a separate Linux container
+An `apple-container` runtime runs each session in a separate Linux container
 through Apple's `container` CLI. It is available only on Apple silicon with
 macOS 26 or newer and, like every isolated target, runs the selected harness in
 its unrestricted mode.
@@ -27,7 +27,7 @@ an [EC2 target](/aws/) instead.
 ## Configure a target
 
 Mjolnir supplies this local target automatically on macOS and checks the runtime
-before allowing selection. Customize it in **prefix+s Settings → Machines and Runtimes**:
+before allowing selection. Customize it in **prefix+s Settings → Runtimes**:
 
 ```toml
 [targets.apple-container]
@@ -72,7 +72,7 @@ mj doctor --json --smoke
 ```
 
 The smoke test uses the configured target image, creates a disposable
-container, runs `true`, and removes it. If no `apple-container` target exists,
+container, runs `true`, and removes it. If no `apple-container` runtime exists,
 doctor uses a small stock image for the runtime check. The target is ready only
 when the smoke result is no longer `fixable`.
 

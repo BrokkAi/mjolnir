@@ -1269,30 +1269,55 @@ pub fn resolve_target_input_path(
     match target {
         TargetTemplate::SshBare { ssh, .. }
         | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. } => {
-            let mut ssh = ssh.clone();
-            ssh.identity_file = ssh
-                .identity_file
-                .as_deref()
-                .map(mj_core::path_input::expand_local)
-                .transpose()?;
-            let command = crate::targets::ssh_command(
-                &SshTarget::from(&ssh),
-                ["sh", "-c", "printf '%s' \"$HOME\""],
-            )
-            .purpose("resolve remote home directory");
-            let output = executor.execute(&command)?;
-            anyhow::ensure!(
-                output.status == 0,
-                "Could not resolve remote home: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            let home =
-                String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
-            mj_core::path_input::expand_home(path, Some(Path::new(&home)))
-        }
+        | TargetTemplate::SshDocker { ssh, .. } => resolve_ssh_input_path(ssh, path, executor),
         _ => mj_core::path_input::expand_local(path),
     }
+}
+
+/// Resolve the login home on a configured machine, for the Settings screen's
+/// path fields. A machine, not a runtime, is what owns a home directory.
+pub fn resolve_machine_input_path(
+    machine: &mj_core::config::Machine,
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    if !mj_core::path_input::needs_home(path)? {
+        return Ok(path.to_path_buf());
+    }
+    match machine {
+        mj_core::config::Machine::Ssh { ssh, .. } => resolve_ssh_input_path(ssh, path, executor),
+        // An EC2 instance does not exist until a session starts, so the only
+        // home this screen can resolve is this machine's.
+        mj_core::config::Machine::Local { .. } | mj_core::config::Machine::AwsEc2 { .. } => {
+            mj_core::path_input::expand_local(path)
+        }
+    }
+}
+
+fn resolve_ssh_input_path(
+    ssh: &mj_core::config::SshConnection,
+    path: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<PathBuf> {
+    let mut ssh = ssh.clone();
+    ssh.identity_file = ssh
+        .identity_file
+        .as_deref()
+        .map(mj_core::path_input::expand_local)
+        .transpose()?;
+    let command = crate::targets::ssh_command(
+        &SshTarget::from(&ssh),
+        ["sh", "-c", "printf '%s' \"$HOME\""],
+    )
+    .purpose("resolve remote home directory");
+    let output = executor.execute(&command)?;
+    anyhow::ensure!(
+        output.status == 0,
+        "Could not resolve remote home: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let home = String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
+    mj_core::path_input::expand_home(path, Some(Path::new(&home)))
 }
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {

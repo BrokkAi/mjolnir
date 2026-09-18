@@ -205,6 +205,7 @@ pub(crate) fn config() -> Config {
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
+        machines: Default::default(),
         profiles: BTreeMap::from([
             (
                 "claude-1".into(),

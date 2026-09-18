@@ -19,7 +19,7 @@ def run(lab):
     second_home.mkdir()
     profile = config.split("[profiles.fake]", 1)[1].split("[bundles.fixture]", 1)[0]
     profile = profile.replace(str(lab.profile), str(second_home)).replace('"60000"', '"0"')
-    config_path.write_text(config + "\n[profiles.destination]\n" + profile + '\n[targets.destination]\nkind = "local-bare"\n')
+    config_path.write_text(config + "\n[profiles.destination]\n" + profile + '\n[targets.destination]\nkind = "bare"\n')
     client = lab.start_tui("tui-1")
     client.wait_for("Workspaces")
     client.send(b"\r\r")

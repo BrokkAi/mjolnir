@@ -39,6 +39,7 @@ pub enum CommandId {
     Refresh,
     OpenConfig,
     ManageProfiles,
+    ManageMachines,
     ManageTargets,
     CycleFocus,
     CycleFocusReverse,
@@ -566,9 +567,22 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::ManageMachines,
+        label: "Manage machines",
+        description: "Add SSH hosts or EC2 launch templates and edit their shared settings.",
+        scope: Scope::Settings,
+        pane_keys: &[],
+        // The palette reaches this page; it has no key binding of its own.
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::ManageTargets,
-        label: "Manage machines and runtimes",
-        description: "Add SSH or EC2 connections and edit runtime settings.",
+        label: "Manage runtimes",
+        description: "Add a runtime and choose the machine it runs on.",
         scope: Scope::Settings,
         pane_keys: &[],
         action: Some(KeyAction::ManageTargets),
@@ -1077,6 +1091,10 @@ impl DashboardState {
             }
             CommandId::ManageProfiles => {
                 self.begin_settings_section("profiles", None);
+                DashboardAction::None
+            }
+            CommandId::ManageMachines => {
+                self.begin_settings_section("machines", None);
                 DashboardAction::None
             }
             CommandId::ManageTargets => {

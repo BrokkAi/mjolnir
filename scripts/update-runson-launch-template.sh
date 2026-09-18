@@ -31,7 +31,7 @@ usage() {
         '  --root-volume-gib GIB      Root volume size (default: 60)' \
         '  --ssh-public-key PATH      Public key installed for Mjolnir SSH' \
         '  --ssh-identity-file PATH   Matching private key recorded in Mjolnir config' \
-        '  --write-mj-config          Append targets.aws-runson if not configured' \
+        '  --write-mj-config          Append machines.aws-runson and targets.aws-runson if not configured' \
         '  -h, --help                 Show this help'
 }
 
@@ -200,9 +200,9 @@ if [[ "$WRITE_MJ_CONFIG" == true ]]; then
     if grep -Fqx '[targets.aws-runson]' "$mj_config"; then
         printf '%s\n' 'Mjolnir target targets.aws-runson already exists; leaving it unchanged.'
     else
-        printf '\n[targets.aws-runson]\nkind = "aws-ec2"\nregion = "%s"\nlaunch_template = "%s"\nssh_user = "ubuntu"\naddress_source = "public-ip"\nidentity_file = "%s"\n' \
+        printf '\n[machines.aws-runson]\nkind = "aws-ec2"\nregion = "%s"\nlaunch_template = "%s"\nssh_user = "ubuntu"\naddress_source = "public-ip"\nidentity_file = "%s"\n\n[targets.aws-runson]\nkind = "bare"\nmachine = "aws-runson"\n' \
             "$REGION" "$TEMPLATE_NAME" "$SSH_IDENTITY_FILE" >>"$mj_config"
-        printf 'Added Mjolnir target targets.aws-runson to %s.\n' "$mj_config"
+        printf 'Added Mjolnir machine machines.aws-runson and target targets.aws-runson to %s.\n' "$mj_config"
     fi
 fi
 

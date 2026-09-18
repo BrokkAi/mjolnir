@@ -1,12 +1,12 @@
-# AWS EC2 targets
+# AWS EC2 machines
 
-This is the setup guide for a Mjolnir `aws-ec2` target: a disposable EC2 instance
+This is the setup guide for a Mjolnir `aws-ec2` machine: a disposable EC2 instance
 that Mjolnir launches for one session and terminates when the session closes.
 
 ## What Mjolnir does, and does not, manage
 
 Mjolnir provisions a session by shelling out to the `aws` CLI. Opening a session
-on an `aws-ec2` target runs:
+on an `aws-ec2` machine runs:
 
 ```console
 aws --profile <aws_profile> --region <region> ec2 run-instances \
@@ -60,12 +60,13 @@ the launch template, network, and SSH access correctly.
 
 ## Target configuration
 
-Add an `aws-ec2` target under `[targets.<name>]` in `config.toml`. The target
-name is arbitrary — it's just the label you pick under `[targets.*]` and use
-wherever Mjolnir asks you to choose a target.
+Describe the launch template as a machine under `[machines.<name>]`, then add
+a bare runtime on it under `[targets.<name>]`. Both names are arbitrary labels
+you pick; the runtime name is the one Mjolnir asks you to choose when starting
+a session.
 
 ```toml
-[targets.ec2]
+[machines.ec2]
 kind = "aws-ec2"
 region = "us-east-1"
 launch_template = "mj-agent"
@@ -75,9 +76,15 @@ address_source = "public-dns"
 # launch_template_version = "3"
 # identity_file = "/home/me/.ssh/mj-ec2"
 # ssh_args = ["-o", "StrictHostKeyChecking=accept-new"]
+
+[targets.ec2]
+kind = "bare"
+machine = "ec2"
 ```
 
-Accepted target keys:
+An EC2 machine runs a bare harness only; it accepts no container runtime.
+
+Accepted machine keys:
 
 | Key | Required | Notes |
 | --- | --- | --- |
@@ -104,10 +111,11 @@ so it's only available if you built Mjolnir from a source checkout.
 By default it reads an SSH public/private key pair at `~/.ssh/vastai.pub` /
 `~/.ssh/vastai` (override with `--ssh-public-key` / `--ssh-identity-file`).
 With `--write-mj-config`, it appends a target block to your `config.toml`
-named `[targets.aws-runson]` — a fixed name chosen by the script, unrelated to
+named `[machines.aws-runson]` with a matching `[targets.aws-runson]` runtime —
+a fixed name chosen by the script, unrelated to
 the `mj-runson` launch template name or to any target name you might use
 elsewhere (such as `ec2` in the example above). The target name under
-`[targets.*]` is always arbitrary; pick whatever you like when writing one by
+`[machines.*]` and `[targets.*]` is always arbitrary; pick whatever you like when writing one by
 hand.
 
 ## IAM permissions

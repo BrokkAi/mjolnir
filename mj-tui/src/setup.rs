@@ -211,6 +211,17 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
         choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
     }
+    // The Machines page always shows this machine. Until it carries a setting
+    // of its own it is the implied machine, not an entry, so it does not turn
+    // an untouched draft into a change.
+    if let Some(machines) = draft["machines"].as_object_mut()
+        && machines
+            .get(mj_core::config::LOCAL_MACHINE_ID)
+            .and_then(|local| local["build_cache"].as_object())
+            .is_some_and(|cache| cache.values().all(Value::is_null))
+    {
+        machines.remove(mj_core::config::LOCAL_MACHINE_ID);
+    }
     serde_json::from_value(draft)
 }
 
@@ -246,10 +257,31 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
         Value::Object(entries) => entries
             .keys()
             .filter(|key| key.as_str() != "version")
+            .filter(|key| !hidden_key(path, value, key))
             .cloned()
             .collect(),
         Value::Array(entries) => (0..entries.len()).map(|i| i.to_string()).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Settings that exist in the stored shape but have no meaning on this entry,
+/// so showing them would invite a value that does nothing.
+fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        // This machine is always this machine; its type is not a choice.
+        ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
+        // Approvals are a remote-machine setting: a bare runtime here always
+        // uses the configured approvals.
+        ["targets", _] => {
+            key == "permissions"
+                && value["machine"]
+                    .as_str()
+                    .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                    == mj_core::config::LOCAL_MACHINE_ID
+        }
+        _ => false,
     }
 }
 
@@ -393,6 +425,30 @@ fn preferred_size(draft: &Value) -> SetupSize {
     }
 }
 
+/// A configuration with no machines of its own still has this machine, so the
+/// Machines page always has an entry to open. The key is placed where the file
+/// keeps it, before the runtimes that name it, so the page list reads in the
+/// same order as the file.
+fn ensure_local_machine(draft: &mut Value) {
+    let root = draft.as_object_mut().expect("a configuration is an object");
+    if !root.contains_key("machines") {
+        let mut rebuilt = serde_json::Map::new();
+        for (key, value) in std::mem::take(root) {
+            if key == "targets" {
+                rebuilt.insert("machines".to_owned(), json!({}));
+            }
+            rebuilt.insert(key, value);
+        }
+        rebuilt.entry("machines").or_insert_with(|| json!({}));
+        *root = rebuilt;
+    }
+    root["machines"]
+        .as_object_mut()
+        .expect("machines is an object")
+        .entry(mj_core::config::LOCAL_MACHINE_ID)
+        .or_insert_with(|| json!({"kind": "local"}));
+}
+
 fn changed_profile_ids(draft: &Config, current: &Config) -> std::collections::BTreeSet<String> {
     draft
         .profiles
@@ -407,6 +463,7 @@ impl SetupDialog {
     fn new(config: &Config) -> Self {
         let mut draft = serde_json::to_value(config).expect("configuration serializes");
         let original = draft.to_string();
+        ensure_local_machine(&mut draft);
         schema::expand(&mut draft, &mut Vec::new());
         populate_subagent_profile_choices(&mut draft);
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -452,7 +509,10 @@ impl SetupDialog {
     fn collection(&self) -> bool {
         self.current().is_array()
             || (self.path.len() == 1
-                && matches!(self.path[0].as_str(), "profiles" | "targets" | "bundles"))
+                && matches!(
+                    self.path[0].as_str(),
+                    "profiles" | "machines" | "targets" | "bundles"
+                ))
             || self.path.last().is_some_and(|key| key == "environment")
     }
 
@@ -716,33 +776,59 @@ impl SetupDialog {
         {
             return Ok(None);
         }
-        let target: mj_core::config::TargetTemplate =
-            serde_json::from_value(self.draft["targets"][&editor.path[1]].clone())
-                .map_err(|e| e.to_string())?;
+        let machine = self
+            .machine_for_path(&editor.path)
+            .ok_or_else(|| "This setting has no machine to resolve the path on".to_owned())?;
         self.notice = Some("Resolving path…".into());
         Ok(Some(DashboardAction::ResolveSetupPath {
             generation: self.generation,
             draft: self.draft.clone(),
             path: editor.path.clone(),
             value: editor.input.value().to_owned(),
-            target: Box::new(target),
+            machine: Box::new(machine),
         }))
     }
 
-    /// The target whose build cache page is showing, with the settings its
+    /// The machine a draft path belongs to: the machine itself under
+    /// `machines`, and the machine a runtime names under `targets`.
+    fn machine_for_path(&self, path: &[String]) -> Option<mj_core::config::Machine> {
+        let machine_id = match path.first().map(String::as_str)? {
+            "machines" => path.get(1)?.clone(),
+            "targets" => self.draft["targets"][path.get(1)?]["machine"]
+                .as_str()
+                .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                .to_owned(),
+            _ => return None,
+        };
+        self.machine(&machine_id)
+    }
+
+    /// One machine from the draft. This machine is always available, whether
+    /// or not the draft spells it out.
+    fn machine(&self, machine_id: &str) -> Option<mj_core::config::Machine> {
+        match self.draft["machines"].get(machine_id) {
+            Some(machine) => serde_json::from_value(machine.clone()).ok(),
+            None if machine_id == mj_core::config::LOCAL_MACHINE_ID => {
+                Some(mj_core::config::Machine::Local { build_cache: None })
+            }
+            None => None,
+        }
+    }
+
+    /// The machine whose build cache page is showing, with the settings its
     /// preview depends on.
     fn build_cache_page(&self) -> Option<(String, Value)> {
-        let [section, target_id, page] = self.path.as_slice() else {
+        let [section, machine_id, page] = self.path.as_slice() else {
             return None;
         };
-        if section != "targets" || page != "build_cache" {
+        if section != "machines" || page != "build_cache" {
             return None;
         }
         let key = serde_json::json!({
-            "target": self.draft["targets"][target_id],
+            "machine": self.draft["machines"][machine_id],
             "global": self.draft["build_cache"],
         });
-        Some((target_id.clone(), key))
+        Some((machine_id.clone(), key))
     }
 
     /// Start resolving the build cache page's automatic values on the target's
@@ -758,23 +844,23 @@ impl SetupDialog {
         {
             return DashboardAction::None;
         }
-        let target: mj_core::config::TargetTemplate =
-            match serde_json::from_value(key["target"].clone()) {
-                Ok(target) => target,
-                // A draft that does not parse yet has nothing to resolve.
-                Err(_) => return DashboardAction::None,
-            };
+        let machine: mj_core::config::Machine = match serde_json::from_value(key["machine"].clone())
+        {
+            Ok(machine) => machine,
+            // A draft that does not parse yet has nothing to resolve.
+            Err(_) => return DashboardAction::None,
+        };
         let global: mj_core::config::BuildCacheConfig =
             serde_json::from_value(key["global"].clone()).unwrap_or_default();
         self.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: BuildCachePreviewResult::Resolving,
         });
-        self.notice = Some("Resolving the build cache defaults on the target's host…".into());
+        self.notice = Some("Resolving the build cache defaults on the machine…".into());
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
-            target: Box::new(target),
+            machine: Box::new(machine),
             global,
         }
     }
@@ -791,7 +877,7 @@ impl SetupDialog {
         let label = match &preview.result {
             BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
             BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "Not available for this target kind".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
                 "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
                 "enabled" => "On".to_owned(),
@@ -1437,18 +1523,24 @@ impl DashboardState {
             }
             Some(Interaction::Activate(Remove)) if dialog.collection() => {
                 if let Some(key) = dialog.keys().get(dialog.selected).cloned() {
-                    match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
-                        Value::Object(object) => {
-                            object.remove(&key);
+                    // This machine is where Mjolnir runs; it cannot be taken
+                    // out of the list.
+                    if dialog.path == ["machines"] && key == mj_core::config::LOCAL_MACHINE_ID {
+                        dialog.notice = Some("This machine is always available.".into());
+                    } else {
+                        match dialog.draft.pointer_mut(&pointer(&dialog.path)).unwrap() {
+                            Value::Object(object) => {
+                                object.remove(&key);
+                            }
+                            Value::Array(array) => {
+                                array.remove(dialog.selected);
+                            }
+                            _ => {}
                         }
-                        Value::Array(array) => {
-                            array.remove(dialog.selected);
+                        if dialog.path.first().is_some_and(|path| path == "profiles") {
+                            let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
+                            dialog.invalidate_review_validation_for(Some(&profile_id));
                         }
-                        _ => {}
-                    }
-                    if dialog.path.first().is_some_and(|path| path == "profiles") {
-                        let profile_id = dialog.path.get(1).unwrap_or(&key).clone();
-                        dialog.invalidate_review_validation_for(Some(&profile_id));
                     }
                 }
             }
@@ -1704,7 +1796,7 @@ fn detection_notice(scope: DetectScope, added: &[String], rejected: &[RejectedRu
         let names = added.join(", ");
         sentences.push(match scope {
             DetectScope::Profiles => format!("Added agent profiles: {names}."),
-            DetectScope::Runtimes => format!("Added machines and runtimes: {names}."),
+            DetectScope::Runtimes => format!("Added runtimes: {names}."),
         });
     }
     for runtime in rejected {

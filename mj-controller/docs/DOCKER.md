@@ -2,10 +2,10 @@
 
 This is the operational contract for hosts that run Mjolnir Docker targets.
 Mjolnir drives the Docker CLI and requires it to reach a Linux Docker daemon.
-For `local-docker`, attached source directories must be visible inside the
+For Docker on this machine, attached source directories must be visible inside the
 Docker daemon's filesystem. Colima on macOS supports this through its shared
 home directory. OverlayFS writable storage lives in Docker-managed volumes
-inside the Linux VM, not in the macOS cache. For `ssh-docker`, attached sources
+inside the Linux VM, not in the macOS cache. For Docker on an SSH machine, attached sources
 are on the configured SSH host. The controller uses the Docker CLI and does not
 install Docker locally for an SSH target.
 
@@ -13,7 +13,7 @@ install Docker locally for an SSH target.
 
 ```toml
 [targets.docker]
-kind = "local-docker"
+kind = "docker"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
@@ -21,9 +21,13 @@ An SSH Docker target uses the existing OpenSSH configuration and runs Docker
 filesystem operations on the remote host:
 
 ```toml
-[targets.builder-docker]
-kind = "ssh-docker"
+[machines.builder]
+kind = "ssh"
 host = "builder"
+
+[targets.builder-docker]
+kind = "docker"
+machine = "builder"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
@@ -131,7 +135,7 @@ can be attached. Resolve every `fixable` result before launching a session.
 ## Git clone cache and recovery
 
 Docker targets use the same host Git clone cache as local Podman targets. For
-`ssh-docker`, this cache is on the SSH host. Mjolnir mounts a session snapshot
+Docker on an SSH machine, this cache is on the SSH host. Mjolnir mounts a session snapshot
 read-only, lets the in-container clone borrow its objects, and falls back to a
 normal network clone if cache preparation fails. Session snapshots are removed
 after their owning container.

@@ -73,7 +73,7 @@ Mjolnir requires Rust 1.96 or newer. Install the headless controller from crates
 cargo install --locked brokk-mjolnir
 ```
 
-This installs only `mj`. Install `brokk-mj-worker` beside it to use `local-bare`; on macOS that worker is native. Container and remote targets need a target-compatible static Linux worker: install an architecture-named worker beside `mj`, point `MJ_WORKER_DIR` or `MJ_WORKER_BINARY` at one, or configure the verified `MJ_WORKER_URL` and `MJ_WORKER_SHA256` fallback. The release installer and npm package supply both supported portable worker architectures automatically, so use one of those complete bundles unless you intend to build and manage workers yourself.
+This installs only `mj`. Install `brokk-mj-worker` beside it to run a bare runtime on this machine; on macOS that worker is native. Container and remote targets need a target-compatible static Linux worker: install an architecture-named worker beside `mj`, point `MJ_WORKER_DIR` or `MJ_WORKER_BINARY` at one, or configure the verified `MJ_WORKER_URL` and `MJ_WORKER_SHA256` fallback. The release installer and npm package supply both supported portable worker architectures automatically, so use one of those complete bundles unless you intend to build and manage workers yourself.
 
 ```sh
 cargo install --locked brokk-mjolnir brokk-mj-worker
@@ -112,7 +112,7 @@ scripts/run.sh --release -- --version
 
 On Linux this builds the controller natively and cross-compiles only
 `brokk-mj-worker` for the matching musl target. On macOS both binaries are
-native, enabling `local-bare` without a Linux cross toolchain. Managed Linux
+native, enabling a local bare runtime without a Linux cross toolchain. Managed Linux
 targets from macOS still need a packaged worker or an explicit override.
 
 To install `mj` from a checkout together with the worker that container and remote targets need, run:
@@ -121,7 +121,7 @@ To install `mj` from a checkout together with the worker that container and remo
 scripts/install.sh
 ```
 
-The script builds the static Linux worker for the host architecture, builds `mj` and the dictation helper with the same `cargo build` invocations as `scripts/run.sh` so the two scripts share build caches, and places the worker beside the installed `mj` as `mj-worker-<target-triple>`. It builds the release profile unless you pass another, for example `scripts/install.sh --profile dev`. On macOS it also installs the native worker for `local-bare` and builds the Linux worker through Docker or Podman when one is running. It installs into `~/.cargo/bin` unless `CARGO_INSTALL_ROOT` or `CARGO_HOME` names another root. Targets on another architecture still need the release installer or a manually built worker.
+The script builds the static Linux worker for the host architecture, builds `mj` and the dictation helper with the same `cargo build` invocations as `scripts/run.sh` so the two scripts share build caches, and places the worker beside the installed `mj` as `mj-worker-<target-triple>`. It builds the release profile unless you pass another, for example `scripts/install.sh --profile dev`. On macOS it also installs the native worker for a local bare runtime and builds the Linux worker through Docker or Podman when one is running. It installs into `~/.cargo/bin` unless `CARGO_INSTALL_ROOT` or `CARGO_HOME` names another root. Targets on another architecture still need the release installer or a manually built worker.
 
 To build a portable worker manually, use:
 

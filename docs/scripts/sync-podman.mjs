@@ -19,13 +19,13 @@ for (const guide of [
   {
     source: 'SSH.md',
     target: 'ssh.md',
-    title: 'SSH targets: `ssh-bare` and `ssh-podman`',
-    description: 'Configure and verify raw SSH machines and Podman-over-SSH targets for Mjolnir sessions.',
+    title: 'SSH machines: bare and container runtimes',
+    description: 'Configure and verify SSH machines and the bare and container runtimes that run on them.',
   },
   {
     source: 'AWS.md',
     target: 'aws.md',
-    title: 'AWS EC2 targets',
+    title: 'AWS EC2 machines',
     description: 'Prepare an EC2 launch template and configure disposable Mjolnir session instances.',
   },
 ]) {
