@@ -86,7 +86,8 @@ pub use resume::{
 pub use reviewer::reviewer_stager;
 pub use subagents::RegisterSubagentRequest;
 pub use worker_binary::{
-    WorkerBinaryAvailability, pin_worker_binary_sources, worker_binary_prerequisite_for_arch,
+    WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
+    worker_binary_prerequisite_for_arch,
 };
 pub use worker_restart::WorkerUpgradeOutcome;
 pub use worktree::{ResumePlan, local_project_repository, resume_compatibility};

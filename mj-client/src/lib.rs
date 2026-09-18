@@ -14,3 +14,4 @@ pub mod usage_format;
 pub mod operations;
 
 pub mod daemon;
+pub mod executable;

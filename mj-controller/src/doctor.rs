@@ -196,6 +196,8 @@ pub fn run_with_config_path(
     checks.extend(ssh_docker_checks(config.as_ref(), executor, options.smoke));
     checks.extend(aws_checks(config.as_ref(), executor));
     checks.extend(worker_binary_checks(config.as_ref()));
+    checks.push(daemon_build_check());
+    checks.extend(worker_freshness_checks(config.as_ref()));
     checks.push(apple_container_check(
         &apple_platform,
         executor,
@@ -1639,6 +1641,217 @@ fn aws_target_check(
             ),
         ),
     }
+}
+
+/// Whether the running daemon is this build.
+///
+/// Two Mjolnir builds carry the same version string, so the version line in
+/// `mj daemon status` cannot answer it. A daemon left over from before a
+/// rebuild keeps serving the old code, and, when its executable was unlinked
+/// by the rebuild, also loses every portable worker source it would have
+/// pinned. Both are invisible without this check.
+fn daemon_build_check() -> DoctorCheck {
+    const ID: &str = "daemon.build";
+    const TITLE: &str = "Daemon build";
+    let Ok(metadata) = mj_client::daemon::read_metadata_any() else {
+        return DoctorCheck::ready(
+            ID,
+            TITLE,
+            "No Mjolnir daemon is running; the next command starts one from this build.",
+        );
+    };
+    let pid = metadata.pid;
+    match mj_client::executable::process_runs_this_executable(pid) {
+        Ok(Some(true)) => DoctorCheck::ready(
+            ID,
+            TITLE,
+            format!(
+                "Daemon {pid} runs this build (version {}).",
+                metadata.build_version
+            ),
+        ),
+        Ok(Some(false)) => DoctorCheck::warning(
+            ID,
+            TITLE,
+            format!(
+                "Daemon {pid} runs {}, while this client runs {}. Both report version {}, so the version alone cannot tell them apart. Code rebuilt since that daemon started is not running.",
+                describe_executable(mj_client::executable::process_executable_path(pid)),
+                describe_executable(mj_client::executable::running_executable_path()),
+                metadata.build_version,
+            ),
+            "Run `mj daemon restart` from this build. It now fails rather than reporting success if another client's build wins.",
+        ),
+        Ok(None) => DoctorCheck::ready(
+            ID,
+            TITLE,
+            format!(
+                "Daemon {pid} is recorded but not running; the next command starts one from this build."
+            ),
+        ),
+        Err(error) => DoctorCheck::warning(
+            ID,
+            TITLE,
+            format!("Could not tell which build daemon {pid} runs: {error:#}"),
+            "Run `mj daemon restart` from this build if rebuilt code is not taking effect.",
+        ),
+    }
+}
+
+fn describe_executable(path: Option<std::path::PathBuf>) -> String {
+    path.map_or_else(
+        || "an unknown file".to_owned(),
+        |path| path.display().to_string(),
+    )
+}
+
+/// Whether a new session would run the worker binary as it is on disk now.
+///
+/// The daemon copies each worker it can find into a content-addressed cache
+/// when it starts and serves that copy for the rest of its life, so rebuilding
+/// `mj-worker` does not reach a running daemon. Nothing else reports this, and
+/// the digests are what make it checkable at all: two worker builds differ by
+/// content, not by name or version.
+fn worker_freshness_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let daemon = mj_client::daemon::read_metadata_any()
+        .ok()
+        .filter(|metadata| mj_client::daemon::process_is_alive(metadata.pid));
+    let pinned = pinned_worker_digests();
+    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = vec![(
+        "this host".to_owned(),
+        crate::controller::native_worker_binary_prerequisite(),
+    )];
+    for arch in container_worker_architectures(config) {
+        sources.push((
+            format!("{arch} Linux targets"),
+            worker_binary_prerequisite_for_arch(&arch),
+        ));
+    }
+    for (label, availability) in sources {
+        let id = format!("worker.freshness.{}", label.replace(' ', "-"));
+        let title = format!("Worker binary for {label}");
+        let path = match availability {
+            Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
+            // A remote worker is fetched by digest when a target is
+            // provisioned, so it cannot go stale behind a running daemon.
+            Ok(WorkerBinaryAvailability::Remote { .. }) => continue,
+            Err(error) => {
+                checks.push(DoctorCheck::unsupported(
+                    id,
+                    title,
+                    format!("No worker binary resolves for {label}: {error:#}"),
+                ));
+                continue;
+            }
+        };
+        let digest = mj_core::worker_launch::worker_executable_digest(&path)
+            .unwrap_or_else(|error| format!("unreadable ({error:#})"));
+        let pinned_note = if pinned.is_empty() {
+            "the daemon has pinned no worker".to_owned()
+        } else if pinned.contains(&digest) {
+            "this content is in the daemon's pinned worker cache".to_owned()
+        } else {
+            format!(
+                "the pinned worker cache holds {} instead",
+                pinned.join(", ")
+            )
+        };
+        let detail = format!("{} has digest {digest}; {pinned_note}.", path.display());
+        let Some(metadata) = daemon.as_ref() else {
+            checks.push(DoctorCheck::ready(
+                id,
+                title,
+                format!("{detail} No daemon is running, so the next session uses this file."),
+            ));
+            continue;
+        };
+        match worker_changed_since_daemon_start(&path, &metadata.started_at) {
+            Ok(true) => checks.push(DoctorCheck::warning(
+                id,
+                title,
+                format!("{detail} It was rebuilt after daemon {} started, which froze the copy it serves.", metadata.pid),
+                "Run `mj daemon restart` so new sessions use the rebuilt worker. Sessions already running keep their worker until they are quiet enough to be upgraded.",
+            )),
+            Ok(false) => checks.push(DoctorCheck::ready(id, title, detail)),
+            Err(error) => checks.push(DoctorCheck::warning(
+                id,
+                title,
+                format!("{detail} Could not compare it with the daemon's start time: {error:#}"),
+                "Run `mj daemon restart` if rebuilt worker code is not taking effect.",
+            )),
+        }
+    }
+    checks
+}
+
+/// The architectures this configuration needs a portable Linux worker for.
+fn container_worker_architectures(config: Option<&Config>) -> Vec<String> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    let mut architectures = Vec::new();
+    for target in config.targets.values() {
+        let container = match target {
+            TargetTemplate::LocalPodman { container }
+            | TargetTemplate::LocalDocker { container }
+            | TargetTemplate::AppleContainer { container }
+            | TargetTemplate::SshPodman { container, .. }
+            | TargetTemplate::SshDocker { container, .. } => container,
+            _ => continue,
+        };
+        let arch = container
+            .platform
+            .as_deref()
+            .and_then(|platform| platform.rsplit('/').next())
+            .map_or_else(
+                || std::env::consts::ARCH.to_owned(),
+                normalized_worker_architecture,
+            );
+        if !architectures.contains(&arch) {
+            architectures.push(arch);
+        }
+    }
+    architectures
+}
+
+/// Container platforms name architectures the way Docker does; worker files
+/// are named the way Rust target triples do.
+fn normalized_worker_architecture(platform_arch: &str) -> String {
+    match platform_arch {
+        "amd64" => "x86_64".to_owned(),
+        "arm64" => "aarch64".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// The digests the daemon's immutable worker cache holds.
+///
+/// The cache is never pruned, so this is what any daemon on this machine has
+/// pinned at some point, which is why it is reported rather than judged.
+fn pinned_worker_digests() -> Vec<String> {
+    let root = mj_core::config::data_dir().join("workers").join("pinned");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut digests: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    digests.sort();
+    digests
+}
+
+/// Whether a worker file was written after the daemon started.
+///
+/// The daemon copies the file it finds at startup, so a later modification is
+/// exactly the case where the running daemon serves older content.
+fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bool> {
+    let started: SystemTime = chrono::DateTime::parse_from_rfc3339(started_at)
+        .map_err(|error| anyhow::anyhow!("parse daemon start time {started_at:?}: {error}"))?
+        .into();
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified > started)
 }
 
 fn worker_binary_checks(config: Option<&Config>) -> Vec<DoctorCheck> {

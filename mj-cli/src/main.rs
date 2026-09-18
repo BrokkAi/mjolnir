@@ -1000,6 +1000,11 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
     Ok("workspace-1".to_owned())
 }
 
+/// Name an executable for a person, or say plainly that it is unknown.
+fn describe_executable(path: Option<std::path::PathBuf>) -> String {
+    path.map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
+}
+
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Status => {
@@ -1020,6 +1025,20 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 },
                 status.phone_status
             );
+            // Two builds can report the same version, so the version line
+            // cannot answer "is my rebuilt code running?". The executable file
+            // can, and it is the question a development restart turns on.
+            match daemon::process_runs_this_executable(status.pid)? {
+                Some(true) => println!("This daemon runs this build."),
+                Some(false) => println!(
+                    "This daemon runs a different executable ({}) than this client ({}); \
+                     commands work, but code you rebuilt is not running. \
+                     Run `mj daemon restart` from this build.",
+                    describe_executable(daemon::process_executable_path(status.pid)),
+                    describe_executable(daemon::running_executable_path()),
+                ),
+                None => {}
+            }
             if daemon.protocol_version() != daemon::PROTOCOL_VERSION {
                 println!(
                     "The daemon speaks protocol {} while this build speaks {}; \

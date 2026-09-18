@@ -7,6 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 pub(crate) use mj_client::daemon::*;
+pub(crate) use mj_client::executable::{
+    process_executable_path, process_runs_this_executable, running_executable_path,
+};
 pub(crate) use mj_controller::daemon::run_daemon_process;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -223,7 +226,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
         }
         let mut client = connect_or_start_holding(&startup).await?;
         let status = client.status().await?;
-        let identity = daemon_uses_current_executable(status.pid)?;
+        let identity = process_runs_this_executable(status.pid)?;
         if identity != Some(false) || attempt == RESTART_ATTEMPTS {
             return restart_verdict(
                 status.pid,
@@ -267,48 +270,6 @@ fn restart_verdict(
         pid,
         runs_this_build: identity,
     })
-}
-
-/// The file a process is running, for a message a person reads.
-///
-/// Linux names an unlinked executable with a ` (deleted)` suffix. That suffix
-/// is the fact the reader needs, so it is kept rather than trimmed.
-pub(crate) fn process_executable_path(pid: u32) -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        fs::read_link(format!("/proc/{pid}/exe")).ok()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let process_id = sysinfo::Pid::from_u32(pid);
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[process_id]),
-            true,
-            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-        );
-        system
-            .process(process_id)
-            .and_then(|process| process.exe())
-            .map(Path::to_path_buf)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        None
-    }
-}
-
-/// The file this client is running, named the same way.
-pub(crate) fn running_executable_path() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        fs::read_link("/proc/self/exe").ok()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::current_exe().ok()
-    }
 }
 
 /// Why waiting for a launched daemon stopped.
@@ -435,89 +396,6 @@ fn daemon_launch_executable() -> Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutableFileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn executable_file_identity(path: &Path) -> std::io::Result<ExecutableFileIdentity> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let metadata = fs::metadata(path)?;
-    Ok(ExecutableFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-/// Whether process `pid` runs the same executable file as this client.
-///
-/// `Ok(None)` means the question could not be answered: the process is gone,
-/// or this platform does not expose a process's executable.
-#[cfg(target_os = "linux")]
-pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
-    let current = executable_file_identity(Path::new("/proc/self/exe"))
-        .context("inspect the development client executable")?;
-    let daemon_path = PathBuf::from(format!("/proc/{pid}/exe"));
-    let daemon = match executable_file_identity(&daemon_path) {
-        Ok(identity) => identity,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect daemon {pid} executable via {}",
-                    daemon_path.display()
-                )
-            });
-        }
-    };
-    Ok(Some(current == daemon))
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
-    let process_id = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[process_id]),
-        true,
-        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-    );
-    let Some(process) = system.process(process_id) else {
-        return Ok(None);
-    };
-    let Some(path) = process.exe() else {
-        return Ok(None);
-    };
-    let current = std::env::current_exe().context("find development client executable")?;
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
-        Err(error) => return Err(error).context("inspect daemon executable"),
-    };
-    // macOS reports a pathname, not Linux's reference to the running inode.
-    // A newer file at that same pathname also means the daemon is stale.
-    let modified = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    Ok(Some(
-        executable_file_identity(&current)? == executable_file_identity(path)?
-            && modified <= process.start_time(),
-    ))
-}
-
-/// Platforms that do not expose a process's executable answer "unknown", so
-/// every caller has one shape to handle.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
-    let _ = pid;
-    Ok(None)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 static DEVELOPMENT_DAEMON_REFRESH: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -559,7 +437,7 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
                 .context("parse development daemon start time")?
                 .into();
             let stale = tokio::task::spawn_blocking(move || -> Result<bool> {
-                Ok(daemon_uses_current_executable(pid)? == Some(false)
+                Ok(process_runs_this_executable(pid)? == Some(false)
                     || development_workers_changed_since(
                         started,
                         mj_controller::controller::worker_binary_prerequisite_for_arch,
@@ -884,39 +762,6 @@ mod tests {
         assert!(tokio::time::Instant::now().duration_since(started) >= START_TIMEOUT);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn executable_identity_detects_an_nfs_style_replaced_binary() {
-        let directory = tempfile::tempdir().unwrap();
-        let current = directory.path().join("mj");
-        let hard_link = directory.path().join("mj-hard-link");
-        let retained = directory.path().join(".nfs0000000000000001");
-
-        fs::write(&current, b"old executable").unwrap();
-        fs::hard_link(&current, &hard_link).unwrap();
-        assert_eq!(
-            executable_file_identity(&current).unwrap(),
-            executable_file_identity(&hard_link).unwrap(),
-            "two names for the same executable inode must not restart the daemon"
-        );
-
-        fs::rename(&current, &retained).unwrap();
-        fs::write(&current, b"new executable").unwrap();
-        assert_ne!(
-            executable_file_identity(&retained).unwrap(),
-            executable_file_identity(&current).unwrap(),
-            "an NFS-retained old executable must differ from its replacement"
-        );
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn current_process_is_running_the_current_executable() {
-        assert_eq!(
-            daemon_uses_current_executable(std::process::id()).unwrap(),
-            Some(true)
-        );
-        assert_eq!(daemon_uses_current_executable(u32::MAX).unwrap(), None);
-    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn development_refresh_detects_workers_installed_or_rebuilt_after_startup() {
