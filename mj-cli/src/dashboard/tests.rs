@@ -551,6 +551,8 @@ async fn transcript_scrollbar_gestures_bypass_text_selection() {
                     prompt: Rect::new(0, 15, 60, 5),
                     footer: None,
                     overlay: frame.area(),
+                    title_controls: 0,
+                    pane_focused: false,
                 },
                 true,
                 false,

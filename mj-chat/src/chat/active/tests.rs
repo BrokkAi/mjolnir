@@ -2138,6 +2138,8 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         prompt: Rect::new(0, 16, 80, 5),
         footer: None,
         overlay: Rect::new(0, 0, 80, 24),
+        title_controls: 0,
+        pane_focused: false,
     };
 
     terminal
@@ -2270,6 +2272,8 @@ fn draw_in_draws_a_cursor_only_when_the_prompt_has_focus() {
         prompt: Rect::new(0, 16, 80, 6),
         footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
         overlay: Rect::new(0, 0, 80, 24),
+        title_controls: 0,
+        pane_focused: false,
     };
 
     terminal

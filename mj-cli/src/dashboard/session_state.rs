@@ -190,6 +190,31 @@ impl DashboardContext {
             })
     }
 
+    /// The warm chat one pane shows, whether or not that pane has the
+    /// keyboard.
+    ///
+    /// A pane answers only for the session it holds, so this asks the
+    /// arrangement rather than the Sessions selection. While the pane is
+    /// attaching to a different session its old conversation is hidden, the
+    /// same rule the renderer draws by, and nothing is returned.
+    pub(crate) fn pane_chat_mut(&mut self, pane: PaneId) -> Option<&mut mj_chat::chat::ActiveChat> {
+        let Self {
+            chats,
+            opening_chat_sessions,
+            dashboard,
+            ..
+        } = self;
+        let opening = opening_chat_sessions.get(&pane).map(String::as_str);
+        let session_id = dashboard.pane_session(pane)?;
+        if !chat_is_visible(opening, session_id)
+            || dashboard.transition_kind(session_id).is_some()
+            || dashboard.transition_failure_kind(session_id).is_some()
+        {
+            return None;
+        }
+        chats.get_mut(session_id)
+    }
+
     /// The dashboard and the conversation on screen, borrowed together, so a
     /// caller can act on one and report through the other.
     pub(crate) fn dashboard_and_visible_chat(

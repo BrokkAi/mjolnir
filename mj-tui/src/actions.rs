@@ -30,6 +30,8 @@ pub enum CommandId {
     FocusPaneDown,
     FocusPaneUp,
     FocusPaneRight,
+    FocusLastPane,
+    ZoomPane,
     ResizePaneLeft,
     ResizePaneDown,
     ResizePaneUp,
@@ -514,6 +516,30 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::FocusPaneRight),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusLastPane,
+        label: "Focus last pane",
+        description: "Move the keyboard back to the conversation pane it was in before.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::LastPane),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ZoomPane,
+        label: "Zoom pane",
+        description: "Fill the conversation area with the pane you are in, or put the others back.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::Zoom),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -1238,11 +1264,15 @@ impl DashboardState {
             CommandId::OpenSessionSplitBelow => {
                 self.split_command(ratatui::layout::Direction::Vertical)
             }
-            CommandId::ClosePane => DashboardAction::ClosePane,
+            CommandId::ClosePane => DashboardAction::ClosePane {
+                pane: self.focused_pane(),
+            },
             CommandId::FocusPaneLeft => self.focus_pane_command(NavDirection::Left),
             CommandId::FocusPaneDown => self.focus_pane_command(NavDirection::Down),
             CommandId::FocusPaneUp => self.focus_pane_command(NavDirection::Up),
             CommandId::FocusPaneRight => self.focus_pane_command(NavDirection::Right),
+            CommandId::FocusLastPane => self.focus_last_pane_command(),
+            CommandId::ZoomPane => self.zoom_pane_command(),
             CommandId::ResizePaneLeft => self.resize_pane_command(NavDirection::Left),
             CommandId::ResizePaneDown => self.resize_pane_command(NavDirection::Down),
             CommandId::ResizePaneUp => self.resize_pane_command(NavDirection::Up),
@@ -1576,6 +1606,11 @@ mod tests {
             (CommandId::FocusPaneDown, "ctrl+b j"),
             (CommandId::FocusPaneUp, "ctrl+b k"),
             (CommandId::FocusPaneRight, "ctrl+b l"),
+            (CommandId::ZoomPane, "ctrl+b z"),
+            (CommandId::FocusLastPane, "ctrl+b ;"),
+            // Zoom took herdr's `prefix+z`, so the support panes' size key is
+            // its shifted form.
+            (CommandId::CycleFocusedPaneSize, "ctrl+b shift+z"),
         ] {
             assert_eq!(dashboard.key_labels(id), vec![label.to_owned()], "{id:?}");
         }
