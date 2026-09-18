@@ -957,7 +957,26 @@ pub struct BuildCachePreview {
     pub max_size: Option<BuildCacheLimit>,
     /// Why sessions on this target run without a cache, or `None` when they
     /// share one.
-    pub off_reason: Option<String>,
+    pub off_reason: Option<BuildCacheOff>,
+}
+
+/// Why a target's sessions run without the build cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildCacheOff {
+    /// This machine's own `enabled = false`.
+    TurnedOff,
+    /// Nothing on the machine's settings page can turn it on: the global
+    /// switch, the host's mbx, or its filesystem. The text says which.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for BuildCacheOff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TurnedOff => formatter.write_str("turned off for this machine"),
+            Self::Unavailable(reason) => formatter.write_str(reason),
+        }
+    }
 }
 
 /// Where a build cache session's size budget comes from.

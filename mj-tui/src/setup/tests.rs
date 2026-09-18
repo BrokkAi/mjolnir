@@ -1397,9 +1397,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             native_mbx: Some("1.12.0".into()),
             directory: Some("/mnt/fast/mbx-cache".into()),
             max_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
-            off_reason: Some(
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
                 "the filesystem under /mnt/fast/mbx-cache does not support reflinks".into(),
-            ),
+            )),
         })),
     );
     terminal
@@ -1408,7 +1408,8 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
         "Enabled",
-        "Off",
+        "☐",
+        "Off: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
         "/mnt/fast/mbx-cache",
         "537, host mbx config",
         "run without the build cache: the filesystem under",
@@ -1419,6 +1420,24 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         );
     }
 
+    // A host that cannot support the cache cannot be overruled from here: the
+    // row is disabled, so Enter on it does nothing.
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "enabled")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["enabled"],
+        Value::Null,
+        "the blocked switch keeps its value"
+    );
+
     // Changing a setting on the page makes the answer stale and asks again.
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
@@ -1428,6 +1447,78 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::PreviewBuildCache { .. }
     ));
+}
+
+/// On a host that supports the cache the switch is a checkbox: on, off, and
+/// back to unset, which means on.
+#[test]
+fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
+    use mj_core::state::{BuildCacheLimit, BuildCachePreview};
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "build_cache")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("preview build cache");
+    };
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(BuildCachePreview {
+            native_mbx: Some("1.12.0".into()),
+            directory: Some("/home/dev/.cache/mbx".into()),
+            max_size: Some(BuildCacheLimit::Size("100000000000B".into())),
+            off_reason: None,
+        })),
+    );
+    let checked = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
+    assert!(
+        !checked.contains("Off:"),
+        "a supported host explains nothing:\n{checked}"
+    );
+
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "enabled")
+        .unwrap();
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["enabled"],
+        Value::Bool(false)
+    );
+    assert!(dialog.editor.is_none(), "the switch opens no text editor");
+    let unchecked = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(
+        unchecked.contains("☐"),
+        "turning it off unchecks it:\n{unchecked}"
+    );
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["enabled"],
+        Value::Null,
+        "turning it back on writes no override"
+    );
 }
 
 /// The cache size is typed, stored and shown as a whole number of GB.

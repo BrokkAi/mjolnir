@@ -527,6 +527,17 @@ fn value_summary(
         {
             if *value { "☑" } else { "☐" }.to_owned()
         }
+        // The machine's own switch is a checkbox; an unset value means on.
+        // The machine's own switch is a checkbox, and an unset value means on.
+        // A host that cannot support the cache reports an unchecked box
+        // through `automatic`, whatever the machine asks for.
+        Value::Bool(_) | Value::Null if is_build_cache_field(&child_path, "enabled") => {
+            if value.as_bool().unwrap_or(true) {
+                automatic.unwrap_or_else(|| "☑".to_owned())
+            } else {
+                "☐".to_owned()
+            }
+        }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
         // The cache size is measured in whole GB, whatever unit the file
         // spells it in. Only a hand-edited invalid value keeps its own text.
@@ -871,6 +882,19 @@ impl SetupDialog {
             return;
         };
         let value = self.draft.pointer(&pointer(&path)).unwrap();
+        if is_build_cache_field(&path, "enabled") {
+            // An unset value means on, so the box cycles on → off → unset.
+            let on = value.as_bool().unwrap_or(true);
+            if let Some(reason) = self.build_cache_blocked() {
+                let notice = format!("The build cache cannot be turned on here: {reason}");
+                self.notice = Some(notice);
+                return;
+            }
+            *self.draft.pointer_mut(&pointer(&path)).unwrap() =
+                if on { Value::Bool(false) } else { Value::Null };
+            self.form = RefCell::new(Dialog::default());
+            return;
+        }
         if value.is_object() || value.is_array() {
             self.path = path;
             self.selected = 0;
@@ -1148,12 +1172,9 @@ impl SetupDialog {
             return None;
         }
         let label = match &preview.result {
-            BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
-            BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
-                "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
-                "enabled" => "On".to_owned(),
+                "enabled" if preview.off_reason.is_some() => "☐".to_owned(),
+                "enabled" => "☑".to_owned(),
                 "directory" => preview
                     .directory
                     .as_ref()
@@ -1172,8 +1193,32 @@ impl SetupDialog {
                 },
                 _ => return None,
             },
+            // The checkbox keeps showing the machine's own setting while the
+            // other fields report how far the lookup got.
+            _ if field == "enabled" => return None,
+            BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
+            BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
         };
         Some(label)
+    }
+
+    /// The reason this page's host cannot support the build cache at all, so
+    /// the machine's own switch cannot turn it on.
+    fn build_cache_blocked(&self) -> Option<&str> {
+        use mj_core::state::BuildCacheOff;
+        let (_, key) = self.build_cache_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        match &preview.result {
+            BuildCachePreviewResult::Ready(Some(preview)) => match &preview.off_reason {
+                Some(BuildCacheOff::Unavailable(reason)) => Some(reason.as_str()),
+                Some(BuildCacheOff::TurnedOff) | None => None,
+            },
+            _ => None,
+        }
     }
 
     /// The `archive_after_days` value the SessionWiki page is showing right
@@ -2395,11 +2440,16 @@ pub(crate) fn render_setup(
         let keys = dialog.keys();
         let mut rows = Vec::new();
         let mut row_map = Vec::new();
+        // Rows a page draws but cannot act on, such as the switch of a
+        // machine whose host has no cache to share.
+        let mut row_enabled = Vec::new();
+        let blocked = dialog.build_cache_blocked().map(str::to_owned);
         for row in page_plan(&dialog.path, &keys) {
             let index = match row {
                 PageRow::Gap => {
                     rows.push(Line::raw(""));
                     row_map.push(None);
+                    row_enabled.push(true);
                     continue;
                 }
                 PageRow::Heading(heading) => {
@@ -2408,6 +2458,7 @@ pub(crate) fn render_setup(
                         theme::muted().add_modifier(Modifier::BOLD),
                     ));
                     row_map.push(None);
+                    row_enabled.push(true);
                     continue;
                 }
                 PageRow::Setting(index) => index,
@@ -2431,6 +2482,23 @@ pub(crate) fn render_setup(
             };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));
+            let unavailable = blocked
+                .as_deref()
+                .filter(|_| is_build_cache_field(&child_path, "enabled"));
+            row_enabled.push(unavailable.is_none());
+            // Why the switch cannot be turned on, on its own unselectable line
+            // under the row it explains.
+            if let Some(reason) = unavailable {
+                rows.push(Line::styled(
+                    truncate(
+                        &format!("{SETTING_GUTTER}    Off: {reason}"),
+                        usize::from(body.width),
+                    ),
+                    theme::muted(),
+                ));
+                row_map.push(None);
+                row_enabled.push(true);
+            }
         }
         if choice_editor {
             // The page remains visible behind a choice popup, but its controls
@@ -2455,7 +2523,7 @@ pub(crate) fn render_setup(
                 &rows,
                 dialog.selected,
                 &row_map,
-                &[],
+                &row_enabled,
                 &mut form,
                 List,
             );
