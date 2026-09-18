@@ -340,6 +340,7 @@ fn render_combined_themed(
     dashboard.frame_surfaces.clear();
     dashboard.chat_transcript_area = None;
     dashboard.chat_prompt_area = None;
+    dashboard.conversation_area = None;
     let mut area = frame.area();
     frame.render_widget(Block::default().style(theme::base()), area);
     if dashboard.go.is_some() {
@@ -563,18 +564,23 @@ fn render_combined_themed(
         sessions_area.width,
         sessions_height,
     );
+    // The whole conversation band, before it is divided into a transcript
+    // and a prompt. The tiled panes are laid out in this rectangle, so it is
+    // what a split or a directional pane move is measured against.
+    let conversation_area = Rect::new(
+        content_area.x,
+        content_area.y,
+        content_area.width,
+        upper_content_height,
+    );
+    dashboard.conversation_area = Some(conversation_area);
     let upper_bands = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(heights.transcript),
             Constraint::Length(heights.prompt),
         ])
-        .split(Rect::new(
-            content_area.x,
-            content_area.y,
-            content_area.width,
-            upper_content_height,
-        ));
+        .split(conversation_area);
     let (transcript_area, prompt_area) = (upper_bands[0], upper_bands[1]);
     let support_area = Rect::new(
         if supports_adjacent {

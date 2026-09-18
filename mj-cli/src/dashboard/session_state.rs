@@ -123,21 +123,28 @@ impl DashboardContext {
             self.defer_chat_open();
             return;
         }
-        if self.attachment.select(&selected) {
+        let pane = self.dashboard.focused_pane();
+        if self.attachments.entry(pane).or_default().select(&selected) {
             self.open_chat_session(&selected);
         }
     }
 
+    /// Stops the focused pane's attach. A failed or cancelled open stays
+    /// observed, so it is not retried on every background wakeup.
     pub(crate) fn cancel_chat_open(&mut self) {
-        self.attachment.cancel();
-        self.opening_chat_session = None;
-        self.dashboard.set_opening_session(None);
+        let pane = self.dashboard.focused_pane();
+        self.attachments.entry(pane).or_default().cancel();
+        self.opening_chat_sessions.remove(&pane);
+        self.sync_opening_session();
     }
 
+    /// Gives up the focused pane's attach in a way that allows one fresh
+    /// attempt when whatever owns the session has finished with it.
     pub(crate) fn defer_chat_open(&mut self) {
-        self.attachment.defer();
-        self.opening_chat_session = None;
-        self.dashboard.set_opening_session(None);
+        let pane = self.dashboard.focused_pane();
+        self.attachments.entry(pane).or_default().defer();
+        self.opening_chat_sessions.remove(&pane);
+        self.sync_opening_session();
     }
 
     /// The warm chat when it belongs on screen.
@@ -149,24 +156,28 @@ impl DashboardContext {
     /// running while an attach is pending, failed, or cancelled.
     pub(crate) fn visible_chat(&mut self) -> Option<&mut mj_chat::chat::ActiveChat> {
         let Self {
-            active_chat,
-            opening_chat_session,
+            chats,
+            opening_chat_sessions,
             dashboard,
             ..
         } = self;
-        let opening = opening_chat_session.as_deref();
-        active_chat.as_mut().filter(|chat| {
-            // A launch standby stands in front of the conversation that was
-            // selected when the creation started, so typing meant for the new
-            // session cannot land in the old one.
-            !dashboard.launch_standby_capturing()
-                && chat_is_visible(opening, chat.session_id())
-                && dashboard.selected_session_id() == Some(chat.session_id())
-                && dashboard.transition_kind(chat.session_id()).is_none()
-                && dashboard
-                    .transition_failure_kind(chat.session_id())
-                    .is_none()
-        })
+        let opening = opening_chat_sessions
+            .get(&dashboard.focused_pane())
+            .map(String::as_str);
+        chats
+            .get_mut(dashboard.current_session_id()?)
+            .filter(|chat| {
+                // A launch standby stands in front of the conversation that was
+                // selected when the creation started, so typing meant for the new
+                // session cannot land in the old one.
+                !dashboard.launch_standby_capturing()
+                    && chat_is_visible(opening, chat.session_id())
+                    && dashboard.selected_session_id() == Some(chat.session_id())
+                    && dashboard.transition_kind(chat.session_id()).is_none()
+                    && dashboard
+                        .transition_failure_kind(chat.session_id())
+                        .is_none()
+            })
     }
 
     pub(crate) fn needs_animation(&mut self) -> bool {

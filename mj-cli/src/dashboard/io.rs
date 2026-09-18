@@ -87,6 +87,9 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         generation: u64,
+        /// The pane that asked for this conversation. A result whose pane has
+        /// since moved on to another session is dropped.
+        pane: mj_tui::tile_layout::PaneId,
         session_id: String,
         result: Box<std::result::Result<mj_chat::chat::PreparedChat, String>>,
     },
@@ -421,6 +424,8 @@ impl DashboardContext {
                         }
                         self.workspace_layouts
                             .insert(workspace_id.clone(), layout.clone());
+                        self.dashboard
+                            .cache_workspace_layout(&workspace_id, layout.clone());
                         self.layout_persistence.remember(workspace_id, layout);
                     }
                 }
@@ -486,11 +491,7 @@ impl DashboardContext {
                 session_id,
                 message,
             } => {
-                match self
-                    .active_chat
-                    .as_mut()
-                    .filter(|chat| chat.session_id() == session_id)
-                {
+                match self.chats.get_mut(&session_id) {
                     Some(chat) => chat.report_review_refusal(message),
                     // The chat moved on; the refusal still belongs on screen.
                     None => self.dashboard.set_notice(message),
@@ -596,20 +597,23 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ChatOpened {
                 generation,
+                pane,
                 session_id,
                 result,
             } => {
-                // Ignore a late result after a newer request has taken its
-                // place (or the dashboard has shut down).
+                // Ignore a late result after the pane that asked for it moved
+                // on (or the dashboard has shut down).
                 if !self
-                    .attachment
-                    .accepts(generation, self.dashboard.selected_session_id())
-                    || self.opening_chat_session.as_deref() != Some(session_id.as_str())
+                    .attachments
+                    .get(&pane)
+                    .is_some_and(|attachment| attachment.accepts(generation, Some(&session_id)))
+                    || self.opening_chat_sessions.get(&pane).map(String::as_str)
+                        != Some(session_id.as_str())
                 {
                     return;
                 }
-                self.opening_chat_session = None;
-                self.dashboard.set_opening_session(None);
+                self.opening_chat_sessions.remove(&pane);
+                self.sync_opening_session();
                 // The attach may have crossed a lifecycle boundary while it
                 // was preparing. Keep the warm chat/draft untouched and drop
                 // the late result instead of reviving a retiring conversation.
@@ -625,17 +629,12 @@ impl DashboardContext {
                 }
                 match *result {
                     Ok(chat) => {
-                        // The old warm chat continued receiving feed updates
-                        // while this attach was in flight. Capture and persist
-                        // its latest local composer just before replacing it.
-                        if let Some(ordinal) = self
-                            .active_chat
-                            .as_ref()
-                            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
-                        {
-                            self.record_detach(ordinal);
-                        }
-                        self.save_active_question_draft();
+                        // A chat already warm for this session continued
+                        // receiving feed updates while the attach was in
+                        // flight. Capture and persist its latest local
+                        // composer just before replacing it.
+                        self.record_chat_detach(&session_id);
+                        self.save_question_draft(&session_id);
                         // Whatever the user typed into the standby composer
                         // while this attach ran is the newest draft, so it
                         // wins over the copy captured when the open started.
@@ -648,17 +647,17 @@ impl DashboardContext {
                         } else {
                             chat
                         };
-                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
+                        let mut chat = chat.open_replacing(self.chats.get(&session_id));
                         self.restore_question_draft(&session_id, &mut chat);
-                        self.active_chat = Some(chat);
+                        self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
                         // was in flight is handed over now.
                         self.refresh_chat_context();
-                        self.apply_runtime_review_to_active_chat();
+                        self.apply_runtime_review_to_chat(&session_id);
                         self.dashboard.set_current_session(Some(&session_id));
                         self.dashboard.clear_notice();
-                        self.acknowledge_visible_chat();
+                        self.acknowledge_visible_chats();
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");

@@ -990,7 +990,7 @@ pub(crate) async fn apply_dashboard_action(
                 .set_notice(format!("Stopping {}…", short_id(&session_id)));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
-            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
@@ -1020,7 +1020,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::ForceStop { session_id } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
-            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -1041,7 +1041,7 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
-            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -1062,7 +1062,7 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Destroying);
-            mark_active_chat_retiring(context.active_chat.as_mut(), &session_id);
+            mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -1449,9 +1449,7 @@ impl DashboardContext {
         session_id: &str,
         kind: SessionOperationKind,
     ) -> LifecycleOperationRequest {
-        if self.opening_chat_session.as_deref() == Some(session_id) {
-            self.cancel_chat_open();
-        }
+        self.cancel_chat_open_for(session_id);
         self.dashboard
             .begin_session_operation(session_id.to_owned(), kind, None);
         // A restart or resume parks the conversation behind the standby
@@ -1463,12 +1461,7 @@ impl DashboardContext {
             SessionOperationKind::Launching | SessionOperationKind::Resuming
         ) {
             self.dashboard.select_active_session(session_id);
-            if let Some(text) = self
-                .active_chat
-                .as_ref()
-                .filter(|chat| chat.session_id() == session_id)
-                .map(|chat| chat.draft())
-            {
+            if let Some(text) = self.chats.get(session_id).map(|chat| chat.draft()) {
                 self.dashboard.seed_standby_prompt(session_id, text);
             }
             self.dashboard.focus_prompt();

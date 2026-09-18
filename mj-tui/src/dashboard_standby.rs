@@ -6,14 +6,22 @@ use super::*;
 const LAUNCH_STANDBY_SESSION_ID: &str = "launching";
 
 impl DashboardState {
-    /// Records the conversation on screen, which decides which project the
-    /// compact Sessions list belongs to.
+    /// Records the conversation the focused pane shows, which decides which
+    /// project the compact Sessions list belongs to.
     pub fn set_current_session(&mut self, session_id: Option<&str>) {
-        let session_id = session_id.map(str::to_owned);
-        if self.current_session_id == session_id {
+        let pane = self.conversation_layout.focused();
+        if self.pane_sessions.get(&pane).map(String::as_str) == session_id {
             return;
         }
-        self.current_session_id = session_id;
+        match session_id {
+            Some(session_id) => {
+                self.pane_sessions.insert(pane, session_id.to_owned());
+            }
+            None => {
+                self.pane_sessions.remove(&pane);
+            }
+        }
+        self.mark_layout_modified();
         self.clamp_selections();
     }
 
@@ -26,8 +34,11 @@ impl DashboardState {
             .and_then(|detail| detail.last_activity_at_ms)
     }
 
+    /// The session the focused pane shows, if it is not empty.
     pub fn current_session_id(&self) -> Option<&str> {
-        self.current_session_id.as_deref()
+        self.pane_sessions
+            .get(&self.conversation_layout.focused())
+            .map(String::as_str)
     }
 
     /// Records the session an attach is running for, or clears it when the

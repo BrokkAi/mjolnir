@@ -644,9 +644,12 @@ pub struct DashboardState {
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
-    /// The session whose conversation is on screen, or is being opened. It
-    /// decides which project the compact Sessions list belongs to.
-    pub(crate) current_session_id: Option<String>,
+    /// The conversation area's tiled panes. The focused pane holds the
+    /// conversation the keyboard belongs to; every pane may show a session.
+    pub(crate) conversation_layout: tile_layout::TileLayout,
+    /// The session each conversation pane shows. A pane with no entry is
+    /// empty, which is what an unfilled split starts as.
+    pub(crate) pane_sessions: BTreeMap<tile_layout::PaneId, String>,
     /// The session an attach is running for, while it is still in flight.
     /// The conversation band draws as empty for as long as this is set to a
     /// session other than the one on screen, so the transcript never belongs
@@ -658,6 +661,10 @@ pub struct DashboardState {
     /// is over rather than by what has focus.
     pub(crate) chat_transcript_area: Option<Rect>,
     pub(crate) chat_prompt_area: Option<Rect>,
+    /// The whole conversation band from the last frame: the rectangle the
+    /// tiled panes are laid out in. Splits and directional pane focus are
+    /// computed against it.
+    pub(crate) conversation_area: Option<Rect>,
     pub(crate) resume_sessions_area: Option<Rect>,
     /// Selectable surfaces, rebuilt by every frame in render order so the
     /// selection engine can hit-test the screen the user is looking at.
@@ -730,6 +737,9 @@ pub struct DashboardState {
     /// A pane-size update from the controller may not overwrite a local edit
     /// made in this client, even when it arrives after the edit.
     workspace_pane_sizes_modified: BTreeSet<String>,
+    /// The same rule for the conversation pane layout: a controller update
+    /// may not overwrite an arrangement this client has already changed.
+    workspace_layouts_modified: BTreeSet<String>,
     workspace_tab_areas: Vec<(String, Rect)>,
     pub(crate) subagent_workspace_close_area: Option<Rect>,
     pub(crate) workspace_pane_area: Option<Rect>,
@@ -756,6 +766,7 @@ struct WorkspaceViewState {
     capacity_index: usize,
     quota_index: usize,
     pane_sizes: PaneSizes,
+    conversation_layout: mj_core::workspace::ConversationLayout,
     collapsed_project_keys: BTreeSet<String>,
     focus: Focus,
 }
@@ -770,12 +781,14 @@ impl WorkspaceViewState {
             capacity_index: dashboard.capacity_index,
             quota_index: dashboard.quota_index,
             pane_sizes: dashboard.pane_sizes,
+            conversation_layout: dashboard.export_conversation_layout(),
             collapsed_project_keys: dashboard.collapsed_project_keys.clone(),
             focus: dashboard.focus,
         }
     }
 }
 
+mod dashboard_conversation;
 mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
@@ -820,11 +833,13 @@ impl DashboardState {
             quota_index: 0,
             focus: Focus::Sessions,
             pane_sizes: PaneSizes::default(),
-            current_session_id: None,
+            conversation_layout: tile_layout::TileLayout::new().0,
+            pane_sessions: BTreeMap::new(),
             opening_session: None,
             pane_areas: None,
             chat_transcript_area: None,
             chat_prompt_area: None,
+            conversation_area: None,
             resume_sessions_area: None,
             frame_surfaces: FrameSurfaces::new(),
             surface_form: RefCell::new(mj_chat::components::Form::default()),
@@ -854,6 +869,7 @@ impl DashboardState {
             subagent_parent_id: None,
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
+            workspace_layouts_modified: BTreeSet::new(),
             workspace_tab_areas: Vec::new(),
             subagent_workspace_close_area: None,
             workspace_pane_area: None,

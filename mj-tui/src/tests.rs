@@ -2419,3 +2419,110 @@ fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
         }
     );
 }
+
+/// Two running sessions in the active workspace, so a pane can be given one
+/// of them and a split the other.
+fn dashboard_with_two_sessions() -> DashboardState {
+    let mut second = running_session();
+    second.id = "session-2".into();
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.state.sessions.insert(second.id.clone(), second);
+    dashboard
+}
+
+#[test]
+fn setting_the_current_session_writes_only_the_focused_pane() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+
+    dashboard.set_current_session(Some("session-1"));
+
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.pane_session(second), Some("session-1"));
+    assert_eq!(dashboard.pane_session(first), Some("session-1"));
+    dashboard.focus_pane(first);
+    dashboard.set_current_session(None);
+    assert_eq!(dashboard.pane_session(first), None);
+    assert_eq!(dashboard.pane_session(second), Some("session-1"));
+}
+
+#[test]
+fn a_split_shows_its_session_in_the_new_pane_and_takes_the_focus() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+
+    assert_ne!(second, first);
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.current_session_id(), Some("session-2"));
+    assert_eq!(dashboard.pane_session(first), Some("session-1"));
+    assert_eq!(dashboard.pane_for_session("session-1"), Some(first));
+    // Focusing a pane moves the Sessions highlight onto what it shows.
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    dashboard.focus_pane(first);
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+}
+
+#[test]
+fn closing_the_last_pane_empties_it_instead_of_refusing() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let only = dashboard.focused_pane();
+
+    let closed = dashboard.close_focused_pane();
+
+    assert_eq!(closed.as_deref(), Some("session-1"));
+    assert_eq!(dashboard.focused_pane(), only);
+    assert_eq!(dashboard.current_session_id(), None);
+    assert!(dashboard.pane_session_ids().is_empty());
+}
+
+#[test]
+fn the_conversation_layout_round_trips_with_its_sessions_and_focus() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Vertical, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_pane(first);
+    let saved = dashboard.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID);
+    assert!(saved.validate().is_ok());
+
+    let mut restored = dashboard_with_two_sessions();
+    restored.cache_workspace_layout(mj_core::workspace::DEFAULT_WORKSPACE_ID, saved.clone());
+
+    assert_eq!(restored.focused_pane(), first);
+    assert_eq!(restored.pane_session(first), Some("session-1"));
+    assert_eq!(restored.pane_session(second), Some("session-2"));
+    assert_eq!(
+        restored.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID),
+        saved
+    );
+}
+
+#[test]
+fn a_restored_pane_whose_session_is_gone_opens_empty() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    let saved = dashboard.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID);
+
+    // The second session was closed and removed while this client was away.
+    let mut restored = dashboard_with_session(running_session());
+    restored.cache_workspace_layout(mj_core::workspace::DEFAULT_WORKSPACE_ID, saved);
+
+    assert_eq!(restored.pane_session(first), Some("session-1"));
+    assert_eq!(restored.pane_session(second), None);
+}

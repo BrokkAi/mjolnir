@@ -1341,3 +1341,50 @@ fn shutdown_cancels_process_owning_critical_operations() {
 
     assert!(cancelled.load(Ordering::Acquire));
 }
+
+/// Every warm conversation is pumped on every loop iteration, not only the
+/// one the focused pane shows. Each of these chats starts on a stopped
+/// session handle and only reaches its replacement actor while it is being
+/// pumped, so both reporting the reconnection proves both were driven.
+#[tokio::test]
+async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
+    let mut fixtures = Vec::new();
+    let mut notices = Vec::new();
+    let mut chats = BTreeMap::new();
+    for session_id in ["session-1", "session-2"] {
+        let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
+        let chat_notices = Notices::default();
+        chats.insert(
+            session_id.to_owned(),
+            ActiveChat::open(
+                fixture.stopped.clone(),
+                "bundle-1",
+                None,
+                fixture.control.clone(),
+                SessionHeaderIdentity::default(),
+                String::new(),
+                chat_notices.clone(),
+            ),
+        );
+        notices.push(chat_notices);
+        fixtures.push(fixture);
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !notices.iter().all(|notices| {
+            notices
+                .current()
+                .is_some_and(|notice| notice.contains("Reconnected"))
+        }) {
+            super::pump_chats(&mut chats).await;
+        }
+    })
+    .await
+    .expect("both warm conversations reconnected while being pumped");
+
+    assert!(
+        chats
+            .values()
+            .all(mj_chat::chat::ActiveChat::session_feed_open)
+    );
+}

@@ -14,15 +14,26 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 
 
 - [x] (2026-09-17) Design agreed with the user; plan written as this ExecPlan (M0).
-- [ ] M1: the layout tree in `mj-tui/src/tile_layout.rs`, with unit tests.
+- [x] (2026-09-17) M1: the layout tree in `mj-tui/src/tile_layout.rs`, with unit tests (c3024ba1).
 - [x] (2026-09-17) M2: the persisted per-workspace layout: type in `mj-core`, schema migration 38, database functions, daemon action, client method, generalized save coordinator in `mj-cli`.
-- [ ] M3: many warm chats in the terminal controller (`mj-cli`), keyed by session id, all pumped and acknowledged.
+- [x] (2026-09-17) M3: the model in `mj-tui` (`DashboardState` holds the tile layout and its pane sessions) and many warm chats in the controller (`mj-cli`), keyed by session id, all pumped and acknowledged. Rendering still draws only the focused pane and no command creates a split; both are M4.
 - [ ] M4: rendering of several panes and the pane commands in `mj-tui`, reachable from the F2 palette and the session row `⋯` menu.
 - [ ] M5: prefix keybindings. Blocked until the prefix-key work from the `hel3` worktree merges into this branch.
 
 ## Surprises & Discoveries
 
 
+- M3: `mj-cli/src/dashboard/tests.rs` never builds a `DashboardContext`. It
+  cannot: the context takes the terminal, starts the pollers, and talks to the
+  daemon. The M3 controller behaviours that the plan listed as `mj-cli` tests
+  are therefore tested where they are decided: the pane and session
+  bookkeeping in `mj-tui/src/tests.rs`, and the pump over many chats in
+  `mj-cli/src/dashboard/tests.rs`, which drives the real `pump_chats` future
+  with two warm chats built from `replacement_session_test_fixture`.
+- M3: nothing read `DashboardState::current_session_id()` before this
+  milestone; only `set_current_session` was called. Making it the focused
+  pane's session therefore changed no existing caller, and it is now the
+  lookup key for the focused chat in `mj-cli`.
 - M2: nothing in `mj-controller/src/database/tests.rs` pins the schema revision
   as a literal; every test uses the `SCHEMA_VERSION` constant, so bumping it to
   38 needed no fixture edits.
@@ -36,6 +47,35 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 
 ## Decision Log
 
+
+- Decision: M3 is the model and the controller; M4 is the view and the
+  commands. After M3 `DashboardState` holds the tile layout, its pane
+  sessions, and the per-workspace cache, and `mj-cli` holds one warm
+  `ActiveChat` per pane session, all pumped every loop iteration. Rendering
+  still draws only the focused pane's chat and no user command creates a
+  split.
+  Rationale: The two halves touch different files and the controller change is
+  what the rendering needs underneath it. Splitting them keeps each commit
+  revertible on its own.
+  Date/Author: 2026-09-17, user and Fable.
+
+- Decision: A late attach result is accepted when the pane that asked for it
+  still wants that session, rather than when the Sessions selection still
+  names it.
+  Rationale: With several panes the selection is no longer the only thing that
+  decides whether a result is still wanted. The chat installs into the pane
+  that asked; `visible_chat` still keeps it off screen while the selection is
+  elsewhere, so nothing is drawn under the wrong highlight.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: Switching workspaces swaps the whole arrangement in, and the warm
+  chats no pane shows any more are detached and dropped.
+  Rationale: The layout is per workspace, so the panes of the workspace being
+  left no longer exist. Without the sweep their chats would stay warm with
+  nothing able to close them, which is a leak the single-chat design did not
+  have. `DashboardContext::select_workspace` no longer clears the current
+  session by hand: the swap does it.
+  Date/Author: 2026-09-17, Fable.
 
 - Decision: Tile only the conversation region (transcript plus prompt). The Sessions, Workspaces, Targets, and Quota panes and the footer stay where they are.
   Rationale: The user wants several conversations visible at once; the support panes already have their own sizing model (`PaneSizes`) and do not need to move.
@@ -259,6 +299,15 @@ Every milestone is additive until M3, which replaces the single-chat field; M3 a
 
 ## Artifacts and Notes
 
+
+M3 landed in: `mj-tui/src/tile_layout.rs` (conversion to and from
+`ConversationLayout`), `mj-tui/src/dashboard_conversation.rs` (the new pane
+methods on `DashboardState`), `mj-tui/src/lib.rs`,
+`mj-tui/src/dashboard_standby.rs` (a derived `current_session_id`),
+`mj-tui/src/dashboard_workspaces.rs` (the per-workspace cache),
+`mj-tui/src/combined.rs` (the recorded conversation band), and in `mj-cli`
+the `chats` map, the per-pane attachments, and the `select_all` pump across
+`dashboard.rs`, `dashboard/{drafts,drains,io,session_state,surface,chat_tasks,actions}.rs`.
 
 M2 landed in: `mj-core/src/workspace.rs` (`SplitAxis`, `LayoutNode`,
 `ConversationLayout`), `mj-controller/src/database/schema.rs` (migration 38,

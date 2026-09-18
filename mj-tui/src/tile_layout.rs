@@ -9,6 +9,7 @@
 
 use std::cmp::Reverse;
 
+use mj_core::workspace::{ConversationLayout, LayoutNode, SplitAxis};
 use ratatui::layout::{Direction, Rect};
 
 /// Narrowest a pane may be after a split, in columns.
@@ -349,6 +350,86 @@ impl TileLayout {
             prev_focus: None,
             next_id,
         }
+    }
+
+    /// Export the tree, its focus, and the session each pane shows in the
+    /// form the workspace store keeps.
+    pub fn to_conversation_layout(
+        &self,
+        sessions: &std::collections::BTreeMap<PaneId, String>,
+    ) -> ConversationLayout {
+        ConversationLayout {
+            root: saved_node(&self.root),
+            focus: self.focus.raw(),
+            sessions: sessions
+                .iter()
+                .map(|(pane, session)| (pane.raw(), session.clone()))
+                .collect(),
+        }
+    }
+
+    /// Rebuild a layout and its pane sessions from a stored arrangement.
+    /// A stored focus that is not in the tree falls back to the first pane,
+    /// so a damaged record still opens.
+    pub fn from_conversation_layout(
+        layout: &ConversationLayout,
+    ) -> (Self, std::collections::BTreeMap<PaneId, String>) {
+        let root = live_node(&layout.root);
+        let mut ids = Vec::new();
+        collect_ids(&root, &mut ids);
+        let focus = PaneId(layout.focus);
+        let focus = if ids.contains(&focus) {
+            focus
+        } else {
+            *ids.first().expect("a saved layout has at least one pane")
+        };
+        let sessions = layout
+            .sessions
+            .iter()
+            .filter(|(pane, _)| ids.contains(&PaneId(**pane)))
+            .map(|(pane, session)| (PaneId(*pane), session.clone()))
+            .collect();
+        (Self::from_saved(root, focus), sessions)
+    }
+}
+
+fn saved_node(node: &Node) -> LayoutNode {
+    match node {
+        Node::Pane(id) => LayoutNode::Pane { id: id.raw() },
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => LayoutNode::Split {
+            axis: match direction {
+                Direction::Horizontal => SplitAxis::Horizontal,
+                Direction::Vertical => SplitAxis::Vertical,
+            },
+            ratio: *ratio,
+            first: Box::new(saved_node(first)),
+            second: Box::new(saved_node(second)),
+        },
+    }
+}
+
+fn live_node(node: &LayoutNode) -> Node {
+    match node {
+        LayoutNode::Pane { id } => Node::Pane(PaneId(*id)),
+        LayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => Node::Split {
+            direction: match axis {
+                SplitAxis::Horizontal => Direction::Horizontal,
+                SplitAxis::Vertical => Direction::Vertical,
+            },
+            ratio: *ratio,
+            first: Box::new(live_node(first)),
+            second: Box::new(live_node(second)),
+        },
     }
 }
 
