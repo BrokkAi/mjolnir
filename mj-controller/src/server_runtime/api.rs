@@ -739,17 +739,25 @@ fn subagent_status(
     start: Option<&StartStatus>,
     finished_turn_message: Option<&str>,
 ) -> (String, Option<String>, bool) {
+    // A record that failed to start holds the cause; the follow-up's own
+    // message only says that the session would not take a prompt, which is
+    // the symptom. Prefer the cause when there is one, and keep the follow-up
+    // message for a session whose record is fine and whose first prompt or
+    // selector was the thing that failed.
+    let recorded_cause = record
+        .filter(|record| record.state == SessionState::Error)
+        .and_then(|record| record.last_error.clone());
     if let Some(StartStatus::Failed { message }) = start {
-        return ("error".into(), Some(message.clone()), true);
+        return (
+            "error".into(),
+            Some(recorded_cause.unwrap_or_else(|| message.clone())),
+            true,
+        );
     }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
     match lifecycle {
-        Some(SessionState::Error) => (
-            "error".into(),
-            record.and_then(|record| record.last_error.clone()),
-            true,
-        ),
+        Some(SessionState::Error) => ("error".into(), recorded_cause, true),
         Some(SessionState::Lost) => ("lost".into(), None, true),
         Some(SessionState::Stopped | SessionState::DestroyedWithDataLoss) | None => {
             ("stopped".into(), None, true)
@@ -778,7 +786,15 @@ fn subagent_status(
 /// Any other state means the launch ended — stopped, closing, lost or failed —
 /// so the follow-up stops rather than waiting out its deadline. A record that
 /// is not published yet is treated as still starting; the deadline bounds it.
-fn still_starting(states: &SessionStateSource, session_id: &str) -> Result<()> {
+///
+/// A session that failed to start already stored why, so the message carries
+/// that cause. Without it the caller is told the symptom it can already see
+/// and nothing about the reason, which is what #1065 reported.
+fn still_starting(
+    states: &SessionStateSource,
+    exports: &Arc<dyn ExportRuntime>,
+    session_id: &str,
+) -> Result<()> {
     match states(session_id) {
         Some(
             SessionState::Provisioning
@@ -787,7 +803,17 @@ fn still_starting(states: &SessionStateSource, session_id: &str) -> Result<()> {
             | SessionState::Checkpointing,
         )
         | None => Ok(()),
-        Some(state) => bail!("session {session_id} is {state:?} and will not take a first prompt"),
+        Some(state) => match exports
+            .session_record(session_id)
+            .and_then(|record| record.last_error)
+        {
+            Some(cause) => bail!(
+                "session {session_id} is {state:?} and will not take a first prompt: {cause}"
+            ),
+            None => {
+                bail!("session {session_id} is {state:?} and will not take a first prompt")
+            }
+        },
     }
 }
 
@@ -796,12 +822,13 @@ fn still_starting(states: &SessionStateSource, session_id: &str) -> Result<()> {
 async fn apply_followup(
     sessions: SessionControl,
     states: SessionStateSource,
+    exports: Arc<dyn ExportRuntime>,
     session_id: String,
     followup: StartFollowup,
 ) -> Result<Option<u64>> {
     let deadline = tokio::time::Instant::now() + START_DEADLINE;
     let mut handle = loop {
-        still_starting(&states, &session_id)?;
+        still_starting(&states, &exports, &session_id)?;
         ensure!(
             tokio::time::Instant::now() < deadline,
             "session {session_id} had no live actor within 30 minutes"
@@ -828,7 +855,7 @@ async fn apply_followup(
             }
             _ => {}
         }
-        still_starting(&states, &session_id)?;
+        still_starting(&states, &exports, &session_id)?;
         ensure!(
             tokio::time::Instant::now() < deadline,
             "session {session_id} was not ready for its first prompt within 30 minutes"
@@ -855,7 +882,7 @@ async fn apply_followup(
         handle.set_config(key.to_owned(), value).await?;
     }
 
-    still_starting(&states, &session_id)?;
+    still_starting(&states, &exports, &session_id)?;
     match followup.prompt {
         Some(text) => Ok(Some(submit_prompt(&handle, text).await?)),
         None => Ok(None),
@@ -1283,6 +1310,7 @@ impl SubagentBackend for ApiBackend {
             self.prune_starts();
             let sessions = self.sessions.clone();
             let states = self.session_states.clone();
+            let exports = Arc::clone(&self.exports);
             let starts = Arc::clone(&self.starts);
             let id = session_id.clone();
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -1302,7 +1330,7 @@ impl SubagentBackend for ApiBackend {
             let followup_id = session_id.clone();
             let work = tokio::spawn(async move {
                 tokio::select! {
-                    result = apply_followup(sessions, states, followup_id, followup) => result,
+                    result = apply_followup(sessions, states, exports, followup_id, followup) => result,
                     () = cancel.cancelled() => anyhow::bail!("session startup cancelled"),
                 }
             });

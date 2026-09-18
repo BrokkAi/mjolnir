@@ -236,7 +236,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "spawn",
-            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once; the child runs on its own. Do other work, then collect its result with wait. If a model or effort you name cannot be checked when you spawn, an unsupported value is reported later as the child's startup error through wait or list_agents.",
+            "Start an independent Mjolnir child session in this session's target and filesystem. Returns child_session_id at once: that means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one with a new request_key instead.",
             json!({
                 "type":"object",
                 "properties":{

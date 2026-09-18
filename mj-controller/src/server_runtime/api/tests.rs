@@ -85,6 +85,30 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
         ("error".into(), Some("model is unavailable".into()), true)
     );
 }
+
+/// When a child's startup failed, the record holds the reason and the
+/// follow-up holds only the symptom: that the session would not take a first
+/// prompt. The parent model must read the reason, which is what #1065 could
+/// not do.
+#[test]
+fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Error;
+    record.last_error = Some(
+        "sub-agent startup failed: the worker process is gone; it reached the startup step \
+         \"review-baseline\""
+            .into(),
+    );
+    let status = StartStatus::Failed {
+        message: "session child is Error and will not take a first prompt".into(),
+    };
+
+    let (state, output, terminal) = subagent_status(Some(&record), None, Some(&status), None);
+
+    assert_eq!(state, "error");
+    assert!(terminal);
+    assert_eq!(output.as_deref(), record.last_error.as_deref());
+}
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionControlBackend,
     SessionHandleBackend,

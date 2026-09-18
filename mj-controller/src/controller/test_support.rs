@@ -21,7 +21,7 @@ use super::worktree::{
     PrimaryCheckoutRequirement, create_managed_worktree, managed_worktree_target,
 };
 
-pub(super) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
+pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
         build_cache: None,
         container_workspace: None,
