@@ -19,16 +19,34 @@ hel_is_worker() {{
     return 1
 }}
 hel_recorded_worker() {{
-    [ -f "$hel_root/{pid_file}" ] || return 1
-    hel_pid=$(cat "$hel_root/{pid_file}" 2>/dev/null)
+    if [ -f "$hel_root/{pid_file}" ]; then
+        hel_pid=$(cat "$hel_root/{pid_file}" 2>/dev/null)
+        case "$hel_pid" in
+            '' | *[!0-9]*) hel_pid="" ;;
+        esac
+        # The pidfile outlives a launch, so a recycled pid has to be ruled out
+        # by what the process actually is.
+        if [ -n "$hel_pid" ] && hel_is_worker "$hel_pid"; then
+            printf '%s\n' "$hel_pid"
+            return 0
+        fi
+    fi
+    # A worker records its pid in its startup file from its first moment, long
+    # before it writes a pidfile, and the launch clears that file, so a pid
+    # found here can only be this launch's. Existence is therefore the whole
+    # check: a worker does not have to be recognisable by its command line to
+    # be this session's worker.
+    [ -f "$hel_root/{startup_file}" ] || return 1
+    hel_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
     case "$hel_pid" in
         '' | *[!0-9]*) return 1 ;;
     esac
-    hel_is_worker "$hel_pid" || return 1
+    kill -0 "$hel_pid" 2>/dev/null || return 1
     printf '%s\n' "$hel_pid"
 }}"#,
         root = posix_quote(worker_root),
         pid_file = mj_core::relay::WORKER_PID_FILE,
+        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
     )
 }
 
@@ -219,4 +237,85 @@ pub fn in_place_worker_reset_plan(
             .purpose("reset the worker root for an in-place harness replacement")
             .stage(ProvisionStage::Syncing),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_script(script: &str) -> (i32, String) {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run the probe script");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )
+    }
+
+    /// A worker records its own pid in its startup file before it writes a
+    /// pidfile and before its socket exists. The probe has to believe that
+    /// record: a worker is not always recognisable by its command line, and
+    /// one that is not was reported as gone while it was still running.
+    #[test]
+    fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
+        let root = tempfile::tempdir().unwrap();
+        // This test process is certainly alive, and its command line is a test
+        // binary, which matches nothing the probe looks for.
+        std::fs::write(
+            root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
+            format!(
+                "{{\n  \"step\": \"review-baseline\",\n  \"pid\": {},\n  \"steps\": []\n}}",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        let script = format!(
+            "{}\nhel_recorded_worker",
+            worker_daemon_identity_script(&root.path().to_string_lossy())
+        );
+        let (status, stdout) = run_script(&script);
+
+        assert_eq!(status, 0, "the probe must find the recorded worker");
+        assert_eq!(stdout, std::process::id().to_string());
+    }
+
+    /// A startup record left by a worker that has since gone must not be read
+    /// as a live worker.
+    #[test]
+    fn a_startup_record_for_a_dead_pid_reports_no_worker() {
+        let root = tempfile::tempdir().unwrap();
+        // A pid that cannot exist: the kernel rejects it outright.
+        std::fs::write(
+            root.path().join(mj_core::relay::WORKER_STARTUP_FILE),
+            "{\n  \"step\": \"start\",\n  \"pid\": 2147483647,\n  \"steps\": []\n}",
+        )
+        .unwrap();
+
+        let script = format!(
+            "{}\nhel_recorded_worker",
+            worker_daemon_identity_script(&root.path().to_string_lossy())
+        );
+        let (status, stdout) = run_script(&script);
+
+        assert_ne!(status, 0, "a dead pid is not a worker: {stdout}");
+        assert!(stdout.is_empty(), "{stdout}");
+    }
+
+    #[test]
+    fn a_worker_root_with_no_records_reports_no_worker() {
+        let root = tempfile::tempdir().unwrap();
+
+        let script = format!(
+            "{}\nhel_recorded_worker",
+            worker_daemon_identity_script(&root.path().to_string_lossy())
+        );
+        let (status, stdout) = run_script(&script);
+
+        assert_ne!(status, 0);
+        assert!(stdout.is_empty(), "{stdout}");
+    }
 }

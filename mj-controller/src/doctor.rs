@@ -2204,6 +2204,18 @@ fn review_residue_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
         .flat_map(|bundle| bundle.repositories.iter())
         .filter_map(|repository| repository.local.clone())
         .collect();
+    // A session started with `--project-directory` has no bundle, and those
+    // are exactly the repositories a person works in by hand, so they are the
+    // ones where leftovers matter most. A daemon-less machine has no session
+    // database, which is not a reason to skip the configured repositories.
+    if let Ok(state) = crate::database::load_state() {
+        repositories.extend(
+            state
+                .sessions
+                .values()
+                .filter_map(|session| session.project_directory.clone()),
+        );
+    }
     repositories.sort();
     repositories.dedup();
     if repositories.is_empty() {
