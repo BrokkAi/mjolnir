@@ -106,7 +106,10 @@ pub struct ImportProfileOption {
 /// burst of background failures that overwrote each other can still be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NoticeLogDialog {
+    /// First wrapped line drawn.
     pub(crate) scroll: usize,
+    /// The largest useful `scroll`, measured by the renderer at its width.
+    pub(crate) max_scroll: std::cell::Cell<usize>,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
@@ -1126,6 +1129,7 @@ impl DashboardState {
     pub(crate) fn begin_notice_log(&mut self) {
         self.mode = Mode::NoticeLog(NoticeLogDialog {
             scroll: 0,
+            max_scroll: std::cell::Cell::new(0),
             form: RefCell::new(Dialog::default()),
         });
     }
@@ -1135,7 +1139,7 @@ impl DashboardState {
         event: Event,
         mut dialog: NoticeLogDialog,
     ) -> DashboardAction {
-        let last = self.notices.history().len().saturating_sub(1);
+        let last = dialog.max_scroll.get();
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
         {

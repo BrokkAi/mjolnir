@@ -1307,6 +1307,35 @@ fn startup_opens_the_session_with_the_newest_materialized_activity() {
 }
 
 #[test]
+fn startup_never_picks_a_session_whose_target_failed() {
+    let mut failed = live_session("failed", "2026-08-03T00:00:00Z");
+    failed.state = mj_core::state::SessionState::Error;
+    let healthy = live_session("healthy", "2026-08-01T00:00:00Z");
+    let activity = |id: &str| match id {
+        "failed" => Some(300),
+        "healthy" => Some(100),
+        _ => None,
+    };
+    // The failed session is newer and busier, and still not the pick.
+    assert_eq!(
+        startup_session_choice(
+            Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
+            [&failed, &healthy],
+            activity
+        ),
+        Some("healthy".into())
+    );
+    assert_eq!(
+        startup_session_choice(
+            Some(mj_core::workspace::DEFAULT_WORKSPACE_ID),
+            [&failed],
+            activity
+        ),
+        None
+    );
+}
+
+#[test]
 fn startup_activity_in_another_workspace_cannot_replace_the_opened_workspace() {
     let local = live_session("local", "2026-08-01T00:00:00Z");
     let mut foreign = live_session("foreign", "2026-08-03T00:00:00Z");
