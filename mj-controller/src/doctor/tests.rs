@@ -1306,6 +1306,88 @@ fn apple_container_daemon_check_is_ready_once_the_daemon_answers() {
 }
 
 #[test]
+fn a_worker_rebuilt_after_the_daemon_started_is_reported_as_changed() {
+    let directory = tempfile::tempdir().unwrap();
+    let worker = directory.path().join("mj-worker");
+    std::fs::write(&worker, b"worker").unwrap();
+    let started_at = "2026-09-17T23:48:36Z";
+    let started: SystemTime = chrono::DateTime::parse_from_rfc3339(started_at)
+        .unwrap()
+        .into();
+    let file = std::fs::File::options().write(true).open(&worker).unwrap();
+
+    file.set_times(std::fs::FileTimes::new().set_modified(started - Duration::from_secs(60)))
+        .unwrap();
+    assert!(
+        !worker_changed_since_daemon_start(&worker, started_at).unwrap(),
+        "a worker older than the daemon is the one that daemon pinned"
+    );
+
+    file.set_times(std::fs::FileTimes::new().set_modified(started + Duration::from_secs(60)))
+        .unwrap();
+    assert!(
+        worker_changed_since_daemon_start(&worker, started_at).unwrap(),
+        "a worker rebuilt after the daemon started is not the one it serves"
+    );
+}
+
+#[test]
+fn container_platforms_name_the_worker_architecture_the_daemon_resolves() {
+    assert_eq!(normalized_worker_architecture("amd64"), "x86_64");
+    assert_eq!(normalized_worker_architecture("arm64"), "aarch64");
+    assert_eq!(normalized_worker_architecture("x86_64"), "x86_64");
+}
+
+#[test]
+fn every_configured_container_architecture_is_checked_once() {
+    let amd64 = |image: &str| {
+        let mut template = container(image);
+        template.platform = Some("linux/amd64".into());
+        template
+    };
+    let mut arm64 = container("ubuntu:24.04");
+    arm64.platform = Some("linux/arm64".into());
+    let config = config_with([
+        (
+            "one",
+            TargetTemplate::LocalPodman {
+                container: amd64("ubuntu:24.04"),
+            },
+        ),
+        (
+            "two",
+            TargetTemplate::LocalDocker {
+                container: amd64("ghcr.io/example/dev:1"),
+            },
+        ),
+        (
+            "three",
+            TargetTemplate::SshPodman {
+                ssh: ssh_connection(),
+                container: arm64,
+            },
+        ),
+        (
+            "bare",
+            TargetTemplate::SshBare {
+                ssh: ssh_connection(),
+                permissions: mj_core::config::PermissionMode::Yolo,
+                workspace_prefix: PathBuf::from("workspaces"),
+            },
+        ),
+    ]);
+
+    let mut architectures = container_worker_architectures(Some(&config));
+    architectures.sort();
+    assert_eq!(
+        architectures,
+        vec!["aarch64".to_owned(), "x86_64".to_owned()],
+        "each architecture is reported once, and a non-container target adds none"
+    );
+    assert!(container_worker_architectures(None).is_empty());
+}
+
+#[test]
 fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     let instructions = setup_instructions(InstructionsPlatform::Linux);
     assert!(instructions.contains("mj doctor --json"));

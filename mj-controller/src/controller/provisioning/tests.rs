@@ -1237,3 +1237,79 @@ fn a_bare_project_failure_removes_nothing() {
     assert!(!format!("{error:#}").contains("cleanup"));
     assert!(executor.commands().is_empty());
 }
+
+/// A Create that lands while the daemon is downloading its image waits, and
+/// says so as the "Pull image" stage. A Create with nothing to wait for says
+/// nothing about pulling at all.
+#[test]
+fn provisioning_reports_the_pull_stage_only_while_waiting() {
+    #[derive(Default)]
+    struct StageRecorder {
+        stages: Mutex<Vec<targets::ProvisionStage>>,
+        notices: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for StageRecorder {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            unreachable!("waiting for an image runs no commands: {command:?}");
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.stages.lock().unwrap().push(stage);
+        }
+
+        fn notify_notice(&self, notice: &str) {
+            self.notices.lock().unwrap().push(notice.to_owned());
+        }
+    }
+
+    // Its own image, so a concurrent test cannot hold this lock.
+    let image = "ghcr.io/example/pull-stage:latest";
+    let target = targets::TargetTemplate::LocalPodman(ContainerTemplate {
+        build_cache: None,
+        image: image.to_owned(),
+        pull_policy: mj_core::config::ImagePullPolicy::Auto,
+        extra_run_args: Vec::new(),
+        workspace_storage: Default::default(),
+    });
+
+    let quiet = StageRecorder::default();
+    crate::image_pull_gate::with_image_ready(&target, &quiet, || Ok(()))
+        .expect("nothing is downloading, so the work runs straight away");
+    assert!(
+        quiet.stages.lock().unwrap().is_empty(),
+        "a launch with nothing to wait for reported {:?}",
+        quiet.stages.lock().unwrap()
+    );
+    assert!(quiet.notices.lock().unwrap().is_empty());
+
+    let lock = crate::image_pull_gate::image_pull_mutex(&targets::ImageHost::LocalPodman, image);
+    let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let downloader = {
+        let lock = lock.clone();
+        let started = started.clone();
+        std::thread::spawn(move || {
+            let guard = lock.lock().unwrap();
+            started.wait();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(guard);
+        })
+    };
+    started.wait();
+
+    let waiting = StageRecorder::default();
+    crate::image_pull_gate::with_image_ready(&target, &waiting, || Ok(()))
+        .expect("the launch proceeds once the download finishes");
+    assert_eq!(
+        *waiting.stages.lock().unwrap(),
+        vec![targets::ProvisionStage::PullingImage]
+    );
+    let notices = waiting.notices.lock().unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("Waiting for image") && notice.contains(image)),
+        "{notices:?}"
+    );
+    downloader.join().expect("the download thread finishes");
+}

@@ -106,19 +106,28 @@ start of each session. The default agent-dev image avoids that cost.
 
 Container targets default to `pull_policy = "auto"`. Podman and Docker launches
 do not wait on a registry under that default: they start from the image the host
-already has and pull only when the host has no copy at all. The Mjolnir daemon
-refreshes eligible remote `:latest` images for local or SSH Podman and local
-Docker once an hour, and removes the dangling images each pull leaves behind.
-Versioned tags remain cached, digest references stay pinned, and
-`localhost/...` images remain local. Apple container is not part of that
-background loop; it resolves `auto` and refreshes the image while provisioning
-a session.
+already has and pull only when the host has no copy at all.
+
+A few seconds after the Mjolnir daemon starts, it downloads every configured
+container image the host does not have, so your first session does not wait on
+the registry. Local Podman, local Docker, SSH Podman, SSH Docker, and Apple
+container all take part. The dashboard shows "Downloading image ..." while a
+download runs and "Image ... is ready" when it finishes. If you create a
+session while its image is still downloading, the session shows a "Pull image"
+stage and waits for that download instead of starting a second one.
+
+The daemon also refreshes eligible remote `:latest` images once an hour and
+removes the dangling images each pull leaves behind. Versioned tags and digest
+references are downloaded once if absent and then only checked, because their
+content cannot change. A `localhost/...` image cannot be downloaded at all; if
+it is missing, the daemon reports that once rather than every hour.
 
 Set `pull_policy` beside `image` to `always`, `newer`, `missing`, or `never`
 when a target needs an explicit policy. On Podman and Docker, `always` or
-`newer` pulls during launch and remains eligible for the background refresh.
-Apple evaluates the policy only during provisioning; `always` and `newer`
-request a pull there. Existing running containers are never replaced in place.
+`newer` pulls during launch and is refreshed hourly in the background. Apple
+evaluates the policy during provisioning. Only `never` keeps an image out of
+the startup download entirely. Existing running containers are never replaced
+in place.
 
 ## Git clone cache
 

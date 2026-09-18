@@ -2316,3 +2316,69 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
         ["/workspace/src/lib.rs  +1 −0"]
     );
 }
+
+/// A prompt the harness ended without answering keeps its text where
+/// Ctrl-Alt-R can put it back, and says so in the transcript (#970).
+#[test]
+fn an_unanswered_prompt_is_marked_and_stays_restorable() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("1234567890");
+    session.applied_event_ordinal = 9;
+    session.transcript.push(
+        TranscriptItem {
+            stable_id: "user:1".into(),
+            position: 4,
+            latest_content_event_ordinal: None,
+            created_at_ms: 10,
+            last_changed_at_ms: 10,
+            body: TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "rename the module"})],
+            },
+        }
+        .into(),
+    );
+    session.last_turn_outcome = Some(unanswered_outcome(
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    ));
+    chat.apply_materialized(&session, &[], &[]);
+    // The same projection arriving again must not stack a second record.
+    chat.apply_materialized(&session, &[], &[]);
+    assert_eq!(chat.unsent_prompts.len(), 1);
+    assert_eq!(chat.unsent_prompts[0].kind, UnsentKind::Unanswered);
+    assert_eq!(
+        chat.unsent_prompts[0].kind.headline(),
+        "Prompt was not answered"
+    );
+
+    chat.restore_latest_unsent_prompt();
+    assert_eq!(
+        chat.draft_payload(),
+        PromptPayload::text("rename the module")
+    );
+}
+
+/// A turn that ended normally leaves nothing to restore.
+#[test]
+fn a_finished_turn_is_not_offered_for_restore() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("1234567890");
+    session.applied_event_ordinal = 9;
+    session.last_turn_outcome = Some(unanswered_outcome("EndTurn"));
+    chat.apply_materialized(&session, &[], &[]);
+    assert!(chat.unsent_prompts.is_empty());
+}
+
+fn unanswered_outcome(stop_reason: &str) -> mj_core::state::MaterializedTurnOutcome {
+    mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(3),
+        turn_start_position: Some(4),
+        completed_ordinal: 8,
+        completed_at_ms: 20,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: stop_reason.into(),
+        },
+    }
+}

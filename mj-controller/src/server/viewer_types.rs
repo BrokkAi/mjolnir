@@ -106,12 +106,20 @@ impl ViewerSnapshot {
                     // same field, so that state reports it too; every
                     // successful transition clears `last_error`, so this never
                     // reports a failure the session has since recovered from.
+                    //
+                    // A live session's `last_error` is not published here: it
+                    // can hold a raw provisioning chain naming profile homes
+                    // and SSH hosts. A failed close leaves the session alive
+                    // and still owes the person a reason, so the sentence the
+                    // controller composed for them is published whatever state
+                    // the session is in (#1081).
                     launch_error: matches!(
                         session.state,
                         SessionState::Error | SessionState::Stopped
                     )
                     .then(|| session.last_error.clone())
-                    .flatten(),
+                    .flatten()
+                    .or_else(|| session.public_error().map(str::to_owned)),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),

@@ -2562,7 +2562,7 @@ function renderMoveForm() {
       }
     }
     moveStep.append(targetPicker);
-    moveStep.append(el('p', 'dim', 'Move rebuilds a fresh environment. Existing resource sizing and attached directories are retained. Installed packages and files outside the declared workspace are not migrated.'));
+    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target, attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
     clearResourcesInput.type = 'checkbox';
@@ -2587,6 +2587,9 @@ function renderMoveForm() {
       ? 'Resource sizing: use destination defaults. Attached directories remain fixed to this workspace.'
       : 'Resource sizing and attached directories: retain the source workspace settings.'));
     moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
+    moveStep.append(el('p', 'dim', preparation.in_place
+      ? 'Only the harness and profile are replaced; the environment and workspace are kept.'
+      : 'The session is restored into a fresh environment.'));
     if (preparation.source_unavailable) {
       moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
     }
@@ -2605,7 +2608,9 @@ function renderMoveForm() {
         draft.acknowledge = check.checked;
         renderMoveForm();
       };
-      warning.append(check, el('span', '', 'Interrupt the active turn and checkpoint the session before rebuilding it.'));
+      warning.append(check, el('span', '', preparation.in_place
+        ? 'Interrupt the active turn and checkpoint the session before replacing the harness.'
+        : 'Interrupt the active turn and checkpoint the session before rebuilding it.'));
       moveStep.append(warning);
     }
     const queued = preparation.queued_commands || [];
@@ -4792,6 +4797,12 @@ async function submitPrompt() {
 
 const PROSE_ROLES = new Set(['user', 'agent', 'thought']);
 
+// The marker the worker puts on a turn the harness ended without answering
+// (#970). The row carries the prompt so it can go back in the composer without
+// being retyped; it is never resent automatically, because mj cannot tell a
+// prompt the harness dropped from one it acted on silently.
+const PROMPT_UNANSWERED_MARKER = 'ACP prompt returned no session updates';
+
 /// How close to the bottom still counts as reading the tail.
 const TAIL_SLACK_PX = 48;
 
@@ -4844,7 +4855,7 @@ function entryTimestamp(entry) {
 /// Thinking and tool detail are collapsed by default, and which folds the
 /// reader had opened is recorded and restored, so an update does not snap shut
 /// something they were part way through reading.
-function paintEntry(node, entry) {
+function paintEntry(node, entry, unansweredPrompt) {
   const openFolds = new Set(
     [...node.querySelectorAll('details.block-fold[open] > summary')].map(
       summary => summary.textContent,
@@ -4869,9 +4880,27 @@ function paintEntry(node, entry) {
   } else {
     node.replaceChildren(heading, body);
   }
+  if (unansweredPrompt) {
+    const controls = el('div', 'row');
+    controls.append(
+      button('Put back in composer', 'secondary', { restorePrompt: unansweredPrompt }),
+    );
+    node.append(controls);
+  }
   for (const summary of node.querySelectorAll('details.block-fold > summary')) {
     if (openFolds.has(summary.textContent)) summary.parentElement.open = true;
   }
+}
+
+/// The prompt an unanswered-turn row offers to put back, or null.
+///
+/// The text comes from the newest user row before the warning, which is the
+/// prompt that turn was running.
+function unansweredPromptFor(entry, lastUserText) {
+  if (entry.role === 'user') return null;
+  const text = (entry.lines || []).join('\n');
+  if (!text.includes(PROMPT_UNANSWERED_MARKER)) return null;
+  return lastUserText || null;
 }
 
 function renderEntries(entries, replace) {
@@ -4881,7 +4910,10 @@ function renderEntries(entries, replace) {
     entryNodes.clear();
   }
   let appended = false;
+  let lastUserText = null;
   for (const entry of entries) {
+    if (entry.role === 'user') lastUserText = (entry.lines || []).join('\n');
+    const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     let node = entryNodes.get(entry.id);
     if (!node) {
       node = el('article');
@@ -4894,7 +4926,7 @@ function renderEntries(entries, replace) {
     // its folds and drop any text the reader had selected.
     if (node.dataset.updatedSeq === String(entry.updated_seq)) continue;
     node.dataset.updatedSeq = entry.updated_seq;
-    paintEntry(node, entry);
+    paintEntry(node, entry, unansweredPrompt);
   }
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
@@ -5537,6 +5569,15 @@ commandPalette.onclick = event => {
   const row = event.target.closest('button[data-insert]');
   if (!row) return;
   setComposerText(row.dataset.insert);
+  placeComposerCaretAtEnd();
+  promptText.focus();
+  updateCommandPalette();
+};
+
+feed.onclick = event => {
+  const restore = event.target.closest('button[data-restore-prompt]');
+  if (!restore) return;
+  setComposerText(restore.dataset.restorePrompt);
   placeComposerCaretAtEnd();
   promptText.focus();
   updateCommandPalette();

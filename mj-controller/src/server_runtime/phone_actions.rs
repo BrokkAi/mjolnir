@@ -4,6 +4,54 @@ pub(super) const MAX_CONCURRENT_PHONE_ACTIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_BUNDLE_CREATIONS: usize = 4;
 pub(super) const MAX_CONCURRENT_PREFLIGHTS: usize = 4;
 
+/// How one phone action ended when it did not succeed.
+///
+/// `detail` is the whole error chain: it goes to the daemon log and to the
+/// session's error overlay, both of which stay on this machine. `refusal` is
+/// the part that may travel: a sentence written for the caller at the place
+/// the failure was produced. A failure with no refusal answers generically,
+/// which is why nothing leaks when a new failure site says nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PhoneActionFailure {
+    pub(super) detail: String,
+    pub(super) refusal: Option<Refusal>,
+}
+
+impl PhoneActionFailure {
+    pub(super) fn of(error: &anyhow::Error) -> Self {
+        Self {
+            detail: format!("{error:#}"),
+            refusal: Refusal::of(error),
+        }
+    }
+
+    /// A failure with no safe reason to report, such as a task that died
+    /// before the action could say anything about itself.
+    pub(super) fn internal(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            refusal: None,
+        }
+    }
+
+    /// The answer this failure owes the caller. `reference` identifies the log
+    /// entry that carries `detail`, and is used only when there is no refusal.
+    pub(super) fn outcome(&self, reference: &str) -> ActionOutcome {
+        match &self.refusal {
+            Some(refusal) => ActionOutcome::Refused(refusal.clone()),
+            None => ActionOutcome::Failed {
+                reference: reference.to_owned(),
+            },
+        }
+    }
+}
+
+/// Identify one action's log entry, so a caller holding a 500 can find the
+/// daemon-log line that says what actually failed.
+pub(super) fn action_reference(action_id: u64) -> String {
+    format!("{}-{action_id}", std::process::id())
+}
+
 pub(super) struct PhoneActionStarted {
     pub(super) action_id: u64,
     pub(super) session: SessionRecord,

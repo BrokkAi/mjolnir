@@ -94,6 +94,53 @@ match on.
 
 ## Routes
 
+### List workspaces
+
+```text
+GET /api/v1/workspaces
+```
+
+```json
+{
+  "workspaces": [
+    {
+      "id": "workspace-1",
+      "name": "Release work",
+      "created_at": "2026-09-11T07:00:00Z",
+      "last_opened_at": "2026-09-17T09:12:03Z",
+      "session_count": 2
+    }
+  ]
+}
+```
+
+Most recently opened first, which is the order the terminal's workspace tabs
+use. A fresh instance answers with an empty list.
+
+### Create a workspace
+
+```text
+POST /api/v1/workspaces
+{"name": "Release work"}
+```
+
+```json
+{
+  "workspace": {
+    "id": "workspace-1",
+    "name": "Release work",
+    "created_at": "2026-09-17T09:12:03Z",
+    "last_opened_at": "2026-09-17T09:12:03Z",
+    "session_count": 0
+  }
+}
+```
+
+The name is the identity: it is trimmed, must be 1–64 characters with no control
+characters, and is unique case-insensitively. Naming a workspace that already
+exists returns that workspace rather than making a second one, so a script may
+call this before every run. An unusable name returns **400**.
+
 ### List sessions
 
 ```text
@@ -460,6 +507,8 @@ Preconditions, all answering `409` with the reason:
 | Command | Route |
 | --- | --- |
 | `mj api-info` | — (prints the base URL and token path) |
+| `mj workspaces list` | `GET /workspaces` |
+| `mj workspaces create <name>` | `POST /workspaces` |
 | `mj sessions` | `GET /sessions` |
 | `mj sessions --session <id>` | `GET /sessions/{id}` |
 | `mj new` | `POST /sessions` |
@@ -547,6 +596,13 @@ mj set-config --session "$id" --key effort --value high --json
 `GET /api/v1/sessions?workspace_id=<id>` filters the session list. The CLI resolves
 `mj sessions --workspace <name>` to that workspace ID. Without a selector, the
 list includes all workspaces.
+
+`POST /api/v1/sessions` accepts `workspace_id`, and chooses one when the request
+names none: the instance's only workspace when it has exactly one, and the
+`default` workspace when it has none at all, so a fresh instance can be scripted
+without opening the terminal first. An instance with several workspaces needs an
+explicit `workspace_id`. `GET /api/v1/workspaces` and `POST /api/v1/workspaces`
+are the routes for choosing deliberately.
 
 `close` is accepted while provisioning or another lifecycle operation is in
 flight. It cancels cancellable work, prevents the initial prompt, waits for the

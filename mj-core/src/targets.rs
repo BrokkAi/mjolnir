@@ -35,6 +35,9 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 /// The launch phase a command belongs to, reported as launch progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvisionStage {
+    /// Waiting for a background download of this target's image to finish,
+    /// rather than starting a second download of the same image.
+    PullingImage,
     Provisioning,
     Booting,
     Cloning,
@@ -55,6 +58,7 @@ pub enum ProvisionStage {
 impl ProvisionStage {
     pub fn label(self) -> String {
         match self {
+            Self::PullingImage => "Pull image".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -1396,15 +1400,17 @@ impl ImagePullPolicy {
 pub enum ImageHost {
     LocalPodman,
     LocalDocker,
+    AppleContainer,
     SshPodman(SshTarget),
     SshDocker(SshTarget),
 }
 
 impl ImageHost {
-    const fn engine(&self) -> &'static str {
+    pub const fn engine(&self) -> &'static str {
         match self {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",
+            Self::AppleContainer => "container",
         }
     }
 
@@ -1413,6 +1419,7 @@ impl ImageHost {
         match self {
             Self::LocalPodman => "local podman".to_owned(),
             Self::LocalDocker => "local docker".to_owned(),
+            Self::AppleContainer => "apple container".to_owned(),
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
             Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
         }
@@ -1420,13 +1427,27 @@ impl ImageHost {
 
     fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
         match self {
-            Self::LocalPodman | Self::LocalDocker => {
+            Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
             Self::SshPodman(ssh) | Self::SshDocker(ssh) => ssh_command_owned(ssh, args),
         }
         .purpose(purpose)
     }
+}
+
+/// When a background refresh downloads an image.
+///
+/// A host that already has the image is the common case, and most targets
+/// only need the copy to exist. Ordering matters: merging two targets that
+/// share an image takes the larger value, so one demanding target upgrades
+/// the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefreshWhen {
+    /// Pull only when the host has no copy (missing, or auto on a fixed tag).
+    WhenAbsent,
+    /// Pull every tick (always, or newer / auto on a moving tag).
+    Always,
 }
 
 /// The commands that keep one host's copy of one image current, away from any
@@ -1436,59 +1457,78 @@ pub struct ImageRefresh {
     pub host: ImageHost,
     pub image: String,
     pub platform: Option<String>,
+    /// Whether this image is downloaded only when the host lacks it, or on
+    /// every refresh.
+    pub when: RefreshWhen,
     /// Reads the cached image id, so a pull that changed nothing stays quiet.
     /// Run before and after the pull.
     pub image_id: CommandSpec,
     pub pull: CommandSpec,
     /// Dangling images only. Both engines keep an image a container still uses.
-    pub prune: CommandSpec,
+    /// `None` for Apple's `container` engine, which has no verified prune form.
+    pub prune: Option<CommandSpec>,
 }
 
 /// The background refresh for one configured container target, or `None` when
-/// the target's pull policy is satisfied by whatever the host already has.
+/// the target asked never to download the image in the background.
+///
+/// `never` is the only opt-out. Every other policy at least wants the host to
+/// have a copy, so the daemon downloads a missing image once; `always` and
+/// `newer` keep the hourly pull they always had.
 pub fn image_refresh(
     host: ImageHost,
     image: &str,
     platform: Option<&str>,
     pull_policy: ImagePullPolicy,
 ) -> Option<ImageRefresh> {
-    if !matches!(
-        pull_policy.resolve(image),
-        ImagePullPolicy::Always | ImagePullPolicy::Newer
-    ) {
-        return None;
-    }
+    let when = match pull_policy.resolve(image) {
+        ImagePullPolicy::Always | ImagePullPolicy::Newer => RefreshWhen::Always,
+        ImagePullPolicy::Missing => RefreshWhen::WhenAbsent,
+        ImagePullPolicy::Never => return None,
+        ImagePullPolicy::Auto => unreachable!("auto pull policy must resolve"),
+    };
     let engine = host.engine();
+    // Apple's `container` CLI has no `--format` on `image inspect`: the exit
+    // status is what says the image is present, and the printed description
+    // stands in for the id when comparing before and after a pull.
+    let apple = matches!(host, ImageHost::AppleContainer);
+    let mut image_id_args = vec![engine.to_owned(), "image".to_owned(), "inspect".to_owned()];
+    if !apple {
+        image_id_args.push("--format".to_owned());
+        image_id_args.push("{{.Id}}".to_owned());
+    }
+    image_id_args.push(image.to_owned());
     let image_id = host.command(
-        vec![
-            engine.to_owned(),
-            "image".to_owned(),
-            "inspect".to_owned(),
-            "--format".to_owned(),
-            "{{.Id}}".to_owned(),
-            image.to_owned(),
-        ],
+        image_id_args,
         format!("read the cached id of container image {image}"),
     );
-    let mut pull_args = vec![engine.to_owned(), "pull".to_owned()];
-    if let Some(platform) = platform {
+    let mut pull_args = vec![engine.to_owned()];
+    if apple {
+        pull_args.push("image".to_owned());
+    }
+    pull_args.push("pull".to_owned());
+    // Apple's engine runs only native images, so it takes no platform.
+    if let Some(platform) = platform.filter(|_| !apple) {
         pull_args.push(format!("--platform={platform}"));
     }
     pull_args.push(image.to_owned());
     let pull = host.command(pull_args, format!("refresh container image {image}"));
-    let prune = host.command(
-        vec![
-            engine.to_owned(),
-            "image".to_owned(),
-            "prune".to_owned(),
-            "-f".to_owned(),
-        ],
-        "remove dangling container images".to_owned(),
-    );
+    let prune = (!apple).then(|| {
+        host.command(
+            vec![
+                engine.to_owned(),
+                "image".to_owned(),
+                "prune".to_owned(),
+                "-f".to_owned(),
+            ],
+            "remove dangling container images".to_owned(),
+        )
+    });
     Some(ImageRefresh {
         host,
         image: image.to_owned(),
         platform: platform.map(str::to_owned),
+        when,
         image_id,
         pull,
         prune,
@@ -1645,6 +1685,23 @@ impl TargetTemplate {
             Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer(_) => Some("container"),
             _ => None,
+        }
+    }
+
+    /// The host that downloads this target's image, with the container
+    /// settings that name the image. `None` for targets that run no image.
+    pub fn image_host(&self) -> Option<(ImageHost, &ContainerTemplate)> {
+        match self {
+            Self::LocalPodman(container) => Some((ImageHost::LocalPodman, container)),
+            Self::LocalDocker(container) => Some((ImageHost::LocalDocker, container)),
+            Self::AppleContainer(container) => Some((ImageHost::AppleContainer, container)),
+            Self::SshPodman { ssh, container } => {
+                Some((ImageHost::SshPodman(ssh.clone()), container))
+            }
+            Self::SshDocker { ssh, container } => {
+                Some((ImageHost::SshDocker(ssh.clone()), container))
+            }
+            Self::LocalBare | Self::AwsEc2(_) | Self::SshBare { .. } => None,
         }
     }
 }

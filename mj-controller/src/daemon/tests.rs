@@ -11,6 +11,26 @@ fn newer_daemon_protocol_requires_updating_the_client() {
 }
 
 #[test]
+fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
+    let refused = LifecycleFailure::of(
+        &anyhow::Error::new(Refusal::precondition(
+            "repository \"app\" needs a network Git remote",
+        ))
+        .context("provision the session target"),
+    );
+    let rebuilt = refused.clone().into_error();
+    assert_eq!(
+        Refusal::of(&rebuilt).map(|refusal| refusal.message().to_owned()),
+        Some("repository \"app\" needs a network Git remote".to_owned()),
+        "a waiter reading the channel must still see the reason, not a bare string"
+    );
+
+    let internal = LifecycleFailure::of(&anyhow::anyhow!("ssh host build-07 refused"));
+    assert!(internal.refusal.is_none());
+    assert!(internal.detail.contains("build-07"));
+}
+
+#[test]
 fn graceful_close_retires_worker_polling_only_during_target_teardown() {
     assert!(!lifecycle_owns_worker_target(
         LifecycleKind::Close,
@@ -2065,6 +2085,41 @@ async fn force_destruction_preemption_times_out_without_destroying() {
             .contains("did not stop after cancellation"),
         "{error:#}"
     );
+}
+
+/// A background image download belongs to the daemon, not to a session, so
+/// whichever workspace the person is looking at shows it.
+#[test]
+fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
+    let session_ids = BTreeSet::from(["018f9dd2-a3b4".to_owned()]);
+    let daemon_notice = RuntimeNotice {
+        id: 1,
+        session_id: String::new(),
+        text: "Downloading image ghcr.io/example/dev:latest for local podman\u{2026}".to_owned(),
+    };
+    let own_session = RuntimeNotice {
+        id: 2,
+        session_id: "018f9dd2-a3b4".to_owned(),
+        text: "Mounted /data read-only.".to_owned(),
+    };
+    let other_session = RuntimeNotice {
+        id: 3,
+        session_id: "018f9dd2-cccc".to_owned(),
+        text: "Mounted /data read-only.".to_owned(),
+    };
+
+    assert!(snapshot::notice_reaches_workspace(
+        &daemon_notice,
+        &session_ids
+    ));
+    assert!(snapshot::notice_reaches_workspace(
+        &own_session,
+        &session_ids
+    ));
+    assert!(!snapshot::notice_reaches_workspace(
+        &other_session,
+        &session_ids
+    ));
 }
 
 /// A view of `session-1` whose harness is ready for its first prompt.

@@ -351,6 +351,94 @@ impl RuntimeState {
         }
     }
 
+    /// Record why a close failed, on the session it was for.
+    ///
+    /// The sentence is written for the person, not copied from the error
+    /// chain: `last_error` is published, and a close failure's chain names
+    /// project paths and SSH hosts. A failure that said what the caller can do
+    /// about it supplies that sentence; every other one points at the daemon
+    /// log entry that carries the whole reason.
+    pub(super) async fn record_failed_close(
+        self: &Arc<Self>,
+        session_id: &str,
+        reference: &str,
+        failure: &LifecycleFailure,
+    ) {
+        let prefix = mj_core::state::CLOSE_FAILURE_PREFIX;
+        let cause = match &failure.refusal {
+            Some(refusal) => format!("{prefix}: {refusal}"),
+            None => {
+                format!("{prefix}; the daemon log records the reason under reference {reference}")
+            }
+        };
+        let applied = blocking({
+            let session_id = session_id.to_owned();
+            let cause = cause.clone();
+            move || {
+                let mut controller = Controller::load()?;
+                controller.record_failed_close(&session_id, &cause)
+            }
+        })
+        .await;
+        match applied {
+            Ok(true) => {
+                if let Err(error) = self.reload_controller().await {
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after recording a failed close");
+                }
+                self.publish_revision();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %session_id,
+                error = format!("{error:#}"),
+                "could not record why a close failed"
+            ),
+        }
+    }
+
+    /// Retire a recorded close failure once something for the session has
+    /// succeeded.
+    ///
+    /// The reason is published for a session that is alive, so it has to stop
+    /// being published for one that is working again; a lifecycle transition
+    /// clears `last_error` on its own, and this covers the ordinary actions,
+    /// such as a prompt, that do not.
+    pub async fn clear_recorded_close_failure(self: &Arc<Self>, session_id: &str) {
+        let recorded = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(|record| record.public_error().is_some());
+        if !recorded {
+            return;
+        }
+        let cleared = blocking({
+            let session_id = session_id.to_owned();
+            move || {
+                let mut controller = Controller::load()?;
+                controller.clear_recorded_close_failure(&session_id)
+            }
+        })
+        .await;
+        match cleared {
+            Ok(true) => {
+                if let Err(error) = self.reload_controller().await {
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after clearing a recorded close failure");
+                }
+                self.publish_revision();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %session_id,
+                error = format!("{error:#}"),
+                "could not clear a recorded close failure"
+            ),
+        }
+    }
+
     pub(super) fn note_lifecycle_outcome(&self, session_id: &str) {
         let stopped = {
             let controller = self
@@ -501,7 +589,10 @@ impl RuntimeState {
             })?
     }
 
-    pub(super) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
+    /// Hand a changed workspace list to the terminal clients and the web
+    /// viewer. The daemon's workspace actions call it, and so does the API's
+    /// create route through `ExportRuntime::republish_workspaces`.
+    pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
         self.publish_revision();
     }

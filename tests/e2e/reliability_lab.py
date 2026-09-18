@@ -395,6 +395,8 @@ class Lab:
         phone_tls: bool = False,
         fake_acp_delay_ms: int = 0,
         fake_acp_prompt_delay_ms: int | None = None,
+        fake_acp_swallow_prompt: int = 0,
+        fake_acp_swallow_banner: bool = False,
     ) -> int:
         if fake_acp_prompt_delay_ms is None:
             fake_acp_prompt_delay_ms = fake_acp_delay_ms
@@ -425,6 +427,7 @@ import sys
 import time
 
 session_id = "reliability-native"
+prompts = 0
 
 if sys.argv[1:] == ["--version"]:
     print("@brokkai/codex-acp 1.11.4")
@@ -464,7 +467,19 @@ for line in sys.stdin:
     method = message.get("method")
     ident = message.get("id")
     if method == "initialize":
-        result = {"protocolVersion": 1}
+        # The pinned adapter advertises goal control; the worker refuses to
+        # resume a Codex session whose adapter cannot pause a goal.
+        result = {
+            "protocolVersion": 1,
+            "_meta": {
+                "goal": {
+                    "version": 1,
+                    "controlMethod": "_session/goal",
+                    "actions": ["resume", "pause", "clear"],
+                    "resumePolicies": ["pause", "preserve"],
+                },
+            },
+        }
     elif method in ("session/new", "session/load"):
         delay()
         rollout_dir = os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "08", "30")
@@ -489,11 +504,32 @@ for line in sys.stdin:
     elif method == "session/set_mode":
         result = {}
     elif method == "session/prompt":
+        prompts += 1
         blocks = message.get("params", {}).get("prompt", [])
         text = " ".join(block.get("text", "") for block in blocks if block.get("type") == "text")
         memory_end = "</mj-project-memory>"
         if memory_end in text:
             text = text.rsplit(memory_end, 1)[1].strip()
+        # Swallow this prompt: accept it, report a successful turn, and do
+        # nothing it asked for. The banner variant is the shape issue #970
+        # reported, where a bridge streams its own compaction progress into
+        # the swallowed prompt's turn.
+        if prompts == int(os.environ.get("MJ_FAKE_ACP_SWALLOW_PROMPT", "0")):
+            if os.environ.get("MJ_FAKE_ACP_SWALLOW_BANNER"):
+                for banner in ("Compacting...", "Compacting completed."):
+                    send({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": banner},
+                            },
+                        },
+                    })
+            send({"jsonrpc": "2.0", "id": ident, "result": {"stopReason": "end_turn"}})
+            continue
         send({
             "jsonrpc": "2.0",
             "method": "session/update",
@@ -614,7 +650,7 @@ tailscale_detect = false
 [profiles.fake]
 kind = "codex"
 home = {json.dumps(str(self.profile))}
-environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, PATH = {json.dumps(str(fixture_bin))}, XDG_CACHE_HOME = {json.dumps(str(self.runtime_root / "cache"))} }}
+environment = {{ MJ_FAKE_ACP_LOG = {json.dumps(str(self.runtime_root / "fake-acp.log"))}, MJ_FAKE_ACP_DELAY_MS = {json.dumps(str(fake_acp_delay_ms))}, MJ_FAKE_ACP_PROMPT_DELAY_MS = {json.dumps(str(fake_acp_prompt_delay_ms))}, MJ_FAKE_ACP_SWALLOW_PROMPT = {json.dumps(str(fake_acp_swallow_prompt))}, MJ_FAKE_ACP_SWALLOW_BANNER = {json.dumps("1" if fake_acp_swallow_banner else "")}, PATH = {json.dumps(str(fixture_bin))}, XDG_CACHE_HOME = {json.dumps(str(self.runtime_root / "cache"))} }}
 
 [bundles.fixture]
 primary_repo = "fixture"
@@ -1116,10 +1152,122 @@ kind = "local-bare"
         self.write_trace()
 
 
+    def run_unanswered_prompt(self) -> None:
+        # The fake agent accepts the second prompt, streams the compaction
+        # banners a bridge emits while it compacts, and ends the turn without
+        # doing anything the prompt asked for. That is the shape issue #970
+        # reported, and it is the one a session-wide update counter cannot
+        # see. A build without the fix reports this turn as finished.
+        port = self.prepare(fake_acp_swallow_prompt=2, fake_acp_swallow_banner=True)
+        client = self.start_tui("tui-1")
+        client.wait_for("Sessions")
+        code, _ = self.wait_daemon_status(port)
+        self.base_url = f"http://127.0.0.1:{port}"
+        status, _ = self.request("POST", "/auth/session", {"code": code})
+        if status != 204:
+            raise ScenarioFailure(f"web login returned {status}")
+
+        workspace = self.snapshot()["workspaces"][0]
+        title = f"unanswered-{self.seed}"
+        status, _ = self.request(
+            "POST",
+            "/api/actions",
+            {
+                "action": "new",
+                "workspace_id": workspace["id"],
+                "profile_id": "fake",
+                "bundle_id": "fixture",
+                "target_id": "localhost",
+                "title": title,
+                "project_directory": str(self.project),
+            },
+        )
+        if status != 202:
+            raise ScenarioFailure(f"new action returned {status}")
+        running = self.wait_snapshot(
+            lambda value: any(
+                item.get("title") == title and item.get("state") == "running"
+                for item in value.get("sessions", [])
+            ),
+            "running unanswered-prompt session",
+        )
+        session = next(item for item in running["sessions"] if item["title"] == title)
+        session_id = str(session["id"])
+
+        # The first prompt is answered normally, so the run proves the check
+        # fires on the swallowed turn rather than on every turn.
+        self.submit_prompt(session_id, f"first seed={self.seed}")
+        answered = self.command("wait", "--session", session_id, "--timeout", "60")
+        if "finished" not in answered.stdout:
+            raise ScenarioFailure(f"an answered turn must finish: {answered.stdout!r}")
+        self.record_action("answered-turn", session_id=session_id, report=answered.stdout.strip())
+
+        self.submit_prompt(session_id, f"second seed={self.seed}")
+        swallowed = self.command(
+            "wait", "--session", session_id, "--timeout", "60", check=False
+        )
+        report = swallowed.stdout.strip()
+        if swallowed.returncode == 0:
+            raise ScenarioFailure(
+                f"a swallowed prompt was reported as success: {report!r}"
+            )
+        if "error (prompt_unanswered)" not in report:
+            raise ScenarioFailure(f"wait did not name the unanswered turn: {report!r}")
+        if "may never have been acted on" not in report:
+            raise ScenarioFailure(f"wait did not explain the unanswered turn: {report!r}")
+        self.record_action("unanswered-turn", session_id=session_id, report=report)
+
+        status, _ = self.request(
+            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+        )
+        if status != 202:
+            raise ScenarioFailure(f"close action returned {status}")
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
+            "stopped unanswered-prompt session",
+        )
+        client.quit()
+        self.record_process("stopped", "tui-1", client.process.pid)
+        self.stop_daemon()
+        self.integrity()
+        leaks = self.owned_pids()
+        if leaks:
+            raise ScenarioFailure(f"owned processes remained after cleanup: {leaks}")
+        self.capture_process_tree()
+        self.trace["finished_at"] = self.timestamp()
+        self.trace["outcome"] = "passed"
+        self.write_trace()
+
+    def submit_prompt(self, session_id: str, text: str) -> None:
+        # A session reports "running" before it can take a prompt: the worker
+        # is still configuring its harness, and a prompt sent into that window
+        # is refused with 409. Wait for an idle chat phase, then retry the
+        # refusal for as long as the scenario's own timeout allows.
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            "session ready for a prompt",
+        )
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            status, _ = self.request(
+                "POST",
+                "/api/actions",
+                {"action": "prompt", "session_id": session_id, "text": text},
+            )
+            if status == 202:
+                break
+            if status != 409 or time.monotonic() >= deadline:
+                raise ScenarioFailure(f"prompt action returned {status}")
+            time.sleep(0.2)
+        self.record_action("prompt", session_id=session_id, text=text)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--scenario", choices=["multi-client-happy-path", "active-stop"], required=True
+        "--scenario",
+        choices=["multi-client-happy-path", "active-stop", "unanswered-prompt"],
+        required=True,
     )
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--hel", required=True, type=pathlib.Path)
@@ -1133,6 +1281,8 @@ def main() -> int:
     try:
         if args.scenario == "active-stop":
             lab.run_active_stop()
+        elif args.scenario == "unanswered-prompt":
+            lab.run_unanswered_prompt()
         else:
             lab.run()
     except BaseException as error:

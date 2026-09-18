@@ -26,15 +26,19 @@ pub(super) async fn drive<T>(
 where
     T: ConnectTo<Client>,
 {
+    // How many updates the agent produced by working, over the whole
+    // connection. A turn reads it before and after to learn whether the
+    // harness answered the prompt at all (#970).
+    let agent_output_count = AgentOutputCount::default();
     let grok_usage = grok_usage::Collector::default();
     let grok_notification_usage = grok_usage.clone();
     let grok_notification_events = events.clone();
     let grok_notification_harness = spec.harness;
+    let grok_notification_output_count = agent_output_count.clone();
     let notification_events = events.clone();
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
-    let session_update_count = Arc::new(AtomicU64::new(0));
-    let notification_session_update_count = session_update_count.clone();
+    let notification_agent_output_count = agent_output_count.clone();
     let resume_required = Arc::new(AtomicBool::new(
         spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
     ));
@@ -63,9 +67,11 @@ where
     let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
     let permission_activity = spec.acp_activity.clone();
+    let permission_output_count = agent_output_count.clone();
     let permission_step_clock = spec.step_clock.clone();
     let ext_events = events.clone();
     let ext_activity = spec.acp_activity.clone();
+    let ext_output_count = agent_output_count.clone();
     let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
@@ -88,11 +94,16 @@ where
     let release_terminals = terminals.clone();
     let create_events = events.clone();
     let create_activity = spec.acp_activity.clone();
+    let create_output_count = agent_output_count.clone();
     let create_step_clock = spec.step_clock.clone();
     let output_activity = spec.acp_activity.clone();
+    let output_output_count = agent_output_count.clone();
     let wait_activity = spec.acp_activity.clone();
+    let wait_output_count = agent_output_count.clone();
     let kill_activity = spec.acp_activity.clone();
+    let kill_output_count = agent_output_count.clone();
     let release_activity = spec.acp_activity.clone();
+    let release_output_count = agent_output_count.clone();
     // A terminal runs where the session runs unless the agent names a
     // directory of its own.
     let session_cwd = spec.cwd.clone();
@@ -187,12 +198,17 @@ where
                 ) {
                     return Ok(());
                 }
+                // Count only what the agent produced by working, so a turn
+                // carrying nothing but the harness's own announcements is
+                // still recognized as unanswered (#970).
+                if mj_core::acp::session_update_is_agent_output(&update) {
+                    notification_agent_output_count.mark();
+                }
                 let update = serde_json::to_value(update).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(serde_json::Value::String(
                         format!("serialize ACP session update for relay: {error}"),
                     ))
                 })?;
-                notification_session_update_count.fetch_add(1, Ordering::Release);
                 notification_events
                     .send(RuntimeEvent::SessionUpdate { update })
                     .await
@@ -234,6 +250,11 @@ where
         )
         .on_receive_notification(
             async move |notification: GrokUsageNotification, _cx| {
+                if grok_notification_harness == HarnessKind::Grok {
+                    // Grok reports a turn it ran here rather than through the
+                    // standard updates, so this is evidence the agent worked.
+                    grok_notification_output_count.mark();
+                }
                 if grok_notification_harness == HarnessKind::Grok
                     && let Err(error) = grok_notification_usage.observe(&notification.session_id.to_string(), &notification.update) {
                     grok_notification_events.send(RuntimeEvent::Warning {
@@ -247,6 +268,7 @@ where
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
+                permission_output_count.mark();
                 permission_step_clock.begin_client_work();
                 if permission_harness == HarnessKind::Muse
                     && permission_policy.is_unconstrained()
@@ -475,6 +497,7 @@ where
         .on_receive_request(
             async move |request: CreateTerminalRequest, responder, _cx| {
                 create_activity.mark();
+                create_output_count.mark();
                 create_step_clock.begin_client_work();
                 let started_at_ms = mj_core::clock::epoch_millis();
                 let spawn = TerminalSpawn {
@@ -526,6 +549,7 @@ where
         .on_receive_request(
             async move |request: TerminalOutputRequest, responder, _cx| {
                 output_activity.mark();
+                output_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(snapshot) = output_terminals.output(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -541,6 +565,7 @@ where
         .on_receive_request(
             async move |request: WaitForTerminalExitRequest, responder, _cx| {
                 wait_activity.mark();
+                wait_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(exit) = wait_terminals.exit_receiver(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -569,6 +594,7 @@ where
         .on_receive_request(
             async move |request: KillTerminalRequest, responder, _cx| {
                 kill_activity.mark();
+                kill_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 // The terminal stays valid: output and wait_for_exit still
                 // answer for it until the agent releases it.
@@ -582,6 +608,7 @@ where
         .on_receive_request(
             async move |request: ReleaseTerminalRequest, responder, _cx| {
                 release_activity.mark();
+                release_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(supervisor) = release_terminals.release(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -610,6 +637,7 @@ where
         .on_receive_request(
             async move |request: agent_client_protocol::UntypedMessage, responder, _cx| {
                 ext_activity.mark();
+                ext_output_count.mark();
                 ext_step_clock.begin_client_work();
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
@@ -829,7 +857,7 @@ where
                 session_elicitations,
                 plan_implementation_slot,
                 opened,
-                session_update_count,
+                agent_output_count,
                 session_updates_enabled,
                 resume_required,
                 native_session_used,
@@ -1060,12 +1088,59 @@ pub(super) fn prompt_failure_warning(error: &agent_client_protocol::Error) -> St
     }
 }
 
+/// How much the agent has produced by working, over one ACP connection.
+///
+/// A turn reads it before and after to learn whether the harness did anything
+/// the prompt asked for (#970). It is marked wherever the agent acts: the
+/// session updates that carry its messages, thoughts, plans and tool calls,
+/// and every request it makes of Mjolnir — a permission, a terminal, an
+/// elicitation. Traffic a harness emits on its own schedule is excluded, so a
+/// turn carrying only a command catalogue, a usage figure or a compaction
+/// banner counts as having produced nothing.
+#[derive(Clone, Default)]
+pub(super) struct AgentOutputCount(Arc<AtomicU64>);
+
+impl AgentOutputCount {
+    pub(super) fn mark(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// What the person is told when the harness ended a turn without answering.
+///
+/// It leads with the stable marker `mj_core::credentials` matches on, then
+/// says in plain language what happened and what to do. It deliberately does
+/// not claim the prompt was dropped: Mjolnir cannot tell a prompt the harness
+/// never acted on from one it acted on silently, and resending is the person's
+/// decision because the harness may have done the work already.
+pub(super) fn prompt_unanswered_message(harness: HarnessKind) -> String {
+    format!(
+        "{PROMPT_EMPTY_RESPONSE_MARKER}: {name} ended the turn without producing any message, \
+         thought or tool call, so this prompt may never have been acted on. Check the workspace \
+         before resending it, in case the work was done without being reported.",
+        name = harness.display_name(),
+    )
+}
+
+/// Whether the harness ended this turn without doing anything the prompt asked
+/// for.
+///
+/// Only a turn the harness reported as finished is judged. A cancelled,
+/// refused, token-limited or errored turn already reports its own ending, and
+/// relabelling those would hide the reason they really ended. The counters
+/// count agent output only (`mj_core::acp::session_update_is_agent_output`),
+/// so a turn that ran a tool and said nothing counts as answered, while a turn
+/// carrying only the harness's own banners counts as unanswered (#970).
 pub(super) fn prompt_returned_without_updates(
     stop_reason: &StopReason,
     updates_before: u64,
     updates_after: u64,
 ) -> bool {
-    *stop_reason != StopReason::Cancelled && updates_before == updates_after
+    *stop_reason == StopReason::EndTurn && updates_before == updates_after
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1078,7 +1153,7 @@ pub(super) async fn drive_connection(
     pending_elicitations: PendingElicitations,
     plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    session_update_count: Arc<AtomicU64>,
+    agent_output_count: AgentOutputCount,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -1097,7 +1172,7 @@ pub(super) async fn drive_connection(
         &pending_elicitations,
         &plan_implementation_slot,
         opened,
-        &session_update_count,
+        &agent_output_count,
         &session_updates_enabled,
         resume_required,
         native_session_used,

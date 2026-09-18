@@ -43,6 +43,7 @@ for line in sys.stdin:
         text = params['prompt'][0]['text']
         if text == 'restart': os._exit(0)
         assert (model,effort) == ('chosen','medium'), (model,effort)
+        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}}}}), flush=True)
         result = {'stopReason':'end_turn'}
     else: result = {}
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
@@ -91,7 +92,11 @@ for line in sys.stdin:
             effort = value
             result = {'configOptions':options()}
         else: raise AssertionError(key)
-    elif method == 'session/prompt': result = {'stopReason':'end_turn'}
+    elif method == 'session/prompt':
+        # A real harness answers; a turn with no output at all is
+        # reported as unanswered (#970).
+        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}}}}), flush=True)
+        result = {'stopReason':'end_turn'}
     reply = {'jsonrpc':'2.0','id':ident}
     reply['error' if error else 'result'] = error or result
     print(json.dumps(reply), flush=True)
@@ -136,7 +141,11 @@ for line in sys.stdin:
             answer = options()
         else: raise AssertionError(key)
         result = {'configOptions':answer}
-    elif method == 'session/prompt': result = {'stopReason':'end_turn'}
+    elif method == 'session/prompt':
+        # A real harness answers; a turn with no output at all is
+        # reported as unanswered (#970).
+        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}}}}), flush=True)
+        result = {'stopReason':'end_turn'}
     else: result = {}
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
 "#,
@@ -892,6 +901,7 @@ for line in sys.stdin:
         result = {'configOptions':options()}
     elif method == 'session/prompt':
         if params['prompt'][0]['text'] == 'restart': os._exit(0)
+        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}}}}), flush=True)
         result = {'stopReason':'end_turn'}
     else: result = {}
     print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)

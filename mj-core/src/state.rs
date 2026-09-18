@@ -1043,6 +1043,13 @@ pub struct SessionRecord {
     /// restores what the user was typing. Empty means no draft.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub draft_input: String,
+    /// Why the last operation on this session failed.
+    ///
+    /// This is usually a raw controller error chain, which names profile
+    /// homes, project paths and SSH hosts, so a public projection publishes it
+    /// only for a session that is stopped or failed. The one exception is a
+    /// sentence the controller composed for the person; see
+    /// [`CLOSE_FAILURE_PREFIX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1062,7 +1069,27 @@ fn default_session_workspace_id() -> String {
     crate::workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
 
+/// How a failed close's reason begins in [`SessionRecord::last_error`].
+///
+/// A close that fails is non-destructive: the session goes back to the state
+/// it was running in. Its reason therefore has to be published for a live
+/// session, which the raw error chains in the same field never are. The
+/// controller composes a sentence for the person and tags it with this prefix,
+/// and the projection reads the tag to tell the two apart. Written in one
+/// place and read in one place, so the tag cannot drift.
+pub const CLOSE_FAILURE_PREFIX: &str = "the close did not finish";
+
 impl SessionRecord {
+    /// The recorded failure that is safe to publish whatever state this
+    /// session is in, because the controller wrote it for the person rather
+    /// than copying an error chain into it.
+    #[must_use]
+    pub fn public_error(&self) -> Option<&str> {
+        self.last_error
+            .as_deref()
+            .filter(|error| error.starts_with(CLOSE_FAILURE_PREFIX))
+    }
+
     /// Configuration drift belongs to this session, not the entire controller.
     /// The diagnostic contains only public identifiers, so both UIs can show it.
     pub fn configuration_issue(&self, config: &Config) -> Option<String> {

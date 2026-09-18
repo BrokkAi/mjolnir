@@ -124,6 +124,18 @@ pub(super) fn build_observation(
             .operation
             .as_ref()
             .is_some_and(|operation| operation.kind == crate::server::ViewerOperationKind::Resume),
+        // The projection forces a close-requested session to `Closing` from
+        // the moment the controller takes the request, so this covers the gap
+        // before the lifecycle operation itself is registered.
+        closing: session.lifecycle == ViewerLifecycleCategory::Stopping,
+        // A live session publishes no raw error text, so a reason on one can
+        // only be the sentence a failed close recorded.
+        close_failure: matches!(
+            session.lifecycle,
+            ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting
+        )
+        .then(|| session.launch_error.clone())
+        .flatten(),
         launch_failed: snapshot
             .launch_failures
             .iter()

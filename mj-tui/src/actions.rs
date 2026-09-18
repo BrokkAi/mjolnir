@@ -46,6 +46,7 @@ pub enum CommandId {
     SelectWorkspacePrevious,
     SelectWorkspaceNext,
     WebViewer,
+    RestartDaemon,
     QuitDetach,
     Palette,
     CycleSpinner,
@@ -683,6 +684,21 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::RestartDaemon,
+        label: "Restart the Mjolnir daemon",
+        description: "Stop the background daemon and start one from this build, then report which build came up.",
+        scope: Scope::Global,
+        // Restarting the daemon is rare and disruptive, so it is reachable
+        // from the palette rather than from a key that could be hit by
+        // accident. It is always offered: the daemon being gone is exactly
+        // when it is needed, and that is also when nothing can be asked.
+        keys: &[],
+        footer: no_footer,
+        footer_group: FooterGroup::Function,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::Refresh,
         label: "Refresh targets and quotas",
         description: "Re-probe every target's capacity and ask every profile for its quota again.",
@@ -1051,6 +1067,7 @@ impl DashboardState {
             CommandId::SelectWorkspacePrevious => self.select_adjacent_workspace(-1),
             CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
+            CommandId::RestartDaemon => DashboardAction::RestartDaemon,
             CommandId::QuitDetach => DashboardAction::QuitDetach,
             // Help toggles: the same key that opens the reference closes it
             // again, which is what the overlay's own Esc/F1/? arm does when
@@ -1336,6 +1353,7 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = mj_core::state::MovePreparation {
+            in_place: false,
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {

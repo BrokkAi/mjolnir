@@ -24,6 +24,7 @@ use crate::targets::{
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mj_core::config::Config;
+use mj_core::refusal::Refusal;
 use mj_core::relay::RelayCommand;
 use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
 use mj_core::subagent::SubagentRecord;
@@ -324,8 +325,7 @@ struct ActiveLifecycle {
     request_key: Option<String>,
     _move_guard: Option<MoveMutationGuard>,
     move_source_closed: bool,
-    result:
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
+    result: LifecycleWatch,
 }
 
 impl ActiveLifecycle {
@@ -360,6 +360,55 @@ enum DaemonLifecycleResult {
     Done,
     DeferredCleanup,
     Move(MoveOutcome),
+}
+
+/// How one lifecycle operation ended when it failed.
+///
+/// The result is broadcast to every waiter, which is why it cannot simply be
+/// the `anyhow::Error`: that is not clonable. Keeping the refusal beside the
+/// text is what lets a reason written for the caller survive the crossing; a
+/// failure rebuilt from a string alone would arrive as an internal fault.
+#[derive(Debug, Clone)]
+pub(crate) struct LifecycleFailure {
+    detail: String,
+    refusal: Option<Refusal>,
+}
+
+/// One lifecycle operation's outcome, and the channel every waiter reads it
+/// from. `None` means the operation is still running.
+type LifecycleResult = std::result::Result<DaemonLifecycleResult, LifecycleFailure>;
+type LifecycleWatch = tokio::sync::watch::Receiver<Option<LifecycleResult>>;
+
+impl LifecycleFailure {
+    fn of(error: &anyhow::Error) -> Self {
+        Self {
+            detail: format!("{error:#}"),
+            refusal: Refusal::of(error),
+        }
+    }
+
+    /// A failure with no reason written for a caller, such as a task that died
+    /// before the operation could say anything about itself.
+    fn internal(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            refusal: None,
+        }
+    }
+
+    /// Rebuild the error a waiter sees, with the refusal still attached.
+    fn into_error(self) -> anyhow::Error {
+        match self.refusal {
+            Some(refusal) => anyhow::Error::new(refusal).context(self.detail),
+            None => anyhow::Error::msg(self.detail),
+        }
+    }
+}
+
+impl std::fmt::Display for LifecycleFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
 }
 
 impl From<LifecycleKind> for RuntimeLifecycleKind {

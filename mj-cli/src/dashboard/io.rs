@@ -94,6 +94,9 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    /// An explicit daemon restart finished. The sentence is what the surface
+    /// shows: which build came up, or why no daemon of this build did.
+    DaemonRestarted(std::result::Result<String, String>),
     GoSelectionSaved(std::result::Result<(), String>),
     GoContext {
         session_id: String,
@@ -643,6 +646,10 @@ impl DashboardContext {
                     }
                 }
             }
+            DashboardIoUpdate::DaemonRestarted(result) => match result {
+                Ok(sentence) => self.dashboard.set_notice(sentence),
+                Err(error) => self.dashboard.set_failure_notice(error),
+            },
             DashboardIoUpdate::GoSelectionSaved(result) => {
                 self.go_selection_in_flight = false;
                 if let Err(error) = result {

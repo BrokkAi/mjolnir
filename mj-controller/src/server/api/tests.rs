@@ -294,11 +294,40 @@ async fn event_stream_rejects_bad_cursors_and_requires_authentication() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The workspaces the fake store holds.
+///
+/// It holds one by default, because the interesting case is the other one: an
+/// instance with no workspace at all, which is what a fresh `mj -i <name>` is.
+struct FakeWorkspaces(Mutex<Vec<mj_core::workspace::WorkspaceRecord>>);
+
+impl FakeWorkspaces {
+    fn empty() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn record(name: &str) -> mj_core::workspace::WorkspaceRecord {
+        mj_core::workspace::WorkspaceRecord {
+            id: format!("id-of-{name}"),
+            name: name.to_owned(),
+            created_at: "now".into(),
+            last_opened_at: "now".into(),
+            session_count: 0,
+        }
+    }
+}
+
+impl Default for FakeWorkspaces {
+    fn default() -> Self {
+        Self(Mutex::new(vec![Self::record("existing")]))
+    }
+}
+
 /// A hand-written backend. Mocking the trait would only re-state its
 /// signature; this returns the exact observations each test needs and
 /// records what the handlers asked for.
 #[derive(Default)]
 struct FakeBackend {
+    workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
     turn_states: Mutex<Vec<Option<TurnState>>>,
@@ -495,6 +524,28 @@ impl SubagentBackend for FakeBackend {
                 .clone()
                 .map(|pushed| PushedBranch { branch, ..pushed })
                 .ok_or_else(|| ExportError::Refused("this session is running a turn".into()))
+        })
+    }
+    fn list_workspaces(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
+    }
+    fn create_workspace(
+        &self,
+        name: String,
+    ) -> BoxFuture<'_, AnyResult<mj_core::workspace::WorkspaceRecord>> {
+        Box::pin(async move {
+            let mut workspaces = self.workspaces.0.lock().unwrap();
+            if let Some(existing) = workspaces
+                .iter()
+                .find(|workspace| workspace.name.eq_ignore_ascii_case(&name))
+            {
+                return Ok(existing.clone());
+            }
+            let created = FakeWorkspaces::record(&name);
+            workspaces.push(created.clone());
+            Ok(created)
         })
     }
     fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
@@ -846,6 +897,122 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         Some("add a README line"),
         "the first prompt is the backend's to submit once the harness is ready"
     );
+}
+
+/// A fresh instance has no workspace, and until #1080 the only way to make one
+/// was to open the terminal dashboard, so a scripted first session was refused
+/// with nothing the script could do about it. Starting one now adopts the
+/// store's `default` workspace instead.
+#[tokio::test]
+async fn a_first_session_on_an_instance_with_no_workspace_creates_the_default_one() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { workspace_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(workspace_id, "id-of-default");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        backend.workspaces.0.lock().unwrap().len(),
+        1,
+        "the default workspace is created once and then reused"
+    );
+}
+
+/// Naming a workspace, or having one already, still leaves the choice where it
+/// was: the caller's id travels unchanged, and an instance that already holds
+/// workspaces sends an empty id so the controller selects.
+#[tokio::test]
+async fn a_named_workspace_travels_unchanged_and_an_existing_one_is_left_to_the_controller() {
+    for (extra, expected) in [
+        (r#","workspace_id":"workspace-7""#, "workspace-7"),
+        ("", ""),
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+        let response = tokio::spawn(app.oneshot(start_request(start_body(extra))));
+        let request = actions.recv().await.unwrap();
+        let ControllerAction::New { workspace_id, .. } = &request.action else {
+            panic!("expected a New action");
+        };
+        assert_eq!(workspace_id, expected);
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: Some("session-2".into()),
+            })
+            .unwrap();
+        response.await.unwrap().unwrap();
+        assert_eq!(
+            backend.workspaces.0.lock().unwrap().len(),
+            1,
+            "nothing is created when the instance already has a workspace"
+        );
+    }
+}
+
+/// The routes a script drives a fresh instance with: create by name, which is
+/// idempotent because the name is the identity, and list what exists.
+#[tokio::test]
+async fn workspaces_are_created_by_name_idempotently_and_listed() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let create = |name: &str| {
+        bearer(Request::post("/api/v1/workspaces"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"name":"{name}"}}"#)))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(create("Release work")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = json_body(response).await;
+    assert_eq!(first["workspace"]["name"], "Release work");
+
+    // The same name twice is the same workspace, so a script may create before
+    // every run without checking first.
+    let response = app.clone().oneshot(create("release WORK")).await.unwrap();
+    assert_eq!(
+        json_body(response).await["workspace"]["id"],
+        first["workspace"]["id"]
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/workspaces"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = json_body(response).await;
+    assert_eq!(listed["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["workspaces"][0]["name"], "Release work");
+
+    // An unusable name is refused by the caller's own request, not recorded.
+    let response = app.clone().oneshot(create("   ")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(backend.workspaces.0.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1343,6 +1510,39 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
         (WaitOutcome::Error, Some("refusal".to_owned())),
         "an unrecognized ending must not be reported as success"
     );
+    // A prompt the harness ended without answering is an error a script can
+    // recognize by name, not a finished turn (#970).
+    assert_eq!(
+        map_stop_reason("prompt_unanswered"),
+        (WaitOutcome::Error, Some("prompt_unanswered".to_owned()))
+    );
+}
+
+/// A turn the worker failed because the harness produced nothing must reach
+/// `mj wait` as an error carrying both the name and the explanation, the same
+/// way a stalled turn does.
+#[test]
+fn an_unanswered_turn_reaches_wait_as_a_named_error() {
+    let mut outcome = completed(7, "prompt_unanswered");
+    outcome.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "ACP prompt returned no session updates: Claude Code ended the turn without \
+                  producing any message, thought or tool call"
+            .into(),
+        code: Some("prompt_unanswered".into()),
+        http_status: None,
+        reset_at: None,
+    });
+    let decision = WaitDecision::from_outcome(&outcome);
+    assert_eq!(decision.outcome, WaitOutcome::Error);
+    assert_eq!(decision.stop_reason.as_deref(), Some("prompt_unanswered"));
+    assert!(
+        decision
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("without producing any message")),
+        "{:?}",
+        decision.message
+    );
 }
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
@@ -1604,6 +1804,58 @@ fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
 }
 
 #[test]
+fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
+    let request = WaitRequest::default();
+
+    // The close owns the session. Without this the wait would answer
+    // "stopped" while the close was still running, and never see how it ended.
+    let running_close = WaitObservation {
+        closing: true,
+        lifecycle: Some(ViewerLifecycleCategory::Stopping),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    assert_eq!(resolve_wait(&running_close, &request), None);
+
+    // It ended and the session is alive again, so it failed. The reason the
+    // close recorded is what the wait has to report: the request that asked
+    // for the close was answered when it was admitted.
+    let failed_close = WaitObservation {
+        close_failure: Some("the close did not finish: the checkpoint could not be written".into()),
+        lifecycle: Some(ViewerLifecycleCategory::Live),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    let decision = resolve_wait(&failed_close, &request).unwrap();
+    assert_eq!(decision.outcome, WaitOutcome::Error);
+    assert_eq!(
+        decision.message.as_deref(),
+        Some("the close did not finish: the checkpoint could not be written"),
+        "reporting the finished turn instead would call a failed close a success"
+    );
+
+    // A close that reached its destination still ends the wait as stopped.
+    let finished_close = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Stopped),
+        ..idle(Some(completed(10, "end_turn")))
+    };
+    assert_eq!(
+        resolve_wait(&finished_close, &request).unwrap().outcome,
+        WaitOutcome::Stopped
+    );
+
+    // A close that left the session dead reports its recorded reason rather
+    // than only that the session failed.
+    let dead = WaitObservation {
+        lifecycle: Some(ViewerLifecycleCategory::Failed),
+        launch_error: Some("close failed and left the session without a live worker".into()),
+        ..idle(None)
+    };
+    assert_eq!(
+        resolve_wait(&dead, &request).unwrap().message.as_deref(),
+        Some("close failed and left the session without a live worker")
+    );
+}
+
+#[test]
 fn a_launch_failure_for_another_session_is_not_this_session_s() {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -1664,6 +1916,33 @@ fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
         serde_json::to_value(&failed).unwrap()["error"],
         "secret-token at /highly/secret/codex"
     );
+}
+
+#[test]
+fn a_running_session_publishes_a_failed_close_but_not_a_raw_error() {
+    let (config, mut state) = sample_config_state();
+
+    // The same running session, with the sentence a failed close records
+    // instead of the raw chain the fixture starts with. A failed close leaves
+    // the session running, so gating this on the state would hide it.
+    state.sessions.get_mut("session-1").unwrap().last_error = Some(format!(
+        "{}; the daemon log records the reason under reference lifecycle-9",
+        mj_core::state::CLOSE_FAILURE_PREFIX
+    ));
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let running = ApiSession::from(&snapshot.sessions[0]);
+    assert_eq!(
+        running.error.as_deref(),
+        Some(
+            "the close did not finish; the daemon log records the reason under reference lifecycle-9"
+        ),
+        "a close that failed has to reach the person who asked for it"
+    );
+
+    // A later successful transition clears the record, and with it the report.
+    state.sessions.get_mut("session-1").unwrap().last_error = None;
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, None);
 }
 
 #[test]

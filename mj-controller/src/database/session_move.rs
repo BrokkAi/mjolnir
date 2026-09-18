@@ -153,6 +153,7 @@ mod tests {
 
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
+            in_place: false,
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
@@ -258,6 +259,48 @@ mod tests {
             "the undecodable row must be skipped, not fail the load"
         );
         assert_eq!(loaded[0].selection.session_id, good.id);
+    }
+
+    #[test]
+    fn in_place_intent_round_trips_and_a_legacy_row_without_it_reads_as_a_fresh_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let session = super::super::tests::session("move-in-place", "project");
+        save_session_to(&path, &session).unwrap();
+        let connection = open(&path).unwrap();
+        let mut intent = operation(&session);
+        intent.in_place = true;
+        save_move_operation_with(&connection, &intent).unwrap();
+        let stored: String = connection
+            .query_row(
+                "SELECT operation_json FROM session_moves WHERE session_id=?1",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.contains("\"in_place\":true"),
+            "the in-place choice must be durable: {stored}"
+        );
+        let restored = load_move_operation_with(&connection, &session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, intent);
+        // A row written before this field existed must still decode, as the
+        // full fresh-environment move it was.
+        let rewritten = connection
+            .execute(
+                "UPDATE session_moves
+                 SET operation_json = replace(operation_json, '\"in_place\":true,', '')
+                 WHERE session_id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert_eq!(rewritten, 1);
+        let legacy = load_move_operation_with(&connection, &session.id)
+            .unwrap()
+            .expect("a row without in_place must still decode");
+        assert!(!legacy.in_place);
     }
 
     #[test]

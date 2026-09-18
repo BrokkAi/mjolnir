@@ -29,6 +29,14 @@ pub struct WaitObservation {
     /// without this a wait would answer `stopped` for a session that is on its
     /// way up.
     pub resuming: bool,
+    /// A close owns this session now. Like `resuming`, this ends nothing: the
+    /// wait follows the close until it finishes.
+    pub closing: bool,
+    /// The reason a close recorded on a session that is alive again, which is
+    /// what a close that failed leaves behind. It is published only until the
+    /// next action or transition for the session succeeds, so it always refers
+    /// to a close nobody has recovered from.
+    pub close_failure: Option<String>,
     /// A recorded launch failure names this session.
     pub launch_failed: bool,
     /// Why the launch failed, when a reason was recorded.
@@ -121,6 +129,13 @@ impl WaitDecision {
 ///
 /// 0. A resume running for this session ends nothing: it is a session coming
 ///    up, and its durable record says stopped until the archive is verified.
+///    A close running for it ends nothing either, for the same reason in
+///    reverse: the wait follows it and reports how it ended. A close that
+///    left the session alive failed, and this is the only place left to say
+///    so, because the request that asked for it was answered when it was
+///    admitted. That reason outlives the wait that started it, on purpose: a
+///    close can fail before the next command has even connected, and it is
+///    cleared as soon as anything for the session succeeds.
 /// 1. A stopped or stopping session ends the wait as `stopped`, superseding
 ///    any initialization result that raced with the close request.
 /// 2. A launch failure or failed initialization is reported before a turn; a durable
@@ -148,6 +163,16 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
     // durable record still says stopped. The wait keeps waiting; its own
     // deadline still bounds it.
     if observation.resuming {
+        return None;
+    }
+    if let Some(reason) = &observation.close_failure {
+        return Some(WaitDecision::simple(
+            WaitOutcome::Error,
+            Some(reason.clone()),
+        ));
+    }
+    // The close owns the session; its own deadline still bounds this wait.
+    if observation.closing {
         return None;
     }
     if stopping {
@@ -184,7 +209,14 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
     if observation.lifecycle == Some(ViewerLifecycleCategory::Failed) {
         return Some(WaitDecision::simple(
             WaitOutcome::Error,
-            Some("the session is in a failed state".to_owned()),
+            // A close that left the session dead recorded why; saying only
+            // that it failed would throw that away.
+            Some(
+                observation
+                    .launch_error
+                    .clone()
+                    .unwrap_or_else(|| "the session is in a failed state".to_owned()),
+            ),
         ));
     }
     let retry_pending = |outcome: &MaterializedTurnOutcome| {

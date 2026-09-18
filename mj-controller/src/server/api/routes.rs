@@ -8,6 +8,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/config",
             axum::routing::patch(set_config),
         )
+        .route("/workspaces", get(list_workspaces).post(create_workspace))
         .route("/sessions", get(list_sessions).post(start_session))
         .route("/sessions/{session_id}", get(get_session))
         .route(
