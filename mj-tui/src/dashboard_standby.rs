@@ -166,17 +166,17 @@ impl DashboardState {
     /// Keys for the standby composer shown while a Starting/Resuming
     /// transition or an in-flight attach owns the selected session. It is the
     /// real composer, so the whole readline chord set edits the draft; only
-    /// the dashboard's own chords are reserved, which keeps, say, Alt-X
-    /// cancel working while typing. `Enter` never sends while the session is
-    /// offline: the standby keeps the draft and explains. `Some` means the
-    /// key was consumed, including as a no-op.
+    /// the dashboard's own pane keys are reserved. Everything configurable is
+    /// matched by the prefix router before the key reaches here. `Enter` never
+    /// sends while the session is offline: the standby keeps the draft and
+    /// explains. `Some` means the key was consumed, including as a no-op.
     pub(crate) fn handle_standby_prompt_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
         if self.focus != Focus::Prompt {
             return None;
         }
         let session_id = self.standby_prompt_session()?.to_owned();
-        // Chords the dashboard answers from every surface — the palette, the
-        // pane keys, canceling an operation — still belong to it.
+        // Pane keys still belong to the dashboard; the prefix router has
+        // already taken everything a user can rebind.
         if crate::actions::pane_command_for_key(key, self.focus).is_some() {
             return None;
         }

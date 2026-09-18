@@ -488,10 +488,6 @@ impl DashboardState {
             // arm of this function can apply to it.
             return wizard.reenter_review(self);
         }
-        if wizard.step() == WizardStep::Target && key.code == KeyCode::F(5) {
-            self.target_readiness.clear();
-            return self.keep(wizard);
-        }
         if wizard.step() == WizardStep::Target
             && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
         {

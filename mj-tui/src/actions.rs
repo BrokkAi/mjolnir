@@ -917,10 +917,9 @@ impl DashboardState {
             | CommandId::QuitDetach
             | CommandId::TogglePanePreset
             | CommandId::Refresh => true,
-            // While the target-actions dialog is up, cancel belongs to the
-            // test that dialog is running, so it must not be caught here; the
-            // modal check is what leaves it to the dialog's own handler.
-            CommandId::CancelOperation => !self.modal_open(),
+            // Cancel is allowed through exactly one modal: the target-actions
+            // dialog, where it cancels the test that dialog is running.
+            CommandId::CancelOperation => self.target_test_running() || !self.modal_open(),
             CommandId::CycleFocusedPaneSize => !self.modal_open(),
             // Moving the keyboard or the workspace out from under an open
             // dialog would act on a surface the user cannot see.
@@ -1020,6 +1019,11 @@ impl DashboardState {
             }
             CommandId::MarkAllRead => self.mark_all_read(),
             CommandId::CancelOperation => {
+                // The target-actions dialog's running test is the one thing
+                // cancel reaches through a modal.
+                if let Some(action) = self.cancel_target_test() {
+                    return action;
+                }
                 let operation = self.selected_session().and_then(|session| {
                     self.session_operation_kind(&session.id)
                         .map(|kind| (session.id.clone(), kind))

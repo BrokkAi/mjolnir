@@ -564,7 +564,7 @@ fn tab_reaches_every_pane_without_changing_explicit_sizes() {
     }
 }
 
-/// The combined surface is quit with Alt-Q. A stray Escape must never
+/// The combined surface is quit with the detach chord. A stray Escape must never
 /// take the conversation off the screen.
 #[test]
 fn escape_never_quits_the_combined_surface() {

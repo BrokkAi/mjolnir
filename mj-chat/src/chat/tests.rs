@@ -2004,7 +2004,7 @@ fn alt_t_toggles_rendering() {
     assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
     chat.handle_key(alt('t'));
     assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    // Ctrl-T stayed free for readline when the toggle moved to Alt-T.
+    // Ctrl-T stayed free for readline when the rendering toggle moved away.
     chat.handle_key(ctrl('t'));
     assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
 }

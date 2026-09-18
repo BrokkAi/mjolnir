@@ -398,7 +398,8 @@ impl DashboardState {
         // while the config is empty, and an empty config has no sessions. The
         // registry cannot resolve this on the key alone, because `e` is also
         // the Sessions, Targets, and Quota panes' key, so the ambiguity is
-        // settled here and `Scope::Setup` is left out of `spec_for_key`.
+        // settled here and `Scope::Setup` is left out of
+        // `pane_command_for_key`.
         if plain && key.code == KeyCode::Char('e') && self.config_is_empty() {
             let action = self.dispatch_command(CommandId::OpenConfig);
             self.record_event_handled();

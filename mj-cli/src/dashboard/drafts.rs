@@ -228,9 +228,14 @@ impl DashboardContext {
         self.dashboard.set_current_session(Some(&session_id));
         self.dashboard.select_active_session(&session_id);
         self.dashboard.set_opening_session(Some(&session_id));
-        self.dashboard.set_notice(
-            "Opening session… Esc cancels; select another session to switch; Alt-Q quits.",
-        );
+        let detach = self
+            .dashboard
+            .first_key_label(mj_tui::CommandId::QuitDetach)
+            .map(|key| format!("; {key} quits"))
+            .unwrap_or_default();
+        self.dashboard.set_notice(format!(
+            "Opening session… Esc cancels; select another session to switch{detach}."
+        ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();
         self.attachment.spawn(

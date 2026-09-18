@@ -65,6 +65,12 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - Observation: `cargo check --workspace` fails in this checkout because `mj-desktop` needs GTK/WebKit system libraries. The default workspace members exclude it.
   Evidence: `Cargo.toml:7` lists ten default members without `mj-desktop`; `cargo check --workspace` fails in `pango-sys`, `cairo-sys-rs`, `javascriptcore-rs-sys`. Consequence: validation uses plain `cargo test` and `cargo clippy --all-targets`, which honour `default-members`.
 
+- Observation: two hard-coded chords survived the M2 sweep because they live inside dialog key handlers rather than the registry: the target-actions dialog cancelled its running test on a literal `Alt-X` (`mj-tui/src/dialogs.rs:652-660`), and the new/resume wizard rechecked target readiness on a literal `F5` (`mj-tui/src/wizards/dashboard.rs:491`).
+  Evidence: `grep -rn "Alt-\[A-Z\]\|F\[1-9\] " --include=*.rs mj-tui/src mj-cli/src mj-chat/src` after the first M2 commit still matched both, plus their hint strings. Consequence: both are retired. `CommandId::CancelOperation` is now allowed through exactly that one modal — `command_allowed_now` asks `target_test_running()` — and its dispatch arm calls `cancel_target_test()` first. The wizard's `F5` arm was deleted outright, because `dispatch_command(Refresh)` already clears `target_readiness` and already survives modals, so the Refresh chord does the recheck with no wizard-specific code at all.
+
+- Observation: a dozen user-visible strings named keys that no longer exist, in crates that have no `DashboardState` at hand.
+  Evidence: `Alt-Q quits` in `mj-cli/src/dashboard/io.rs` and `drafts.rs`, `F2 → Next spinner style` in `io.rs`, `F7 Settings` twice in `mj-cli/src/go.rs`, `press Alt-V to transcribe` in `mj-chat/src/chat/active/dispatch.rs`, and four `F6/Shift-F6 panes` fragments in `mj-chat/src/chat/elicitation.rs`. Consequence: the mj-cli strings read `DashboardState::first_key_label` (made `pub` for this); `mj-cli/src/go.rs` has only a `Config`, so it reads `Config::keybinds().labels(KeyAction::OpenSettings)`; the chat crate cannot know the host's bindings, so the dictation notice points at the microphone control and the elicitation footers simply drop the pane fragment.
+
 ## Decision Log
 
 - Decision: adopt herdr's full prefix model and drop mj's direct `Alt` and function-key defaults, instead of only renaming letters.

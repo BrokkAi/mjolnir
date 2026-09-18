@@ -15,8 +15,8 @@ impl ChatState {
         // projection state: it is rebuilt from `pending_elicitations` the next
         // time the session is opened, so stepping out loses nothing but field
         // text that was typed and not submitted.
-        // The pane dial, detach, and the web viewer are global chords
-        // (Alt-G, Alt-Q, F4). The host catches them before the composer sees
+        // The pane dial, detach, and the web viewer are host bindings behind
+        // the prefix key. The host catches them before the composer sees
         // them, so the composer has no escape hatch of its own left.
 
         // A reviewing harness that asked a question is blocked until it is
@@ -282,9 +282,9 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
-                // The rendering toggle sits here rather than beside Alt-V
-                // because the block above hands every key to an open
-                // reverse-i-search first.
+                // The rendering toggle sits here rather than beside the
+                // dictation key because the block above hands every key to an
+                // open reverse-i-search first.
                 KeyCode::Char('t') => self.toggle_render_mode(),
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),

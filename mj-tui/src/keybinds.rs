@@ -300,7 +300,7 @@ impl DashboardState {
     /// from [`DashboardState::key_labels`]: prose like "press … to create a
     /// session" is read from the conversation as often as from a pane, and a
     /// bare pane letter is text everywhere else.
-    pub(crate) fn first_key_label(&self, id: CommandId) -> Option<String> {
+    pub fn first_key_label(&self, id: CommandId) -> Option<String> {
         let spec = crate::actions::spec(id);
         spec.action
             .and_then(|action| {

@@ -255,9 +255,8 @@ impl ActiveChat {
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
-                    self.state.set_notice(
-                        "Starting microphone… click again or press Alt-V to transcribe",
-                    );
+                    self.state
+                        .set_notice("Starting microphone… click it again to transcribe");
                     spawn_dictation(auth_path, self.voice_updates_tx.clone(), cancel_rx);
                 }
             }
@@ -276,9 +275,10 @@ impl ActiveChat {
     /// transcript has been read, which the host turns into the session's read
     /// receipt and its saved draft.
     ///
-    /// `Alt-Q` is a global chord, so the host catches it before the composer
-    /// sees the key and calls this directly; `/detach` reaches it through
-    /// [`ChatAction::QuitDetach`]. Both paths must do the same bookkeeping.
+    /// The detach key is a host binding, so the host catches it before the
+    /// composer sees the key and calls this directly; `/detach` reaches it
+    /// through [`ChatAction::QuitDetach`]. Both paths must do the same
+    /// bookkeeping.
     pub fn detach(&mut self) -> ChatEventOutcome {
         self.cancel_dictation();
         ChatEventOutcome::QuitDetach {

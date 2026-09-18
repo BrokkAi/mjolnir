@@ -1,5 +1,15 @@
 use super::*;
 
+/// The Target step's resource keys, with the live refresh binding for the
+/// recheck rather than a key that may not exist any more.
+fn resource_help(dashboard: &DashboardState) -> String {
+    let base = "+ double · - halve · c +8 CPU · m +50% memory · r reset";
+    match dashboard.first_key_label(crate::CommandId::Refresh) {
+        Some(key) => format!("{base} · {key} recheck"),
+        None => base.to_owned(),
+    }
+}
+
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
     match step {
         WizardStep::Profile => WizardControl::ProfileList,
@@ -435,7 +445,7 @@ pub(crate) fn render_new_wizard(
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
     let mut help = vec![if wizard.step == WizardStep::Target {
-        picker_help("+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck")
+        picker_help(&resource_help(dashboard))
     } else {
         picker_help("↑/↓ select · Tab moves focus · Enter activates")
     }];
@@ -1495,9 +1505,7 @@ pub(crate) fn render_resume_wizard(
                 })
                 .collect(),
             wizard.target,
-            vec![picker_help(
-                "+ double · - halve · c +8 CPU · m +50% memory · r reset · F5 recheck",
-            )],
+            vec![picker_help(&resource_help(dashboard))],
         ),
         WizardStep::Bundle => unreachable!("resume does not select a bundle"),
         WizardStep::Review => unreachable!("review was rendered above"),

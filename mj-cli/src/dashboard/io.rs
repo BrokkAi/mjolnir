@@ -631,7 +631,14 @@ impl DashboardContext {
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        self.dashboard.set_notice(format!("Could not open session: {error}. Press Enter in Sessions to retry, or select another session. Alt-Q quits."));
+                        let detach = self
+                            .dashboard
+                            .first_key_label(mj_tui::CommandId::QuitDetach)
+                            .map(|key| format!(" {key} quits."))
+                            .unwrap_or_default();
+                        self.dashboard.set_notice(format!(
+                            "Could not open session: {error}. Press Enter in Sessions to retry, or select another session.{detach}"
+                        ));
                     }
                 }
             }
@@ -937,8 +944,13 @@ impl DashboardContext {
                     self.controller.config = config.clone();
                     self.dashboard.set_config(config);
                     self.refresh_chat_context();
+                    let palette = self
+                        .dashboard
+                        .first_key_label(mj_tui::CommandId::Palette)
+                        .map(|key| format!("{key} → "))
+                        .unwrap_or_default();
                     self.dashboard.set_notice(format!(
-                        "Spinner: {style}. F2 → Next spinner style to change it."
+                        "Spinner: {style}. {palette}Next spinner style to change it."
                     ));
                 }
                 Err(error) => {

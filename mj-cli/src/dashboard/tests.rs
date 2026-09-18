@@ -1087,10 +1087,10 @@ fn the_cancel_chord_cancels_the_selected_sessions_launch_from_the_composer() {
     );
 }
 
-/// Inside the target-actions dialog the cancel key belongs to the test that
-/// dialog is running, so the router must leave it alone.
+/// The cancel chord is allowed through exactly one modal: inside the
+/// target-actions dialog it cancels the test that dialog is running.
 #[test]
-fn the_cancel_key_inside_the_target_dialog_cancels_the_running_test() {
+fn the_cancel_chord_inside_the_target_dialog_cancels_the_running_test() {
     let mut dashboard = populated_dashboard();
     focus_on(&mut dashboard, mj_tui::Focus::Targets);
     assert!(matches!(
@@ -1106,18 +1106,16 @@ fn the_cancel_key_inside_the_target_dialog_cancels_the_running_test() {
         DashboardAction::TestTarget { .. }
     ));
 
-    assert_eq!(
-        chord_command(&mut dashboard, &chord('C')),
-        None,
-        "the dialog keeps the key"
-    );
+    let command = chord_command(&mut dashboard, &chord('C'))
+        .expect("cancel reaches the dialog's running test");
+    assert_eq!(command, CommandId::CancelOperation);
     assert!(matches!(
-        dashboard.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('x'),
-            crossterm::event::KeyModifiers::ALT
-        )),
+        dashboard.dispatch_command(command),
         DashboardAction::CancelTargetTest
     ));
+    // With the test cancelled the dialog is an ordinary modal again, and
+    // cancel waits for it to close.
+    assert_eq!(chord_command(&mut dashboard, &chord('C')), None);
 }
 
 #[test]
