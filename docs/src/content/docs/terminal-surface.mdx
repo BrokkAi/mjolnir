@@ -143,6 +143,7 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+shift+r` | Refresh all target capacity and profile quota data |
 | `prefix+shift+c` | Cancel the selected session's in-flight launch, resume, or stop operation |
 | `prefix+a` | Mark all session activity as read |
+| `prefix+o` / `prefix+shift+o` | Open the next or previous session that needs you, in any workspace |
 | `prefix+u` | Show the web viewer address and access code |
 | `prefix+shift+t` | Rename the selected session |
 | `prefix+t` | Toggle the transcript between rendered and raw text |
@@ -154,6 +155,28 @@ The commands below run from any dashboard pane and from the composer, once the p
 Pressing the prefix twice sends the literal key through to whatever has focus instead of running a command. In the composer this is how you still reach `Ctrl-B`, backward-character: press `ctrl+b ctrl+b`.
 
 Every binding above, including the prefix itself, is editable in `config.toml` under `[keys]`; see [Configuration](/configuration/#keys-keys).
+
+## Sessions that need you
+
+Every session has an attention level: waiting for your input, failed, unread,
+working, or idle. `prefix+o` opens the session that most needs a person and
+`prefix+shift+o` walks the same list backwards. Questions come first, then
+failures and unreachable sessions, then finished answers you have not read;
+within a level the most recent activity leads. The walk continues from the
+selected session when it is in the list, wraps at either end, and crosses
+workspace tabs, unfolding a folded project on the way. When nothing is
+waiting, the footer says so. While something is, the footer names the key
+with the count, for example `o next (2)`.
+
+Each workspace tab carries the same count: `!2` for two sessions waiting or
+failed, or `✓3` for three unread sessions when none is waiting. A folded
+project heading carries the count for its hidden rows.
+
+**Setup → Advanced → Session order** changes how the Sessions pane sorts.
+`project` (the default) groups sessions under a heading per project in
+creation order. `priority` drops the headings and lists sessions by attention
+level, so a question is always at the top; the numbered fold keys do nothing
+in this order.
 
 ## Command palette
 

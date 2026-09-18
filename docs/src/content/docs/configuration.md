@@ -109,12 +109,14 @@ activity without changing how sessions run:
 [advanced]
 detailed_activity_clocks = false
 show_stopped_sessions = false
+session_order = "project"
 ```
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
 | `show_stopped_sessions` | boolean | `false` | When enabled, stopped sessions appear in the terminal Sessions pane for their workspace. |
+| `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
 
 The terminal Setup screen edits these settings under **Advanced**. Detailed
 clocks do not change how sessions run: the normal `Running` status continues
@@ -177,6 +179,8 @@ The default bindings:
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
 | `mark_all_read` | `prefix+a` | Mark all session activity as read |
+| `next_attention` | `prefix+o` | Open the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |

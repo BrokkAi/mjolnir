@@ -128,6 +128,8 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::Palette => CommandId::Palette,
         KeyAction::CancelOperation => CommandId::CancelOperation,
         KeyAction::MarkAllRead => CommandId::MarkAllRead,
+        KeyAction::NextAttention => CommandId::NextAttention,
+        KeyAction::PreviousAttention => CommandId::PreviousAttention,
         KeyAction::WebViewer => CommandId::WebViewer,
         KeyAction::RenameSession => CommandId::RenameSession,
         KeyAction::ToggleTranscriptRendering => CommandId::ToggleTranscriptRendering,

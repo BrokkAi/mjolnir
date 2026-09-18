@@ -666,7 +666,11 @@ fn stopped_session_visibility_is_only_editable_under_advanced() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(
         dialog.keys(),
-        ["detailed_activity_clocks", "show_stopped_sessions"]
+        [
+            "detailed_activity_clocks",
+            "show_stopped_sessions",
+            "session_order"
+        ]
     );
     assert_eq!(dialog.draft["advanced"]["show_stopped_sessions"], false);
 

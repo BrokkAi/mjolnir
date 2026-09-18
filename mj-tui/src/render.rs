@@ -2,7 +2,7 @@
 mod capacity;
 mod footer;
 mod quotas;
-mod sessions;
+pub(crate) mod sessions;
 pub(crate) use capacity::*;
 pub(crate) use footer::*;
 pub(crate) use quotas::*;

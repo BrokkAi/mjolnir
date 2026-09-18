@@ -17,7 +17,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use mj_core::config::{Config, HarnessKind, TargetTemplate as HelTargetTemplate};
+use mj_core::config::{Config, HarnessKind, SessionOrder, TargetTemplate as HelTargetTemplate};
 use mj_core::state::{
     MoveOperation, ProjectSourceIdentity, ResumeQueueDisposition, SessionRecord,
     SessionResourceAllocation, SessionState, SessionTransitionKind, State,
@@ -800,6 +800,7 @@ impl WorkspaceViewState {
 mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
+pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
 

@@ -11,7 +11,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false})
+            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project"})
         }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
@@ -134,6 +134,7 @@ pub(super) fn label(key: &str) -> String {
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
         "show_stopped_sessions" => "Show stopped sessions",
+        "session_order" => "Session order",
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
@@ -267,14 +268,21 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             )
             .to_lowercase()
         ),
-        "advanced" => match ["detailed_activity_clocks", "show_stopped_sessions"]
-            .iter()
-            .filter(|field| section[*field] == Value::Bool(true))
-            .count()
-        {
-            0 => "All off".to_owned(),
-            count => format!("{count} on"),
-        },
+        "advanced" => {
+            let on = ["detailed_activity_clocks", "show_stopped_sessions"]
+                .iter()
+                .filter(|field| section[*field] == Value::Bool(true))
+                .count();
+            let order = if section["session_order"] == Value::String("priority".to_owned()) {
+                " · priority order"
+            } else {
+                ""
+            };
+            match on {
+                0 => format!("All off{order}"),
+                count => format!("{count} on{order}"),
+            }
+        }
         "profiles" | "machines" | "targets" | "bundles" => named_entries(section),
         "phone" => {
             if section["enabled"] == Value::Bool(false) {
@@ -402,6 +410,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
     let values: &[&str] = match key {
         "sessions_side" => &["left", "right"],
+        "session_order" => &["project", "priority"],
         "spinner" => &[], // Use the canonical animation list below.
         "tier" => &["quick", "extended"],
         "permissions" => &["guardian", "yolo"],
@@ -482,6 +491,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "advanced" => "Optional diagnostics and display details for the activity surface.",
         "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
         "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
+        "session_order" => {
+            "Group sessions by project, or list the ones that need you first without project headings."
+        }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
         }

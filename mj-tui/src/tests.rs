@@ -2438,3 +2438,281 @@ fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
         }
     );
 }
+
+/// A form question the agent is waiting on, as the daemon projects it.
+fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
+    mj_core::elicitation::ElicitationRequest::from_acp_params(
+        format!("{session_id}-question"),
+        serde_json::json!({
+            "mode": "form",
+            "sessionId": session_id,
+            "message": "Choose a path",
+            "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+        }),
+    )
+    .expect("valid test question")
+}
+
+/// Three live sessions in the default workspace and one in `other`: `asks`
+/// is waiting on a question, `done` has an unread answer, `quiet` is idle and
+/// read, and `remote` (in `other`) is also waiting on a question.
+fn dashboard_with_attention_mix() -> DashboardState {
+    let mut sessions = BTreeMap::new();
+    for (id, workspace, created) in [
+        ("quiet", "default", "2026-08-01T00:00:00Z"),
+        ("asks", "default", "2026-08-02T00:00:00Z"),
+        ("done", "default", "2026-08-03T00:00:00Z"),
+        ("remote", "other", "2026-08-04T00:00:00Z"),
+    ] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.workspace_id = workspace.into();
+        session.created_at = created.into();
+        session.project_directory = Some(format!("/projects/{id}").into());
+        sessions.insert(session.id.clone(), session);
+    }
+    let mut dashboard = DashboardState::new(
+        config(),
+        State {
+            subagents: Default::default(),
+            version: STATE_VERSION,
+            sessions,
+            mount_history: BTreeMap::new(),
+            container_sizes: BTreeMap::new(),
+        },
+        BTreeMap::new(),
+    );
+    dashboard.set_workspace_names(BTreeMap::from([
+        ("default".into(), "Default".into()),
+        ("other".into(), "Other".into()),
+    ]));
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations = vec![question(id)];
+    }
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .unread_agent_messages = 1;
+    dashboard
+}
+
+#[test]
+fn attention_levels_rank_a_question_above_unread_above_idle() {
+    let dashboard = dashboard_with_attention_mix();
+    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Waiting);
+    assert_eq!(dashboard.attention_level("done"), AttentionLevel::Unread);
+    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Idle);
+    assert_eq!(
+        dashboard.attention_level("missing"),
+        AttentionLevel::Inactive
+    );
+    let queue = dashboard
+        .attention_queue()
+        .into_iter()
+        .map(|entry| entry.session_id)
+        .collect::<Vec<_>>();
+    // Both questions lead; the unread answer follows; the idle session is
+    // not in the queue at all.
+    assert_eq!(queue.len(), 3);
+    assert!(queue[..2].contains(&"asks".to_owned()));
+    assert!(queue[..2].contains(&"remote".to_owned()));
+    assert_eq!(queue[2], "done");
+}
+
+#[test]
+fn next_attention_opens_the_waiting_session_and_wraps_through_the_queue() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Make the local question the newest so it leads the queue.
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    dashboard
+        .session_details
+        .get_mut("remote")
+        .unwrap()
+        .last_activity_at_ms = Some(10);
+    dashboard.select_active_session("quiet");
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+    assert_eq!(dashboard.selected_session_id(), Some("asks"));
+    assert!(dashboard.prompt_has_focus());
+
+    // The next entry lives in another workspace: the dashboard records it as
+    // that workspace's selection and asks the host to switch tabs.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("remote"));
+
+    // From the last entry, previous walks back and next wraps to the front.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::PreviousAttention),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "default".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("default".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("asks"));
+    dashboard.select_active_session("done");
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+}
+
+#[test]
+fn next_attention_reports_an_empty_queue_and_unfolds_a_folded_project() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let key = dashboard
+        .project_source(&dashboard.state.sessions["asks"])
+        .key;
+    dashboard.toggle_project(&key);
+    assert!(dashboard.collapsed_project_keys.contains(&key));
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    // From a session outside the queue, the walk starts at the front.
+    dashboard.select_active_session("quiet");
+    let action = chord(&mut dashboard, CommandId::NextAttention);
+    assert_eq!(
+        action,
+        DashboardAction::Open {
+            session_id: "asks".into()
+        }
+    );
+    assert!(!dashboard.collapsed_project_keys.contains(&key));
+
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .unread_agent_messages = 0;
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.notices.current().as_deref(),
+        Some("Nothing is waiting for you.")
+    );
+}
+
+#[test]
+fn the_footer_names_the_next_key_only_while_something_waits() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let footer = lines.last().unwrap();
+    assert!(footer.contains("o next (3)"), "{footer}");
+
+    let mut quiet = dashboard_with_session(running_session());
+    let lines = drawn(&mut quiet, 120, 40);
+    assert!(
+        !lines.last().unwrap().contains("next ("),
+        "{}",
+        lines.last().unwrap()
+    );
+}
+
+#[test]
+fn workspace_tabs_and_folded_headings_carry_attention_badges() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let tabs = lines
+        .iter()
+        .find(|line| line.contains("Default") && line.contains("Other"))
+        .expect("workspace tab row");
+    assert!(tabs.contains("Default !1"), "{tabs}");
+    assert!(tabs.contains("Other !1"), "{tabs}");
+
+    // Folding the project that holds the unread session puts its count on
+    // the heading; an unfolded project shows the rows instead.
+    let key = dashboard
+        .project_source(&dashboard.state.sessions["done"])
+        .key;
+    dashboard.toggle_project(&key);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let heading = lines
+        .iter()
+        .find(|line| line.contains("done ✓1"))
+        .unwrap_or_else(|| panic!("folded heading with badge: {lines:#?}"));
+    assert!(heading.contains("done ✓1"));
+}
+
+#[test]
+fn priority_order_lists_waiting_first_without_project_headings() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let mut config = dashboard.config.clone();
+    config.advanced.session_order = mj_core::config::SessionOrder::Priority;
+    dashboard.set_config(config);
+
+    let ids = dashboard
+        .ordered_sessions()
+        .into_iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["asks", "done", "quiet"]);
+    assert!(
+        dashboard
+            .sessions_rows()
+            .iter()
+            .all(|row| matches!(row, SessionsRow::Session { .. })),
+        "priority order has no project headings"
+    );
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('1')));
+    assert!(dashboard.collapsed_project_keys.is_empty());
+    assert!(
+        dashboard
+            .notices
+            .current()
+            .as_deref()
+            .is_some_and(|notice| notice.contains("priority order"))
+    );
+
+    // Answering the question drops the session below the unread one.
+    dashboard
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .pending_elicitations
+        .clear();
+    let ids = dashboard
+        .ordered_sessions()
+        .into_iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids[0], "done");
+}

@@ -186,15 +186,19 @@ pub(crate) fn drawn_session_rows_with_options(
                 if let Some(last) = rows.last_mut() {
                     last.spacing = 1;
                 }
-                pending_heading = Some((
-                    key,
-                    Line::styled(
-                        format!("{hotkey}{label}"),
-                        Style::default()
-                            .fg(theme::palette().secondary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ));
+                let mut spans = vec![Span::styled(
+                    format!("{hotkey}{label}"),
+                    Style::default()
+                        .fg(theme::palette().secondary)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                // A folded project hides its rows, so the heading says what
+                // is waiting inside it. An unfolded one shows every symbol.
+                if dashboard.collapsed_project_keys.contains(&key) {
+                    let (waiting, unread) = dashboard.project_attention_counts(&key);
+                    spans.extend(attention_badge(waiting, unread));
+                }
+                pending_heading = Some((key, Line::from(spans)));
             }
             SessionsRow::Session { index, expanded } => {
                 let Some(session) = sessions.get(index) else {
@@ -683,8 +687,7 @@ impl SessionRowFacts<'_> {
         review: Option<&RuntimeReviewView>,
         operation: Option<&SessionOperationDisplay>,
     ) -> &'static str {
-        use mj_core::review::driver::TurnReviewPhase;
-        use mj_core::review::verdict::ReviewVerdict;
+        use crate::AttentionLevel;
 
         if operation.is_some() {
             return "◐";
@@ -704,34 +707,29 @@ impl SessionRowFacts<'_> {
         if self.unreachable {
             return "?";
         }
-        if self.needs_input() {
-            return "!";
-        }
-        if let Some(review) = review.filter(|review| review.activity_label().is_some()) {
-            if review.is_working() {
-                return "◐";
-            }
-            return match &review.phase {
-                TurnReviewPhase::Verdict(ReviewVerdict::Clean) => "✓",
-                TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
-                | TurnReviewPhase::Forwarding { error: Some(_), .. } => "×",
-                _ => "!",
-            };
-        }
-        let Some(detail) = self.detail else {
-            return "·";
-        };
-        if !detail.activity.is_idle(detail.current_turn_started_at) {
-            "◐"
-        } else if detail.materialized_applied_event_ordinal.is_none()
-            && detail.activity.execution.is_none()
-            && detail.activity.idle_since_ms.is_none()
-        {
-            "·"
-        } else if detail.has_unread() {
-            "✓"
-        } else {
-            "○"
+        // The same scale the attention queue and the badges read, so a row
+        // can never show a symbol the queue disagrees with.
+        match crate::dashboard_sessions::attention_level(
+            self.detail,
+            review,
+            self.state,
+            false,
+            false,
+        ) {
+            AttentionLevel::Waiting => "!",
+            AttentionLevel::Failed => "×",
+            AttentionLevel::Working => "◐",
+            AttentionLevel::Unread => "✓",
+            AttentionLevel::Idle | AttentionLevel::Inactive => match self.detail {
+                Some(detail)
+                    if detail.materialized_applied_event_ordinal.is_some()
+                        || detail.activity.execution.is_some()
+                        || detail.activity.idle_since_ms.is_some() =>
+                {
+                    "○"
+                }
+                _ => "·",
+            },
         }
     }
 
@@ -990,6 +988,24 @@ pub(crate) fn sessions_block(
             maximize_enabled,
         ))
         .title(pane_size_controls(size, maximize_enabled))
+}
+
+/// The ` !2` or ` ✓3` a folded heading or a workspace tab carries: waiting
+/// sessions when there are any, otherwise unread ones, otherwise nothing.
+pub(crate) fn attention_badge(waiting: usize, unread: usize) -> Option<Span<'static>> {
+    let text = if waiting > 0 {
+        format!(" !{waiting}")
+    } else if unread > 0 {
+        format!(" ✓{unread}")
+    } else {
+        return None;
+    };
+    Some(Span::styled(
+        text,
+        Style::default()
+            .fg(theme::palette().session_attention)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// Draws the Sessions pane and reports the per-row mouse hitboxes.

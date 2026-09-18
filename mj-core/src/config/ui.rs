@@ -146,6 +146,28 @@ pub struct AdvancedConfig {
     pub detailed_activity_clocks: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub show_stopped_sessions: bool,
+    #[serde(skip_serializing_if = "SessionOrder::is_default")]
+    pub session_order: SessionOrder,
+}
+
+/// How the Sessions pane orders its rows.
+///
+/// `Project` groups sessions under a heading per project, in creation order,
+/// which keeps related work together. `Priority` drops the headings and lists
+/// the sessions that need a person first: waiting for input, then failed,
+/// then unread, then working, then idle, newest activity first within a level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionOrder {
+    #[default]
+    Project,
+    Priority,
+}
+
+impl SessionOrder {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl AdvancedConfig {

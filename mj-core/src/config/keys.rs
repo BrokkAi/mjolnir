@@ -386,6 +386,8 @@ key_actions! {
     Palette / palette = "prefix+:",
     CancelOperation / cancel_operation = "prefix+shift+c",
     MarkAllRead / mark_all_read = "prefix+a",
+    NextAttention / next_attention = "prefix+o",
+    PreviousAttention / previous_attention = "prefix+shift+o",
     WebViewer / web_viewer = "prefix+u",
     RenameSession / rename_session = "prefix+shift+t",
     ToggleTranscriptRendering / toggle_transcript_rendering = "prefix+t",

@@ -28,6 +28,10 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 
 Active work and requests for input take precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
 
+The same scale drives `prefix+o`, which opens the session that most needs you
+across every workspace, and the `!N` and `✓N` counts on workspace tabs and
+folded project headings. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
+
 ## Create a session
 
 Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal

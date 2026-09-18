@@ -32,6 +32,8 @@ pub enum CommandId {
     MoveSession,
     ForceDestroySession,
     MarkAllRead,
+    NextAttention,
+    PreviousAttention,
     CancelOperation,
     ToggleProject,
     TargetActions,
@@ -343,6 +345,14 @@ fn cancel_footer(dashboard: &DashboardState) -> Option<String> {
     Some(format!("cancel {}", kind.label().to_lowercase()))
 }
 
+/// The footer names the next-attention key only while something is actually
+/// waiting, and says how many sessions are, so the hint is a signal as well
+/// as a reminder of the key.
+fn attention_footer(dashboard: &DashboardState) -> Option<String> {
+    let waiting = dashboard.attention_queue().len();
+    (waiting > 0).then(|| format!("next ({waiting})"))
+}
+
 fn operation_in_flight(dashboard: &DashboardState) -> Availability {
     match cancel_footer(dashboard) {
         Some(_) => Availability::Ready,
@@ -434,6 +444,30 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: footer_word!("read"),
         footer_group: FooterGroup::Chord,
         footer_rank: 2,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::NextAttention,
+        label: "Next session needing you",
+        description: "Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::NextAttention),
+        footer: attention_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::PreviousAttention,
+        label: "Previous session needing you",
+        description: "Walk the sessions that need a person in the other direction.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::PreviousAttention),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 3,
         available: always_ready,
     },
     CommandSpec {
@@ -1049,6 +1083,8 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
+            CommandId::NextAttention => self.step_attention(1),
+            CommandId::PreviousAttention => self.step_attention(-1),
             CommandId::CancelOperation => {
                 // The target-actions dialog's running test is the one thing
                 // cancel reaches through a modal.
