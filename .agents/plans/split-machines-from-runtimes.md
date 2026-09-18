@@ -12,10 +12,10 @@ After this change the configuration file and the Settings screen have two separa
 
 - [x] (2026-09-17) Milestone 1: stored configuration shape (`Machine`, `StoredTarget`, `StoredConfig`), lossless conversion both ways, legacy migration on load, version 11, validation, and round-trip tests in `mj-core`.
 - [x] (2026-09-17) Milestone 2: shared cache host keyed by machine (`CacheHost::Local | Ssh`), `preview_build_cache` taking a machine, `resolve_machine_input_path`, the dashboard action payloads, and the controller's mbx tests.
-- [ ] Milestone 3: Settings screen pages "Machines" and "Runtimes", machine choice on runtimes, build cache preview under machines, path resolution under machines, detection inserting runtimes on `local`, and TUI behavior tests.
+- [x] (2026-09-17) Milestone 3: Settings screen pages "Machines" and "Runtimes", machine choice on runtimes, build cache preview under machines, path resolution under machines, detection inserting runtimes on `local`, and TUI behavior tests.
 - [ ] Milestone 4: documentation, the launch-template script, and the end-to-end fixtures write the new shape; full workspace validation.
 
-Known transient state: between Milestone 1 and Milestone 3, four Settings-screen tests in `mj-tui` fail (`setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft`, `the_automatic_download_policy_shows_what_it_does_to_this_image`, `remote_path_apply_preserves_failed_and_newer_drafts`, `the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields`). The Settings draft is literally `serde_json::to_value(&Config)`, so the moment the stored shape changes the screen's schema is out of date, and the schema is Milestone 3's subject. Every other package is green at each milestone, and Milestone 3 restores the whole suite.
+Resolved transient state: between Milestone 1 and Milestone 3, four Settings-screen tests in `mj-tui` fail (`setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft`, `the_automatic_download_policy_shows_what_it_does_to_this_image`, `remote_path_apply_preserves_failed_and_newer_drafts`, `the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields`). The Settings draft is literally `serde_json::to_value(&Config)`, so the moment the stored shape changes the screen's schema is out of date, and the schema is Milestone 3's subject. Every other package was green at each milestone, and Milestone 3 restored the whole suite.
 
 ## Surprises & Discoveries
 
@@ -27,6 +27,12 @@ Known transient state: between Milestone 1 and Milestone 3, four Settings-screen
 
 - Observation: `save_setup_at` in `mj-cli/src/dashboard/io/spawn.rs` decided whether an implicit local target was "unchanged" by comparing the editor's JSON against `serde_json::to_value(&TargetTemplate)`, which is the fused shape. Once the editor works in the stored shape those never matched, the merge base lost every implicit target, and saving an edited implicit target failed with "Setup / targets changed in another client."
   Evidence: `dashboard::io::tests::settings_can_override_an_implicit_local_target_without_a_setup_file` failed with exactly that message. The comparison now uses the stored form taken from `serde_json::to_value(&Config::default().with_local_targets())`.
+
+- Observation: the Machines page has to show this machine even when the file names no machines, but adding `machines.local` to the draft made every untouched draft look edited, because `SetupDialog::dirty` parses the draft back into a `Config` and compares it with the one the dialog opened on.
+  Evidence: `review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them` stopped closing on Escape (`assertion failed: !dashboard.modal_open()`) and `expanded_form_preserves_existing_optional_settings` came back with `machines: {"local": Local { build_cache: None }}` against `machines: {}`. `config_from_draft` now drops a `local` machine whose build cache is still all blank, so the implied machine is a page but not a change.
+
+- Observation: the Settings dialog is moved out of `DashboardState::mode` for the duration of a key press and put back at the end, so an early `return` from the key handler loses the whole dialog.
+  Evidence: the first version of the "this machine cannot be removed" guard returned early and the next line of the test found no dialog at all (`called 'Option::unwrap()' on a 'None' value` on `setup_dialog_mut`). The guard is now an `else` branch.
 
 ## Decision Log
 
