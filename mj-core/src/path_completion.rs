@@ -257,7 +257,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    // macOS filesystems reject invalid UTF-8 names before completion can read them.
+    #[cfg(target_os = "linux")]
     fn non_utf8_entries_are_skipped() {
         use std::os::unix::ffi::OsStrExt;
 

@@ -1,5 +1,7 @@
 use super::*;
 
+#[cfg(unix)]
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;

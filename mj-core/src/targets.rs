@@ -5,7 +5,6 @@
 //! command string; every remotely supplied argument is POSIX-quoted there.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1887,6 +1886,8 @@ pub fn container_exec(
 
 #[cfg(all(test, unix))]
 mod executor_tests {
+    use std::fs;
+
     use super::*;
 
     /// A stand-in for `ssh` that is refused by the server on its first call and
