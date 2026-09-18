@@ -51,13 +51,17 @@ measured to need one, from the harness kind the worker already knows.
 - [x] (2026-09-18) Revised after the maintainer's decision: no 600-second cap, progress
       notifications are the fix rather than defence in depth, and any cap is per harness
       and only where measured.
-- [ ] Milestone 1: one shared timeout rule, an unambiguous result shape, the daemon's
-      deadline counted from the caller's request, and one log line per wait.
-- [ ] Milestone 2: the worker answers at the caller's deadline even when the daemon does
-      not.
-- [ ] Milestone 3: MCP progress notifications while a call is in flight.
-- [ ] Milestone 4: measure the real ceiling on each harness with one wait past 1900
-      seconds, and cap only a harness that is measured to need it.
+- [x] (2026-09-18 02:00Z) Milestone 1: one shared timeout rule, an unambiguous result
+      shape, the daemon's deadline counted from the caller's request, and one log line per
+      wait. Commit 5a3e553d.
+- [x] (2026-09-18 02:05Z) Milestone 2: the worker answers at the caller's deadline even
+      when the daemon does not. Commit 3f61cd7d.
+- [x] (2026-09-18 02:10Z) Milestone 3: MCP progress notifications while a call is in
+      flight. Commit 2cd77c03.
+- [x] (2026-09-18 03:20Z) Milestone 4: measured both harnesses with a real hour-long
+      wait. Claude needs no cap; Codex does, at 240 seconds. Commit c28b8f65.
+- [x] (2026-09-18 03:45Z) Live validation on both harnesses and the daemon-restart
+      scenario; see `Outcomes & Retrospective`.
 
 ## Surprises & Discoveries
 
@@ -166,6 +170,36 @@ measured to need one, from the harness kind the worker already knows.
   `"timed_out": true` nested inside that string, and the word "timed out" reads like a
   failure rather than "ask again".
 
+- Observation: the progress notifications, the worker-side deadline and the new answer
+  shape work end to end against a real worker. A 95-second wait driven through the real
+  shim with a `progressToken` produced one notification every 30 seconds and answered at
+  its own deadline.
+  Evidence, from the live instance:
+
+      PROGRESS {"progressToken": "tok-live", "progress": 30, "message": "waiting for 1
+        child session(s) to finish their turn: ffc38ab6…; 30s elapsed", "total": 95}
+      PROGRESS {"progressToken": "tok-live", "progress": 60, ...}
+      PROGRESS {"progressToken": "tok-live", "progress": 90, ...}
+      [wait] answered after 95.0s
+      "status": "still_running", "waited_seconds": 94,
+      "next_action": "1 of 1 child sessions are still running; this is not a failure.
+        Call wait again with the same child_session_ids to keep waiting, or do other
+        work first and call wait later."
+
+  The per-wait log line lands in the daemon log as intended:
+
+      INFO mj_controller::server_runtime::api: starting a sub-agent wait
+        parent_session_id="e0b42…" children=1 requested_seconds=3600 remaining_seconds=3599
+      INFO mj_controller::server_runtime::api: answering a sub-agent wait
+        parent_session_id="e0b42…" complete=false waited_seconds=94
+
+- Observation: Codex bounds a `tools/call` by total elapsed time, not by silence, and its
+  limit is 300 seconds — below the tool's own 300-second default, so a default wait was
+  already racing that timer before this change. Claude Code's limit is on silence and the
+  progress notifications break it. Both measured on 2026-09-18 with a real hour-long child;
+  the transcripts are quoted in `Outcomes & Retrospective`.
+  Consequence: the cap is 240 seconds for a Codex parent and nothing for a Claude parent.
+
 ## Decision Log
 
 - Decision: put the authoritative deadline in the worker's socket handler
@@ -224,11 +258,55 @@ measured to need one, from the harness kind the worker already knows.
 
 ## Outcomes & Retrospective
 
-To be written when the milestones land. The bar has two parts. A live run of the
-Milestone 2 scenario answers a 45-second wait in about 45 seconds while the daemon is
-restarted underneath it, where the unfixed build answers at about 61 seconds. And one real
-wait of at least 1900 seconds returns its own answer on each harness, where today Claude
-Code abandons the call at 1800 seconds.
+All four milestones landed and both halves of the bar were met on 2026-09-18, in the
+private instance `fix1034` on a `local-bare` target.
+
+A Claude parent held one `mcp__mj-agents__wait` call open for **3582 seconds** and got its
+answer, which is roughly twice the 1800-second idle limit that produced the issue. Its own
+report, verbatim from the transcript:
+
+    {"status":"complete","waited_seconds":3582,"agents":[{"child_session_id":"0b8efcff…",
+      "state":"completed","finished":true,"output":"`finished` — the command completed with
+      exit code 0 after running the full ~60 minutes (80 × 45s)."}],
+      "next_action":"All children finished. Their reports are in each agent's output field."}
+
+A Codex parent asking for the same 3600 seconds was cut off by its own client at 300
+seconds, which is what Milestone 4 existed to find out:
+
+    Wall time: 303.0009 seconds
+    tool call error: tool call failed for `mj-agents/wait`
+    Caused by: timed out awaiting tools/call after 300s
+
+With the Codex cap in place, the same request from a Codex parent now returns an answer
+inside that limit, and the model reads the ceiling from the schema:
+
+    Wall time: 241.7643 seconds
+    {"status":"still_running","waited_seconds":240,"agents":[{"child_session_id":"7124d1ef…",
+      "state":"running","finished":false,"output":"Controller suite is still running…"}],
+      "next_action":"1 of 1 child sessions are still running; this is not a failure. Call
+      wait again with the same child_session_ids…"}
+    Maximum timeout_seconds allowed by the wait tool's schema: 240 seconds.
+
+The deadline scenario passes: a 45-second wait with the daemon stopped at 15 seconds and
+restarted at 18 answered at **45.1 seconds**, against **61.0 seconds** on the unfixed
+build. The worker process and its socket were unchanged across the restart (same pid, same
+inode), and the restarted daemon picked the request up with the caller's remaining budget
+rather than a fresh one:
+
+    INFO … starting a sub-agent wait parent_session_id="9c08c06f…" children=1
+      requested_seconds=45 remaining_seconds=27
+
+What remains. One earlier run of the same restart scenario ended differently: the worker
+closed the in-flight connection about two seconds after the daemon stopped, and the shim
+answered `the sub-agent socket closed without a reply` at 17.5 seconds, which reaches the
+model as a JSON-RPC error it can retry rather than as a still-running answer. The daemon
+still answered that request at the caller's original deadline. The second run, with the
+worker pid and socket inode recorded, showed no such closure, so this looks like a
+worker/daemon reconnect behaviour rather than anything this change introduced; it is not
+explained and deserves its own look. Separately, one Codex session that had been through
+several daemon restarts lost its `mj-agents` tools entirely (`unsupported call:
+mcp__mj_agents__wait`) while a freshly created session on the same binaries had them,
+which points at the resume path and not at this change.
 
 ## Context and Orientation
 
@@ -641,7 +719,8 @@ In `mj-controller/src/server_runtime/api.rs`, `execute_subagent_tool` takes the 
 The ceiling stays at 3600 seconds for every harness. Progress notifications remove
 Claude Code's idle limit rather than every parent paying for it, and a cap is added only
 where a harness is measured to enforce a total limit that progress does not reset,
-computed from the harness kind rather than applied to all.
+computed from the harness kind rather than applied to all. Measured: Claude keeps 3600,
+Codex is capped at 240 because its client abandons any call at 300 seconds.
 
 The result shape changes: `status` and `next_action` replace `timed_out`, and the
 `SubagentToolResult` envelope is unwrapped so the payload is the tool's structured
@@ -676,3 +755,12 @@ clients, measuring a 150-second Codex tool call live, and reproducing the server
 deadline at 45-second scale in a private instance. The design changed once during writing:
 an earlier draft put the authoritative deadline in the daemon, which the reproduction
 showed cannot hold across a daemon restart, so it moved into the worker.
+
+---
+
+Revision note, 2026-09-18 (second): the implementation landed and the plan now records
+what the live runs measured. The one design change the measurements forced is the Codex
+cap: Milestone 4 existed to find out whether any harness needed one, and Codex did, at 300
+seconds of total elapsed time that progress notifications do not reset. Claude needed
+none, which is the point of the progress work. The `Progress` and `Outcomes` sections
+carry the commits, the measured numbers and the two loose ends that are not explained.
