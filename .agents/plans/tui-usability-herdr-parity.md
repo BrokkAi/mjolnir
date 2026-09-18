@@ -21,7 +21,7 @@ Milestone numbers match the "Plan of Work" section.
 - [x] (2026-09-19 03:00Z) M5 Per-session context: the checkout's branch, upstream distance, and changed-file count on the session title line (read on the target about once a minute per visible live session, through the same executor path go mode uses), and a `prefix+d` changed-files overlay with per-file kinds and line counts. Context-window usage was dropped (see Surprises & Discoveries).
 - [x] (2026-09-19 06:30Z) M6a Terminal integration: the notice bar keeps a thirty-entry history behind a **Recent messages** palette command and counts failures that overwrite each other (`2 failures · latest: …`); a Monochrome theme (`theme = "mono"`, also forced by `NO_COLOR`) that carries focus and selection with bold and reverse video; an ASCII symbol set (`[advanced] symbols`, or automatic on the Linux console and non-UTF-8 locales) covering status marks, transitions, badges, pane controls, borders, rules, ellipses, quota bars, scrollbars, footer separators, the spinner, and the branch text.
 - [x] (2026-09-19 08:00Z) M6b Narrow layout: between 60 and 79 columns the workspace tabs and a compact Sessions list stack above the conversation, Targets and Quota become one summary row each below it, and every hitbox follows; the "Terminal too small" floor moved to 60 columns. The second transcript column is dropped: upstream's conversation split panes (`.agents/plans/conversation-split-panes.md`, merged 2026-09-19) already show several conversations side by side.
-- [ ] M7 Onboarding and docs: Terminal surface page corrections (remaining: the Commands-button drift). The first-launch prefix hint landed in M4; per-feature docs landed with each milestone.
+- [x] (2026-09-19 08:40Z) M7 Onboarding and docs: the Terminal surface page no longer claims a Commands button in the Sessions pane, the sessions page lists the ASCII status marks, and the Setup screenshot caption names Notifications. The first-launch prefix hint landed in M4; per-feature docs landed with each milestone.
 
 ## Surprises & Discoveries
 
@@ -81,6 +81,10 @@ Milestone numbers match the "Plan of Work" section.
   Date/Author: 2026-09-18, Claude.
 
 ## Outcomes & Retrospective
+
+Complete, 2026-09-19. Every item of the usability review is on master except the two that were consciously dropped: per-session context-window usage (no harness reports it) and a pinned second transcript (upstream's tiled conversation panes cover it). Against the purpose: a person can now press `prefix+o` and land on the session that needs them, hear a bell and read the terminal title from another tab, search the live list, find any command by typing part of its name, see each checkout's branch and open its changed files, run the dashboard on a 60-column phone terminal or a color-less console, read the notices that overwrote each other, and learn the prefix key on first launch. What remains is what only a live terminal can prove: the bell and title on real emulators and multiplexers, the desktop notification helpers on macOS and Linux, and the stacked layout under a real touch keyboard; the e2e harness covers the layout guard and the hints, not those.
+
+Lessons: the shared-table pattern (attention level, confirmation letters, glyphs) paid for itself every time, because each later milestone consumed the earlier table instead of adding a second scale; and merging master after every milestone rather than at the end kept the one large merge to four both-sides-appended conflicts.
 
 M2 landed with four notify tests; the episode model (one report per session per attention level, started when first seen) is what keeps a question the agent answers itself quiet and keeps a mode change from replaying old events. The host writes BEL and the title after the frame, so a bell never precedes the row it is about. There is no sound file support: Herdr's per-agent sounds were left out because BEL already reaches every terminal and the desktop notification carries the platform sound.
 
@@ -241,6 +245,7 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-19: M7 complete; plan closed with the retrospective above.
 - 2026-09-19: M6b complete (stacked layout from 60 columns).
 - 2026-09-19: M6a complete (notice history, Monochrome and NO_COLOR, ASCII symbols). M6 split into 6a and 6b so the narrow layout lands on its own.
 - 2026-09-19: Merged origin/master (2.13.0, conversation split panes). Dropped the M6 second-transcript item as superseded; recorded the merge-as-you-go decision.

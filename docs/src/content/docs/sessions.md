@@ -32,6 +32,12 @@ The same scale drives `prefix+o`, which opens the session that most needs you
 across every workspace, and the `!N` and `✓N` counts on workspace tabs and
 folded project headings. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
 
+With the ASCII symbol set (**Setup → Advanced → Symbols**, or automatically on
+a terminal without UTF-8) the same states read `*` working, `!` waiting, `+`
+unread, `-` idle, `.` unknown, `?` unreachable, `x` failed, `^` starting, `~`
+resuming, `<>` moving, `#` checkpointing, `v` stopping, `=` stopped, and `X`
+destroying.
+
 ## Create a session
 
 Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
