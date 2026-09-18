@@ -1067,70 +1067,83 @@ fn primary_repository(
         })
 }
 
-/// Rewrite a caller's export path as one relative to the layout's workspace
-/// root, so the target-side read resolves it where the agent would.
+/// The root a file export hands the target, and the path to look up inside it.
 ///
-/// A plain `secret.txt` means the file the agent wrote, because it resolves in
-/// the directory the agent runs in (#1079). `..` is honoured as far as the
-/// workspace root, so a multi-repo bundle still reaches a sibling repository as
-/// `../other/file`, the way `other/file` did when paths were resolved at the
-/// workspace root. Climbing above the workspace root is refused here, naming
-/// the directory that was searched.
+/// A path resolves in the directory the agent runs in, so a plain `secret.txt`
+/// means the file the agent wrote (#1079). What bounds it depends on the
+/// layout:
 ///
-/// The result carries no `..` of its own, so the target-side read keeps both
-/// its own refusal of a path that tries to leave the root it is handed and its
-/// canonicalizing check against symlinks out of the workspace.
-fn workspace_relative_path(
+/// - With more than one repository, the others sit beside the primary one under
+///   the workspace root, so `..` has to reach them. `../other/file` names what
+///   `other/file` named when paths resolved at the workspace root, and the
+///   workspace root is the boundary.
+/// - With one repository there is no sibling to reach, and the workspace root
+///   is not a boundary Hel owns: for a bare project session it is the parent
+///   directory holding the user's other projects. The agent's own directory is
+///   the boundary there, so `../other-project/.env` is refused.
+///
+/// The returned path carries no `..` of its own, so the target-side read keeps
+/// both its own refusal of a path that tries to leave the root it is handed and
+/// its canonicalizing check against symlinks out of that root. Nothing on the
+/// target has to know about this, which keeps older installed workers working.
+fn export_root_and_path(
     layout: &SessionExportLayout,
     relative: &Path,
-) -> Result<String, ExportError> {
-    let agent_directory = || {
-        target_join(
-            &layout.workspace_root,
-            &primary_repository(layout)
-                .map(|repository| repository.relative_destination.clone())
-                .unwrap_or_default(),
-        )
+) -> Result<(String, String), ExportError> {
+    let primary = primary_repository(layout)?;
+    let agent_directory = target_join(&layout.workspace_root, &primary.relative_destination);
+    let (root, mut resolved) = if layout.repositories.len() > 1 {
+        let prefix = primary
+            .relative_destination
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        (layout.workspace_root.clone(), prefix)
+    } else {
+        (agent_directory.clone(), Vec::new())
     };
-    let mut resolved: Vec<String> = primary_repository(layout)?
-        .relative_destination
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
+    // Naming both only helps when they differ; for a single repository the
+    // boundary is the directory the path resolved in.
+    let climbed = || {
+        if root == agent_directory {
+            format!(
+                "{} climbs above {agent_directory}, the directory the agent runs in",
+                relative.display()
+            )
+        } else {
+            format!(
+                "{} climbs above the session workspace {root}; it was resolved in {agent_directory}",
+                relative.display()
+            )
+        }
+    };
     for component in relative.components() {
         match component {
             Component::Normal(part) => resolved.push(part.to_string_lossy().into_owned()),
             Component::CurDir => {}
             Component::ParentDir => {
                 if resolved.pop().is_none() {
-                    return Err(ExportError::Refused(format!(
-                        "{} climbs above the session workspace {}; it was resolved in {}",
-                        relative.display(),
-                        layout.workspace_root,
-                        agent_directory()
-                    )));
+                    return Err(ExportError::Refused(climbed()));
                 }
             }
             Component::RootDir | Component::Prefix(_) => {
                 return Err(ExportError::Refused(format!(
-                    "{} must be relative to {}",
-                    relative.display(),
-                    agent_directory()
+                    "{} must be relative to {agent_directory}",
+                    relative.display()
                 )));
             }
         }
     }
     if resolved.is_empty() {
         return Err(ExportError::Refused(format!(
-            "{} names the session workspace {}, not a file in it",
-            relative.display(),
-            layout.workspace_root
+            "{} names {root} itself, not a file in it",
+            relative.display()
         )));
     }
-    Ok(resolved.join("/"))
+    Ok((root, resolved.join("/")))
 }
 
 /// Join a relative path onto a target-side root.
@@ -1166,8 +1179,8 @@ async fn write_workspace_file(
         .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let layout = export_layout(session_id.clone()).await?;
     // An upload lands where a read of the same relative path finds it: resolved
-    // in the directory the agent runs in, bounded by the workspace root (#1079).
-    let relative = workspace_relative_path(&layout, &path)?;
+    // in the directory the agent runs in, under the same boundary (#1079).
+    let (root, relative) = export_root_and_path(&layout, &path)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -1190,7 +1203,7 @@ async fn write_workspace_file(
             "--length".into(),
             bytes.len().to_string(),
             "--root".into(),
-            layout.workspace_root,
+            root,
             "--path".into(),
             relative,
         ];
@@ -1618,14 +1631,14 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            // The path resolves in the agent's directory; the workspace root
-            // bounds how far `..` may reach, so a sibling repository in a
-            // multi-repo bundle stays reachable (#1079).
-            let relative = workspace_relative_path(&layout, &path)?;
+            // The path resolves in the agent's directory; how far `..` may
+            // reach depends on whether the layout has a sibling repository to
+            // reach (#1079).
+            let (root, relative) = export_root_and_path(&layout, &path)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
-                layout.workspace_root.clone(),
+                root,
                 "--path".to_owned(),
                 relative,
             ];

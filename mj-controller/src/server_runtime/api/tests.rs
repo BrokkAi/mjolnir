@@ -923,34 +923,37 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
     };
     assert_eq!(agent_working_directory(&bundle).unwrap(), "/workspace/app");
 
-    // What the target is actually asked to read: a path relative to the
-    // workspace root, resolved as the agent's directory would resolve it.
+    // What the target is actually asked to read. The one-repository layout is
+    // bounded by the agent's own directory, so the path it is handed is the one
+    // the caller typed.
     assert_eq!(
-        workspace_relative_path(&bare, Path::new("secret.txt")).unwrap(),
-        "project/secret.txt"
+        export_root_and_path(&bare, Path::new("secret.txt")).unwrap(),
+        ("/home/dev/project".to_owned(), "secret.txt".to_owned())
     );
+    // The bundle is bounded by the workspace root the repositories share, so
+    // the path is rewritten to start at the primary repository.
     assert_eq!(
-        workspace_relative_path(&bundle, Path::new("src/main.rs")).unwrap(),
-        "app/src/main.rs"
+        export_root_and_path(&bundle, Path::new("src/main.rs")).unwrap(),
+        ("/workspace".to_owned(), "app/src/main.rs".to_owned())
     );
 
     // A secondary repository sits beside the primary one under the workspace
     // root, so `..` reaches it. Before paths resolved in the agent's directory
     // this was `lib/README.md`; it must not have become unreachable (#1079).
     assert_eq!(
-        workspace_relative_path(&bundle, Path::new("../lib/README.md")).unwrap(),
-        "lib/README.md"
+        export_root_and_path(&bundle, Path::new("../lib/README.md")).unwrap(),
+        ("/workspace".to_owned(), "lib/README.md".to_owned())
     );
     assert_eq!(
-        workspace_relative_path(&bundle, Path::new("./src/../src/main.rs")).unwrap(),
-        "app/src/main.rs"
+        export_root_and_path(&bundle, Path::new("./src/../src/main.rs")).unwrap(),
+        ("/workspace".to_owned(), "app/src/main.rs".to_owned())
     );
 
     // Above the workspace root is refused, and the refusal names both the
     // boundary and the directory the path was resolved in.
     for escape in ["../../etc/passwd", "../.."] {
         let ExportError::Refused(message) =
-            workspace_relative_path(&bundle, Path::new(escape)).unwrap_err()
+            export_root_and_path(&bundle, Path::new(escape)).unwrap_err()
         else {
             panic!("{escape} must be refused, not attempted");
         };
@@ -960,9 +963,28 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
         );
     }
 
-    // The workspace root itself is not a file in the workspace.
-    assert!(matches!(
-        workspace_relative_path(&bundle, Path::new("..")),
-        Err(ExportError::Refused(_))
-    ));
+    // A one-repository layout has no sibling to reach, and its workspace root
+    // is the parent directory holding the user's other projects, not a boundary
+    // Hel owns. `..` stops at the agent's directory there.
+    let ExportError::Refused(message) =
+        export_root_and_path(&bare, Path::new("../other-project/.env")).unwrap_err()
+    else {
+        panic!("a single-repository layout must not reach outside its own directory");
+    };
+    assert!(
+        message.contains("/home/dev/project"),
+        "the refusal names the boundary: {message}"
+    );
+    assert!(
+        !message.contains("/home/dev/other-project"),
+        "the refusal does not suggest the path was looked for: {message}"
+    );
+
+    // The boundary itself is not a file inside it.
+    for (layout, path) in [(&bundle, ".."), (&bare, ".")] {
+        assert!(matches!(
+            export_root_and_path(layout, Path::new(path)),
+            Err(ExportError::Refused(_))
+        ));
+    }
 }
