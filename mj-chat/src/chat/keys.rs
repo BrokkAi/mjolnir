@@ -169,17 +169,6 @@ impl ChatState {
             return ChatAction::PasteFromClipboard;
         }
 
-        if modifiers.contains(KeyModifiers::ALT) && code == KeyCode::Char('v') {
-            // A recording remains stoppable even if the helper becomes
-            // unavailable while it is running. An unavailable idle button is
-            // inert, matching the mouse path below.
-            return if self.voice_available || self.voice_active {
-                ChatAction::ToggleVoice
-            } else {
-                ChatAction::None
-            };
-        }
-
         if self.history_search.is_some() {
             self.handle_history_search_key(code, modifiers);
             return ChatAction::None;
@@ -282,10 +271,6 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
-                // The rendering toggle sits here rather than beside the
-                // dictation key because the block above hands every key to an
-                // open reverse-i-search first.
-                KeyCode::Char('t') => self.toggle_render_mode(),
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
                 KeyCode::Char('d') | KeyCode::Delete => {

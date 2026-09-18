@@ -51,6 +51,12 @@ fn escape_cancels_opening_without_stealing_modal_or_quit_keys() {
 }
 
 fn open_test_chat(session_id: &str) -> ActiveChat {
+    open_test_chat_with_notices(session_id, Notices::default())
+}
+
+/// The same chat, but with a notice handle the caller keeps, so a test can
+/// read what the conversation reported.
+fn open_test_chat_with_notices(session_id: &str, notices: Notices) -> ActiveChat {
     let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
     ActiveChat::open(
         fixture.stopped,
@@ -59,7 +65,7 @@ fn open_test_chat(session_id: &str) -> ActiveChat {
         fixture.control,
         SessionHeaderIdentity::default(),
         String::new(),
-        Notices::default(),
+        notices,
     )
 }
 
@@ -886,6 +892,54 @@ fn the_pane_chords_cycle_focus_forward_and_backward() {
     assert_eq!(command, CommandId::CycleFocusReverse);
     dashboard.dispatch_command(command);
     assert_eq!(dashboard.focus(), mj_tui::Focus::Sessions);
+}
+
+/// The rendering toggle left the composer for the registry, so it now runs
+/// from a pane and lands on whichever conversation is on screen.
+#[tokio::test]
+async fn prefix_t_toggles_rendering_of_the_visible_chat_from_a_pane() {
+    let mut dashboard = populated_dashboard();
+    dashboard.focus_sessions();
+
+    let command = chord_command(&mut dashboard, &chord('t')).expect("the rendering chord is bound");
+    assert_eq!(command, CommandId::ToggleTranscriptRendering);
+    assert!(matches!(
+        dashboard.dispatch_command(command),
+        DashboardAction::ToggleTranscriptRendering
+    ));
+
+    let notices = Notices::default();
+    let mut chat = open_test_chat_with_notices("rendering-toggle", notices.clone());
+    super::actions::apply_chat_toggle(
+        &mut dashboard,
+        Some(&mut chat),
+        super::actions::ChatToggle::TranscriptRendering,
+    );
+    assert_eq!(
+        notices.current().as_deref(),
+        Some("Raw transcript source enabled")
+    );
+    super::actions::apply_chat_toggle(
+        &mut dashboard,
+        Some(&mut chat),
+        super::actions::ChatToggle::TranscriptRendering,
+    );
+    assert_eq!(
+        notices.current().as_deref(),
+        Some("Rich transcript rendering enabled")
+    );
+
+    // With nothing on screen the command explains itself rather than doing
+    // nothing at all.
+    super::actions::apply_chat_toggle(
+        &mut dashboard,
+        None,
+        super::actions::ChatToggle::TranscriptRendering,
+    );
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("No conversation is open.")
+    );
 }
 
 /// Resume is a chord like new session: the pane letter it used to answer

@@ -24,7 +24,7 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - [x] (2026-09-17) M0: plan committed at `.agents/plans/prefix-keybindings.md`.
 - [x] (2026-09-17) M1: `mj-core` key-string parser, `KeysConfig`, `Keybinds`, defaults, validation, unit tests; `Config.keys` wired; Settings modal hides the section.
 - [x] (2026-09-17) M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated with `\x02q`.
-- [ ] M3: `Alt-T` and `Alt-V` leave the composer and become the `ToggleTranscriptRendering` and `ToggleDictation` commands.
+- [x] (2026-09-17) M3: `Alt-T` and `Alt-V` leave the composer; `ToggleTranscriptRendering` and `ToggleDictation` reach the visible conversation through mj-cli's action executor.
 - [ ] M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
 - [ ] M5: user docs, hint strings, README, troubleshooting, config reference, regenerated screenshots.
 - [ ] Final: `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile, outside the sandbox; retrospective written.
@@ -70,6 +70,21 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 
 - Observation: a dozen user-visible strings named keys that no longer exist, in crates that have no `DashboardState` at hand.
   Evidence: `Alt-Q quits` in `mj-cli/src/dashboard/io.rs` and `drafts.rs`, `F2 → Next spinner style` in `io.rs`, `F7 Settings` twice in `mj-cli/src/go.rs`, `press Alt-V to transcribe` in `mj-chat/src/chat/active/dispatch.rs`, and four `F6/Shift-F6 panes` fragments in `mj-chat/src/chat/elicitation.rs`. Consequence: the mj-cli strings read `DashboardState::first_key_label` (made `pub` for this); `mj-cli/src/go.rs` has only a `Config`, so it reads `Config::keybinds().labels(KeyAction::OpenSettings)`; the chat crate cannot know the host's bindings, so the dictation notice points at the microphone control and the elicitation footers simply drop the pane fragment.
+
+- Observation: a third composer test depended on the `Alt-T` arm. `editor_preserves_uppercase_text_while_shortcuts_remain_case_insensitive` proved that a shifted Alt chord still reaches its lowercase shortcut by pressing `Alt-Shift-T` and asserting the render mode flipped.
+  Evidence: it failed with `left: Rich, right: Raw` at `mj-chat/src/chat/tests.rs:1944` once the arm was gone. Consequence: the test now presses `Alt-Shift-B` and asserts the cursor moved back a word, which makes the same case-insensitivity point with a key that stays in the composer.
+
+- Observation: `active_voice_remains_stoppable_after_availability_is_lost` also pressed `Alt-V`.
+  Evidence: `grep -rn "Alt-V" mj-chat/src` plus the test body at `mj-chat/src/chat/tests.rs:378`. Consequence: it asks `dictation_toggle_action()` instead, and still checks the mouse path separately.
+
+- Observation: mj-cli's action executor cannot be exercised from a test, because `DashboardContext` owns a `TerminalGuard` and a live `Controller`.
+  Evidence: `mj-cli/src/dashboard.rs:218-260`. Consequence: the arm's body is a free function, `apply_chat_toggle(&mut DashboardState, Option<&mut ActiveChat>, ChatToggle)` in `mj-cli/src/dashboard/actions.rs`, which the new test calls directly with a chat it opened itself.
+
+- Observation: `DashboardContext::visible_chat` borrows the whole context, so the "no conversation" notice cannot be written in its `else` branch.
+  Evidence: `visible_chat` destructures `active_chat`, `opening_chat_session` and `dashboard` together (`mj-cli/src/dashboard/session_state.rs:150`). Consequence: a sibling `dashboard_and_visible_chat` returns both borrows at once, by asking `visible_chat()` first and then re-splitting the struct.
+
+- Observation: `ActiveChat::open` needs a Tokio reactor, so the new mj-cli test is a `#[tokio::test]`.
+  Evidence: it first panicked with "there is no reactor running" at `mj-chat/src/chat/active.rs:716`.
 
 ## Decision Log
 
@@ -128,6 +143,14 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - Decision: `ToggleTranscriptRendering` and `ToggleDictation` are `Scope::Global` and always available, and mj-cli answers them with the notice "No conversation is open." until M3 wires the chat calls.
   Rationale: the plan asked for exactly this placeholder; a `Hidden` availability would have kept them out of the footer and the help overlay, which is where their new keys have to be advertised from the start.
   Date/Author: 2026-09-17, Opus implementing M2.
+
+- Decision: the chat side of the two commands is three small public calls rather than one generic "run this ChatAction" entry point: `ChatState::toggle_render_mode`, `ChatState::dictation_toggle_action`, and `ActiveChat::toggle_transcript_rendering` / `ActiveChat::toggle_dictation`.
+  Rationale: the host should not have to know `ChatAction`, and the dictation guard (`voice_available || voice_active`) must stay in one place. The microphone's own mouse path now reads that same guard through `dictation_toggle_action`, so the key and the click cannot drift apart.
+  Date/Author: 2026-09-17, Opus implementing M3.
+
+- Decision: mj-cli routes both variants through one `apply_chat_toggle` helper with a `ChatToggle` enum, instead of two inline arms.
+  Rationale: the "No conversation is open." notice is written once, and the helper is the only part of the executor a unit test can reach without a terminal.
+  Date/Author: 2026-09-17, Opus implementing M3.
 
 ## Outcomes & Retrospective
 
@@ -444,6 +467,19 @@ One caution about running the whole suite: `mj-cli/tests/termination_pty.rs`
 starts real daemons, so two concurrent `cargo test` runs in the same checkout
 make `fixture_teardown_before_the_dashboard_is_ready_removes_its_storage` fail
 with "another Mjolnir controller is already using …". Run the suite alone.
+
+M3, `cargo test` (dev profile, outside the sandbox), the crates this milestone
+touched:
+
+    mj_chat  test result: ok. 527 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.56s
+    mj_tui   test result: ok. 505 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.24s
+    mj       test result: ok. 119 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+The PTY suite, run on its own afterwards:
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.20s
+
+`cargo clippy --all-targets -- -D warnings` exits 0.
 
 Record here, as the work proceeds: the final footer string at full width, the help overlay text with defaults, a `cargo test` summary line per milestone, and the validation error text produced by the conflicting-bindings example.
 
