@@ -75,13 +75,11 @@ fails in under a second with the loader error as its reason.
 - [x] (2026-09-18 03:15Z) Milestone 5 (d0a38a23): bounded automatic retry, and a child the parent can act on.
 - [x] (2026-09-18 03:20Z) Milestone 6 (b05b3c72): retire the relay actor of a session that reached a terminal state.
 - [x] (2026-09-18 03:25Z) Milestone 7 (3c6e6952): re-resolve the worker source per session instead of only at daemon start.
-- [x] (2026-09-18 04:30Z) Live acceptance run: `local-bare` 24 of 24 and `morannon`
-      ssh-podman 7 of 7 with nothing failing; local Podman 11 of 14, see
-      `Outcomes & Retrospective`.
-- [ ] Local Podman: the two remaining failure modes. Both are named, and neither should
-      happen: a concurrent start that still exceeds the 300-second harness wait, and a
-      spawn refused with "sub-agent ... has no child session" after earlier children were
-      closed.
+- [x] (2026-09-18 05:40Z) Live acceptance passes on every target kind: 45 spawns, 45
+      started. `local-bare` 24 of 24, local Podman 14 of 14, `morannon` ssh-podman 7 of 7.
+- [x] (2026-09-18 05:10Z) The container process limit, which was the cause of every
+      concurrent-start failure (190d2b19), and the state residue that refused a spawn
+      (e1933e31).
 
 ## Surprises & Discoveries
 
@@ -235,68 +233,102 @@ fails in under a second with the loader error as its reason.
 
 ## Outcomes & Retrospective
 
-### What the volume acceptance measured (2026-09-18)
+### What the volume acceptance measured (2026-09-18, final)
 
 Spawns were driven through the daemon's own HTTP route rather than through a parent model,
 so the numbers measure the spawn path instead of a model's ability to call a tool the right
 number of times. Each child ran one trivial prompt on the `deepseek` profile and was closed.
 
-    target            set        result                 time to running
-    local-bare        20 + 4     24 of 24                2.0-7.0s, mean 2.8s
-    local podman      10 + 4     11 of 14                1.0-7.0s for those that came up
-    morannon ssh      5 + 2      7 of 7                  2.0-5.0s, mean 4.1s
+    target                 set        result      time to running
+    local-bare             20 + 4     24 of 24     1.0-6.0s, mean 1.7s
+    local podman           10 + 4     14 of 14     1.0-7.0s, mean 2.4s
+    morannon ssh-podman     5 + 2      7 of 7      2.0-5.0s, mean 3.9s
 
-`local-bare` and `morannon` meet the bar: nothing failed, explained or otherwise. Local
-Podman does not yet, and the three that did not come up are described below.
+Forty-five spawns, forty-five children started, nothing unexplained and nothing explained
+either. The bar is met on every target kind the maintainer uses.
 
-### What the run found that the plan had not predicted
+### Where the 300 seconds went
 
-**A spawn over the HTTP route answered 404 for a child that had started.** Fixed in
-93de6b7b. The handler built its answer by looking the child up in the viewer snapshot,
-which is republished on a tick, so a child registered milliseconds earlier was almost never
-in it. Every spawn in the first volume run reported "unknown session" while every child was
-in fact running. A caller that retried on 404 would have spawned a duplicate.
+The first podman runs lost two to three of every four concurrent children to
+"ACP runtime did not report session startup within 300s", while the worker itself was
+serving in under 200 milliseconds. Extending the startup trace through the bridge phase
+(96eea216) turned that into a measurement. A healthy child on a container target:
 
-**Concurrent starts inside one container defeated the harness, not the worker.** Fixed in
-9d19d876. Ten children started one after another each reached their harness in about seven
-seconds. Four started at once left two or three of them past the 300-second harness-startup
-wait, with the worker itself healthy and serving in under 200 milliseconds. A sub-agent
-start on a container target now takes one of two admission slots for that container, which
-turned a repeated 1-of-4 and 2-of-4 into 4 of 4 in 1, 7, 9 and 15 seconds. Bare targets have
-no gate and do not need one.
+    start              0ms      bind-socket      +125ms    acp-initialized  +507ms
+    re-exec           +28ms     serving          +127ms    acp-session-open +619ms
+    policy            +57ms     login-resolve    +131ms
+    durable-relay     +59ms     harness-resolve  +135ms
 
-**A container can be filled with the process trees of children that are on their way out.**
-Closing a child is accepted asynchronously, and a harness that closes them as fast as it can
-spawn them ran a container out of process slots: `sh: 1: Cannot fork`. The message is clear
-and the product behaved correctly, but it is worth knowing that a close is not finished when
-it is accepted.
+That ruled out two of the four suspects at once. Resolving the login environment and
+resolving the managed harness cost four milliseconds between them, because a container
+session runs the image's own harness and never takes the installer lock; the whole of a
+good start is 619 milliseconds.
 
-### What is still open on local Podman
+The slow ones never reached `acp-initialized`, and the worker logs named why:
+"launch supervised ACP bridge sh: Resource temporarily unavailable (os error 11)", then
+"launch ACP bridge ...: Resource temporarily unavailable", and, once the container was
+fuller, "sh: 1: Cannot fork". All of them are EAGAIN from the process limit.
 
-1. **A concurrent start still occasionally exceeds the 300-second harness wait.** In the
-   final 10 + 4 run, two of the four concurrent starts failed this way even with the
-   admission gate. The gate reduced the rate; it did not remove it. The next step is to
-   measure where those 300 seconds go inside the container, because the worker is serving
-   within 200 milliseconds and the wait is entirely the harness bridge.
+Measured inside the container: `pids.max` was 2048, the engine default, and a container
+holding a parent and one child was already at 1521. One session's tree costs about 700
+threads, because its worker, its ACP supervisor and the harness's own Node process each
+size a thread pool to the host's CPU count. So the engine default fits about two sessions,
+while Mjolnir lets a parent hold six children by default, which needs roughly 4,900. That
+limit was never a choice Mjolnir made; it simply never set one. It now asks for 8192, and a
+template that sets `--pids-limit` itself keeps its own number.
 
-2. **A spawn was refused with "sub-agent ... has no child session".** This comes from
-   `State::validate` in `mj-core/src/state.rs`: the loaded state holds a sub-agent relation
-   whose child session is not in the loaded session map. It appeared only after earlier
-   children had been closed, so it is a residue problem. Two candidate mechanisms, neither
-   confirmed: the `ON DELETE CASCADE` on `subagent_sessions.child_session_id` not firing on
-   some delete path, or `load_state`'s inner join of `sessions` with `session_contexts`
-   dropping a session whose context row went first. This was deliberately not guessed at
-   under time pressure: a wrong fix in state consistency is worse than the bug.
+This also explains the earlier two-slot admission gate's partial success: it limited how
+many children *started* at once, but the limit is on how many *exist*, so a burst still ran
+the container out of slots. The gate is kept, because a start is the expensive moment and
+staggering it is cheap, but the room is what made the difference: 11 of 14 became 14 of 14.
+
+### The residue that refused a spawn
+
+`sub-agent "..." has no child session` came from `State::validate`, which `load_state_from`
+calls on every load, so one relation row whose child session the load did not return made
+every later operation on that daemon fail with it, including an unrelated spawn.
+
+Two candidate causes were ruled out with evidence rather than guessed at. The foreign key
+cascade does work: deleting a child session deletes its relation, which a control test now
+asserts, and every connection sets `PRAGMA foreign_keys = ON`. A session cannot lose its
+context row either: the `sessions` foreign key blocks that delete, so the load's inner join
+against `session_contexts` cannot drop a live session. A live reproduction of the sequence
+from the volume run, spawning children, closing them and destroying their parent, left the
+database consistent at every step, so the residue is rarer than the sequence and was not
+caught in the act.
+
+What was certain is where the damage was done, and that is what is fixed (e1933e31): the
+load no longer refuses an entire state because of one row that describes nothing. Such a row
+is dropped with a warning, exactly as the load already skips a session whose harness it
+cannot parse, and the next save deletes it. Whatever writes it, it can no longer stop a
+daemon from working.
+
+### Other things the runs found
+
+**A spawn over the HTTP route answered 404 for a child that had started** (93de6b7b). The
+handler built its answer from the viewer snapshot, which is republished on a tick, so a
+child registered milliseconds earlier was almost never in it. A caller that retried on 404
+would have spawned a duplicate.
+
+**A child close is accepted asynchronously.** `POST /sessions/{id}/close` answers 202 and
+the child's process tree goes some time later. A caller that spawns and closes in a tight
+loop can therefore fill a container with the trees of children that are on their way out;
+that is how the acceptance harness first hit `sh: 1: Cannot fork`. The product behaved
+correctly and said so clearly, but a close is not finished when it is accepted. Recorded
+here for the maintainer to decide whether it deserves its own ticket.
+
+**A daemon pins `MJ_WORKER_BINARY` from the environment it was started with.** Changing it
+for a later `mj new` does nothing until the daemon restarts.
 
 ### The original purpose, measured against
 
 A sub-agent spawn that failed used to leave a child permanently in `Error` with
 "worker relay did not accept a connection in 30s", an empty log, and no way to tell a dead
-worker from a slow one. Every failure in this run named its own cause: the startup step the
-worker reached, the harness wait that expired, the container that ran out of process slots,
-or the state check that refused. That part of the goal is met on every target kind. The
-remaining work is not about diagnosis any more; it is about the two local-Podman failures
-above actually not happening.
+worker from a slow one. Now a spawn either works or names its own cause: the startup step
+the worker reached, the harness wait that expired, the workspace a review cannot cover, or
+the process limit a container hit. Forty-five spawns across three target kinds all worked,
+and every failure met along the way named itself well enough to be fixed from its own
+message. That is what "spawn working completely" asked for.
 
 ## Context and Orientation
 
