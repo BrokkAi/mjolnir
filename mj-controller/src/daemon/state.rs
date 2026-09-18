@@ -130,6 +130,18 @@ impl RuntimeState {
         .await
     }
 
+    /// What one indexed session is, and what continuing it would mean, or
+    /// `None` when the index holds no session with that id.
+    pub async fn wiki_session(
+        &self,
+        wiki_id: String,
+    ) -> Result<Option<mj_client::daemon::WikiSessionInfo>> {
+        // A session with a record here is one `mj resume` can take; anything
+        // else has to be restored or imported first.
+        let known = self.live_session_ids();
+        blocking(move || crate::sessionwiki::wiki_session(&wiki_id, &known)).await
+    }
+
     /// Start a new session carrying a hand-off compacted from an archived one.
     ///
     /// The session starts like any other; the hand-off is installed in the

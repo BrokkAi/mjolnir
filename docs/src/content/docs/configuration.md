@@ -176,12 +176,12 @@ The default bindings:
 | `switch_workspace` | `prefix+1..9` | Select a workspace by number |
 | `next_pane` | `prefix+tab` | Focus the next support pane |
 | `previous_pane` | `prefix+shift+tab` | Focus the previous support pane |
-| `pane_size` | `prefix+z` | Cycle the focused support pane's size |
+| `pane_size` | `prefix+shift+z` | Cycle the focused support pane's size |
 | `pane_preset` | `prefix+b` | Toggle the dashboard pane preset |
 | `refresh` | `prefix+shift+r` | Refresh target capacity and profile quota |
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
-| `mark_all_read` | `prefix+a` | Mark all session activity as read |
+| `mark_all_read` | `prefix+a` | Mark unread session activity as read |
 | `next_attention` | `prefix+o` | Open the next session that needs you |
 | `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
@@ -196,6 +196,8 @@ The default bindings:
 | `focus_pane_down` | `prefix+j` | Move the keyboard to the pane below |
 | `focus_pane_up` | `prefix+k` | Move the keyboard to the pane above |
 | `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
+| `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
+| `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
 | `stop_session` | unbound | Stop the selected session |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |

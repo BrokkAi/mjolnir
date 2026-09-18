@@ -2048,6 +2048,44 @@ fn stage_claude_profile_follows_symlinked_entries() {
     assert!(!staged.path().join("skills/dangling.md").exists());
 }
 
+#[test]
+fn staging_reproduces_the_skills_tree_the_sync_will_push() {
+    // The launch stage and the credential sync must agree byte for byte:
+    // the first reconciliation replaces the whole tree, so a stage the sync
+    // does not reproduce would have its managed skills wiped a minute later.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
+    std::fs::write(home.path().join("skills/review/SKILL.md"), "review skill\n").unwrap();
+    std::fs::create_dir_all(home.path().join("skills/mj")).unwrap();
+    std::fs::write(home.path().join("skills/mj/SKILL.md"), "the user's own\n").unwrap();
+
+    let staged = tempfile::tempdir().unwrap();
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_managed_skills(profile.kind, staged.path()).unwrap();
+
+    let expected = mj_core::skills::session_skills(profile.kind, home.path()).unwrap();
+    let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
+    assert_eq!(installed.fingerprint(), expected.fingerprint());
+    assert_eq!(installed, expected);
+    assert_eq!(
+        std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
+        "review skill\n"
+    );
+    assert_ne!(
+        std::fs::read_to_string(staged.path().join("skills/mj/SKILL.md")).unwrap(),
+        "the user's own\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn stage_claude_profile_skips_dangling_allowlist_symlinks() {

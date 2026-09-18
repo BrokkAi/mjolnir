@@ -143,7 +143,9 @@ impl DashboardState {
             self.attention_queue()
                 .into_iter()
                 .fold((0, 0), |(waiting, unread), entry| match entry.level {
-                    AttentionLevel::Waiting | AttentionLevel::Failed => (waiting + 1, unread),
+                    AttentionLevel::Waiting
+                    | AttentionLevel::Unreachable
+                    | AttentionLevel::Failed => (waiting + 1, unread),
                     _ => (waiting, unread + 1),
                 });
         let mut title = String::from("mj");

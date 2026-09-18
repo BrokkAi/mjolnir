@@ -15,6 +15,9 @@ use mj_controller::server::api::{
     WaitRequest, WaitResponse,
 };
 
+use mj_client::daemon::WikiSessionStatus;
+use mj_controller::sessionwiki::WikiContinuation;
+
 use crate::api_client::{ApiClient, ExportResult};
 
 #[derive(Debug, Args)]
@@ -348,11 +351,21 @@ pub(crate) struct CloseArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("resume-subject")
+        .required(true)
+        .args(["session", "wiki"])
+))]
 pub(crate) struct ResumeArgs {
     /// Stopped, lost, or failed session to resume. It keeps its identity,
     /// transcript, and work.
     #[arg(long)]
-    session: String,
+    session: Option<String>,
+    /// SessionWiki id of a session to continue, whoever ran it: a Mjolnir
+    /// session is resumed or restored, another tool's session is imported and
+    /// then resumed.
+    #[arg(long)]
+    wiki: Option<String>,
     /// Profile to resume on. Defaults to the one the session last ran.
     #[arg(long)]
     profile: Option<String>,
@@ -691,7 +704,11 @@ pub(crate) async fn sessions(
 ) -> Result<()> {
     let client = ApiClient::connect().await?;
     if let Some(session_id) = &args.session {
-        let session = client.session(session_id).await?;
+        // An id that names no Mjolnir session may still name a SessionWiki
+        // row, which is what an agent has after a search.
+        let Some(session) = client.session_if_known(session_id).await? else {
+            return wiki_session(&client, session_id, args.json).await;
+        };
         if args.json {
             return print_json(&session);
         }
@@ -741,6 +758,32 @@ pub(crate) async fn sessions(
             session.id, session.state, session.title
         );
     }
+    Ok(())
+}
+
+/// Report one SessionWiki row for an id that names no Mjolnir session.
+///
+/// `mine` is a Mjolnir session the daemon still has a record of, `archived`
+/// one whose record the archive job destroyed, and `native` another tool's
+/// session. All three can be continued with `mj resume --wiki <id>`.
+async fn wiki_session(client: &ApiClient, wiki_id: &str, json: bool) -> Result<()> {
+    let info = client.wiki_session(wiki_id).await?.with_context(|| {
+        format!("no session {wiki_id}: it names neither a Mjolnir session nor an indexed one")
+    })?;
+    if json {
+        return print_json(&info);
+    }
+    let status = match info.status {
+        WikiSessionStatus::Mine => "mine",
+        WikiSessionStatus::Archived => "archived",
+        WikiSessionStatus::Native => "native",
+    };
+    println!("{}  {status}  {}", info.wiki_id, info.title);
+    println!("{} at {}", info.tool, info.path.display());
+    if let Some(session_id) = &info.mjolnir_session_id {
+        println!("Mjolnir session {session_id}");
+    }
+    println!("continue it with `mj resume --wiki {}`", info.wiki_id);
     Ok(())
 }
 
@@ -794,10 +837,17 @@ fn close_session_id(args: &CloseArgs) -> Result<&str> {
 /// `mj wait --session <id>`, which blocks while the resume runs and reports why
 /// it failed if it does.
 pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
+    if let Some(wiki_id) = args.wiki.clone() {
+        return resume_wiki(args, wiki_id).await;
+    }
+    let session = args
+        .session
+        .clone()
+        .context("name the session to resume with --session <id>")?;
     let client = ApiClient::connect().await?;
     let response = client
         .resume(
-            &args.session,
+            &session,
             &ResumeSessionRequest {
                 profile_id: args.profile.clone(),
                 target_id: args.target.clone(),
@@ -814,6 +864,147 @@ pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
         response.session_id, response.profile_id, response.target_id
     );
     println!("watch it with `mj wait --session {}`", response.session_id);
+    Ok(())
+}
+
+/// Continue the session a SessionWiki id names, whoever ran it.
+///
+/// The branch is the daemon's: a Mjolnir session Mjolnir still has a record of
+/// is resumed, one it has archived is restored from the indexed transcript,
+/// and another tool's session is imported and then resumed. The output says
+/// which of the three ran, so the caller can follow with `mj prompt`.
+async fn resume_wiki(args: ResumeArgs, wiki_id: String) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let info = client
+        .wiki_session(&wiki_id)
+        .await?
+        .with_context(|| format!("no indexed session {wiki_id}"))?;
+    match mj_controller::sessionwiki::wiki_continuation(
+        &info.wiki_id,
+        &info.tool,
+        &info.path,
+        info.status == WikiSessionStatus::Mine,
+    )? {
+        WikiContinuation::Resume { session_id } => {
+            let response = client
+                .resume(
+                    &session_id,
+                    &ResumeSessionRequest {
+                        profile_id: args.profile.clone(),
+                        target_id: args.target.clone(),
+                        workspace_id: args.workspace_id.clone(),
+                        queue: args.queue.map(Into::into),
+                    },
+                )
+                .await?;
+            report_wiki_continuation(&args, "resume", &wiki_id, &response.session_id, || {
+                format!("resumed {}", response.session_id)
+            })
+        }
+        WikiContinuation::Restore { wiki_id } => {
+            let profile_id = args
+                .profile
+                .clone()
+                .or_else(|| info.profile_id.clone())
+                .with_context(|| {
+                    format!(
+                        "the indexed session {wiki_id} records no profile; name one with --profile"
+                    )
+                })?;
+            let target_id = args
+                .target
+                .clone()
+                .or_else(|| info.target_template_id.clone())
+                .with_context(|| {
+                    format!(
+                        "the indexed session {wiki_id} records no target; name one with --target"
+                    )
+                })?;
+            let response = client
+                .wiki_restore(
+                    &wiki_id,
+                    &mj_controller::server::api::WikiRestoreBody {
+                        workspace_id: args.workspace_id.clone(),
+                        profile_id,
+                        target_id,
+                        project_directory: None,
+                        model: None,
+                        effort: None,
+                    },
+                )
+                .await?;
+            report_wiki_continuation(&args, "restore", &wiki_id, &response.session_id, || {
+                format!("restored {wiki_id} into {}", response.session_id)
+            })
+        }
+        WikiContinuation::Import {
+            harness,
+            native_session_id,
+        } => {
+            let workspace_id = match args.workspace_id.clone() {
+                Some(workspace_id) => workspace_id,
+                None => crate::resolve_store_workspace(None).await?,
+            };
+            let indexed_at = info.path.clone();
+            let imported = {
+                let native_session_id = native_session_id.clone();
+                let tool = info.tool.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::import::import_named_native_session(
+                        harness,
+                        native_session_id.clone(),
+                        &workspace_id,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "import the {tool} session {native_session_id}, which the index read from {}",
+                            indexed_at.display()
+                        )
+                    })
+                })
+                .await
+                .context("import task panicked")??
+            };
+            let session_id = imported.context("the import was cancelled")?;
+            let response = client
+                .resume(
+                    &session_id,
+                    &ResumeSessionRequest {
+                        profile_id: args.profile.clone(),
+                        target_id: args.target.clone(),
+                        workspace_id: args.workspace_id.clone(),
+                        queue: args.queue.map(Into::into),
+                    },
+                )
+                .await?;
+            report_wiki_continuation(&args, "import", &wiki_id, &response.session_id, || {
+                format!(
+                    "imported {} session {native_session_id} as {} and resumed it",
+                    info.tool, response.session_id
+                )
+            })
+        }
+    }
+}
+
+/// One line saying which of the three cases ran, or the same three facts as
+/// JSON. The `mj wait` hint is the same one a plain resume prints.
+fn report_wiki_continuation(
+    args: &ResumeArgs,
+    action: &str,
+    wiki_id: &str,
+    session_id: &str,
+    summary: impl FnOnce() -> String,
+) -> Result<()> {
+    if args.json {
+        return print_json(&serde_json::json!({
+            "action": action,
+            "session_id": session_id,
+            "wiki_id": wiki_id,
+        }));
+    }
+    println!("{}", summary());
+    println!("watch it with `mj wait --session {session_id}`");
     Ok(())
 }
 
@@ -1209,7 +1400,7 @@ mod tests {
         let Some(Command::Resume(args)) = cli.command else {
             panic!("expected the resume subcommand");
         };
-        assert_eq!(args.session, "s1");
+        assert_eq!(args.session.as_deref(), Some("s1"));
         assert_eq!(args.profile, None);
         assert_eq!(args.target, None);
         assert_eq!(args.queue, None);
@@ -1249,6 +1440,27 @@ mod tests {
             });
             assert_eq!(crate::command_name(cli.command.as_ref()), matched);
         }
+    }
+
+    /// `mj resume` names one subject: a Mjolnir session or a SessionWiki row.
+    /// Both at once would leave the command guessing which to continue.
+    #[test]
+    fn resume_takes_a_session_or_a_wiki_id_but_not_both() {
+        let cli = Cli::try_parse_from(["mj", "resume", "--wiki", "abc123"]).unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.wiki.as_deref(), Some("abc123"));
+        assert_eq!(args.session, None);
+
+        assert!(
+            Cli::try_parse_from(["mj", "resume", "--wiki", "abc123", "--session", "s1"]).is_err(),
+            "--wiki and --session name different subjects"
+        );
+        assert!(
+            Cli::try_parse_from(["mj", "resume"]).is_err(),
+            "resume has to be told what to continue"
+        );
     }
 
     /// `mj workspaces` keeps opening the manager, and the two subcommands are

@@ -938,12 +938,19 @@ impl DashboardContext {
     /// showing before the selection followed. A session open in a different
     /// pane moves the focus there instead of appearing twice, and a
     /// conversation area with no room for two panes says so.
+    ///
+    /// Every terminal path that names a session opens it first, and
+    /// `open_chat_session` already moves the keyboard to the pane showing it.
+    /// So when the session is on screen this runs with the keyboard in its
+    /// pane, and the notice says so; the explicit focus move below only
+    /// covers a caller that has not opened the session yet.
     pub(crate) fn open_session_in_split(&mut self, session_id: &str, direction: Direction) {
         let focused = self.dashboard.focused_pane();
         if let Some(pane) = self.dashboard.pane_for_session(session_id)
             && pane != focused
         {
             self.dashboard.focus_pane(pane);
+            self.dashboard.set_notice("Already open in this pane");
             self.sync_opening_session();
             self.save_active_workspace_layout();
             return;
@@ -952,6 +959,12 @@ impl DashboardContext {
         let displaced = moving
             .then(|| self.previous_pane_sessions.get(&focused).cloned())
             .flatten();
+        if moving && displaced.is_none() {
+            // Nothing came before it in this pane, so a split would only add a
+            // blank pane beside the conversation the user is already in.
+            self.dashboard.set_notice("Already open in this pane");
+            return;
+        }
         let Some(new_pane) = self.dashboard.split_focused_pane(direction, None) else {
             self.dashboard.set_notice("Not enough room to split");
             return;
@@ -1003,14 +1016,13 @@ impl DashboardContext {
         self.dashboard.focus_prompt();
     }
 
-    /// Closes the focused pane, saving and dropping the conversation it held.
-    /// The last pane is emptied rather than removed.
-    pub(crate) fn close_focused_pane(&mut self) {
-        let pane = self.dashboard.focused_pane();
+    /// Closes `pane`, saving and dropping the conversation it held. The last
+    /// pane is emptied rather than removed.
+    pub(crate) fn close_pane(&mut self, pane: PaneId) {
         self.opening_chat_sessions.remove(&pane);
         self.previous_pane_sessions.remove(&pane);
         self.attachments.remove(&pane);
-        if let Some(session_id) = self.dashboard.close_focused_pane() {
+        if let Some(session_id) = self.dashboard.close_pane(pane) {
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
             self.selection.clear();
@@ -1626,8 +1638,8 @@ fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
 /// no work.
 ///
 /// A mouse event goes where the pointer is, not where the keyboard is: the
-/// wheel over the transcript scrolls the transcript even while a pane has
-/// focus, and a click there hands the keyboard back to the composer. Keys go
+/// wheel over a transcript scrolls that transcript, including an unfocused
+/// pane's, and a click there hands the keyboard back to the composer. Keys go
 /// to the modal if one is open, then to the composer if it has focus, and
 /// otherwise to the panes.
 ///
@@ -1646,6 +1658,26 @@ fn dispatch_event(
             .is_some_and(|chat| chat.component_modal_open());
     let dashboard_pointer = !chat_modal
         && matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
+    // The wheel belongs to the pane under the pointer. Only an unfocused pane
+    // needs saying so: over the focused pane the conversation below is the one
+    // `visible_chat` already returns.
+    let wheel_pane = match &event {
+        Event::Mouse(mouse)
+            if !dashboard_pointer
+                && !chat_modal
+                && !context.dashboard.modal_open()
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) =>
+        {
+            context
+                .dashboard
+                .chat_region_contains(mouse.column, mouse.row)
+                .filter(|pane| *pane != context.dashboard.focused_pane())
+        }
+        _ => None,
+    };
     let to_chat = !dashboard_pointer
         && (chat_modal
             || match &event {
@@ -1675,7 +1707,11 @@ fn dispatch_event(
                 }
                 _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
             });
-    match context.visible_chat().filter(|_| to_chat) {
+    let chat = match wheel_pane {
+        Some(pane) if to_chat => context.pane_chat_mut(pane),
+        _ => context.visible_chat().filter(|_| to_chat),
+    };
+    match chat {
         Some(chat) => {
             let result = chat.handle_event_result(event);
             *chat_outcome = result

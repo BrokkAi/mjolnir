@@ -33,6 +33,7 @@ fn session_metadata_text(
         detail,
         None,
         false,
+        crate::AttentionLevel::Idle,
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
@@ -176,7 +177,10 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
         },
     );
     dashboard.state.sessions.insert(foreign.id.clone(), foreign);
-    assert_eq!(dashboard.pending_input_count(), 1);
+    assert_eq!(
+        dashboard.sessions_attention_summary(),
+        Some((crate::AttentionLevel::Waiting, 1))
+    );
 
     let expanded = drawn(&mut dashboard, 120, 30).join("\n");
     assert!(expanded.contains("Question"), "{expanded}");
@@ -185,7 +189,7 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
     let minimized = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(minimized.contains("Question"), "{minimized}");
     assert!(
-        minimized.contains("Sessions [1]") || minimized.contains("Q1"),
+        minimized.contains("Sessions [!1]") || minimized.contains("!1"),
         "{minimized}"
     );
 }
@@ -1069,6 +1073,14 @@ fn collapsed_duplicate_targets_are_numbered_within_their_project() {
     assert!(!rendered.contains("second tail"), "{rendered}");
 }
 
+/// The band a row draws, derived exactly as the renderer derives it: the
+/// shared attention ladder first, then the live-session colours.
+fn band(detail: Option<&SessionDetail>, unreachable: bool, state: SessionState) -> Color {
+    let level =
+        crate::dashboard_sessions::attention_level(detail, None, state, unreachable, false, false);
+    session_band_color(level, detail, state)
+}
+
 #[test]
 fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
     let normal = SessionDetail {
@@ -1076,7 +1088,7 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&normal), false, SessionState::Running),
+        band(Some(&normal), false, SessionState::Running),
         theme::palette().session_activity
     );
 
@@ -1086,8 +1098,9 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&unread), false, SessionState::Running),
-        theme::palette().session_attention
+        band(Some(&unread), false, SessionState::Running),
+        theme::palette().session_activity,
+        "a running turn is activity, whatever is still unread"
     );
 
     let unread_idle = SessionDetail {
@@ -1095,13 +1108,14 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&unread_idle), false, SessionState::Running),
-        theme::palette().session_idle
+        band(Some(&unread_idle), false, SessionState::Running),
+        theme::palette().session_attention,
+        "a finished turn nobody has read wants a person"
     );
 
     let read_idle = SessionDetail::default();
     assert_eq!(
-        session_band_color(Some(&read_idle), false, SessionState::Running),
+        band(Some(&read_idle), false, SessionState::Running),
         theme::palette().session_idle
     );
 
@@ -1114,7 +1128,7 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&foreground), false, SessionState::Running),
+        band(Some(&foreground), false, SessionState::Running),
         theme::palette().session_activity,
         "foreground work is not idle"
     );
@@ -1134,16 +1148,16 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&unread_background), false, SessionState::Running),
-        theme::palette().session_attention,
-        "background work does not use the blue idle-unread band"
+        band(Some(&unread_background), false, SessionState::Running),
+        theme::palette().session_activity,
+        "background work is still work, not something waiting on a person"
     );
     let read_background = SessionDetail {
         activity: unread_background.activity.clone(),
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&read_background), false, SessionState::Running),
+        band(Some(&read_background), false, SessionState::Running),
         theme::palette().session_activity,
         "background work is not idle after it has been read"
     );
@@ -1153,8 +1167,9 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&restarted_idle), false, SessionState::Running),
-        theme::palette().session_idle
+        band(Some(&restarted_idle), false, SessionState::Running),
+        theme::palette().session_attention,
+        "an unread restart is unread activity"
     );
 
     let restarted_running = SessionDetail {
@@ -1163,8 +1178,9 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&restarted_running), false, SessionState::Running),
-        theme::palette().session_attention
+        band(Some(&restarted_running), false, SessionState::Running),
+        theme::palette().session_activity,
+        "a running turn is activity, whatever is still unread"
     );
 
     let needs_input = SessionDetail {
@@ -1186,34 +1202,34 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        session_band_color(Some(&needs_input), false, SessionState::Running),
+        band(Some(&needs_input), false, SessionState::Running),
         theme::palette().session_attention,
         "pending input overrides the idle blue"
     );
 
     assert_eq!(
-        session_band_color(Some(&read_idle), false, SessionState::Provisioning),
+        band(Some(&read_idle), false, SessionState::Provisioning),
         theme::palette().session_activity,
         "provisioning is a lifecycle state, not a live idle session"
     );
     assert_eq!(
-        session_band_color(Some(&read_idle), false, SessionState::Error),
+        band(Some(&read_idle), false, SessionState::Error),
         theme::palette().session_error,
         "error overrides idle"
     );
     assert_eq!(
-        session_band_color(None, false, SessionState::Running),
+        band(None, false, SessionState::Running),
         theme::palette().session_activity,
         "unknown detail stays at the default"
     );
 
-    // An unreachable target is red, overriding every other state.
     assert_eq!(
-        session_band_color(Some(&unread), true, SessionState::Running),
-        theme::palette().session_error
+        band(Some(&unread), true, SessionState::Running),
+        theme::palette().session_error,
+        "an unreachable worker is red, overriding every other state"
     );
     assert_eq!(
-        session_band_color(None, true, SessionState::Running),
+        band(None, true, SessionState::Running),
         theme::palette().session_error
     );
 }
@@ -1252,14 +1268,12 @@ fn current_agent_excerpt_never_repeats_an_old_answer() {
 }
 
 #[test]
-fn marking_all_read_removes_the_unread_tint_while_the_session_keeps_working() {
+fn marking_all_read_removes_the_unread_tint_from_an_idle_session() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, vec![agent_message(4, "unread response")]);
-    dashboard
-        .session_details
-        .get_mut("session-1")
-        .unwrap()
-        .current_turn_started_at = Some(1);
+    let detail = dashboard.session_details.get_mut("session-1").unwrap();
+    detail.current_turn_started_at = None;
+    detail.activity = mj_client::usage_format::SessionActivity::default();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     let mut row_color = |dashboard: &mut DashboardState| {
         terminal
@@ -1269,13 +1283,14 @@ fn marking_all_read_removes_the_unread_tint_while_the_session_keeps_working() {
         let lines = buffer_lines(buffer);
         let row = lines
             .iter()
-            .position(|line| line.contains("podman") && line.contains("Working"))
+            .position(|line| line.contains("podman"))
             .expect("session row");
         buffer[(cell_column(&lines[row], "podman"), row as u16)].fg
     };
     assert_eq!(
         row_color(&mut dashboard),
-        theme::palette().session_attention
+        theme::palette().session_attention,
+        "an answer nobody has read wants a person"
     );
     assert_eq!(
         chord(&mut dashboard, crate::CommandId::MarkAllRead),
@@ -1283,11 +1298,7 @@ fn marking_all_read_removes_the_unread_tint_while_the_session_keeps_working() {
             receipts: vec![("session-1".into(), 4)]
         }
     );
-    assert_eq!(row_color(&mut dashboard), theme::palette().session_activity);
-    assert_eq!(
-        dashboard.session_details["session-1"].current_turn_started_at,
-        Some(1)
-    );
+    assert_eq!(row_color(&mut dashboard), theme::palette().session_idle);
 }
 
 #[test]
@@ -1594,7 +1605,7 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · z size \
+        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
          · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette \
          · ? keys"
     );

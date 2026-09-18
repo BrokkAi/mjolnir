@@ -975,6 +975,29 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         crate::config::TargetTemplate::LocalBare,
     );
     state.validate_setup_update(&before, &after).unwrap();
+    // Build cache settings are read when a session is provisioned, so editing
+    // them is allowed while that session runs.
+    let mut after = before.clone();
+    let crate::config::TargetTemplate::LocalPodman { container } =
+        after.targets.get_mut(&session.target_template_id).unwrap()
+    else {
+        panic!("sample session uses a podman target");
+    };
+    container.build_cache = Some(crate::config::TargetBuildCache {
+        enabled: None,
+        directory: None,
+        max_size: Some("20GB".into()),
+    });
+    state.validate_setup_update(&before, &after).unwrap();
+    // Any other container change is still refused.
+    let mut after = before.clone();
+    let crate::config::TargetTemplate::LocalPodman { container } =
+        after.targets.get_mut(&session.target_template_id).unwrap()
+    else {
+        panic!("sample session uses a podman target");
+    };
+    container.image = "ubuntu:22.04".into();
+    assert!(state.validate_setup_update(&before, &after).is_err());
     let mut stopped = state.clone();
     stopped.sessions.values_mut().next().unwrap().state = SessionState::Stopped;
     stopped

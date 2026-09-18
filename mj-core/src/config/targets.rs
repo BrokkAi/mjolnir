@@ -217,6 +217,22 @@ pub fn parse_build_cache_size(value: &str) -> Option<u64> {
     count.checked_mul(multiplier)
 }
 
+/// An mbx size string as a whole number of gigabytes, rounded to the nearest
+/// one. The setup editor measures the cache in GB, so a value written in any
+/// other unit still has a number to show.
+#[must_use]
+pub fn build_cache_size_gigabytes(value: &str) -> Option<u64> {
+    const GIGABYTE: u64 = 1_000_000_000;
+    let bytes = parse_build_cache_size(value)?;
+    Some(bytes.saturating_add(GIGABYTE / 2) / GIGABYTE)
+}
+
+/// The size string stored for a whole number of gigabytes.
+#[must_use]
+pub fn build_cache_size_from_gigabytes(gigabytes: u64) -> String {
+    format!("{gigabytes}GB")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
@@ -429,6 +445,27 @@ impl TargetTemplate {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
         }
+    }
+
+    /// A copy without the settings that only matter when a session is
+    /// launched.
+    ///
+    /// Build cache settings are resolved once while a session is provisioned
+    /// and stored on its record, so an active session does not depend on
+    /// them. Comparing templates without them lets setup edit a machine's
+    /// build cache while sessions are running.
+    #[must_use]
+    pub fn without_launch_only_settings(&self) -> Self {
+        let mut stripped = self.clone();
+        match &mut stripped {
+            Self::LocalPodman { container }
+            | Self::LocalDocker { container }
+            | Self::AppleContainer { container }
+            | Self::SshPodman { container, .. }
+            | Self::SshDocker { container, .. } => container.build_cache = None,
+            Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
+        }
+        stripped
     }
 
     pub const fn execution_policy(&self) -> ExecutionPolicy {

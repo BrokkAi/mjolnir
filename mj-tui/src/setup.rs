@@ -474,6 +474,21 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
     schema::label(key)
 }
 
+/// A size string as the whole number of GB the field is measured in, or the
+/// string itself when it is not a size at all.
+fn build_cache_gigabytes_label(size: &str) -> String {
+    mj_core::config::build_cache_size_gigabytes(size)
+        .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
+}
+
+/// Whether a full path names the given field of a machine's build cache.
+fn is_build_cache_field(path: &[String], field: &str) -> bool {
+    match path {
+        [section, _, page, key] => section == "machines" && page == "build_cache" && key == field,
+        _ => false,
+    }
+}
+
 /// What one row reports, which on the first page is the state of a whole
 /// section rather than the size of it.
 fn row_summary(
@@ -512,7 +527,22 @@ fn value_summary(
         {
             if *value { "☑" } else { "☐" }.to_owned()
         }
+        // The machine's own switch is a checkbox, and an unset value means on.
+        // A host that cannot support the cache reports an unchecked box
+        // through `automatic`, whatever the machine asks for.
+        Value::Bool(_) | Value::Null if is_build_cache_field(&child_path, "enabled") => {
+            if value.as_bool().unwrap_or(true) {
+                automatic.unwrap_or_else(|| "☑".to_owned())
+            } else {
+                "☐".to_owned()
+            }
+        }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
+        // The cache size is measured in whole GB, whatever unit the file
+        // spells it in. Only a hand-edited invalid value keeps its own text.
+        Value::String(size) if is_build_cache_field(&child_path, "max_size") => {
+            build_cache_gigabytes_label(size)
+        }
         Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path, draft)),
         // The archive window's live estimate carries the value itself, so it
         // replaces the number as well as the "Never" placeholder.
@@ -851,6 +881,19 @@ impl SetupDialog {
             return;
         };
         let value = self.draft.pointer(&pointer(&path)).unwrap();
+        if is_build_cache_field(&path, "enabled") {
+            // An unset value means on, so the box cycles on → off → unset.
+            let on = value.as_bool().unwrap_or(true);
+            if let Some(reason) = self.build_cache_blocked() {
+                let notice = format!("The build cache cannot be turned on here: {reason}");
+                self.notice = Some(notice);
+                return;
+            }
+            *self.draft.pointer_mut(&pointer(&path)).unwrap() =
+                if on { Value::Bool(false) } else { Value::Null };
+            self.form = RefCell::new(Dialog::default());
+            return;
+        }
         if value.is_object() || value.is_array() {
             self.path = path;
             self.selected = 0;
@@ -882,6 +925,13 @@ impl SetupDialog {
                 } else {
                     EditorInput::Text(TextInput::from(if value.is_null() {
                         String::new()
+                    } else if let Some(size) = value
+                        .as_str()
+                        .filter(|_| is_build_cache_field(&path, "max_size"))
+                    {
+                        // The field is edited in whole GB, so a value written
+                        // in another unit is offered converted.
+                        build_cache_gigabytes_label(size)
                     } else {
                         value
                             .as_str()
@@ -1121,30 +1171,53 @@ impl SetupDialog {
             return None;
         }
         let label = match &preview.result {
-            BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
-            BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
-                "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
-                "enabled" => "On".to_owned(),
+                "enabled" if preview.off_reason.is_some() => "☐".to_owned(),
+                "enabled" => "☑".to_owned(),
                 "directory" => preview
                     .directory
                     .as_ref()
                     .map(|directory| directory.display().to_string())
                     .unwrap_or_else(|| "Unknown".to_owned()),
+                // Resolved sizes are shown in the same whole GB the field is
+                // edited in.
                 "max_size" => match &preview.max_size {
-                    Some(BuildCacheLimit::Size(size)) => size.clone(),
+                    Some(BuildCacheLimit::Size(size)) => build_cache_gigabytes_label(size),
                     // The value column is narrow, so these stay short.
                     Some(BuildCacheLimit::HostConfiguration(Some(size))) => {
-                        format!("{size}, host mbx config")
+                        format!("{}, host mbx config", build_cache_gigabytes_label(size))
                     }
                     Some(BuildCacheLimit::HostConfiguration(None)) => "host mbx config".to_owned(),
                     None => "Unknown".to_owned(),
                 },
                 _ => return None,
             },
+            // The checkbox keeps showing the machine's own setting while the
+            // other fields report how far the lookup got.
+            _ if field == "enabled" => return None,
+            BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
+            BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
         };
         Some(label)
+    }
+
+    /// The reason this page's host cannot support the build cache at all, so
+    /// the machine's own switch cannot turn it on.
+    fn build_cache_blocked(&self) -> Option<&str> {
+        use mj_core::state::BuildCacheOff;
+        let (_, key) = self.build_cache_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        match &preview.result {
+            BuildCachePreviewResult::Ready(Some(preview)) => match &preview.off_reason {
+                Some(BuildCacheOff::Unavailable(reason)) => Some(reason.as_str()),
+                Some(BuildCacheOff::TurnedOff) | None => None,
+            },
+            _ => None,
+        }
     }
 
     /// The `archive_after_days` value the SessionWiki page is showing right
@@ -1314,6 +1387,22 @@ impl SetupDialog {
                         .parse::<u64>()
                         .map_err(|_| "Enter a whole number of bytes.".to_owned())?,
                 )
+            }
+        } else if is_build_cache_field(&editor.path, "max_size") {
+            let text = editor.input.trim().to_owned();
+            if text.is_empty() {
+                Value::Null
+            } else {
+                let gigabytes = text
+                    .parse::<u64>()
+                    .map_err(|_| "Enter a whole number of gigabytes.".to_owned())?;
+                if gigabytes == 0 {
+                    return Err(
+                        "Enter at least 1 GB, or clear the field to use the host's own limits."
+                            .into(),
+                    );
+                }
+                Value::String(mj_core::config::build_cache_size_from_gigabytes(gigabytes))
             }
         } else if editor.input.trim().is_empty() && old.is_null() {
             Value::Null
@@ -2350,11 +2439,16 @@ pub(crate) fn render_setup(
         let keys = dialog.keys();
         let mut rows = Vec::new();
         let mut row_map = Vec::new();
+        // Rows a page draws but cannot act on, such as the switch of a
+        // machine whose host has no cache to share.
+        let mut row_enabled = Vec::new();
+        let blocked = dialog.build_cache_blocked().map(str::to_owned);
         for row in page_plan(&dialog.path, &keys) {
             let index = match row {
                 PageRow::Gap => {
                     rows.push(Line::raw(""));
                     row_map.push(None);
+                    row_enabled.push(true);
                     continue;
                 }
                 PageRow::Heading(heading) => {
@@ -2363,6 +2457,7 @@ pub(crate) fn render_setup(
                         theme::muted().add_modifier(Modifier::BOLD),
                     ));
                     row_map.push(None);
+                    row_enabled.push(true);
                     continue;
                 }
                 PageRow::Setting(index) => index,
@@ -2386,6 +2481,23 @@ pub(crate) fn render_setup(
             };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));
+            let unavailable = blocked
+                .as_deref()
+                .filter(|_| is_build_cache_field(&child_path, "enabled"));
+            row_enabled.push(unavailable.is_none());
+            // Why the switch cannot be turned on, on its own unselectable line
+            // under the row it explains.
+            if let Some(reason) = unavailable {
+                rows.push(Line::styled(
+                    truncate(
+                        &format!("{SETTING_GUTTER}    Off: {reason}"),
+                        usize::from(body.width),
+                    ),
+                    theme::muted(),
+                ));
+                row_map.push(None);
+                row_enabled.push(true);
+            }
         }
         if choice_editor {
             // The page remains visible behind a choice popup, but its controls
@@ -2410,7 +2522,7 @@ pub(crate) fn render_setup(
                 &rows,
                 dialog.selected,
                 &row_map,
-                &[],
+                &row_enabled,
                 &mut form,
                 List,
             );

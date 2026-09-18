@@ -155,13 +155,19 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
 /// prompt. `footer` is `Some` only when the host wants the chat to own the
 /// footer row, which it does while the composer has focus. `overlay` is the
 /// whole frame: modals and the autocomplete popup are centred and clamped
-/// inside it rather than inside the bands above.
+/// inside it rather than inside the bands above. `title_controls` is how many
+/// columns the host draws its own chips into at the right of the transcript's
+/// title row, which the title must stop short of. `pane_focused` says the
+/// host has given this pane the keyboard and wants the transcript's border
+/// drawn in the focused style; a host with a single pane leaves it clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatRegions<'a> {
     pub transcript: Rect,
     pub prompt: Rect,
     pub footer: Option<ChatFooter<'a>>,
     pub overlay: Rect,
+    pub title_controls: u16,
+    pub pane_focused: bool,
 }
 
 /// The footer area and global hints supplied by the host's command registry.

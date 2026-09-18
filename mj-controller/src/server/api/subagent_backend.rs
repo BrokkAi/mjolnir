@@ -215,6 +215,15 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki transcript hits are unavailable") })
     }
 
+    /// What one indexed session is, and what continuing it would mean.
+    /// `None` when the index holds no session with that id.
+    fn wiki_session(
+        &self,
+        _wiki_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_client::daemon::WikiSessionInfo>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki lookups are unavailable") })
+    }
+
     /// Start a session from an archived transcript, answering with its id, or
     /// `None` when the index holds no session with that id.
     fn wiki_restore(

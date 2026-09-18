@@ -33,13 +33,35 @@ pub(super) struct HarnessAdapter {
     home: PathBuf,
 }
 
-/// The SessionWiki tool name for a harness, or `None` for a harness whose
-/// sessions SessionWiki already indexes itself.
-fn tool_name(kind: HarnessKind) -> Option<&'static str> {
+/// The SessionWiki tool name a harness's sessions are indexed under, whether
+/// SessionWiki indexes them itself or one of the adapters here does.
+///
+/// This is the only table of tool names; [`harness_for_tool`] reads it
+/// backwards, and [`adapted_tool_name`] narrows it to the harnesses that need
+/// an adapter of Mjolnir's own.
+pub(super) const fn tool_name(kind: HarnessKind) -> &'static str {
     match kind {
-        HarnessKind::Kimi => Some("kimi-code"),
-        HarnessKind::Grok => Some("grok-build"),
-        HarnessKind::Muse => Some("muse"),
+        HarnessKind::Claude => "claude-code",
+        HarnessKind::Codex => "codex",
+        HarnessKind::Kimi => "kimi-code",
+        HarnessKind::Grok => "grok-build",
+        HarnessKind::Muse => "muse",
+    }
+}
+
+/// The harness a SessionWiki tool name names, or `None` for a tool Mjolnir
+/// cannot import.
+pub(super) fn harness_for_tool(name: &str) -> Option<HarnessKind> {
+    HarnessKind::ALL
+        .into_iter()
+        .find(|kind| tool_name(*kind) == name)
+}
+
+/// The tool name of a harness SessionWiki has no adapter of its own for, or
+/// `None` when SessionWiki already indexes that harness's sessions.
+fn adapted_tool_name(kind: HarnessKind) -> Option<&'static str> {
+    match kind {
+        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => Some(tool_name(kind)),
         HarnessKind::Codex | HarnessKind::Claude => None,
     }
 }
@@ -50,7 +72,7 @@ impl HarnessAdapter {
     pub(super) fn in_home(kind: HarnessKind, home: PathBuf) -> Option<Self> {
         Some(Self {
             kind,
-            tool: tool_name(kind)?,
+            tool: adapted_tool_name(kind)?,
             home,
         })
     }

@@ -2499,7 +2499,7 @@ fn closing_the_last_pane_empties_it_instead_of_refusing() {
     dashboard.set_current_session(Some("session-1"));
     let only = dashboard.focused_pane();
 
-    let closed = dashboard.close_focused_pane();
+    let closed = dashboard.close_pane(only);
 
     assert_eq!(closed.as_deref(), Some("session-1"));
     assert_eq!(dashboard.focused_pane(), only);
@@ -2679,11 +2679,11 @@ fn closing_a_pane_moves_the_highlight_onto_the_surviving_pane() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
-    dashboard
+    let second = dashboard
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
         .expect("the test conversation area has room for two panes");
 
-    let closed = dashboard.close_focused_pane();
+    let closed = dashboard.close_pane(second);
 
     assert_eq!(closed.as_deref(), Some("session-2"));
     assert_eq!(dashboard.focused_pane(), first);
@@ -2741,11 +2741,342 @@ fn the_pane_keys_split_beside_the_conversation_and_close_the_pane() {
 
     assert_eq!(
         chord(&mut dashboard, CommandId::ClosePane),
-        DashboardAction::ClosePane
+        DashboardAction::ClosePane { pane: second }
     );
-    assert_eq!(dashboard.close_focused_pane().as_deref(), Some("session-2"));
+    assert_eq!(dashboard.close_pane(second).as_deref(), Some("session-2"));
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
     assert_eq!(dashboard.focused_pane(), first);
+}
+
+/// Every conversation pane carries a close chip on its title row, and the
+/// chip names its own pane: clicking the unfocused pane's chip asks to close
+/// that pane and leaves the keyboard, and the Sessions highlight with it,
+/// where they were.
+#[test]
+fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let chip = |dashboard: &DashboardState, pane| {
+        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+        (transcript.right() - 3, transcript.y)
+    };
+    for pane in [first, second] {
+        let (column, row) = chip(&dashboard, pane);
+        assert_eq!(
+            lines[row as usize].chars().nth(column as usize),
+            Some('×'),
+            "every pane draws a close chip on its title row: {lines:#?}"
+        );
+    }
+
+    let target = chip(&dashboard, first);
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), target)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), target)),
+        DashboardAction::ClosePane { pane: first }
+    );
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+}
+
+/// The last-pane key returns the keyboard to the pane it came from, and says
+/// so when there is no pane to go back to.
+#[test]
+fn the_last_pane_key_returns_to_the_pane_the_keyboard_came_from() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    dashboard.focus_prompt();
+
+    // Nothing has moved yet, so there is nothing to go back to.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
+    assert_eq!(dashboard.focused_pane(), first);
+
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_pane(first);
+    dashboard.focus_pane(second);
+    dashboard.focus_prompt();
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+    assert_eq!(dashboard.focused_pane(), first);
+
+    // It is a toggle: running it again goes back to where it just came from.
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+    assert_eq!(dashboard.focused_pane(), second);
+}
+
+/// Closing a pane forgets it as the place to go back to, so the key never
+/// moves the keyboard into a pane that is gone.
+#[test]
+fn closing_a_pane_leaves_no_previous_pane_to_return_to() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_pane(first);
+    dashboard.focus_prompt();
+
+    dashboard.close_pane(second);
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusLastPane),
+        DashboardAction::None
+    );
+    assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
+    assert_eq!(dashboard.focused_pane(), first);
+}
+
+/// Zoom fills the conversation band with the focused pane: the other panes
+/// keep their place in the arrangement but are neither drawn nor pointed at,
+/// and the zoom toggles back off.
+#[test]
+fn zoom_fills_the_band_with_the_focused_pane_and_toggles_back() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    let band = dashboard.conversation_area.expect("the conversation band");
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ZoomPane),
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    );
+    assert!(dashboard.conversation_zoomed());
+    drawn(&mut dashboard, 120, 40);
+
+    let panes = dashboard.conversation_panes(band);
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].id, second);
+    assert_eq!(panes[0].rect, band);
+    // Hit-testing agrees with what was drawn: the hidden pane answers for
+    // nothing, and the zoomed pane answers for the whole band.
+    let (transcript, _) = dashboard.pane_bands(second).expect("the zoomed pane drew");
+    assert_eq!(transcript.width, band.width);
+    assert!(dashboard.pane_bands(first).is_none());
+    assert_eq!(
+        dashboard.chat_region_contains(band.x + 1, band.y + 1),
+        Some(second)
+    );
+
+    // The arrangement underneath is untouched, so unzooming puts both back.
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(!dashboard.conversation_zoomed());
+    drawn(&mut dashboard, 120, 40);
+    assert_eq!(dashboard.conversation_panes(band).len(), 2);
+    assert!(dashboard.pane_bands(first).is_some());
+}
+
+/// Directional focus works against the arrangement the zoom hides, and moving
+/// the keyboard keeps the zoom: the new pane fills the band in its turn.
+#[test]
+fn focusing_another_pane_while_zoomed_keeps_the_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    chord(&mut dashboard, CommandId::ZoomPane);
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::FocusPaneLeft),
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
+    );
+
+    assert_eq!(dashboard.focused_pane(), first);
+    assert!(dashboard.conversation_zoomed());
+    let band = dashboard.conversation_area.expect("the conversation band");
+    let panes = dashboard.conversation_panes(band);
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].id, first);
+    assert_ne!(second, first);
+}
+
+/// Splitting and closing both change which panes there are, so each one ends
+/// the zoom rather than leaving panes hidden behind it.
+#[test]
+fn a_split_or_a_close_ends_the_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(dashboard.conversation_zoomed());
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Vertical, None)
+        .expect("the test conversation area has room for a third pane");
+    assert!(!dashboard.conversation_zoomed());
+
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(dashboard.conversation_zoomed());
+    dashboard.close_pane(first);
+    assert!(!dashboard.conversation_zoomed());
+}
+
+/// A lone pane already fills the band, so the command says so instead of
+/// changing nothing silently.
+#[test]
+fn zooming_a_lone_pane_says_there_is_nothing_to_zoom() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    dashboard.focus_prompt();
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ZoomPane),
+        DashboardAction::None
+    );
+
+    assert!(!dashboard.conversation_zoomed());
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Only one pane; nothing to zoom")
+    );
+}
+
+/// The zoomed pane carries a `Z` chip left of its close chip, and clicking it
+/// puts the other panes back.
+#[test]
+fn clicking_the_zoom_chip_unzooms() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_current_session(Some("session-1"));
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+    drawn(&mut dashboard, 120, 40);
+    chord(&mut dashboard, CommandId::ZoomPane);
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let (transcript, _) = dashboard
+        .pane_bands(dashboard.focused_pane())
+        .expect("the zoomed pane drew");
+    let chip = (transcript.right() - 6, transcript.y);
+    assert_eq!(
+        lines[chip.1 as usize].chars().nth(chip.0 as usize),
+        Some('Z'),
+        "the zoomed pane draws a Z chip left of its close chip: {lines:#?}"
+    );
+
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), chip)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), chip)),
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    );
+    assert!(!dashboard.conversation_zoomed());
+}
+
+/// The pane with the keyboard draws its transcript border in the focused
+/// style, and its neighbour does not, so the focused pane is visible without
+/// reading the composer.
+#[test]
+fn the_focused_pane_draws_an_accented_transcript_border() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    assert_eq!(dashboard.focused_pane(), second);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw two panes");
+    let corner = |dashboard: &DashboardState, pane| {
+        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+        (transcript.x, transcript.y)
+    };
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer[corner(&dashboard, second)].fg,
+        mj_chat::theme::palette().accent,
+        "the focused pane's transcript border is accented"
+    );
+    assert_eq!(
+        buffer[corner(&dashboard, first)].fg,
+        mj_chat::theme::palette().border,
+        "an unfocused pane keeps the resting border"
+    );
+}
+
+/// With one pane there is nothing to tell apart, so the transcript border
+/// stays at rest and the single-pane surface draws as it always has.
+#[test]
+fn the_lone_pane_draws_a_resting_transcript_border() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let pane = dashboard.focused_pane();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw one pane");
+    let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+    assert_eq!(
+        terminal.backend().buffer()[(transcript.x, transcript.y)].fg,
+        mj_chat::theme::palette().border,
+        "a lone pane draws the resting border whether or not it has the keyboard"
+    );
+}
+
+/// Closing a pane that does not hold the keyboard removes it and reports what
+/// it showed, leaving the focus and the highlight alone.
+#[test]
+fn closing_an_unfocused_pane_leaves_the_keyboard_where_it_was() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+
+    let closed = dashboard.close_pane(first);
+
+    assert_eq!(closed.as_deref(), Some("session-1"));
+    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
 /// `prefix+minus` stacks instead of sitting beside, and the focus keys move
@@ -2903,6 +3234,124 @@ fn attention_levels_rank_a_question_above_unread_above_idle() {
 }
 
 #[test]
+fn a_failure_outranks_a_question_and_an_unreachable_worker_sits_between_them() {
+    let mut dashboard = dashboard_with_attention_mix();
+    // "asks" already has a pending question. A review that failed on the same
+    // session must win, so the row, the queue, and the badge all say failure.
+    dashboard.set_session_reviews([mj_client::review::RuntimeReviewView {
+        session_id: "asks".into(),
+        tier: mj_core::review::lanes::ReviewTier::Quick,
+        phase: mj_core::review::driver::TurnReviewPhase::Verdict(
+            mj_core::review::verdict::ReviewVerdict::Failed {
+                reason: "the reviewer never answered".into(),
+            },
+        ),
+        roles: Vec::new(),
+        status: "the review failed".into(),
+        verdict: None,
+    }]);
+    dashboard.set_session_connectivity("remote", false);
+
+    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Failed);
+    assert_eq!(
+        dashboard.attention_level("remote"),
+        AttentionLevel::Unreachable,
+        "an unreachable worker is its own level, above a question"
+    );
+    assert!(AttentionLevel::Failed > AttentionLevel::Unreachable);
+    assert!(AttentionLevel::Unreachable > AttentionLevel::Waiting);
+
+    let queue = dashboard
+        .attention_queue()
+        .into_iter()
+        .map(|entry| entry.session_id)
+        .collect::<Vec<_>>();
+    assert_eq!(queue, vec!["asks", "remote", "done"]);
+}
+
+#[test]
+fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
+    let mut dashboard = dashboard_with_attention_mix();
+    let session = dashboard.state.sessions.get_mut("quiet").unwrap();
+    session.state = SessionState::Closing;
+    session.last_error = Some("the worker would not stop".into());
+
+    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
+    assert_eq!(
+        dashboard
+            .attention_queue()
+            .first()
+            .map(|entry| &*entry.session_id),
+        Some("quiet")
+    );
+}
+
+#[test]
+fn a_badge_names_the_most_urgent_level_and_counts_every_flagged_session() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Default holds one question and one unread answer.
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Waiting, 2))
+    );
+
+    dashboard.set_session_connectivity("done", false);
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Unreachable, 2))
+    );
+
+    let session = dashboard.state.sessions.get_mut("quiet").unwrap();
+    session.state = SessionState::Error;
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 3))
+    );
+
+    let badge =
+        crate::render::sessions::attention_badge(dashboard.workspace_attention_summary("default"))
+            .expect("a workspace with three flagged sessions carries a badge");
+    assert_eq!(badge.content, " \u{d7}3");
+    assert_eq!(
+        badge.style.fg,
+        Some(mj_chat::theme::palette().session_error),
+        "a failure badge is red, not the attention colour"
+    );
+
+    let quiet = dashboard_with_session(running_session());
+    assert_eq!(quiet.workspace_attention_summary("default"), None);
+    assert!(crate::render::sessions::attention_badge(None).is_none());
+}
+
+#[test]
+fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    // Mark all read advances the read marker to the materialized transcript.
+    dashboard
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .materialized_applied_event_ordinal = Some(4);
+    assert_eq!(
+        dashboard.sessions_attention_summary(),
+        Some((AttentionLevel::Waiting, 2))
+    );
+
+    chord(&mut dashboard, CommandId::MarkAllRead);
+    assert_eq!(
+        dashboard.attention_level("asks"),
+        AttentionLevel::Waiting,
+        "a pending question survives mark all read"
+    );
+    assert_eq!(
+        dashboard.sessions_attention_summary(),
+        Some((AttentionLevel::Waiting, 1))
+    );
+}
+
+#[test]
 fn next_attention_opens_the_waiting_session_and_wraps_through_the_queue() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
@@ -3011,7 +3460,9 @@ fn the_footer_names_the_next_key_only_while_something_waits() {
     dashboard.set_active_workspace(Some("default".into()));
     let lines = drawn(&mut dashboard, 120, 40);
     let footer = lines.last().unwrap();
-    assert!(footer.contains("o next (3)"), "{footer}");
+    // The hint carries the same badge as the tabs: the most urgent glyph and
+    // how many sessions need a person.
+    assert!(footer.contains("o next (!3)"), "{footer}");
 
     let mut quiet = dashboard_with_session(running_session());
     let lines = drawn(&mut quiet, 120, 40);
@@ -3031,7 +3482,9 @@ fn workspace_tabs_and_folded_headings_carry_attention_badges() {
         .iter()
         .find(|line| line.contains("Default") && line.contains("Other"))
         .expect("workspace tab row");
-    assert!(tabs.contains("Default !1"), "{tabs}");
+    // A tab shows its most urgent glyph and the total it is flagging: the
+    // default workspace holds one question and one unread answer.
+    assert!(tabs.contains("Default !2"), "{tabs}");
     assert!(tabs.contains("Other !1"), "{tabs}");
 
     // Folding the project that holds the unread session puts its count on

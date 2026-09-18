@@ -185,6 +185,25 @@ pub fn locate_native_session(
     })
 }
 
+/// The id [`locate_native_session`] takes, read back from the path that
+/// locator produced. `None` when the path has no readable name.
+///
+/// The inverse of the locators above, so every caller that has only a
+/// transcript path — the SessionWiki index stores one per row — names the
+/// session the same way `mj import` does. Each harness keeps its id in a
+/// different part of the path: Claude Code names the file after the session,
+/// Codex appends the thread UUID to a `rollout-` prefix, Kimi and Grok name
+/// the session's own directory, and Muse names the directory above
+/// `session.jsonl`.
+pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<String> {
+    match harness {
+        HarnessKind::Claude => path.file_stem()?.to_str().map(str::to_owned),
+        HarnessKind::Codex => codex_rollout_id_from_path(path).map(str::to_owned),
+        HarnessKind::Kimi | HarnessKind::Grok => path.file_name()?.to_str().map(str::to_owned),
+        HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
+    }
+}
+
 /// Where one native session's transcript lives and when it last changed.
 ///
 /// Cheaper than [`NativeSessionListing`]: no git branch and no directory size,

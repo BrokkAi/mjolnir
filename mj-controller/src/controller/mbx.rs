@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::{BuildCacheConfig, TargetBuildCache};
-use mj_core::state::{BuildCacheLimit, BuildCachePreview, SessionBuildCache};
+use mj_core::state::{BuildCacheLimit, BuildCacheOff, BuildCachePreview, SessionBuildCache};
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
@@ -158,7 +158,9 @@ pub fn preview_build_cache(
             native_mbx: None,
             directory: None,
             max_size: None,
-            off_reason: Some("the build cache is turned off for every machine".into()),
+            off_reason: Some(BuildCacheOff::Unavailable(
+                "the build cache is turned off for every machine".into(),
+            )),
         }));
     }
     inspect_host(&host, &settings, executor).map(|inspection| Some(inspection.preview))
@@ -190,10 +192,10 @@ fn inspect_host(
             native_mbx: native_version.clone(),
             directory: None,
             max_size: None,
-            off_reason: Some(format!(
+            off_reason: Some(BuildCacheOff::Unavailable(format!(
                 "the host's mbx {version} is older than the {MBX_VERSION} Mjolnir installs, \
                  so they cannot share a store"
-            )),
+            ))),
         }));
     }
     let directory = match &settings.directory {
@@ -225,7 +227,7 @@ fn inspect_host(
         (None, Some(text)) => BuildCacheLimit::HostConfiguration(configured_max_size(text)),
         (None, None) => unreachable!("a missing budget is derived above"),
     };
-    let preview = |off_reason: Option<String>| BuildCachePreview {
+    let preview = |off_reason: Option<BuildCacheOff>| BuildCachePreview {
         native_mbx: native_version.clone(),
         directory: Some(directory.clone()),
         max_size: Some(limit.clone()),
@@ -235,27 +237,23 @@ fn inspect_host(
     // The directory may not exist yet; its filesystem is its nearest
     // existing ancestor's.
     let volume = nearest_existing_ancestor(host, &directory, executor)?;
-    let enabled = match settings.enabled {
-        Some(enabled) => enabled,
-        None => reflinks_supported(host, &volume, executor)?,
-    };
-    if !enabled {
-        let reason = if settings.enabled == Some(false) {
-            "turned off for this target".to_owned()
-        } else {
-            format!(
-                "the filesystem under {} does not support reflinks, so restoring cached \
-                 outputs would copy every byte",
-                directory.display()
-            )
-        };
-        return Ok(off(preview(Some(reason))));
+    // A machine that is not turned off still has to support the cache: an
+    // explicit `enabled = true` cannot make a volume without reflinks usable.
+    if !settings.enabled.unwrap_or(true) {
+        return Ok(off(preview(Some(BuildCacheOff::TurnedOff))));
+    }
+    if !reflinks_supported(host, &volume, executor)? {
+        return Ok(off(preview(Some(BuildCacheOff::Unavailable(format!(
+            "the filesystem under {} does not support reflinks, so restoring cached \
+             outputs would copy every byte",
+            directory.display()
+        ))))));
     }
     if let Some(reason) = unusable_filesystem(host, &volume, executor)? {
-        return Ok(off(preview(Some(format!(
+        return Ok(off(preview(Some(BuildCacheOff::Unavailable(format!(
             "{} is on a {reason}, where mbx's file locks are unreliable",
             directory.display()
-        )))));
+        ))))));
     }
 
     Ok(Inspection {
@@ -1027,12 +1025,28 @@ mod tests {
         .unwrap();
         assert_eq!(resolved.directory, PathBuf::from("/mnt/nvme/mbx"));
         assert_eq!(resolved.max_size.as_deref(), Some("250GiB"));
-        assert!(
-            !executor
-                .ran()
-                .iter()
-                .any(|line| line.contains("mj-reflink")),
-            "an explicit enabled setting skips the reflink probe"
+    }
+
+    /// Turning the cache on cannot override the host: without reflinks a
+    /// restore would copy every byte, so sessions still run without it.
+    #[test]
+    fn an_enabled_setting_does_not_survive_a_volume_without_reflinks() {
+        let _isolated = isolated();
+        let mut answers = plain_host();
+        answers.retain(|(needle, _, _)| *needle != "mj-reflink");
+        answers.push(("mj-reflink", 1, ""));
+        let executor = ProbeExecutor::new(&answers);
+        assert_eq!(
+            resolve(
+                &podman(Some(TargetBuildCache {
+                    enabled: Some(true),
+                    directory: None,
+                    max_size: None,
+                })),
+                &BuildCacheConfig::default(),
+                &executor,
+            ),
+            None
         );
     }
 
@@ -1070,10 +1084,7 @@ mod tests {
             Some(BuildCacheLimit::Size("100000000000B".into()))
         );
         assert!(
-            preview
-                .off_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("reflinks")),
+            matches!(&preview.off_reason, Some(BuildCacheOff::Unavailable(reason)) if reason.contains("reflinks")),
             "{:?}",
             preview.off_reason
         );

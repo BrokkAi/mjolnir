@@ -66,6 +66,39 @@ impl DashboardState {
         self.clamp_selections();
     }
 
+    /// The panes to draw and hit-test this frame.
+    ///
+    /// Zoomed, that is the focused pane alone filling the whole band: the
+    /// others keep their place in the arrangement but are not on screen, so
+    /// nothing may be drawn for them or pointed at in them.
+    pub fn conversation_panes(&self, area: Rect) -> Vec<crate::tile_layout::PaneInfo> {
+        if self.conversation_zoomed && self.conversation_layout.pane_count() > 1 {
+            return vec![crate::tile_layout::PaneInfo {
+                id: self.conversation_layout.focused(),
+                rect: area,
+                is_focused: true,
+            }];
+        }
+        self.conversation_layout.panes(area)
+    }
+
+    /// Whether the focused pane is filling the band on its own.
+    pub fn conversation_zoomed(&self) -> bool {
+        self.conversation_zoomed && self.conversation_layout.pane_count() > 1
+    }
+
+    /// Toggle the zoom on the focused pane. With nothing to hide there is
+    /// nothing to zoom, and the surface says so rather than changing how it
+    /// already looks.
+    pub(crate) fn zoom_pane_command(&mut self) -> DashboardAction {
+        if self.conversation_layout.pane_count() < 2 {
+            self.set_notice("Only one pane; nothing to zoom");
+            return DashboardAction::None;
+        }
+        self.conversation_zoomed = !self.conversation_zoomed;
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    }
+
     /// Split the focused pane and show `session` in the new leaf, which takes
     /// the focus. `None` means the conversation area is too small to split,
     /// in which case nothing changes.
@@ -74,6 +107,9 @@ impl DashboardState {
         direction: Direction,
         session: Option<&str>,
     ) -> Option<PaneId> {
+        // A split is about seeing two conversations at once, so it ends a
+        // zoom rather than hiding the pane it just made.
+        self.conversation_zoomed = false;
         let area = self.conversation_area();
         let focused = self.conversation_layout.focused();
         let pane = self
@@ -104,18 +140,22 @@ impl DashboardState {
         DashboardAction::SplitPane { direction }
     }
 
-    /// Remove the focused pane and report the session it showed. The last
-    /// pane is emptied rather than removed: the conversation area always has
-    /// somewhere to open the next session.
-    pub fn close_focused_pane(&mut self) -> Option<String> {
-        let focused = self.conversation_layout.focused();
-        let session_id = self.pane_sessions.remove(&focused);
+    /// Remove `pane` and report the session it showed. The last pane is
+    /// emptied rather than removed: the conversation area always has
+    /// somewhere to open the next session. Closing a pane that does not hold
+    /// the keyboard leaves the focus and its history alone.
+    pub fn close_pane(&mut self, pane: PaneId) -> Option<String> {
+        // Closing changes which panes exist, so the band goes back to showing
+        // all of them rather than hiding survivors behind a stale zoom.
+        self.conversation_zoomed = false;
+        let session_id = self.pane_sessions.remove(&pane);
         if self.conversation_layout.pane_count() > 1 {
-            self.conversation_layout.close_focused();
+            self.conversation_layout.close_pane(pane);
         }
-        // The Sessions highlight follows the keyboard, and the keyboard is now
-        // in the surviving pane. Leaving it on the closed pane's session would
-        // pull that conversation into the pane that took the focus.
+        // The Sessions highlight follows the keyboard. After closing the
+        // focused pane the keyboard is in a surviving pane, and leaving the
+        // highlight on the closed pane's session would pull that conversation
+        // into the pane that took the focus.
         if let Some(surviving) = self
             .pane_sessions
             .get(&self.conversation_layout.focused())
@@ -159,6 +199,25 @@ impl DashboardState {
         } else {
             DashboardAction::None
         }
+    }
+
+    /// Move the keyboard back to the pane it was in before this one.
+    ///
+    /// There is nothing to go back to before the first focus move, and
+    /// closing a pane forgets it, so the command says so rather than moving
+    /// the keyboard somewhere the user did not ask for.
+    pub(crate) fn focus_last_pane_command(&mut self) -> DashboardAction {
+        let previous = self
+            .conversation_layout
+            .previous_focus()
+            .filter(|pane| *pane != self.conversation_layout.focused())
+            .filter(|pane| self.conversation_layout.pane_ids().contains(pane));
+        let Some(previous) = previous else {
+            self.set_notice("No previous pane");
+            return DashboardAction::None;
+        };
+        self.focus_pane(previous);
+        DashboardAction::ConversationPanesChanged { focus_moved: true }
     }
 
     /// Move the focused pane's border toward `nav` by one step.
@@ -241,6 +300,7 @@ impl DashboardState {
     pub(crate) fn restore_conversation_layout(&mut self, layout: &ConversationLayout) {
         let (tree, sessions) = TileLayout::from_conversation_layout(layout);
         self.conversation_layout = tree;
+        self.conversation_zoomed = false;
         // A session belongs to one pane. A stored arrangement that names the
         // same session twice keeps the first pane and empties the rest, so the
         // same conversation is never drawn in two places.
@@ -264,6 +324,7 @@ impl DashboardState {
     pub(crate) fn reset_conversation_layout(&mut self) {
         self.conversation_layout = TileLayout::new().0;
         self.pane_sessions.clear();
+        self.conversation_zoomed = false;
     }
 
     pub(crate) fn mark_layout_modified(&mut self) {

@@ -32,7 +32,7 @@ use mj_client::session::{BoxFuture, SessionControl, SessionHandle, ViewError, ne
 use mj_core::relay::RelayCommand;
 
 use crate::daemon::RuntimeState;
-use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage};
+use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo};
 
 /// How the follow-up task learns whether a session is still on its way up.
 ///
@@ -109,6 +109,10 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("SessionWiki transcript hits are unavailable") })
     }
 
+    fn wiki_session(&self, _wiki_id: String) -> BoxFuture<'_, Result<Option<WikiSessionInfo>>> {
+        Box::pin(async { anyhow::bail!("SessionWiki lookups are unavailable") })
+    }
+
     fn wiki_restore(
         self: Arc<Self>,
         _request: WikiRestoreRequest,
@@ -181,6 +185,10 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move {
             RuntimeState::wiki_hits(self, wiki_id, query, context_messages, per_message_chars).await
         })
+    }
+
+    fn wiki_session(&self, wiki_id: String) -> BoxFuture<'_, Result<Option<WikiSessionInfo>>> {
+        Box::pin(async move { RuntimeState::wiki_session(self, wiki_id).await })
     }
 
     fn wiki_restore(
@@ -1360,6 +1368,11 @@ impl SubagentBackend for ApiBackend {
                 .wiki_hits(wiki_id, query, context_messages, per_message_chars)
                 .await
         })
+    }
+
+    fn wiki_session(&self, wiki_id: String) -> BoxFuture<'_, Result<Option<WikiSessionInfo>>> {
+        let runtime = Arc::clone(&self.exports);
+        Box::pin(async move { runtime.wiki_session(wiki_id).await })
     }
 
     fn wiki_restore(&self, request: WikiRestoreRequest) -> BoxFuture<'_, Result<Option<String>>> {

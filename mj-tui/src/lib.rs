@@ -147,7 +147,10 @@ impl SessionStateFilter {
 
     pub(crate) fn admits(self, level: AttentionLevel) -> bool {
         match self {
-            Self::Blocked => matches!(level, AttentionLevel::Waiting | AttentionLevel::Failed),
+            Self::Blocked => matches!(
+                level,
+                AttentionLevel::Waiting | AttentionLevel::Unreachable | AttentionLevel::Failed
+            ),
             Self::Working => level == AttentionLevel::Working,
             Self::Idle => matches!(level, AttentionLevel::Idle | AttentionLevel::Inactive),
             Self::Done => level == AttentionLevel::Unread,
@@ -186,8 +189,10 @@ pub enum DashboardAction {
     SplitPane {
         direction: ratatui::layout::Direction,
     },
-    /// Remove the focused conversation pane, saving what it held.
-    ClosePane,
+    /// Remove one conversation pane, saving what it held.
+    ClosePane {
+        pane: tile_layout::PaneId,
+    },
     /// The conversation panes were focused or resized. The controller saves
     /// the arrangement, and a focus move also re-reads which conversation the
     /// keyboard is now in.
@@ -761,6 +766,11 @@ pub struct DashboardState {
     /// The session each conversation pane shows. A pane with no entry is
     /// empty, which is what an unfilled split starts as.
     pub(crate) pane_sessions: BTreeMap<tile_layout::PaneId, String>,
+    /// Whether the focused pane fills the conversation band on its own. The
+    /// arrangement underneath is untouched, so unzooming puts every pane back
+    /// where it was. It is a view state, not part of the stored layout: a
+    /// restart comes back unzoomed.
+    pub(crate) conversation_zoomed: bool,
     /// The session an attach is running for, while it is still in flight.
     /// The conversation band draws as empty for as long as this is set to a
     /// session other than the one on screen, so the transcript never belongs
@@ -968,6 +978,7 @@ impl DashboardState {
             pane_sizes: PaneSizes::default(),
             conversation_layout: tile_layout::TileLayout::new().0,
             pane_sessions: BTreeMap::new(),
+            conversation_zoomed: false,
             opening_session: None,
             pane_areas: None,
             narrow_layout: Cell::new(false),

@@ -69,6 +69,16 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 }
             };
             let sync_github_token = target_syncs_github_token(session.target.as_ref());
+            // A session that runs out of the user's own harness home must not
+            // receive Mjolnir's managed skills; they would land in that home
+            // and stay there.
+            let owns_profile_home = match controller.session_owns_profile_home(&session.id) {
+                Ok(owns) => owns,
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, "could not decide profile home ownership for credential sync: {error:#}");
+                    false
+                }
+            };
             Some(CredentialSyncTarget {
                 session_id: session.id.clone(),
                 profile_id: session.last_profile.clone(),
@@ -76,6 +86,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 profile_home: profile.home.clone(),
                 authenticates_with_api_key: profile.auth_scheme().is_api_key(),
                 sync_github_token,
+                owns_profile_home,
                 spec,
             })
         })
