@@ -285,6 +285,10 @@ pub enum DashboardAction {
         target_ids: Vec<String>,
     },
     LoadWebAccess,
+    /// Stop the running daemon and start one from the build this surface is
+    /// running, then report which build came up. The keep-alive never starts
+    /// a daemon, so this is how a surface gets one back.
+    RestartDaemon,
     RecoverWebViewer(WebViewerRecovery),
     InspectWebListener,
     CancelWebAccess,

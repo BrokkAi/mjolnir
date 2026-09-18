@@ -314,6 +314,9 @@ pub(crate) async fn apply_dashboard_action(
         | DashboardAction::InspectWebListener) => {
             spawn_web_request(context, action);
         }
+        DashboardAction::RestartDaemon => {
+            spawn_daemon_restart(context);
+        }
         DashboardAction::CancelWebAccess => {
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);
@@ -1452,6 +1455,41 @@ impl DashboardContext {
 }
 
 /// Own each dialog request, cancel stale polling, and observe background task failures.
+/// Restart the daemon from this surface, off the event loop.
+///
+/// Stopping and starting a daemon takes seconds and holds a file lock, so it
+/// can never run on the render loop. The outcome is a sentence for the notice
+/// bar rather than a silent success, for the same reason `mj daemon restart`
+/// now names the build that came up: a restart that lands on someone else's
+/// build must not look like the one that was asked for.
+fn spawn_daemon_restart(context: &mut DashboardContext) {
+    let updates = context.dashboard_io_tx.clone();
+    let guard = context
+        .critical_operations
+        .begin("restarting the Mjolnir daemon");
+    context
+        .dashboard
+        .set_notice("Restarting the Mjolnir daemon...");
+    tokio::spawn(async move {
+        let result = daemon::restart_daemon().await.map_or_else(
+            |error| Err(format!("Could not restart the Mjolnir daemon: {error:#}")),
+            |restarted| {
+                Ok(match restarted.runs_this_build {
+                    Some(true) => format!(
+                        "Mjolnir daemon restarted as PID {}, running this build.",
+                        restarted.pid
+                    ),
+                    _ => format!("Mjolnir daemon restarted as PID {}.", restarted.pid),
+                })
+            },
+        );
+        if let Err(error) = updates.send(DashboardIoUpdate::DaemonRestarted(result)) {
+            tracing::warn!(%error, "daemon restart outcome dropped because the surface closed");
+        }
+        drop(guard);
+    });
+}
+
 fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     context.web_request_cancel = None;
     context.web_request_generation = context.web_request_generation.wrapping_add(1);

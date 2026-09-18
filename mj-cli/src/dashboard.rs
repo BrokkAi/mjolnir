@@ -265,6 +265,9 @@ pub(crate) struct DashboardContext {
     shutdown_requested: bool,
     pub(crate) critical_operations: CriticalOperationTracker,
     critical_operations_changed: watch::Receiver<u64>,
+    /// What the two-second keep-alive last saw. It never starts a daemon, so
+    /// a daemon that goes away stays away until the user asks for it back.
+    daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
 
     quota_profiles_tx: watch::Sender<QuotaRefreshBatch>,
     quota: Feed<Receiver<QuotaUpdate>>,
@@ -417,6 +420,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     client_id: &str,
     open_workspace_manager: bool,
     go: Option<(mj_tui::GoMode, bool)>,
+    daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -431,7 +435,8 @@ pub(crate) async fn run_dashboard_for_workspace(
     })
     .await
     .context("initialize startup configuration task failed")??;
-    let Some(mut context) = DashboardContext::open(workspace_id, client_id)? else {
+    let Some(mut context) = DashboardContext::open(workspace_id, client_id, daemon_presence)?
+    else {
         return Ok(DashboardExit::Normal);
     };
     if let Some((mode, setup)) = go {
@@ -631,6 +636,26 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             _ = context.critical_operations_changed.changed(),
                 if context.shutdown_requested => {}
+            // The keep-alive no longer starts a daemon, so a daemon that is
+            // gone has to be visible instead of silently replaced.
+            changed = context.daemon_presence.changed() => {
+                if changed.is_ok() {
+                    let presence = context.daemon_presence.borrow_and_update().clone();
+                    match presence {
+                        crate::daemon::DaemonPresence::Attached => context
+                            .dashboard
+                            .set_notice("Mjolnir daemon is running again."),
+                        // The reason is already in the log. The notice bar is
+                        // one line, so it carries the action instead.
+                        crate::daemon::DaemonPresence::Missing(reason) => {
+                            tracing::warn!(%reason, "the Mjolnir daemon is not running");
+                            context.dashboard.set_failure_notice(
+                                "Mjolnir daemon is not running. Press F2 and run \"Restart the Mjolnir daemon\".",
+                            );
+                        }
+                    }
+                }
+            }
             // Poll displayed time values without forcing a frame when none
             // of the visible clocks or countdowns changed.
             _ = clock_tick.tick() => {
@@ -886,7 +911,11 @@ impl DashboardContext {
     /// Loads state, takes the terminal, and starts every background feed.
     /// `Ok(None)` means first-run setup was cancelled and there is nothing to
     /// run.
-    fn open(workspace_id: &str, client_id: &str) -> Result<Option<Self>> {
+    fn open(
+        workspace_id: &str,
+        client_id: &str,
+        daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+    ) -> Result<Option<Self>> {
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
         let workspaces = mj_controller::database::list_workspaces()?;
@@ -1008,6 +1037,7 @@ impl DashboardContext {
             shutdown_requested: false,
             critical_operations,
             critical_operations_changed,
+            daemon_presence,
             quota_profiles_tx,
             quota: Feed::new(quota_updates_rx),
             manual_quota_refresh_generation: None,

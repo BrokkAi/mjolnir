@@ -527,35 +527,70 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     }
 }
 
+/// What the keep-alive last saw when it refreshed this client's presence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonPresence {
+    /// A daemon answered and knows this client is attached.
+    Attached,
+    /// No daemon answered. The string is the reason, for the person reading it.
+    Missing(String),
+}
+
+/// The keep-alive task and what it reports about the daemon.
+pub struct Attachment {
+    pub task: tokio::task::JoinHandle<()>,
+    pub presence: tokio::sync::watch::Receiver<DaemonPresence>,
+}
+
+/// Keep this client's presence fresh in whatever daemon is running.
+///
+/// This is a two-second timer, not a user action, so it only ever reconnects.
+/// It deliberately does not start a daemon: a timer cannot express the intent
+/// to start one, and when the client's own executable has been replaced on
+/// disk the daemon it would start runs code the user has already discarded.
+/// That is exactly how a stopped daemon used to come back on an old build,
+/// beating the restart that had just stopped it. When no daemon answers, the
+/// surface says so and offers its explicit restart instead.
 pub fn maintain_attachment(
     client_id: String,
     pid: u32,
     cancellation: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Attachment {
+    let (presence_tx, presence) = tokio::sync::watch::channel(DaemonPresence::Attached);
+    let task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    match connect_or_start().await {
-                        Ok(mut daemon) => {
-                            if let Err(error) = daemon
-                                .attach(client_id.clone(), pid)
-                                .await
-                            {
+                    let observed = match connect_existing().await {
+                        Ok(mut daemon) => match daemon.attach(client_id.clone(), pid).await {
+                            Ok(()) => DaemonPresence::Attached,
+                            Err(error) => {
                                 tracing::warn!(%error, "could not refresh daemon client presence");
+                                DaemonPresence::Missing(format!("{error:#}"))
                             }
-                        }
+                        },
                         Err(error) => {
                             tracing::warn!(%error, "could not reconnect dashboard to Mjolnir daemon");
+                            DaemonPresence::Missing(format!("{error:#}"))
                         }
-                    }
+                    };
+                    // `send_if_modified` so a daemon that keeps answering does
+                    // not wake the render loop every two seconds.
+                    presence_tx.send_if_modified(|current| {
+                        let changed = *current != observed;
+                        if changed {
+                            *current = observed;
+                        }
+                        changed
+                    });
                 }
             }
         }
-    })
+    });
+    Attachment { task, presence }
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -648,6 +683,51 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+    /// The keep-alive is a timer, not a user action. It used to call
+    /// `connect_or_start`, which is how a daemon stopped by a restart came
+    /// back on the attached client's older build before the restart could
+    /// start its own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one() {
+        const CHILD: &str = "MJ_TEST_KEEP_ALIVE_NEVER_STARTS_A_DAEMON";
+        const TEST: &str = "daemon::tests::the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        assert!(
+            !metadata_path().exists(),
+            "this isolated store starts without a daemon"
+        );
+        let cancellation = CancellationToken::new();
+        let attachment = maintain_attachment(
+            "keep-alive-test".to_owned(),
+            std::process::id(),
+            cancellation.clone(),
+        );
+        let mut presence = attachment.presence.clone();
+        tokio::time::timeout(Duration::from_secs(20), presence.changed())
+            .await
+            .expect("the keep-alive reports within a few ticks")
+            .expect("the keep-alive is still running");
+        assert!(
+            matches!(&*presence.borrow(), DaemonPresence::Missing(_)),
+            "a missing daemon must be reported, not replaced"
+        );
+        cancellation.cancel();
+        attachment.task.await.unwrap();
+        // Starting a daemon begins by taking the startup lock, which creates
+        // this file. Its absence is the proof that no start was attempted;
+        // the missing metadata alone would only prove none succeeded.
+        assert!(
+            !data_dir().join("daemon-start.lock").exists(),
+            "the keep-alive must never attempt to start a daemon"
+        );
+        assert!(
+            !metadata_path().exists(),
+            "the keep-alive must never start a daemon"
+        );
     }
     #[test]
     fn a_restart_onto_this_build_succeeds_and_says_so() {

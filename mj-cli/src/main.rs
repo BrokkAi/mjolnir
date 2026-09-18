@@ -926,15 +926,21 @@ async fn run_workspace_dashboard(
     );
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
-    let attachment_task = daemon::maintain_attachment(
+    let attachment = daemon::maintain_attachment(
         client_id.clone(),
         std::process::id(),
         attachment_cancellation.clone(),
     );
-    let result =
-        run_dashboard_for_workspace(&selected, &client_id, open_workspace_manager, go).await;
+    let result = run_dashboard_for_workspace(
+        &selected,
+        &client_id,
+        open_workspace_manager,
+        go,
+        attachment.presence,
+    )
+    .await;
     attachment_cancellation.cancel();
-    if let Err(error) = attachment_task.await {
+    if let Err(error) = attachment.task.await {
         tracing::warn!(%error, "workspace attachment task failed");
     }
     match daemon::connect_existing().await {
