@@ -97,14 +97,19 @@ pub enum UiTheme {
     #[serde(rename = "darcula", alias = "dracula")]
     Darcula,
     HighContrast,
+    /// No colors at all: the terminal's own foreground and background, with
+    /// bold and reverse video carrying focus and selection. Chosen
+    /// automatically when the `NO_COLOR` environment variable is set.
+    Mono,
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Midnight,
         Self::Light,
         Self::Darcula,
         Self::HighContrast,
+        Self::Mono,
     ];
 
     pub fn label(self) -> &'static str {
@@ -113,6 +118,7 @@ impl UiTheme {
             Self::Light => "Light",
             Self::Darcula => "Darcula",
             Self::HighContrast => "High Contrast",
+            Self::Mono => "Monochrome",
         }
     }
 
@@ -148,6 +154,20 @@ pub struct AdvancedConfig {
     pub show_stopped_sessions: bool,
     #[serde(skip_serializing_if = "SessionOrder::is_default")]
     pub session_order: SessionOrder,
+    /// Which glyphs the dashboard draws with. `None` decides from the
+    /// terminal: ASCII on the Linux console or a locale without UTF-8,
+    /// Unicode otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<SymbolSet>,
+}
+
+/// The character set the dashboard draws status symbols, borders, and
+/// separators with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolSet {
+    Unicode,
+    Ascii,
 }
 
 /// How the dashboard tells the person about a session they are not looking

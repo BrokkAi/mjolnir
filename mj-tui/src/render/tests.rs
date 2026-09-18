@@ -1552,8 +1552,8 @@ fn footer_chord_group_starts_with_the_live_prefix() {
 /// Every hint in the footer, whichever separator it sits between.
 fn footer_hints(footer: &str) -> Vec<String> {
     footer
-        .split(theme::FOOTER_GROUP_SEPARATOR)
-        .flat_map(|group| group.split(theme::FOOTER_SEPARATOR))
+        .split(theme::footer_group_separator())
+        .flat_map(|group| group.split(theme::footer_separator()))
         .filter(|hint| !hint.is_empty())
         .map(ToOwned::to_owned)
         .collect()

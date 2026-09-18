@@ -64,14 +64,14 @@ pub fn dismissible_modal_title<K: Copy + Eq>(
     );
     form.register_dismiss(hitbox, enabled);
     let dismiss_style = if !enabled {
-        theme::muted().bg(theme::palette().surface_raised)
+        theme::muted().patch(theme::raised())
     } else if form.dismiss_is_armed() {
         theme::selection(true)
     } else {
         theme::selection(false)
     };
     Line::from(vec![
-        Span::styled(" × ", dismiss_style),
+        Span::styled(theme::glyphs().close, dismiss_style),
         Span::styled(title.into(), title_style),
         Span::styled(" ", title_style),
     ])
@@ -368,7 +368,7 @@ mod tests {
         let disabled = dismissible_modal_title(&mut form, popup, "Title", Style::default(), false);
         assert_eq!(
             disabled.spans[0].style,
-            theme::muted().bg(theme::palette().surface_raised)
+            theme::muted().patch(theme::raised())
         );
     }
 }

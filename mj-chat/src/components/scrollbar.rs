@@ -82,7 +82,11 @@ pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
     for row in geometry.track.y..geometry.track.bottom() {
         let is_thumb = row >= geometry.thumb.y && row < geometry.thumb.bottom();
         frame.buffer_mut()[(geometry.track.x, row)]
-            .set_symbol(if is_thumb { THUMB_SYMBOL } else { TRACK_SYMBOL })
+            .set_symbol(if is_thumb {
+                theme::glyphs().scroll_thumb
+            } else {
+                theme::glyphs().scroll_track
+            })
             .set_style(Style::default().fg(if is_thumb {
                 theme::palette().accent
             } else {

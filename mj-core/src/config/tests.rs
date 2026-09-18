@@ -1090,7 +1090,7 @@ fn legacy_dracula_theme_loads_and_saves_as_darcula() {
 
     let config = Config::load_from(&path).unwrap();
     assert_eq!(config.theme, UiTheme::Darcula);
-    assert_eq!(UiTheme::ALL.len(), 4);
+    assert_eq!(UiTheme::ALL.len(), 5);
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(saved.contains("theme = \"darcula\""), "{saved}");

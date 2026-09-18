@@ -11,7 +11,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project"})
+            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project","symbols":null})
         }
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
@@ -138,6 +138,7 @@ pub(super) fn label(key: &str) -> String {
         "detailed_activity_clocks" => "Detailed activity clocks",
         "show_stopped_sessions" => "Show stopped sessions",
         "session_order" => "Session order",
+        "symbols" => "Symbols",
         "notify" => "Notifications",
         "mode" => "Notify through",
         "bell" => "Ring the terminal bell",
@@ -212,6 +213,9 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     match parts.as_slice() {
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // Unset symbols follow the terminal: ASCII on the Linux console or
+        // without a UTF-8 locale, Unicode otherwise.
+        ["advanced", "symbols"] => "Follows the terminal".to_owned(),
         // The backend emits no CPU or memory flag, so the container competes
         // for the whole machine.
         ["targets", _, "cpus" | "memory"] => "No limit".to_owned(),
@@ -424,6 +428,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let values: &[&str] = match key {
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
+        "symbols" => &["unicode", "ascii"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "tier" => &["quick", "extended"],
@@ -520,6 +525,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
         "session_order" => {
             "Group sessions by project, or list the ones that need you first without project headings."
+        }
+        "symbols" => {
+            "Draw status marks, borders, and separators with Unicode or plain ASCII. Unset, the terminal decides: ASCII on the Linux console or without a UTF-8 locale."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."

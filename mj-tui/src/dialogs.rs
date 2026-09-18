@@ -73,6 +73,7 @@ pub(crate) enum DialogControl {
     WebCancelStop,
     ChangedFilesRefresh,
     ChangedFilesClose,
+    NoticeLogClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +100,14 @@ pub struct ImportProfileOption {
     pub sessions: Vec<ImportSessionOption>,
     pub scan_progress: Option<(usize, usize)>,
     pub error: Option<String>,
+}
+
+/// The notice log: the last notices the footer showed, newest first, so a
+/// burst of background failures that overwrote each other can still be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NoticeLogDialog {
+    pub(crate) scroll: usize,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
 /// The changed-files overlay for one session. The data lives on the
@@ -1099,6 +1108,50 @@ impl DashboardState {
                 DialogControl::Field,
             ),
         });
+    }
+
+    pub(crate) fn begin_notice_log(&mut self) {
+        self.mode = Mode::NoticeLog(NoticeLogDialog {
+            scroll: 0,
+            form: RefCell::new(Dialog::default()),
+        });
+    }
+
+    pub(crate) fn handle_notice_log_event(
+        &mut self,
+        event: Event,
+        mut dialog: NoticeLogDialog,
+    ) -> DashboardAction {
+        let last = self.notices.history().len().saturating_sub(1);
+        if let Event::Key(key) = &event
+            && key.kind != KeyEventKind::Release
+        {
+            let scrolled = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(dialog.scroll.saturating_add(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(dialog.scroll.saturating_sub(1)),
+                KeyCode::PageDown => Some(dialog.scroll.saturating_add(10)),
+                KeyCode::PageUp => Some(dialog.scroll.saturating_sub(10)),
+                KeyCode::Home => Some(0),
+                KeyCode::End => Some(last),
+                _ => None,
+            };
+            if let Some(scroll) = scrolled {
+                dialog.scroll = scroll.min(last);
+                self.record_event_handled();
+                self.mode = Mode::NoticeLog(dialog);
+                return DashboardAction::None;
+            }
+        }
+        let result = dialog.form.get_mut().handle(&event);
+        self.last_event_consumed.set(result.consumed);
+        match result.action {
+            Some(Interaction::Cancel)
+            | Some(Interaction::Activate(DialogControl::NoticeLogClose)) => {
+                self.cancel_modal();
+            }
+            _ => self.mode = Mode::NoticeLog(dialog),
+        }
+        DashboardAction::None
     }
 
     /// Opens the changed-files overlay for the selected session and asks the

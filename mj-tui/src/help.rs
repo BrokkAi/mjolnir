@@ -279,7 +279,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState, query: &str) -> Vec<Line<'s
                 theme::muted()
             };
             let keys = if keys.is_empty() {
-                "—".to_owned()
+                theme::glyphs().none.to_owned()
             } else {
                 keys
             };

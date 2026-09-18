@@ -1532,7 +1532,7 @@ fn add_summary_tool_rows(
         let line_index = synthetic_body_start.saturating_add(body_index);
         let line_text = row_text(line);
         let content = line_text
-            .strip_prefix(ROLE_GUTTER)
+            .strip_prefix(role_gutter())
             .unwrap_or(&line_text)
             .trim_end();
         let content = content.trim_start();

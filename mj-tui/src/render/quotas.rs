@@ -31,7 +31,7 @@ pub(crate) fn minimized_targets_line(
             if detail.refreshing {
                 return SummaryReading {
                     name: detail.target.host.clone(),
-                    value: "refreshing…".into(),
+                    value: format!("refreshing{}", theme::glyphs().ellipsis),
                     color: None,
                 };
             }
@@ -98,7 +98,7 @@ pub(crate) fn minimized_quota_line(
             if dashboard.quota_refreshing.contains(id) {
                 return Some(SummaryReading {
                     name: id.to_owned(),
-                    value: "refreshing…".into(),
+                    value: format!("refreshing{}", theme::glyphs().ellipsis),
                     color: None,
                 });
             }
@@ -162,7 +162,12 @@ pub(crate) fn summary_row(
         let text = format!("{separator}{} {}", reading.name, reading.value);
         let text_width = text.chars().count();
         if used + text_width > budget {
-            spans.push(Span::raw(if index == 0 { "… " } else { ", … " }));
+            let ellipsis = theme::glyphs().ellipsis;
+            spans.push(Span::raw(if index == 0 {
+                format!("{ellipsis} ")
+            } else {
+                format!(", {ellipsis} ")
+            }));
             return Line::from(spans);
         }
         used += text_width;
@@ -198,8 +203,14 @@ pub(crate) fn quota_remaining_percent(window: &QuotaWindow) -> Option<u8> {
 }
 
 pub(crate) const EMPTY_QUOTA_CELL: &str = " ";
-pub(crate) const QUOTA_CHART_LEFT_BORDER: &str = "▕";
-pub(crate) const QUOTA_CHART_RIGHT_BORDER: &str = "▏";
+
+/// The chart's rails, in the symbol set in force.
+fn quota_chart_left_border() -> &'static str {
+    theme::glyphs().bar_left
+}
+fn quota_chart_right_border() -> &'static str {
+    theme::glyphs().bar_right
+}
 // Both bar kinds occupy the same column, so they must agree on the cell count.
 pub(crate) const QUOTA_BAR_CELLS: usize = 10;
 
@@ -218,7 +229,12 @@ pub(crate) fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
     let eighths = (usize::from(remaining) * CELLS * EIGHTHS_PER_CELL + 50) / 100;
     let full_cells = eighths / EIGHTHS_PER_CELL;
     let partial_eighths = eighths % EIGHTHS_PER_CELL;
-    let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][partial_eighths];
+    // ASCII has no partial cell, so the fraction rounds to a whole cell.
+    let partial = if theme::ascii() {
+        if partial_eighths >= 4 { "#" } else { "" }
+    } else {
+        ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][partial_eighths]
+    };
     let empty_cells = CELLS
         .saturating_sub(full_cells)
         .saturating_sub(usize::from(partial_eighths > 0));
@@ -232,14 +248,14 @@ pub(crate) fn quota_bar(window: Option<&QuotaWindow>) -> Line<'static> {
         .bg(theme::palette().background)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
-        Span::styled("█".repeat(full_cells), bar_style),
+        Span::styled(theme::glyphs().bar_full.repeat(full_cells), bar_style),
         Span::styled(partial.to_string(), bar_style),
         Span::styled(
             EMPTY_QUOTA_CELL.repeat(empty_cells),
             Style::default().bg(theme::palette().background),
         ),
         // The percentage follows the chart rail without an extra separator.
-        Span::styled(QUOTA_CHART_RIGHT_BORDER, quota_chart_border_style()),
+        Span::styled(quota_chart_right_border(), quota_chart_border_style()),
         Span::styled(
             format!("{remaining}%"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -258,7 +274,7 @@ pub(crate) fn api_quota_bar() -> Line<'static> {
         Span::styled(EMPTY_QUOTA_CELL.repeat(left), field),
         Span::styled(label, field.add_modifier(Modifier::BOLD)),
         Span::styled(EMPTY_QUOTA_CELL.repeat(right), field),
-        Span::styled(QUOTA_CHART_RIGHT_BORDER, quota_chart_border_style()),
+        Span::styled(quota_chart_right_border(), quota_chart_border_style()),
     ])
 }
 
@@ -389,7 +405,7 @@ pub(crate) fn quota_chart(mut chart: Line<'static>, chart_present: bool) -> Line
     let mut spans = Vec::new();
     if chart_present {
         spans.push(Span::styled(
-            QUOTA_CHART_LEFT_BORDER,
+            quota_chart_left_border(),
             quota_chart_border_style(),
         ));
     }
@@ -431,7 +447,7 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                     )
                 } else if dashboard.quota_refreshing.contains(id) {
                     (
-                        Line::raw("refreshing…"),
+                        Line::raw(format!("refreshing{}", theme::glyphs().ellipsis)),
                         String::new(),
                         Line::default(),
                         String::new(),
@@ -464,7 +480,7 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                             false,
                         ),
                         None => (
-                            Line::raw("refreshing…"),
+                            Line::raw(format!("refreshing{}", theme::glyphs().ellipsis)),
                             String::new(),
                             Line::default(),
                             String::new(),
@@ -547,7 +563,7 @@ pub(crate) fn render_quotas(
         .as_secs();
     let rows = quota_table_rows(dashboard, now);
     let refresh_status = if !dashboard.quota_refreshing.is_empty() {
-        "refreshing…".to_string()
+        format!("refreshing{}", theme::glyphs().ellipsis)
     } else {
         dashboard
             .quotas

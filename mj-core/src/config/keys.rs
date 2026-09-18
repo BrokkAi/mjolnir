@@ -409,6 +409,7 @@ key_actions! {
     ManageTargets / manage_targets = "",
     ManageMachines / manage_machines = "",
     RestartDaemon / restart_daemon = "",
+    NoticeLog / notice_log = "",
     ChangeGoSetup / change_go_setup = "",
     CycleSpinner / cycle_spinner = "",
     ResizePaneLeft / resize_pane_left = "",

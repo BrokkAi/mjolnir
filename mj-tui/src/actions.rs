@@ -68,6 +68,7 @@ pub enum CommandId {
     SwitchWorkspace,
     WebViewer,
     RestartDaemon,
+    NoticeLog,
     QuitDetach,
     Palette,
     CycleSpinner,
@@ -983,6 +984,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::NoticeLog,
+        label: "Recent messages",
+        description: "Show the last notices the footer reported, newest first, including failures that replaced each other.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::NoticeLog),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::QuitDetach,
         label: "Detach from this terminal",
         description: "Leave this terminal client; the daemon and its sessions keep running.",
@@ -1419,6 +1432,10 @@ impl DashboardState {
             CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::RestartDaemon => DashboardAction::RestartDaemon,
+            CommandId::NoticeLog => {
+                self.begin_notice_log();
+                DashboardAction::None
+            }
             CommandId::QuitDetach => DashboardAction::QuitDetach,
             // Help toggles: the same key that opens the reference closes it
             // again, which is what the overlay's own Esc/F1/? arm does when

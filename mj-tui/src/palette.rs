@@ -454,7 +454,13 @@ pub(crate) fn render_palette(
     let mut form = palette.form.borrow_mut();
     form.begin_frame();
     form.set_bounds(popup);
-    let title = dismissible_modal_title(&mut form, popup, "✦ Commands", theme::title(true), true);
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        format!("{} Commands", theme::glyphs().spark),
+        theme::title(true),
+        true,
+    );
     let outer = theme::modal()
         .title(title)
         .title(
@@ -476,7 +482,7 @@ pub(crate) fn render_palette(
     if palette.query.is_empty() {
         frame.render_widget(
             Line::styled(
-                "Search commands…",
+                format!("Search commands{}", theme::glyphs().ellipsis),
                 theme::muted().add_modifier(Modifier::ITALIC),
             ),
             rows[0],
@@ -511,7 +517,10 @@ pub(crate) fn render_palette(
                 let rule_width = width.saturating_sub(heading.chars().count() + 4);
                 Line::from(vec![
                     Span::styled(format!("  {heading}  "), theme::title(true)),
-                    Span::styled("─".repeat(rule_width), theme::border(false)),
+                    Span::styled(
+                        theme::glyphs().rule.repeat(rule_width),
+                        theme::border(false),
+                    ),
                 ])
             }
             PaletteLine::Command(index) => {
@@ -547,7 +556,14 @@ pub(crate) fn render_palette(
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
                 Line::from(vec![
-                    Span::styled(if selected { "› " } else { "  " }, theme::title(true)),
+                    Span::styled(
+                        if selected {
+                            theme::glyphs().selected
+                        } else {
+                            "  "
+                        },
+                        theme::title(true),
+                    ),
                     Span::styled(text, style),
                     Span::raw(" ".repeat(padding)),
                     Span::styled(

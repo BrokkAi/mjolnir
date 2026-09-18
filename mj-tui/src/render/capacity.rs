@@ -54,7 +54,7 @@ pub(crate) fn capacity_table_rows(
         .values()
         .map(|detail| {
             let capacity = if detail.refreshing {
-                "refreshing…".into()
+                format!("refreshing{}", theme::glyphs().ellipsis)
             } else {
                 match (&detail.target.kind, &detail.usage) {
                     (DeploymentCapacityKind::Host, Some(usage)) => {
@@ -176,7 +176,11 @@ pub(crate) fn render_capacity(
     } else {
         Style::default()
     })
-    .highlight_symbol(if focused { "› " } else { "  " })
+    .highlight_symbol(if focused {
+        theme::glyphs().selected
+    } else {
+        "  "
+    })
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
     let mut offset = dashboard.targets_scroll.get();

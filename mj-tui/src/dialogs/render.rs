@@ -391,6 +391,88 @@ fn render_text_prompt(
     form.end_frame(DialogControl::Field);
 }
 
+/// The notice log: one row per remembered notice, newest first, with how
+/// long ago it was reported.
+pub(crate) fn render_notice_log(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    dialog: &NoticeLogDialog,
+    surfaces: &mut FrameSurfaces,
+) {
+    let history = dashboard.notices.history();
+    let popup_height = u16::try_from(history.len().saturating_add(5).clamp(8, 30)).unwrap_or(30);
+    let popup = centered_modal(frame, surfaces, 80, popup_height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 2 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Recent messages",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    if history.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Nothing has been reported yet.").style(theme::muted()),
+            list_area,
+        );
+    } else {
+        let now = std::time::Instant::now();
+        let age_width = 8;
+        let text_width = usize::from(list_area.width).saturating_sub(age_width + 1);
+        let rows = history
+            .iter()
+            .skip(dialog.scroll)
+            .take(usize::from(list_area.height))
+            .map(|record| {
+                let age = mj_client::usage_format::format_clock(
+                    now.saturating_duration_since(record.at).as_secs(),
+                );
+                let style = if record.failure {
+                    Style::default().fg(theme::palette().warning)
+                } else {
+                    Style::default().fg(theme::palette().text)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>age_width$} ", format!("{age} ago")),
+                        theme::muted(),
+                    ),
+                    Span::styled(
+                        truncate_to_cells(&record.text, text_width, Truncate::PLAIN),
+                        style,
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(rows), list_area);
+    }
+    Dialog::render_actions(
+        frame,
+        footer,
+        &[(DialogControl::NoticeLogClose, "Close", true)],
+        &mut form,
+    );
+    form.end_frame(DialogControl::NoticeLogClose);
+}
+
 /// The changed-files overlay: the branch line, the totals, then one row per
 /// file with its kind and line counts.
 pub(crate) fn render_changed_files(
@@ -441,7 +523,10 @@ pub(crate) fn render_changed_files(
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     let header_line = match status {
-        None => Line::styled("Reading the checkout…", theme::muted()),
+        None => Line::styled(
+            format!("Reading the checkout{}", theme::glyphs().ellipsis),
+            theme::muted(),
+        ),
         Some(Err(error)) => Line::styled(
             format!("Could not read the checkout: {error}"),
             Style::default().fg(theme::palette().warning),
@@ -618,7 +703,7 @@ pub(crate) fn render_target_actions(
                     mj_chat::spinner::elapsed_ms(),
                 ),
                 Span::styled(
-                    format!(" Testing {target_id}…"),
+                    format!(" Testing {target_id}{}", theme::glyphs().ellipsis),
                     Style::default().fg(theme::palette().accent),
                 ),
                 Span::styled(
@@ -735,7 +820,7 @@ pub(crate) fn render_web_dialog(
         lines.push(Line::raw("Other viewers and dashboards using that server will be disconnected. Mjolnir will request a graceful stop, then retry this port."));
     } else if dialog.loading {
         lines.push(Line::styled(
-            "Starting web viewer…",
+            format!("Starting web viewer{}", theme::glyphs().ellipsis),
             Style::default().fg(theme::palette().warning),
         ));
     } else if let Some(message) = &dialog.message {
@@ -758,7 +843,7 @@ pub(crate) fn render_web_dialog(
         }
         if dialog.inspecting {
             lines.push(Line::styled(
-                "Inspecting listener…",
+                format!("Inspecting listener{}", theme::glyphs().ellipsis),
                 Style::default().fg(theme::palette().accent),
             ));
         }

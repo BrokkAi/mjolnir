@@ -155,6 +155,7 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::ManageTargets => CommandId::ManageTargets,
         KeyAction::ManageMachines => CommandId::ManageMachines,
         KeyAction::RestartDaemon => CommandId::RestartDaemon,
+        KeyAction::NoticeLog => CommandId::NoticeLog,
         KeyAction::ChangeGoSetup => CommandId::ChangeGoSetup,
         KeyAction::CycleSpinner => CommandId::CycleSpinner,
     }

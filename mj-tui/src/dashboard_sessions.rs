@@ -694,7 +694,7 @@ impl DashboardState {
         self.git_status
             .get(session_id)
             .and_then(|status| status.as_ref().ok())
-            .map(mj_core::local_git::SessionGitStatus::row_text)
+            .map(|status| status.row_text_with(mj_chat::theme::ascii()))
             .filter(|text| !text.is_empty())
     }
 

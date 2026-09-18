@@ -1054,7 +1054,7 @@ pub(crate) fn render_workspace_manager(
         ])
         .split(inner);
     let message = if dialog.loading {
-        "Loading workspaces…".to_owned()
+        format!("Loading workspaces{}", theme::glyphs().ellipsis)
     } else if let Some(error) = &dialog.error {
         error.clone()
     } else if let Some(success) = &dialog.success {

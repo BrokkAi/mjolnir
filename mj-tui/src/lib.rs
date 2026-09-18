@@ -32,8 +32,8 @@ use mj_core::targets::AdditionalMount;
 
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
-    ImportBundleConfirmation, ImportProgress, RenameEditor, RepositoryOriginDialog,
-    TargetActionsDialog, WebDialog,
+    ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -644,6 +644,8 @@ pub(crate) enum Mode {
     Rename(RenameEditor),
     /// The selected session's changed files, branch, and upstream distance.
     ChangedFiles(ChangedFilesDialog),
+    /// The last notices the footer showed, newest first.
+    NoticeLog(NoticeLogDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),

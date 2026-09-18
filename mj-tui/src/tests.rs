@@ -3517,3 +3517,125 @@ fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
         crate::actions::Availability::Blocked(_)
     ));
 }
+
+#[test]
+fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.set_git_status("asks".into(), Ok(git_status_fixture()));
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    dashboard.set_config(config);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let offenders = lines
+        .iter()
+        .flat_map(|line| line.chars())
+        .filter(|character| !character.is_ascii())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        offenders.is_empty(),
+        "non-ASCII glyphs drawn: {offenders:?}\n{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("+---")),
+        "ASCII borders: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ACP pretty name  br feature/x")),
+        "{lines:#?}"
+    );
+    let wide = drawn(&mut dashboard, 160, 40);
+    assert!(
+        wide.iter()
+            .any(|line| line.contains("br feature/x +1 -2 ~2")),
+        "{wide:#?}"
+    );
+    // The chord hints are joined by the ASCII separator.
+    assert!(
+        wide.last().unwrap().contains("c create - g resume"),
+        "ASCII footer separators: {}",
+        wide.last().unwrap()
+    );
+
+    // The default set is unchanged.
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_config(config);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(lines.iter().any(|line| line.contains("╭")), "{lines:#?}");
+}
+
+#[test]
+fn the_monochrome_theme_draws_every_surface_without_colors() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let mut config = dashboard.config.clone();
+    config.theme = mj_core::config::UiTheme::Mono;
+    dashboard.set_config(config);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let colored = buffer
+        .content()
+        .iter()
+        .filter(|cell| {
+            cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
+        })
+        .count();
+    assert_eq!(colored, 0, "monochrome must paint no colors");
+    // The selected row still stands out, by reverse video.
+    let lines = buffer_lines(buffer);
+    let (column, row) = point(&lines, "› ");
+    assert!(
+        buffer[(column, row)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "selection is reverse video in mono"
+    );
+    open_palette(&mut dashboard);
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Esc));
+    chord(&mut dashboard, CommandId::Help);
+    drawn(&mut dashboard, 120, 40);
+}
+
+#[test]
+fn the_notice_log_lists_notices_newest_first_and_stacked_failures() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    dashboard.set_notice("Profile quotas refreshed.");
+    dashboard.set_failure_notice("Resume failed: archive missing");
+    dashboard.set_failure_notice("Move failed: target unreachable");
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .contains("2 failures · latest: Move failed: target unreachable"),
+        "{}",
+        lines.last().unwrap()
+    );
+    dashboard.dispatch_command(CommandId::NoticeLog);
+    assert!(matches!(dashboard.mode, Mode::NoticeLog(_)));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let newest = lines
+        .iter()
+        .position(|line| line.contains("Move failed: target unreachable"))
+        .expect("newest failure");
+    let older = lines
+        .iter()
+        .position(|line| line.contains("Resume failed: archive missing"))
+        .expect("older failure");
+    let oldest = lines
+        .iter()
+        .position(|line| line.contains("Profile quotas refreshed."))
+        .expect("plain notice");
+    assert!(newest < older && older < oldest, "{lines:#?}");
+    assert!(lines[newest].contains("ago"), "{lines:#?}");
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(dashboard.mode, Mode::Dashboard);
+}

@@ -42,9 +42,15 @@ while you type and while a notice replaces the footer. Each session row has a
 including global shortcuts in the composer's footer. Help supports wheel
 scrolling and a **Close** button.
 
-Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula, or High
-Contrast. Saving applies the palette to the dashboard, conversation, and dialogs
-and preserves it for future launches. Setup groups the theme, spinner, and
+Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula, High
+Contrast, or Monochrome. Saving applies the palette to the dashboard, conversation, and dialogs
+and preserves it for future launches. Monochrome paints no colors at all and
+carries focus and selection with bold and reverse video; setting the
+`NO_COLOR` environment variable selects it whatever the configuration says.
+**Setup → Advanced → Symbols** switches every status mark, border, chart bar,
+and footer separator to plain ASCII for a terminal that cannot show Unicode;
+left unset, the dashboard does this by itself on the Linux console or
+without a UTF-8 locale. Setup groups the theme, spinner, and
 Sessions sidebar position under **Interface**. It also edits Advanced display
 options and integrated review settings; see [Configuration](/configuration/).
 
@@ -370,5 +376,7 @@ Inside help, press `/` to filter the rows. Typing narrows them to the rows whose
 If you run Mjolnir inside tmux or GNU screen with its default `ctrl+b` prefix, the multiplexer sees `ctrl+b` first and Mjolnir's prefix never arms. Press `ctrl+b` twice to send it through, as you would for tmux's own prefix, or set `prefix` to a different key in `[keys]`. The dashboard notices this on its first launch inside a multiplexer and says so once in the footer.
 
 Inside help, `Esc` clears the filter text if there is any and otherwise closes help. On a pane, `Esc` clears the footer notice.
+
+The footer holds one notice at a time. When a second failure arrives before the first has been readable for a few seconds, the bar reads `2 failures · latest: …` so nothing is silently lost, and **Recent messages** in the command palette lists the last thirty notices, newest first, with failures in the warning color.
 
 For session states and recovery behavior, continue to [sessions](/sessions/). The [CLI reference](/cli-reference/) covers non-interactive commands, while [troubleshooting](/troubleshooting/) covers key handling, target failures, and viewer connectivity.

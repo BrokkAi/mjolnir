@@ -29,21 +29,32 @@ impl SessionGitStatus {
     /// The compact form a session row carries beside its target:
     /// `⎇ main ↑1 ↓2 ±4`. Empty when the checkout is not a repository.
     pub fn row_text(&self) -> String {
+        self.row_text_with(false)
+    }
+
+    /// [`Self::row_text`] with plain ASCII markers when `ascii` is set:
+    /// `br main +1 -2 ~4`.
+    pub fn row_text_with(&self, ascii: bool) -> String {
         if self.branch.is_empty()
             || self.branch.starts_with("not a git")
             || self.branch.starts_with("unavailable")
         {
             return String::new();
         }
-        let mut text = format!("⎇ {}", self.branch);
-        if let Some(ahead) = self.ahead.filter(|ahead| *ahead > 0) {
-            text.push_str(&format!(" ↑{ahead}"));
+        let (branch, ahead, behind, changed) = if ascii {
+            ("br", "+", "-", "~")
+        } else {
+            ("⎇", "↑", "↓", "±")
+        };
+        let mut text = format!("{branch} {}", self.branch);
+        if let Some(count) = self.ahead.filter(|ahead| *ahead > 0) {
+            text.push_str(&format!(" {ahead}{count}"));
         }
-        if let Some(behind) = self.behind.filter(|behind| *behind > 0) {
-            text.push_str(&format!(" ↓{behind}"));
+        if let Some(count) = self.behind.filter(|behind| *behind > 0) {
+            text.push_str(&format!(" {behind}{count}"));
         }
         if !self.changed.is_empty() {
-            text.push_str(&format!(" ±{}", self.changed.len()));
+            text.push_str(&format!(" {changed}{}", self.changed.len()));
         }
         text
     }

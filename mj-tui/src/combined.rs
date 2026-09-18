@@ -323,8 +323,14 @@ pub fn render_combined(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    theme::with_theme(dashboard.config.theme, || {
-        render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected)
+    // NO_COLOR wins over the configured theme; the symbol set follows the
+    // configuration or, unset, the terminal.
+    let theme = theme::effective_theme(dashboard.config.theme);
+    let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
+    theme::with_theme(theme, || {
+        theme::with_symbols(symbols, || {
+            render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected)
+        })
     })
 }
 
@@ -1050,13 +1056,21 @@ fn render_empty_transcript(
             4,
         );
         let invitation = match reason {
-            EmptyConversation::NoLiveSession => "A little spark. Something extraordinary.",
-            EmptyConversation::NoConversationOpen => "Your next idea starts here.",
-            EmptyConversation::Opening => "Bringing your conversation into focus…",
+            EmptyConversation::NoLiveSession => {
+                "A little spark. Something extraordinary.".to_owned()
+            }
+            EmptyConversation::NoConversationOpen => "Your next idea starts here.".to_owned(),
+            EmptyConversation::Opening => format!(
+                "Bringing your conversation into focus{}",
+                theme::glyphs().ellipsis
+            ),
         };
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled("✦  M J O L N I R", theme::title(true)),
+                Line::styled(
+                    format!("{}  M J O L N I R", theme::glyphs().spark),
+                    theme::title(true),
+                ),
                 Line::default(),
                 Line::styled(invitation, theme::muted()),
             ])
@@ -1103,7 +1117,7 @@ fn render_empty_prompt_advice(
         EmptyConversation::Opening => (
             " Opening session ",
             [
-                "Opening session…".to_owned(),
+                format!("Opening session{}", theme::glyphs().ellipsis),
                 match dashboard.first_key_label(crate::CommandId::QuitDetach) {
                     Some(detach) => {
                         format!("Esc cancels · select another session to switch · {detach} quits")
@@ -1178,7 +1192,10 @@ fn render_launch_standby_surface(
             .right_aligned(),
         );
     let details = vec![
-        Line::raw("Current stage: Preparing session launch…"),
+        Line::raw(format!(
+            "Current stage: Preparing session launch{}",
+            theme::glyphs().ellipsis
+        )),
         Line::default(),
         Line::styled(
             "Type the first message now; it is sent when the session is live.",

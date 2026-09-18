@@ -68,7 +68,7 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, or `high-contrast`. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
@@ -111,6 +111,7 @@ activity without changing how sessions run:
 detailed_activity_clocks = false
 show_stopped_sessions = false
 session_order = "project"
+# symbols = "ascii"
 ```
 
 | Field | TOML type | Default | Behavior |
@@ -118,6 +119,7 @@ session_order = "project"
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
 | `show_stopped_sessions` | boolean | `false` | When enabled, stopped sessions appear in the terminal Sessions pane for their workspace. |
 | `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
+| `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
 
 The terminal Setup screen edits these settings under **Advanced**. Detailed
 clocks do not change how sessions run: the normal `Running` status continues
@@ -203,6 +205,7 @@ The default bindings:
 | `manage_targets` | unbound | Open target management |
 | `manage_machines` | unbound | Open machine management |
 | `restart_daemon` | unbound | Restart the Mjolnir daemon |
+| `notice_log` | unbound | Show the last notices the footer reported |
 | `change_go_setup` | unbound | Change the `mj go` fast-start setup |
 | `cycle_spinner` | unbound | Cycle the activity spinner style |
 | `resize_pane_left` | unbound | Move the conversation pane's border left |

@@ -77,11 +77,13 @@ pub fn truncate_to_cells(text: &str, width: usize, options: Truncate) -> String 
     if width == 0 {
         return String::new();
     }
-    if width == 1 {
-        return "…".to_owned();
+    let ellipsis = crate::theme::glyphs().ellipsis;
+    let ellipsis_width = ellipsis.width().max(1);
+    if width <= ellipsis_width {
+        return ellipsis.chars().take(width).collect();
     }
-    // One cell is reserved for the ellipsis itself.
-    let budget = width - 1;
+    // The ellipsis's own cells are reserved.
+    let budget = width - ellipsis_width;
     let mut kept = String::new();
     let mut used = 0usize;
     for character in text.chars() {
@@ -95,7 +97,7 @@ pub fn truncate_to_cells(text: &str, width: usize, options: Truncate) -> String 
     if options.trim_punctuation {
         kept.truncate(kept.trim_end_matches(trim_before_ellipsis).len());
     }
-    kept.push('…');
+    kept.push_str(ellipsis);
     kept
 }
 
