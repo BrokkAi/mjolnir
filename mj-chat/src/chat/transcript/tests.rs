@@ -475,7 +475,7 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false);
+            render_transcript(frame, frame.area(), &mut chat, false, 0);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -493,6 +493,34 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     }
 }
 
+/// A host that draws its own chips at the right of the title row tells the
+/// chat how many columns to stay clear of, and the title stops short of them.
+#[test]
+fn a_long_title_stops_short_of_the_columns_the_host_reserved() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("podman", "profile", "t".repeat(200));
+    let reserve = 4;
+    let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_transcript(frame, frame.area(), &mut chat, false, reserve);
+        })
+        .expect("render conversation");
+    let buffer = terminal.backend().buffer();
+    let header = (0..60).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+    let title_end = header
+        .char_indices()
+        .rfind(|(_, glyph)| *glyph == 't')
+        .map(|(index, _)| header[..index].chars().count() as u16 + 1)
+        .expect("the title is drawn");
+    assert!(
+        title_end <= 60 - 1 - reserve,
+        "the title has to stop short of the reserved chip columns: {header:?}"
+    );
+}
+
 #[test]
 fn long_conversation_titles_use_the_header_width_while_working() {
     use ratatui::{Terminal, backend::TestBackend};
@@ -505,7 +533,7 @@ fn long_conversation_titles_use_the_header_width_while_working() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_transcript(frame, area, &mut chat, false);
+                render_transcript(frame, area, &mut chat, false, 0);
             })
             .expect("render conversation");
         let buffer = terminal.backend().buffer();

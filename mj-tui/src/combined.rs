@@ -827,6 +827,9 @@ fn render_combined_themed(
         .collect::<Vec<_>>()
     {
         if !pane_focused {
+            // Every pane but the last carries a close chip, and an unfocused
+            // pane only exists while there are several.
+            let close_chip = true;
             // An unfocused pane answers only for the session it holds: the
             // Sessions selection and the launch standby belong to the pane
             // with the keyboard.
@@ -867,6 +870,7 @@ fn render_combined_themed(
                             prompt: prompt_area,
                             footer: None,
                             overlay: pane_rect,
+                            title_controls: title_controls(close_chip),
                         },
                         false,
                         false,
@@ -883,12 +887,29 @@ fn render_combined_themed(
                         transcript_area,
                         reason,
                         dashboard.config.spinner,
+                        title_controls(close_chip),
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
                 }
             }
+            if close_chip {
+                crate::surface_controls::render_pane_close_control(
+                    frame,
+                    dashboard,
+                    transcript_area,
+                    pane_id,
+                );
+            }
             continue;
         }
+        // The lone pane offers a close only while it holds a conversation:
+        // closing it empties it, which is nothing to ask for when it is
+        // already empty. A chat modal owns the frame, so the chip stands down.
+        let close_chip = (pane_bands.len() > 1 || dashboard.pane_session(pane_id).is_some())
+            && !focused_chat_session
+                .as_deref()
+                .and_then(|session_id| chats.get(session_id))
+                .is_some_and(|chat| chat.component_modal_open());
         chat_drew_footer = if launch_standby_drawn {
             render_launch_standby_surface(frame, transcript_area, prompt_area, dashboard);
             false
@@ -936,6 +957,7 @@ fn render_combined_themed(
                                 banner: banner.as_ref(),
                             }),
                             overlay: area,
+                            title_controls: title_controls(close_chip),
                         },
                         prompt_focused,
                         transcript_selected,
@@ -977,6 +999,7 @@ fn render_combined_themed(
                         transcript_area,
                         reason,
                         dashboard.config.spinner,
+                        title_controls(close_chip),
                     );
                     if opening {
                         // The real composer parks in the prompt band while the
@@ -998,6 +1021,14 @@ fn render_combined_themed(
                 }
             }
         };
+        if close_chip {
+            crate::surface_controls::render_pane_close_control(
+                frame,
+                dashboard,
+                transcript_area,
+                pane_id,
+            );
+        }
     }
 
     if !chat_drew_footer {
@@ -1006,6 +1037,15 @@ fn render_combined_themed(
     dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
     drawn_sessions
+}
+
+/// The columns a pane's title has to leave clear for the close chip.
+fn title_controls(close_chip: bool) -> u16 {
+    if close_chip {
+        crate::surface_controls::PANE_CLOSE_CONTROL_RESERVE
+    } else {
+        0
+    }
 }
 
 /// How one pane's leaf divides into a transcript and a composer. The composer
@@ -1075,6 +1115,7 @@ fn render_empty_transcript(
     transcript_area: Rect,
     reason: EmptyConversation,
     spinner_style: spinner::SpinnerStyle,
+    title_controls: u16,
 ) {
     let mut panel = theme::panel(false).title(" Conversation ");
     if matches!(reason, EmptyConversation::Opening) {
@@ -1083,6 +1124,8 @@ fn render_empty_transcript(
                 Span::raw(" "),
                 spinner::compact_span(spinner_style, spinner::elapsed_ms()),
                 Span::raw(" "),
+                // Clear of whatever the host draws at the right of the row.
+                Span::raw(" ".repeat(usize::from(title_controls))),
             ])
             .right_aligned(),
         );

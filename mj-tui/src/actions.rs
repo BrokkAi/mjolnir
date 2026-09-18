@@ -1235,7 +1235,9 @@ impl DashboardState {
             CommandId::OpenSessionSplitBelow => {
                 self.split_command(ratatui::layout::Direction::Vertical)
             }
-            CommandId::ClosePane => DashboardAction::ClosePane,
+            CommandId::ClosePane => DashboardAction::ClosePane {
+                pane: self.focused_pane(),
+            },
             CommandId::FocusPaneLeft => self.focus_pane_command(NavDirection::Left),
             CommandId::FocusPaneDown => self.focus_pane_command(NavDirection::Down),
             CommandId::FocusPaneUp => self.focus_pane_command(NavDirection::Up),

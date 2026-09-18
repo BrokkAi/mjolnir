@@ -996,14 +996,13 @@ impl DashboardContext {
         self.dashboard.focus_prompt();
     }
 
-    /// Closes the focused pane, saving and dropping the conversation it held.
-    /// The last pane is emptied rather than removed.
-    pub(crate) fn close_focused_pane(&mut self) {
-        let pane = self.dashboard.focused_pane();
+    /// Closes `pane`, saving and dropping the conversation it held. The last
+    /// pane is emptied rather than removed.
+    pub(crate) fn close_pane(&mut self, pane: PaneId) {
         self.opening_chat_sessions.remove(&pane);
         self.previous_pane_sessions.remove(&pane);
         self.attachments.remove(&pane);
-        if let Some(session_id) = self.dashboard.close_focused_pane() {
+        if let Some(session_id) = self.dashboard.close_pane(pane) {
             self.record_chat_detach(&session_id);
             self.chats.remove(&session_id);
             self.selection.clear();

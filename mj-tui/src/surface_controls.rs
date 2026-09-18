@@ -9,6 +9,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::actions::{Availability, CommandId, spec};
+use crate::tile_layout::PaneId;
 use crate::{DashboardAction, DashboardState, Focus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub(crate) enum SurfaceControl {
     Command(CommandId),
     Footer(CommandId),
     Session(usize),
+    /// The close chip on one conversation pane's title row.
+    ClosePane(PaneId),
     WorkspaceMenu,
 }
 
@@ -144,6 +147,7 @@ impl DashboardState {
                     }
                     DashboardAction::None
                 }
+                SurfaceControl::ClosePane(pane) => DashboardAction::ClosePane { pane },
                 SurfaceControl::WorkspaceMenu => {
                     self.focus = Focus::Workspaces;
                     self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
@@ -230,6 +234,39 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
             area,
         );
     }
+}
+
+/// The width a pane title has to leave clear for [`render_pane_close_control`].
+pub(crate) const PANE_CLOSE_CONTROL_RESERVE: u16 = 4;
+
+/// Draws the three-cell close chip on one conversation pane's title row, in
+/// the same right-edge column the support panes put their size controls in.
+pub(crate) fn render_pane_close_control(
+    frame: &mut Frame,
+    dashboard: &DashboardState,
+    transcript: Rect,
+    pane: PaneId,
+) {
+    if transcript.width < PANE_CLOSE_CONTROL_RESERVE + 2 || transcript.height == 0 {
+        return;
+    }
+    let area = Rect::new(
+        transcript
+            .right()
+            .saturating_sub(PANE_CLOSE_CONTROL_RESERVE),
+        transcript.y,
+        3,
+        1,
+    );
+    let control = SurfaceControl::ClosePane(pane);
+    let mut form = dashboard.surface_form.borrow_mut();
+    form.register(control, ControlKind::Button, area, true);
+    let style = if form.is_armed(control) {
+        theme::selection(true)
+    } else {
+        theme::muted()
+    };
+    frame.render_widget(Paragraph::new(theme::glyphs().close).style(style), area);
 }
 
 pub(crate) fn render_onboarding_actions(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {

@@ -186,8 +186,10 @@ pub enum DashboardAction {
     SplitPane {
         direction: ratatui::layout::Direction,
     },
-    /// Remove the focused conversation pane, saving what it held.
-    ClosePane,
+    /// Remove one conversation pane, saving what it held.
+    ClosePane {
+        pane: tile_layout::PaneId,
+    },
     /// The conversation panes were focused or resized. The controller saves
     /// the arrangement, and a focus move also re-reads which conversation the
     /// keyboard is now in.

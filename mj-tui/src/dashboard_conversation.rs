@@ -104,18 +104,19 @@ impl DashboardState {
         DashboardAction::SplitPane { direction }
     }
 
-    /// Remove the focused pane and report the session it showed. The last
-    /// pane is emptied rather than removed: the conversation area always has
-    /// somewhere to open the next session.
-    pub fn close_focused_pane(&mut self) -> Option<String> {
-        let focused = self.conversation_layout.focused();
-        let session_id = self.pane_sessions.remove(&focused);
+    /// Remove `pane` and report the session it showed. The last pane is
+    /// emptied rather than removed: the conversation area always has
+    /// somewhere to open the next session. Closing a pane that does not hold
+    /// the keyboard leaves the focus and its history alone.
+    pub fn close_pane(&mut self, pane: PaneId) -> Option<String> {
+        let session_id = self.pane_sessions.remove(&pane);
         if self.conversation_layout.pane_count() > 1 {
-            self.conversation_layout.close_focused();
+            self.conversation_layout.close_pane(pane);
         }
-        // The Sessions highlight follows the keyboard, and the keyboard is now
-        // in the surviving pane. Leaving it on the closed pane's session would
-        // pull that conversation into the pane that took the focus.
+        // The Sessions highlight follows the keyboard. After closing the
+        // focused pane the keyboard is in a surviving pane, and leaving the
+        // highlight on the closed pane's session would pull that conversation
+        // into the pane that took the focus.
         if let Some(surviving) = self
             .pane_sessions
             .get(&self.conversation_layout.focused())

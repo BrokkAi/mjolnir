@@ -15,8 +15,8 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 ## Progress
 
 
-- [ ] M0: this ExecPlan written and committed.
-- [ ] M1: close a pane by id; a `×` chip on every conversation pane's title row.
+- [x] M0: this ExecPlan written and committed (2026-09-18, ac500d28).
+- [x] M1: close a pane by id; a `×` chip on every conversation pane's title row. Done 2026-09-18T10:48-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [ ] M2: split-open notices for a session that is already open.
 - [ ] M3: wheel routes to the pane under the pointer; focused transcript border.
 - [ ] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`).
@@ -27,7 +27,22 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 ## Surprises & Discoveries
 
 
-(none yet)
+`DashboardState::close_focused_pane` was removed rather than kept as a thin
+wrapper over `close_pane`. Only three unit tests called it; `mj-cli` went
+straight to `close_pane(pane)`, so a wrapper would have carried its own
+explaining to do for no saved churn.
+
+A chat that splits its transcript, for a second opinion or a turn review,
+divides the whole transcript rectangle in half and draws the reviewer on the
+right. The close chip sits at the outer right edge, so on a split it lands on
+the reviewer half's title row and the reserved columns are taken out of the
+primary title instead. It costs three cells of a title that is usually short;
+M1 leaves it alone rather than teaching `mj-chat` about host chips per half.
+
+`cargo build --workspace` fails in this checkout because `mj-desktop` needs
+GTK development packages that are not installed. The workspace's
+`default-members` exclude `mj-desktop`, so the three validation commands in
+this plan are unaffected: they build and test the default members only.
 
 ## Decision Log
 

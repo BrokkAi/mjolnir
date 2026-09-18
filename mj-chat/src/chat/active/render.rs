@@ -36,6 +36,7 @@ pub(crate) fn render_full_frame(
             prompt: chunks[1],
             footer: Some(test_footer(chunks[2])),
             overlay: inner,
+            title_controls: 0,
         },
         true,
         transcript_selected,
@@ -113,7 +114,13 @@ pub(crate) fn render_in(
         chat.voice_form
             .end_frame(crate::chat::VoiceControl::Microphone);
 
-        render_transcript(frame, upper_transcript, chat, transcript_selected);
+        render_transcript(
+            frame,
+            upper_transcript,
+            chat,
+            transcript_selected,
+            regions.title_controls,
+        );
         if question_height > 0
             && let Some(dialog) = chat.elicitation.as_ref()
         {
@@ -161,7 +168,13 @@ pub(crate) fn render_in(
     } else {
         (transcript_area, None)
     };
-    render_transcript(frame, primary_area, chat, transcript_selected);
+    render_transcript(
+        frame,
+        primary_area,
+        chat,
+        transcript_selected,
+        regions.title_controls,
+    );
     chat.reviewer_area = None;
     if let Some(area) = reviewer_area {
         if chat.turn_review_split() {

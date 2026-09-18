@@ -2499,7 +2499,7 @@ fn closing_the_last_pane_empties_it_instead_of_refusing() {
     dashboard.set_current_session(Some("session-1"));
     let only = dashboard.focused_pane();
 
-    let closed = dashboard.close_focused_pane();
+    let closed = dashboard.close_pane(only);
 
     assert_eq!(closed.as_deref(), Some("session-1"));
     assert_eq!(dashboard.focused_pane(), only);
@@ -2679,11 +2679,11 @@ fn closing_a_pane_moves_the_highlight_onto_the_surviving_pane() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
-    dashboard
+    let second = dashboard
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
         .expect("the test conversation area has room for two panes");
 
-    let closed = dashboard.close_focused_pane();
+    let closed = dashboard.close_pane(second);
 
     assert_eq!(closed.as_deref(), Some("session-2"));
     assert_eq!(dashboard.focused_pane(), first);
@@ -2741,11 +2741,73 @@ fn the_pane_keys_split_beside_the_conversation_and_close_the_pane() {
 
     assert_eq!(
         chord(&mut dashboard, CommandId::ClosePane),
-        DashboardAction::ClosePane
+        DashboardAction::ClosePane { pane: second }
     );
-    assert_eq!(dashboard.close_focused_pane().as_deref(), Some("session-2"));
+    assert_eq!(dashboard.close_pane(second).as_deref(), Some("session-2"));
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
     assert_eq!(dashboard.focused_pane(), first);
+}
+
+/// Every conversation pane carries a close chip on its title row, and the
+/// chip names its own pane: clicking the unfocused pane's chip asks to close
+/// that pane and leaves the keyboard, and the Sessions highlight with it,
+/// where they were.
+#[test]
+fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    dashboard.focus_prompt();
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let chip = |dashboard: &DashboardState, pane| {
+        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+        (transcript.right() - 3, transcript.y)
+    };
+    for pane in [first, second] {
+        let (column, row) = chip(&dashboard, pane);
+        assert_eq!(
+            lines[row as usize].chars().nth(column as usize),
+            Some('×'),
+            "every pane draws a close chip on its title row: {lines:#?}"
+        );
+    }
+
+    let target = chip(&dashboard, first);
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), target)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), target)),
+        DashboardAction::ClosePane { pane: first }
+    );
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+}
+
+/// Closing a pane that does not hold the keyboard removes it and reports what
+/// it showed, leaving the focus and the highlight alone.
+#[test]
+fn closing_an_unfocused_pane_leaves_the_keyboard_where_it_was() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+
+    let closed = dashboard.close_pane(first);
+
+    assert_eq!(closed.as_deref(), Some("session-1"));
+    assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(dashboard.focused_pane(), second);
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
 /// `prefix+minus` stacks instead of sitting beside, and the focus keys move
