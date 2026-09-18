@@ -22,11 +22,14 @@ You can see it working: build `mj`, start the TUI, rebuild `mj`, run `mj daemon 
 - [x] (2026-09-17 23:55Z) Proved the key assumption behind the recommended fix: a client that predates any fix already blocks on `daemon-start.lock`, so holding that lock across stop-and-start wins deterministically without changing old clients.
 - [x] (2026-09-17 23:52Z) Established what the daemon pins at startup for the worker binary and confirmed the pinned copy is the SHA-256 of the worker file as it stood when the daemon started.
 - [x] (2026-09-18 00:20Z) Wrote this plan. No product code changed.
-- [ ] Maintainer decides the open questions in `Decisions For The Maintainer`.
-- [ ] Milestone 1: restart holds the startup lock across stop and start, and verifies the resulting daemon's executable identity.
-- [ ] Milestone 2: build identity and pinned worker identity become visible in `mj daemon status` and `mj doctor`.
-- [ ] Milestone 3: the attachment keep-alive stops creating daemons.
-- [ ] Milestone 4 (only if the maintainer wants it): a sidecar intent file that records which build asked for the current daemon.
+- [x] (2026-09-18 00:40Z) Maintainer approved the plan and answered every open question; the answers are in the Decision Log.
+- [x] (2026-09-18 00:55Z) Milestone 1: restart holds the startup lock across stop and start, and verifies the resulting daemon's executable identity. Commit `59ba94cb`.
+- [x] (2026-09-18 01:00Z) Milestone 1 live: with an old client attached, six of six restarts from the rebuilt binary landed on the caller's build and said so; the same six on the unfixed build reported success while two landed on the old, unlinked inode.
+- [x] (2026-09-18 01:35Z) Milestone 2: `mj daemon status` says whether the daemon runs this build, and `mj doctor` reports the daemon's build identity, the worker digest resolved now and the daemon's pinned digests. Commit `057278e9`.
+- [x] (2026-09-18 02:10Z) Milestone 3: the keep-alive only reconnects, and a new palette command runs the verified restart. Commit `210dd1aa`.
+- [x] (2026-09-18 02:15Z) Milestone 3 live: after `mj daemon stop`, no daemon came back, and the TUI showed "Mjolnir daemon is not running. Press F2 and run "Restart the Mjolnir daemon"."; running that command brought up a daemon on the surface's own build.
+- [x] (2026-09-18 02:20Z) `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the dev profile outside the sandbox.
+- [ ] Milestone 4 is not being built: the maintainer declined the `daemon-build.json` sidecar.
 
 ## Surprises & Discoveries
 
@@ -82,7 +85,55 @@ You can see it working: build `mj`, start the TUI, rebuild `mj`, run `mj daemon 
 
   Date/Author: 2026-09-18 / Opus (plan only)
 
-- Decision: recommend against making the `MJ_DEV_RESTART_STALE_DAEMON` behaviour the default in development builds.
+- Decision (maintainer, answering question 1): a restart fails with a non-zero status when another build wins after one retry, and the message names both executables.
+
+  Rationale: a restart that reports success while running other code is the whole bug. A script that restarts the daemon with an old client open now gets a failure, which is the correct signal.
+
+  Date/Author: 2026-09-18 / maintainer
+
+- Decision (maintainer, answering question 2): Milestone 3 is unconditional. The keep-alive never creates a daemon, and the "only if my executable still exists on disk" variant is dropped. The timer only reconnects; when the daemon is gone the surface says so and offers an explicit restart that goes through the Milestone 1 path. Starting a daemon when the TUI opens is unchanged.
+
+  Rationale: creating a daemon is a user intent, and a two-second timer cannot express one. A conditional rule would leave the same class of surprise in place for a subset of cases.
+
+  Date/Author: 2026-09-18 / maintainer
+
+- Decision (maintainer, answering question 3): no `daemon-build.json` sidecar. Milestone 4 is not built.
+
+  Rationale: it binds only clients that already have the fix, and those are better served by Milestone 3, which removes the spawn rather than arbitrating it.
+
+  Date/Author: 2026-09-18 / maintainer
+
+- Decision (maintainer, answering question 5): `mj doctor` reports the daemon's build identity, the worker digest resolved now, and the daemon's pinned digests, warning on a mismatch. `mj daemon status` says whether the daemon runs this build. None of this appears in the live UI or in any poller.
+
+  Rationale: this is reporting, not policy, and reporting belongs where someone goes to ask a question, not on a render loop.
+
+  Date/Author: 2026-09-18 / maintainer
+
+- Decision: make the restart exclusive by holding one startup guard, which required splitting `connect_or_start` rather than calling it again.
+
+  Rationale: the guard is a `flock`, which conflicts between two open file descriptions even inside one process. A restart that re-entered `connect_or_start` would wait on itself until the guard's own deadline. The existing test `cancelled_startup_wait_does_not_retain_the_lock` already showed this, and a new test, `the_startup_lock_is_not_reentrant_within_one_process`, states it as the property the restart depends on.
+
+  Date/Author: 2026-09-18 / implementation
+
+- Decision: move the executable-identity helpers to a new `mj-client/src/executable.rs`.
+
+  Rationale: `mj doctor` lives in `mj-controller`, whose `DoctorCheck` constructors are private to that crate, so the check has to be written there; the restart path lives in `mj-cli`. Both need the same question answered. `mj-client` is below both and already depends on `sysinfo` and `libc`, which the macOS and Linux paths need, while `mj-core` does not depend on `sysinfo`. Duplicating the `/proc` and `sysinfo` interpretation in two crates was the alternative and is exactly what the repository's guidance forbids.
+
+  Date/Author: 2026-09-18 / implementation
+
+- Decision: judge worker freshness on the worker file's modification time against the daemon's start time, and report the pinned digests as information rather than as the verdict.
+
+  Rationale: the pinned cache is content-addressed and never pruned, so a digest being present proves only that some daemon pinned that content once, not that the running daemon did. The modification-time comparison is the same rule `MJ_DEV_RESTART_STALE_DAEMON` already uses for "the daemon's worker is older than the file on disk". Its one false positive is a rebuild that produces byte-identical output, whose remediation — restart the daemon — is cheap. An exact answer needs the daemon to report the digests it pinned, which needs a protocol change this plan rules out.
+
+  Date/Author: 2026-09-18 / implementation
+
+- Decision: build on the #1060 readiness wait rather than beside it, by cherry-picking `b4902b35` before touching `mj-cli/src/daemon.rs`.
+
+  Rationale: the two changes share one file and one concept. Taking the finished wait first meant the identity check sits on the final wait with no second loop and no merge. It also changes the timing: `START_TIMEOUT` is now 60 seconds, so `acquire_start_guard` waits up to 90 seconds and a restart can hold the lock for up to two stop-and-start rounds. A waiting client that exceeds its deadline fails one attempt with the existing message and retries; that is accepted rather than papered over.
+
+  Date/Author: 2026-09-18 / implementation
+
+- Decision: recommend against making the `MJ_DEV_RESTART_STALE_DAEMON` behaviour the default in development builds. The maintainer confirmed this (question 4): it stays opt-in, set by `scripts/run.sh` only.
 
   Rationale: this repository is routinely checked out into many worktrees at once, each with its own `target/debug/mj`, all sharing one instance's daemon by default. A default-on staleness check means every command from worktree A stops the daemon worktree B just started, and back again, indefinitely. The check is correct as an explicit statement by `scripts/run.sh` that its freshly built binary is authoritative; it is wrong as a standing rule. The real gap the issue found is not that the check is off by default, but that `mj daemon restart` does not verify its own result.
 
@@ -90,7 +141,17 @@ You can see it working: build `mj`, start the TUI, rebuild `mj`, run `mj daemon 
 
 ## Outcomes & Retrospective
 
-Not started. Fill this in at the end of each milestone: what the reader can now do that they could not, which evidence proves it, and what remains.
+All three milestones are implemented, tested and live-checked. What a user can do now that they could not:
+
+`mj daemon restart` either produces a daemon running the caller's own executable and says so, or fails with a message naming both executables. Live, with a client from the previous build attached and actively trying to revive the daemon, six of six restarts landed on the caller's build; the same six runs on the unfixed build reported success while two of them brought back the old, unlinked executable.
+
+`mj daemon status` and `mj doctor` answer "is my rebuilt code running?" for both the daemon and the worker binary, which no command could answer before. `mj doctor` reports the daemon's build identity, the worker digest that would be resolved now, and the digests the daemon's pinned cache holds.
+
+A running TUI no longer creates daemons on a timer. Stopping the daemon leaves it stopped and tells the user, with the command that starts a new one from the build they are running.
+
+What remains: Milestone 4 was declined. The worker-freshness verdict rests on the worker file's modification time against the daemon's start time; a rebuild that produced byte-identical output would warn although nothing is stale. Making that exact needs the daemon to report the digests it pinned, which needs a protocol change and was out of scope. The pinned digests are reported alongside so a reader can see the case for themselves.
+
+Lessons: the load-bearing discovery was that clients which predate the fix already honour `daemon-start.lock`. That single fact turned an unfixable coordination problem — the offending client cannot be changed — into a lock-scope change. Looking for what old clients already do, rather than for what new clients could agree to, was worth more than any of the protocol designs considered.
 
 ## Context and Orientation
 
@@ -393,7 +454,21 @@ Dependencies already in the workspace and used as-is: `sysinfo` for non-Linux pr
 
 Unchanged and deliberately so: `PROTOCOL_VERSION` in `mj-client/src/daemon.rs`; `DaemonMetadata`; `DaemonStatus`; `DaemonAction`; `daemon.json`; every timeout constant.
 
+## Implementation Notes
+
+What the finished work looks like, for a reader comparing the plan with the tree.
+
+Milestone 1 is in `mj-cli/src/daemon.rs` and `mj-cli/src/main.rs`. `connect_or_start` now takes the startup guard and delegates to a new `connect_or_start_holding(&DaemonStartGuard)`. `restart_daemon() -> Result<RestartedDaemon>` takes one guard and, under it, stops the recorded daemon with the existing `replace_daemon`, starts a replacement, asks it for its status, and checks `process_runs_this_executable(status.pid)`. A mismatch retries once, then `restart_verdict` returns an error naming both executables. `mj daemon restart` prints "running this build" when the check confirmed it.
+
+Milestone 2 is in `mj-client/src/executable.rs` (new), `mj-cli/src/main.rs` and `mj-controller/src/doctor.rs`. The identity helpers moved into `mj-client` with their tests. `mj daemon status` prints one extra line. `mj doctor` gained `daemon.build` and one `worker.freshness.*` check per worker the configuration needs, using the new public `native_worker_binary_prerequisite` for the host worker.
+
+Milestone 3 is in `mj-cli/src/daemon.rs`, `mj-cli/src/dashboard.rs`, `mj-cli/src/dashboard/actions.rs`, `mj-cli/src/dashboard/io.rs`, `mj-cli/src/main.rs`, `mj-tui/src/actions.rs` and `mj-tui/src/lib.rs`. `maintain_attachment` returns an `Attachment` carrying its task and a `watch::Receiver<DaemonPresence>`; it uses `connect_existing` only. The dashboard selects on that receiver and sets a notice. `CommandId::RestartDaemon` and `DashboardAction::RestartDaemon` run `daemon::restart_daemon` in a tracked background task and report through `DashboardIoUpdate::DaemonRestarted`.
+
+Nothing changed in the daemon protocol, `daemon.json`, `DaemonStatus`, the database, or any timeout. `PROTOCOL_VERSION` is unchanged. There is no migration.
+
 ## Decisions For The Maintainer
+
+All five were answered on 2026-09-18 and the answers are recorded in the Decision Log above. They are kept here as written for the record.
 
 1. **Should `mj daemon restart` fail, or warn and succeed, when another client's build won twice?** Recommendation: fail, with the message naming both executables. A restart that reports success while running other code is the whole bug, and the issue asks for exactly this. The cost is that a script which restarts the daemon while an old TUI is open now gets a non-zero exit; that is the correct signal.
 
@@ -436,6 +511,39 @@ The lock experiment that justifies Milestone 1. An external `flock` held `daemon
     t=24s none
     t=27s pid=2699708 inode=2660262
 
+The fixed build, in the instance `fix1039` on 2026-09-18, with a client from the previous build attached on a deleted inode and trying to revive the daemon every two seconds:
+
+    FIXED BUILD: restart client inode 1282977; old client attached on deleted inode 2652077
+    run1 exit=0 out='Mjolnir daemon restarted as PID 3412393, running this build.' daemon_inode=1282977
+    ...
+    run6 exit=0 out='Mjolnir daemon restarted as PID 3416972, running this build.' daemon_inode=1282977
+
+The same six runs on the unfixed build, where success is reported either way:
+
+    run2 exit=0 out='Mjolnir daemon restarted as PID 3399492.' daemon_inode=2652077 link=.../mj-unfixed-old (deleted)
+    run4 exit=0 out='Mjolnir daemon restarted as PID 3401264.' daemon_inode=2652077 link=.../mj-unfixed-old (deleted)
+
+`mj daemon status` against a daemon from the previous build:
+
+    Mjolnir daemon 3416972 (version 2.10.0) started 2026-09-18T00:21:40Z; 1 attached client; web viewer http://127.0.0.1:4139/
+    This daemon runs a different executable (.../debug/mj (deleted)) than this client (.../debug/mj); commands work, but code you rebuilt is not running. Run `mj daemon restart` from this build.
+
+`mj doctor` on the same daemon, with a worker written after it started:
+
+    warning Daemon build: Daemon 3416972 runs .../debug/mj (deleted), while this client runs .../debug/mj. Both report version 2.10.0, so the version alone cannot tell them apart. Code rebuilt since that daemon started is not running.
+    warning Worker binary for this host: .../mj-worker-rebuilt has digest b624c7ae...; the pinned worker cache holds 3e086f25..., 5fbc7669... instead. It was rebuilt after daemon 3416972 started, which froze the copy it serves.
+
+And after a restart onto the current build:
+
+    ready Daemon build: Daemon 3529733 runs this build (version 2.10.0).
+    ready Worker binary for this host: .../mj-worker has digest 5fbc7669...; this content is in the daemon's pinned worker cache.
+
+Milestone 3, live: `mj daemon stop` with the TUI open left no daemon after ten seconds, and the surface showed
+
+    Mjolnir daemon is not running. Press F2 and run "Restart the Mjolnir daemon".
+
+Running that palette command brought up a daemon on the surface's own build (inode 540337) and the keep-alive then reported "Mjolnir daemon is running again."
+
 The worker pin, showing the content-addressed freeze:
 
     $ sha256sum target/debug/mj-worker
@@ -446,3 +554,5 @@ The worker pin, showing the content-addressed freeze:
 ## Revision Note
 
 2026-09-18, Opus: first version of this plan, written from issue #1039 plus a live reproduction in a private instance. No product code was changed. The plan's central claim — that holding the existing startup lock across stop and start is enough to beat clients that predate any fix — rests on the `flock` experiment recorded above; if that experiment cannot be reproduced on another platform, Milestone 1 loses its guarantee there and falls back to detection only, which is Milestone 2.
+
+2026-09-18, Opus: implemented Milestones 1 to 3 after the maintainer approved the plan and answered the five open questions. Added their answers and four implementation decisions to the Decision Log, an `Implementation Notes` section describing the finished shape, live evidence for both the unfixed and the fixed build under the instance `fix1039`, and an `Outcomes & Retrospective` entry. Milestone 4 is closed as declined. The reason for each change is the decision it records: the plan has to stay readable on its own, including by someone who wants to know why the identity helpers ended up in `mj-client` rather than `mj-core`, and why worker freshness is judged on a modification time rather than on the digests the check also prints.
