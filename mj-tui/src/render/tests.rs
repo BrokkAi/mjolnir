@@ -3041,6 +3041,17 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
     );
     let rendered = drawn_dashboard(&mut aged, 200);
     assert!(rendered.contains("stale: sampled 1h ago"), "{rendered}");
+
+    let mut never_sampled = DashboardState::new(config(), State::default(), BTreeMap::new());
+    never_sampled.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    never_sampled.apply_deployment_capacity(
+        "local",
+        Err("probe timed out".into()),
+        now_epoch_seconds(),
+    );
+    let rendered = drawn_dashboard(&mut never_sampled, 200);
+    assert!(rendered.contains("unavailable"), "{rendered}");
+    assert!(!rendered.contains("stale"), "{rendered}");
 }
 
 #[test]

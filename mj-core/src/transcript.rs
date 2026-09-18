@@ -185,7 +185,9 @@ fn text_chunks_mergeable(last: &serde_json::Value, next: &serde_json::Value) -> 
     };
     let is_text = |content: &serde_json::Map<String, serde_json::Value>| {
         content.get("type").and_then(serde_json::Value::as_str) == Some("text")
-            && content.get("text").is_some_and(serde_json::Value::is_string)
+            && content
+                .get("text")
+                .is_some_and(serde_json::Value::is_string)
     };
     if !is_text(last_content) || !is_text(next_content) {
         return false;

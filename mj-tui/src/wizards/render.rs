@@ -79,6 +79,7 @@ pub(crate) fn render_new_wizard(
                         .is_some()
                     || wizard.remote_preflight_error.is_some(),
                 active_interruption: false,
+                in_place_move: false,
                 source_unavailable: false,
                 clear_resource_allocation: false,
                 queue: None,
@@ -521,6 +522,9 @@ pub(crate) struct ReviewWizardView<'a> {
     preparation_error: Option<&'a str>,
     submit_enabled: bool,
     active_interruption: bool,
+    /// True when the prepared move keeps the environment and replaces only the
+    /// harness and profile, so the review must not promise a fresh environment.
+    in_place_move: bool,
     source_unavailable: bool,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
@@ -560,6 +564,7 @@ pub(crate) fn render_review_wizard(
         preparation_error,
         submit_enabled,
         active_interruption,
+        in_place_move,
         source_unavailable,
         clear_resource_allocation,
         queue,
@@ -609,9 +614,19 @@ pub(crate) fn render_review_wizard(
             Style::default().fg(theme::palette().warning),
         ));
     }
+    if moving && in_place_move {
+        lines.push(Line::styled(
+            "Only the harness and profile are replaced; the environment and workspace are kept.",
+            theme::muted(),
+        ));
+    }
     if moving && active_interruption {
         lines.push(Line::styled(
-            "Active work will be interrupted; the session is restored into a fresh environment.",
+            if in_place_move {
+                "Active work will be interrupted; the session keeps its environment."
+            } else {
+                "Active work will be interrupted; the session is restored into a fresh environment."
+            },
             Style::default().fg(theme::palette().warning),
         ));
         if clear_resource_allocation {
@@ -1358,6 +1373,10 @@ pub(crate) fn render_resume_wizard(
                     .preparation
                     .as_ref()
                     .map_or(wizard.moving, |preparation| preparation.active),
+                in_place_move: wizard
+                    .preparation
+                    .as_ref()
+                    .is_some_and(|preparation| preparation.in_place),
                 clear_resource_allocation: wizard.preparation.as_ref().map_or_else(
                     || {
                         wizard.moving

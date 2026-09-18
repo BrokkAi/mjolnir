@@ -188,8 +188,10 @@ impl ExportRuntime for RuntimeState {
         request: WikiRestoreRequest,
     ) -> BoxFuture<'static, Result<Option<String>>> {
         Box::pin(async move {
+            // The HTTP API has no request-scoped cancellation; the daemon's
+            // shutdown drain cancels the queue's own token directly.
             Ok(self
-                .restore_wiki_session(request)
+                .restore_wiki_session(request, &tokio_util::sync::CancellationToken::new())
                 .await?
                 .map(|registered| registered.session.id))
         })

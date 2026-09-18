@@ -140,6 +140,10 @@ async function mockViewer(page, uploadHandler) {
   await expect(page.locator('#sessions .session')).toHaveCount(1);
   await page.locator('#sessions .session h3').click();
   await expect(page).toHaveURL(new RegExp(`#conversation/${SESSION_ID}$`));
+  // The hash changes before the `hashchange` task opens the conversation, and
+  // an image selected before then is dropped for having no session. The title
+  // is set by the same synchronous code that records the session.
+  await expect(page.locator('#conversation-title')).toHaveText('Attachment browser test');
   return state;
 }
 

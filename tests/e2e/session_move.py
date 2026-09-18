@@ -95,7 +95,37 @@ def run(lab):
     logs = (lab.runtime_root / "fake-acp.log").read_text()
     assert "discard-this-pending-prompt" not in logs, "discarded prompt ran on a harness"
     # A profile-only move goes back to the deliberately slow source profile.
+    # Target, attached directories, and resource sizing are unchanged, so the
+    # move replaces only the harness: the same worker root is reused, nothing
+    # under it is torn down, and untracked files stay where they are.
+    before_swap = record()
+    swap_locator = before_swap["target"]
+    assert swap_locator["kind"] == "local-bare", swap_locator
+    worker_root = pathlib.Path(swap_locator["worker_root"])
+    survivor = pathlib.Path(before_swap["project_directory"]) / "in-place-survivor.txt"
+    survivor_content = "survives an in-place harness swap\n" * 4096
+    survivor.write_text(survivor_content)
+    # The survivor is untracked, so the status the move must preserve now
+    # includes it.
+    expected_status = lab.git_output(["status", "--porcelain"], cwd=checkout)
+    daemon_log = lab.data / "daemon.log"
+    log_offset = daemon_log.stat().st_size if daemon_log.exists() else 0
     move("fake", "destination", "discard", "profile")
+    after_swap = record()
+    assert after_swap["target"] == swap_locator, (swap_locator, after_swap["target"])
+    assert survivor.read_text() == survivor_content, "in-place move lost an untracked file"
+    assert after_swap["native_session_id"] == before_swap["native_session_id"]
+    ownership = json.loads((worker_root / "ownership.json").read_text())
+    assert ownership.get("profile_id") == "fake", ownership
+    assert ownership.get("session_id") == session_id, ownership
+    with daemon_log.open() as handle:
+        handle.seek(log_offset)
+        swap_log = handle.read()
+    # The log window covers only this move, and the lab runs one session, so any
+    # such line would be this session's worker state being removed.
+    torn_down = [line for line in swap_log.splitlines()
+                 if "remove exact local Mjolnir worker state" in line]
+    assert not torn_down, torn_down
     prompt("interrupted-start")
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "running", "second active source turn")
     prompt("start-pending-one")

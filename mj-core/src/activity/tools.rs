@@ -132,10 +132,7 @@ impl ToolsInFlight {
             return;
         };
         let mut entries = self.entries();
-        if matches!(
-            status,
-            ToolCallStatus::Pending | ToolCallStatus::InProgress
-        ) {
+        if matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress) {
             entries
                 .entry(tool_call_id.to_owned())
                 .and_modify(|entry| {

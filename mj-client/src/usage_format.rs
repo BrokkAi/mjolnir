@@ -287,9 +287,9 @@ impl SessionActivity {
                 })
                 .into_iter()
                 .collect(),
-            background_started_at_ms: self.background_since().and_then(|seconds| {
-                i64::try_from(seconds).ok().map(|seconds| seconds * 1_000)
-            }),
+            background_started_at_ms: self
+                .background_since()
+                .and_then(|seconds| i64::try_from(seconds).ok().map(|seconds| seconds * 1_000)),
             background_commands: self.background_commands.len(),
             active_user_shells: self.active_user_shells.len(),
             goal_active: self.pursuing_goal,

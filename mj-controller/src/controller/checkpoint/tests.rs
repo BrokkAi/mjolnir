@@ -929,7 +929,7 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
         "Error: unsupported checkpoint export protocol version 3; worker supports 2\n"
     ));
 }
-const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
+pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
 const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
 #[cfg(unix)]
@@ -944,13 +944,13 @@ const RELEASE_TEST_CHILD: &str = "MJ_TEST_RELEASE_LATCH_CHILD";
 const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
 #[cfg(unix)]
 const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
-const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
+pub(crate) const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
-const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
+pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
 /// Whether the scripted relay understands the early checkpoint release.
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ReleaseSupport {
+pub(crate) enum ReleaseSupport {
     Supported,
     /// Answer a release exactly as a worker that predates the command does:
     /// its `RelayCommand` cannot deserialize the variant at all.
@@ -1147,7 +1147,7 @@ fn unparseable_request_response(
 /// A relay target served by this test binary over stdio. Each start of the
 /// server appends to `starts`, if given.
 #[cfg(unix)]
-fn latch_relay_target(
+pub(crate) fn latch_relay_target(
     relay_root: &Path,
     starts: Option<&Path>,
     release: ReleaseSupport,
@@ -2311,5 +2311,238 @@ async fn workspace_lease_blocks_prompts_and_releases_without_advancing_recovery(
             .await
             .is_err(),
         "a queued or running prompt must prevent file injection"
+    );
+}
+
+#[cfg(unix)]
+const IN_PLACE_CLOSE_CHILD: &str = "MJ_TEST_IN_PLACE_CLOSE_CHILD";
+
+/// A move that keeps its environment still needs a verified checkpoint and a
+/// sealed relay. It must stop there: the record stays `Closing` with its
+/// checkpoint and its target, and nothing tears the target down.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
+    if std::env::var_os(IN_PLACE_CLOSE_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::an_in_place_move_close_seals_the_source_and_keeps_its_target",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(name)
+            .env(IN_PLACE_CLOSE_CHILD, "1")
+            // Checkpoint-only mode advances the lifecycle commands itself, so
+            // the sealed Close reaches `Closed` without an ACP harness.
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_DATA_DIR", directory.path().join("data"))
+            .env("MJ_CONFIG_DIR", directory.path().join("config"))
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    let archive_directory = data_directory.join("archives");
+    for directory in [&relay_root, &profile_home, &archive_directory] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    // The archive covers exactly the two observations seeded below, so the
+    // close latch reuses it instead of exporting a new one.
+    let mut seed =
+        mj_worker::relay::DurableRelay::open(&relay_root, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionOpened {
+        native_session_id: "native-session".into(),
+        native_continuity_lost: false,
+        resumed: true,
+    })
+    .unwrap();
+    seed.record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+        config_options: Vec::new(),
+    })
+    .unwrap();
+    drop(seed);
+    let checkpoint = write_checkpoint_gate_archive(&archive_directory, LATCH_RELAY_SESSION, 2);
+
+    // A container is the case an in-place move is really for: the container,
+    // its workspace, and its caches all survive the harness swap.
+    let container_id = targets::resource_name(LATCH_RELAY_SESSION).unwrap();
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target_template_id = "podman".into();
+    session.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: container_id.clone(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
+            name: format!("{container_id}-workspace"),
+        },
+    });
+    session.checkpoint = Some(checkpoint.clone());
+    crate::database::save_session(&session).unwrap();
+
+    // `validate_move_checkpoint` re-reads the configuration from disk and
+    // compares its fingerprint, so the controller's config has to be the
+    // persisted one.
+    let (config, ()) = Config::update(|config| {
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: profile_home.clone(),
+                environment: BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        config.targets.insert(
+            "podman".into(),
+            TargetTemplate::LocalPodman {
+                container: mj_core::config::ContainerTemplate {
+                    build_cache: None,
+                    image: "test:latest".into(),
+                    pull_policy: Default::default(),
+                    platform: None,
+                    cpus: None,
+                    memory: None,
+                    environment: BTreeMap::new(),
+                    workspace_storage: mj_core::config::PodmanWorkspaceStorage::PodmanVolume,
+                },
+            },
+        );
+        config.bundles.insert(
+            "project".into(),
+            ProjectBundle {
+                primary_repo: "project".into(),
+                repositories: vec![ProjectRepository {
+                    id: "project".into(),
+                    github: Some("example/project".into()),
+                    local: None,
+                    destination: "project".into(),
+                    git_ref: None,
+                }],
+            },
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(LATCH_RELAY_SESSION.into(), session.clone())]),
+            ..State::default()
+        },
+    };
+
+    let selection = mj_core::state::MoveSelection {
+        clear_resource_allocation: false,
+        session_id: LATCH_RELAY_SESSION.into(),
+        profile_id: Some("codex".into()),
+        target_template_id: Some("podman".into()),
+        additional_mounts: Some(Vec::new()),
+        resource_allocation: None,
+    };
+    let mut operation = mj_core::state::MoveOperation {
+        in_place: true,
+        source_checkpoint_only: false,
+        operation_id: "move-in-place-close".into(),
+        selection: selection.clone(),
+        source_profile_id: "codex".into(),
+        source_target_template_id: "podman".into(),
+        source_target: session.target.clone(),
+        source_native_session_id: session.native_session_id.clone(),
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_target: None,
+        destination_native_session_id: None,
+        destination_store_id: None,
+        configuration_fingerprint: controller
+            .move_configuration_fingerprint(&selection)
+            .unwrap(),
+        checkpoint: None,
+        recovery_session: None,
+        queue: mj_core::state::ResumeQueueDisposition::Discard,
+        phase: mj_core::state::MovePhase::ClosingSource,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+        cancellation_requested: false,
+        created_at: "2026-08-14T12:00:00Z".into(),
+        updated_at: "2026-08-14T12:00:00Z".into(),
+        error: None,
+    };
+    crate::database::save_move_operation(&operation).unwrap();
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        purposes: std::sync::Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    let executor = RecordingExecutor::default();
+    let deferred = controller
+        .close_session_for_move(
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            &mut operation,
+            None,
+            crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+        )
+        .await
+        .unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+
+    assert!(
+        !deferred,
+        "a retained target has no deferred storage cleanup"
+    );
+    let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(sealed.state, SessionState::Closing);
+    assert_eq!(sealed.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(sealed.target, session.target);
+    assert_eq!(operation.checkpoint.as_ref(), Some(&checkpoint));
+    // The durable record has to agree: recovery reads it, not this process.
+    let persisted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(persisted.state, SessionState::Closing);
+    assert_eq!(persisted.target, session.target);
+    assert!(persisted.checkpoint.is_some());
+
+    let purposes = executor.purposes.lock().unwrap().clone();
+    for purpose in &purposes {
+        let lowered = purpose.to_lowercase();
+        assert!(
+            !lowered.contains("remove")
+                && !lowered.contains("stop")
+                && !lowered.contains("delete")
+                && !lowered.contains("clean"),
+            "an in-place close must not tear anything down, but it ran {purpose:?} \
+             (all: {purposes:?})"
+        );
+    }
+    assert!(
+        !purposes.iter().any(|purpose| purpose.contains("podman")),
+        "no container command ran at all: {purposes:?}"
     );
 }

@@ -234,7 +234,7 @@ pub(super) async fn handle_action(
         DaemonAction::WikiRestore(request) => {
             let wiki_id = request.wiki_id.clone();
             let registered = state
-                .restore_wiki_session(request)
+                .restore_wiki_session(request, cancellation)
                 .await?
                 .with_context(|| format!("no indexed session {wiki_id}"))?;
             Ok(DaemonReply::RegisteredSession(Box::new(registered)))
@@ -392,6 +392,25 @@ pub(super) async fn handle_action(
                 tracing::warn!(%error, "prompt was accepted but its history could not be stored");
             }
             Ok(DaemonReply::Ordinal(ordinal))
+        }
+        DaemonAction::QueueStartupPrompt {
+            session_id,
+            text,
+            inherited_draft,
+        } => {
+            ensure!(
+                !text.trim().is_empty(),
+                "a queued startup prompt needs text to send"
+            );
+            state.queue_startup_step(
+                &session_id,
+                StartupStep::Prompt {
+                    text,
+                    inherited_draft,
+                },
+                cancellation,
+            )?;
+            Ok(DaemonReply::Done)
         }
         DaemonAction::ReviewerAction {
             session_id,

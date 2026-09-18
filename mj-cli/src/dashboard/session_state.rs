@@ -156,7 +156,11 @@ impl DashboardContext {
         } = self;
         let opening = opening_chat_session.as_deref();
         active_chat.as_mut().filter(|chat| {
-            chat_is_visible(opening, chat.session_id())
+            // A launch standby stands in front of the conversation that was
+            // selected when the creation started, so typing meant for the new
+            // session cannot land in the old one.
+            !dashboard.launch_standby_capturing()
+                && chat_is_visible(opening, chat.session_id())
                 && dashboard.selected_session_id() == Some(chat.session_id())
                 && dashboard.transition_kind(chat.session_id()).is_none()
                 && dashboard

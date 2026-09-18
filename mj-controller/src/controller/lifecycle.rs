@@ -36,6 +36,16 @@ pub enum BranchDisposition {
     DeleteIfMerged,
 }
 
+/// What a verified close does with the target the session was running in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceTargetDisposition {
+    /// Verified checkpoint, sealed relay, then destroy the exact target.
+    Destroy,
+    /// Verified checkpoint, sealed relay; keep the target and its worker
+    /// daemon alive for an in-place harness replacement.
+    RetainForInPlaceSwap,
+}
+
 impl Controller {
     /// Checkpoint, ask the harness to close, and only then tear down the exact
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
@@ -52,7 +62,13 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if self
-            .close_session_controlled_with_manager(session_id, executor, None, None)
+            .close_session_controlled_with_manager(
+                session_id,
+                executor,
+                None,
+                None,
+                SourceTargetDisposition::Destroy,
+            )
             .await?
         {
             self.cleanup_stopped_target(session_id, executor)?;
@@ -66,8 +82,14 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<bool> {
-        self.close_session_controlled_with_manager(session_id, executor, Some(manager), None)
-            .await
+        self.close_session_controlled_with_manager(
+            session_id,
+            executor,
+            Some(manager),
+            None,
+            SourceTargetDisposition::Destroy,
+        )
+        .await
     }
 
     pub(super) async fn close_session_for_move(
@@ -77,6 +99,7 @@ impl Controller {
         manager: &SessionManagerControl,
         operation: &mut mj_core::state::MoveOperation,
         preparation: Option<&mj_core::state::MovePreparation>,
+        disposition: SourceTargetDisposition,
     ) -> Result<bool> {
         self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
             .await?;
@@ -85,6 +108,7 @@ impl Controller {
             executor,
             Some(manager),
             Some((operation, preparation)),
+            disposition,
         )
         .await
     }
@@ -98,6 +122,7 @@ impl Controller {
             &mut mj_core::state::MoveOperation,
             Option<&mj_core::state::MovePreparation>,
         )>,
+        disposition: SourceTargetDisposition,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -222,6 +247,14 @@ impl Controller {
         }
         latched.relay.release();
 
+        if disposition == SourceTargetDisposition::RetainForInPlaceSwap {
+            // The record stays `Closing` with its verified checkpoint and its
+            // target. The worker daemon is deliberately left running: a crash
+            // between here and the in-place restore recovers through
+            // `recover_interrupted_close_managed`, which needs the daemon to
+            // answer `Closed`.
+            return Ok(false);
+        }
         match self.destroy_after_verified_checkpoint(session_id, &artifact.metadata, executor) {
             Ok(deferred) => Ok(deferred),
             Err(error) => {
@@ -284,6 +317,7 @@ impl Controller {
                         executor,
                         Some(manager),
                         None,
+                        SourceTargetDisposition::Destroy,
                     )
                     .await;
             }

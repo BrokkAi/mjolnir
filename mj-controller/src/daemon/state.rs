@@ -60,6 +60,7 @@ impl RuntimeState {
             workspaces_tx,
             session_manager,
             lifecycle: Mutex::new(BTreeMap::new()),
+            startup_prompts: Mutex::new(BTreeMap::new()),
             close_requested: Mutex::new(BTreeSet::new()),
             controller: Mutex::new(controller),
             controller_loader,
@@ -138,6 +139,7 @@ impl RuntimeState {
     pub async fn restore_wiki_session(
         self: &Arc<Self>,
         request: WikiRestoreRequest,
+        cancellation: &CancellationToken,
     ) -> Result<Option<RegisteredSession>> {
         let wiki_id = request.wiki_id.clone();
         let Some(archived) =
@@ -181,26 +183,14 @@ impl RuntimeState {
             })
             .await?;
         let session_id = registered.session.id.clone();
-        let runtime = Arc::clone(self);
-        let handoff_session = session_id.clone();
-        tokio::spawn(async move {
-            if let Err(error) = runtime
-                .install_archive_handoff(&handoff_session, archived.snapshot)
-                .await
-            {
-                tracing::warn!(
-                    session_id = %handoff_session,
-                    %error,
-                    "could not install the restored archive's hand-off"
-                );
-                runtime.push_notice(
-                    &handoff_session,
-                    format!(
-                        "The restored session started without its archived hand-off: {error:#}"
-                    ),
-                );
-            }
-        });
+        // The hand-off rides the session's startup queue so that a prompt
+        // typed while the session starts is submitted after the hand-off it
+        // is supposed to read, not before it.
+        self.queue_startup_step(
+            &session_id,
+            StartupStep::InstallHandoff(Box::new(archived.snapshot)),
+            cancellation,
+        )?;
         Ok(Some(registered))
     }
 
@@ -221,9 +211,9 @@ impl RuntimeState {
     async fn install_archive_handoff(
         &self,
         session_id: &str,
-        snapshot: mj_core::archive::CanonicalSessionSnapshot,
+        handle: &crate::session_manager::ManagedSessionHandle,
+        snapshot: &mj_core::archive::CanonicalSessionSnapshot,
     ) -> Result<()> {
-        let handle = self.wait_for_ready_session(session_id).await?;
         let (config, profile_id) = {
             let controller = self
                 .controller
@@ -243,7 +233,7 @@ impl RuntimeState {
         let handoff = crate::handoff::build_handoff_context(
             session_id,
             &config,
-            &snapshot,
+            snapshot,
             context_bytes,
             &cancel,
         )
@@ -265,7 +255,7 @@ impl RuntimeState {
     }
 
     /// Wait until a just-created session has a harness that can be handed to.
-    async fn wait_for_ready_session(
+    pub(super) async fn wait_for_ready_session(
         &self,
         session_id: &str,
     ) -> Result<crate::session_manager::ManagedSessionHandle> {
@@ -287,6 +277,11 @@ impl RuntimeState {
             }
             if let Ok(handle) = self.session_manager.session(session_id).await {
                 let view = handle.view();
+                // A target that is gone never becomes ready. Reporting it now
+                // beats holding the queued work for the full deadline.
+                if let Some(ViewError::TargetMissing(detail)) = &view.error {
+                    bail!("session {session_id} lost its target: {detail}");
+                }
                 if view.connected
                     && view
                         .snapshot
@@ -600,5 +595,373 @@ impl RuntimeState {
     pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
         self.publish_revision();
+    }
+
+    /// Queue one piece of startup work for a session, starting the drain task
+    /// when this is the session's first step.
+    ///
+    /// Steps are carried out in the order they arrive. The entry in the map
+    /// exists only while a drain owns it, so "no entry" and "no live task"
+    /// are the same condition and a second call never starts a second drain.
+    pub(crate) fn queue_startup_step(
+        self: &Arc<Self>,
+        session_id: &str,
+        step: StartupStep,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        // The same set `wait_for_ready_session` accepts: anything else will
+        // never become ready, so queueing would only lose the text later.
+        match self.session_state(session_id) {
+            Some(
+                SessionState::Provisioning
+                | SessionState::Running
+                | SessionState::Disconnected
+                | SessionState::Checkpointing,
+            ) => {}
+            Some(state) => {
+                bail!("session {session_id} is {state:?}; it cannot take a queued prompt")
+            }
+            None => bail!("unknown session {session_id}"),
+        }
+        let mut queues = self
+            .startup_prompts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(queue) = queues.get_mut(session_id) {
+            queue.pending.push_back(step);
+            return Ok(());
+        }
+        let cancel = cancellation.child_token();
+        queues.insert(
+            session_id.to_owned(),
+            StartupQueue {
+                pending: VecDeque::from([step]),
+                in_flight: false,
+                cancel: cancel.clone(),
+                task: None,
+            },
+        );
+        let runtime = Arc::clone(self);
+        let drain_session = session_id.to_owned();
+        // Outer task supervises inner task: a panic in the drain becomes a
+        // reported failure that restores the text, not a queue nobody drains.
+        let task = tokio::spawn(async move {
+            let supervised = {
+                let runtime = Arc::clone(&runtime);
+                let session_id = drain_session.clone();
+                let cancel = cancel.clone();
+                tokio::spawn(async move { runtime.drain_startup_queue(&session_id, &cancel).await })
+            };
+            if let Err(error) = supervised.await {
+                runtime
+                    .fail_startup_queue(
+                        &drain_session,
+                        None,
+                        &format!("the daemon's delivery task failed: {error}"),
+                    )
+                    .await;
+            }
+        });
+        if let Some(queue) = queues.get_mut(session_id) {
+            queue.task = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Wait for the session's harness, then carry out its queued steps in
+    /// order. Every failure path ends in [`Self::fail_startup_queue`], which
+    /// is what puts the text back where the person can see it.
+    async fn drain_startup_queue(self: Arc<Self>, session_id: &str, cancel: &CancellationToken) {
+        let handle = tokio::select! {
+            () = cancel.cancelled() => {
+                self.fail_startup_queue(
+                    session_id,
+                    None,
+                    "the daemon stopped before the session was ready",
+                )
+                .await;
+                return;
+            }
+            ready = self.wait_for_ready_session(session_id) => match ready {
+                Ok(handle) => handle,
+                Err(error) => {
+                    self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        .await;
+                    return;
+                }
+            },
+        };
+        loop {
+            let step = {
+                let mut queues = self
+                    .startup_prompts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let Some(queue) = queues.get_mut(session_id) else {
+                    return;
+                };
+                match queue.pending.pop_front() {
+                    Some(step) => {
+                        queue.in_flight = true;
+                        step
+                    }
+                    None => {
+                        queues.remove(session_id);
+                        return;
+                    }
+                }
+            };
+            let outcome = tokio::select! {
+                () = cancel.cancelled() => {
+                    Err(anyhow!("the daemon stopped before the prompt was sent"))
+                }
+                result = self.run_startup_step(session_id, &handle, &step) => result,
+            };
+            if let Err(error) = outcome {
+                self.fail_startup_queue(session_id, Some(step), &format!("{error:#}"))
+                    .await;
+                return;
+            }
+            let mut queues = self
+                .startup_prompts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(queue) = queues.get_mut(session_id) else {
+                return;
+            };
+            queue.in_flight = false;
+            if queue.pending.is_empty() {
+                queues.remove(session_id);
+                return;
+            }
+        }
+    }
+
+    async fn run_startup_step(
+        &self,
+        session_id: &str,
+        handle: &crate::session_manager::ManagedSessionHandle,
+        step: &StartupStep,
+    ) -> Result<()> {
+        match step {
+            StartupStep::InstallHandoff(snapshot) => {
+                self.install_archive_handoff(session_id, handle, snapshot)
+                    .await
+            }
+            StartupStep::Prompt {
+                text,
+                inherited_draft,
+            } => {
+                self.submit_startup_prompt(session_id, handle, text, inherited_draft.as_deref())
+                    .await
+            }
+        }
+    }
+
+    /// Submit one queued prompt and give it the history and draft handling a
+    /// prompt submitted from a live composer gets.
+    async fn submit_startup_prompt(
+        &self,
+        session_id: &str,
+        handle: &crate::session_manager::ManagedSessionHandle,
+        text: &str,
+        inherited_draft: Option<&str>,
+    ) -> Result<()> {
+        let bundle_id = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get(session_id)
+            .map(|record| record.bundle_id.clone());
+        let ordinal = handle
+            .submit(
+                new_command_id("startup")?,
+                RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new(text.to_owned()))],
+                },
+            )
+            .await?;
+        if let Some(expected) = inherited_draft {
+            let persisted_id = session_id.to_owned();
+            let persisted_expected = expected.to_owned();
+            if let Err(error) = blocking(move || {
+                crate::database::clear_session_draft_input_if_matches(
+                    &persisted_id,
+                    &persisted_expected,
+                )
+            })
+            .await
+            {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "the delivered prompt's draft could not be cleared"
+                );
+            }
+            if let Some(record) = self
+                .controller
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .state
+                .sessions
+                .get_mut(session_id)
+                && record.draft_input == expected
+            {
+                record.draft_input.clear();
+            }
+            self.publish_revision();
+        }
+        if let Some(bundle_id) = bundle_id {
+            let history_id = session_id.to_owned();
+            let history_text = text.to_owned();
+            if let Err(error) = blocking(move || {
+                crate::database::record_prompt(
+                    &history_id,
+                    &bundle_id,
+                    ordinal,
+                    None,
+                    &history_text,
+                )
+            })
+            .await
+            {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "the queued prompt was accepted but its history could not be stored"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Give up on a session's queue: nothing typed is lost, so every prompt
+    /// still in it -- the one that failed and the ones behind it -- goes back
+    /// into the session's saved draft, with a notice saying why.
+    async fn fail_startup_queue(
+        &self,
+        session_id: &str,
+        failed: Option<StartupStep>,
+        reason: &str,
+    ) {
+        let remaining = self
+            .startup_prompts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(session_id)
+            .map(|queue| queue.pending)
+            .unwrap_or_default();
+        let mut texts = Vec::new();
+        let mut dropped_handoff = false;
+        for step in failed.into_iter().chain(remaining) {
+            match step {
+                StartupStep::Prompt { text, .. } => texts.push(text),
+                StartupStep::InstallHandoff(_) => dropped_handoff = true,
+            }
+        }
+        if dropped_handoff {
+            tracing::warn!(
+                session_id,
+                reason,
+                "could not install the restored archive's hand-off"
+            );
+            self.push_notice(
+                session_id,
+                format!("The restored session started without its archived hand-off: {reason}"),
+            );
+        }
+        if texts.is_empty() {
+            return;
+        }
+        let restored = texts.join("\n\n");
+        if let Err(error) = self.append_draft_input(session_id, &restored).await {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "a queued prompt could not be saved back into the session's draft"
+            );
+        }
+        self.push_notice(
+            session_id,
+            format!(
+                "Your prompt could not be sent to session {} ({reason}); it is back in the composer draft.",
+                mj_core::state::short_id(session_id)
+            ),
+        );
+        tracing::warn!(
+            session_id,
+            reason,
+            "a queued startup prompt could not be delivered"
+        );
+    }
+
+    /// Put text back into the session's saved composer draft, after whatever
+    /// is already there. The database is the source of truth, because the
+    /// target refresher reloads the controller from disk regularly; the
+    /// in-memory record is updated too so the change shows up at once.
+    pub(super) async fn append_draft_input(&self, session_id: &str, text: &str) -> Result<()> {
+        let existing = self
+            .session_record(session_id)
+            .map(|record| record.draft_input)
+            .unwrap_or_default();
+        let combined = [existing.as_str(), text]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let persisted_id = session_id.to_owned();
+        let persisted = combined.clone();
+        let stored =
+            blocking(move || crate::database::set_session_draft_input(&persisted_id, &persisted))
+                .await;
+        if let Some(record) = self
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .sessions
+            .get_mut(session_id)
+        {
+            record.draft_input = combined;
+        }
+        self.publish_revision();
+        stored
+    }
+
+    /// Stop every startup queue and wait for its drain to report, so the text
+    /// it holds reaches the database while the writer is still running.
+    pub(crate) async fn cancel_and_join_startup_prompts(&self) -> Result<()> {
+        let tasks = {
+            let mut queues = self
+                .startup_prompts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            queues
+                .values_mut()
+                .filter_map(|queue| {
+                    queue.cancel.cancel();
+                    queue.task.take()
+                })
+                .collect::<Vec<_>>()
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut outcome = Ok(());
+        for task in tasks {
+            let joined = match tokio::time::timeout_at(deadline, task).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(anyhow!("startup prompt delivery task failed: {error}")),
+                Err(_) => Err(anyhow!(
+                    "a startup prompt delivery task did not stop within 1s"
+                )),
+            };
+            if outcome.is_ok() {
+                outcome = joined;
+            } else if let Err(error) = joined {
+                tracing::warn!(%error, "another startup prompt drain did not stop cleanly");
+            }
+        }
+        outcome
     }
 }

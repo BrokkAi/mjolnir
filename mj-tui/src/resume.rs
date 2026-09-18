@@ -21,7 +21,7 @@ use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -1842,14 +1842,15 @@ fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> St
     format!("No matches here · {}", elsewhere.join(", "))
 }
 
-/// The label a matching message carries. The roles are the briefing's own:
+/// The label and colour a matching message carries, in the same two colours
+/// the conversation view gives those roles. The roles are the briefing's own:
 /// anything else, such as the one-line message an error is shown as, carries
-/// no label.
-fn hit_role_label(role: &str) -> Option<&'static str> {
+/// no label. Tool messages never reach here, because a run of them is
+/// collapsed into a single line before any text is laid out.
+fn hit_role_label(role: &str) -> Option<(&'static str, Color)> {
     match role {
-        "user" => Some("User: "),
-        "assistant" => Some("Assistant: "),
-        "tool" => Some("[tool] "),
+        "user" => Some(("User: ", theme::palette().accent)),
+        "assistant" => Some(("Assistant: ", theme::palette().secondary)),
         _ => None,
     }
 }
@@ -1874,7 +1875,7 @@ fn hit_block_lines(
         .fg(theme::palette().accent)
         .add_modifier(Modifier::BOLD);
     let mut prefix = hit_role_label(&block.role)
-        .map(|label| Span::styled(label, Style::default().fg(theme::palette().muted)));
+        .map(|(label, color)| Span::styled(label, Style::default().fg(color)));
     let mut start = 0usize;
     for text in block.text.split('\n') {
         let end = start + text.len();
@@ -1913,6 +1914,14 @@ fn hit_block_lines(
     }
 }
 
+/// The briefing's name for a tool message.
+const TOOL_ROLE: &str = "tool";
+
+/// What a run of consecutive tool messages is shown as. The preview is there to
+/// remind the reader what the session was about, and tool output is the part
+/// they did not write and would scroll past.
+const TOOL_RUN_LABEL: &str = "[tool calls]";
+
 /// The matching passages as logical lines of spans, with the logical line each
 /// hit starts on.
 fn hit_transcript_lines(transcript: &WikiHitTranscript) -> (Vec<Line<'static>>, Vec<usize>) {
@@ -1925,14 +1934,27 @@ fn hit_transcript_lines(transcript: &WikiHitTranscript) -> (Vec<Line<'static>>, 
     }
     let mut lines = Vec::new();
     let mut hit_lines = Vec::new();
-    for (index, block) in transcript.blocks.iter().enumerate() {
-        if index > 0 {
+    let mut collapsing_tools = false;
+    for block in &transcript.blocks {
+        let is_tool = block.role == TOOL_ROLE;
+        // A second tool message in the same run adds nothing to the one line
+        // already standing in for the run. A run does end at a group boundary,
+        // which the omitted marker announces.
+        if is_tool && collapsing_tools && block.omitted_before == 0 {
+            continue;
+        }
+        if !lines.is_empty() {
             lines.push(Line::raw(String::new()));
         }
         if block.omitted_before > 0 {
             lines.push(Line::styled(omitted_marker(block.omitted_before), muted));
         }
-        hit_block_lines(block, &mut lines, &mut hit_lines);
+        if is_tool {
+            lines.push(Line::styled(TOOL_RUN_LABEL, muted));
+        } else {
+            hit_block_lines(block, &mut lines, &mut hit_lines);
+        }
+        collapsing_tools = is_tool;
     }
     if transcript.omitted_after > 0 {
         lines.push(Line::styled(

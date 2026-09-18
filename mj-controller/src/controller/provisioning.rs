@@ -870,7 +870,9 @@ fn provision_target_creation(
     let Some((creation, remainder)) = plan.split_at_target_creation() else {
         // Nothing this plan runs can leave a target behind, so its commands
         // must still finish before the locator is usable.
-        let outputs = plan.execute_concurrent(executor)?;
+        let outputs = crate::image_pull_gate::with_image_ready(target, executor, || {
+            plan.execute_concurrent(executor)
+        })?;
         return discover(&outputs).map(|locator| {
             (
                 locator,
@@ -881,7 +883,12 @@ fn provision_target_creation(
             )
         });
     };
-    let outputs = creation.execute_concurrent(executor)?;
+    // Creating the container is what downloads the image on Docker, and the
+    // probe just before it is what downloads it on Podman. Either way, a
+    // background download of the same image must finish first.
+    let outputs = crate::image_pull_gate::with_image_ready(target, executor, || {
+        creation.execute_concurrent(executor)
+    })?;
     discover(&outputs)
         .map(|locator| (locator, remainder))
         .map_err(|error| {
@@ -1100,7 +1107,12 @@ pub(super) fn podman_image_user(
     if let Some(cached) = IMAGE_USERS.lock().expect("image user cache").get(&key) {
         return Some(*cached);
     }
-    match targets::probe_image_user(ssh, container, executor) {
+    // The probe starts a container, so on Podman this is where a missing image
+    // is actually downloaded. Wait for the daemon's own download instead of
+    // starting a second one.
+    match crate::image_pull_gate::with_image_ready(target, executor, || {
+        targets::probe_image_user(ssh, container, executor)
+    }) {
         Ok(user) => {
             IMAGE_USERS
                 .lock()

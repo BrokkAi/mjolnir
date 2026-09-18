@@ -2562,7 +2562,7 @@ function renderMoveForm() {
       }
     }
     moveStep.append(targetPicker);
-    moveStep.append(el('p', 'dim', 'Move rebuilds a fresh environment. Existing resource sizing and attached directories are retained. Installed packages and files outside the declared workspace are not migrated.'));
+    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target, attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
     clearResourcesInput.type = 'checkbox';
@@ -2587,6 +2587,9 @@ function renderMoveForm() {
       ? 'Resource sizing: use destination defaults. Attached directories remain fixed to this workspace.'
       : 'Resource sizing and attached directories: retain the source workspace settings.'));
     moveStep.append(el('p', 'dim', preparation.cross_harness ? 'This is a cross-harness handoff. Harness-private state is rebuilt from the canonical transcript.' : 'The same harness session state will be restored when supported.'));
+    moveStep.append(el('p', 'dim', preparation.in_place
+      ? 'Only the harness and profile are replaced; the environment and workspace are kept.'
+      : 'The session is restored into a fresh environment.'));
     if (preparation.source_unavailable) {
       moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
     }
@@ -2605,7 +2608,9 @@ function renderMoveForm() {
         draft.acknowledge = check.checked;
         renderMoveForm();
       };
-      warning.append(check, el('span', '', 'Interrupt the active turn and checkpoint the session before rebuilding it.'));
+      warning.append(check, el('span', '', preparation.in_place
+        ? 'Interrupt the active turn and checkpoint the session before replacing the harness.'
+        : 'Interrupt the active turn and checkpoint the session before rebuilding it.'));
       moveStep.append(warning);
     }
     const queued = preparation.queued_commands || [];
