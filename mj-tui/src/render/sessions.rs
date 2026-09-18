@@ -193,8 +193,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 // A folded project hides its rows, so the heading says what
                 // is waiting inside it. An unfolded one shows every symbol.
                 if dashboard.collapsed_project_keys.contains(&key) {
-                    let (waiting, unread) = dashboard.project_attention_counts(&key);
-                    spans.extend(attention_badge(waiting, unread));
+                    spans.extend(attention_badge(dashboard.project_attention_summary(&key)));
                 }
                 pending_heading = Some((key, Line::from(spans)));
             }
@@ -213,11 +212,13 @@ pub(crate) fn drawn_session_rows_with_options(
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
+                let attention = dashboard.attention_level(&session.id);
                 let facts = SessionRowFacts {
                     detail,
                     unreachable,
                     state: session.state,
                     now_epoch_seconds,
+                    attention,
                 };
                 let primary_busy = !unreachable
                     && session.state == SessionState::Running
@@ -252,12 +253,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         SessionTransitionKind::Stopping => glyphs.stopping,
                         SessionTransitionKind::Destroying => glyphs.destroying,
                     })
-                    .or_else(|| {
-                        dashboard
-                            .transition_failure_kind(&session.id)
-                            .map(|_| glyphs.failed)
-                    })
-                    .unwrap_or_else(|| facts.status_symbol(review, operation));
+                    .unwrap_or_else(|| facts.status_symbol(operation));
                 let prefix = format!("{}{symbol} ", if selected { glyphs.selected } else { "  " });
                 let (heading_key, heading_line) = match pending_heading.take() {
                     Some((key, line)) => (Some(key), Some(line)),
@@ -339,6 +335,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         detail,
                         review,
                         unreachable,
+                        attention,
                         operation,
                         now_epoch_seconds,
                         &target,
@@ -357,6 +354,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         detail,
                         review,
                         unreachable,
+                        attention,
                         operation,
                         now_epoch_seconds,
                         &target,
@@ -397,6 +395,7 @@ pub(crate) fn expanded_session_lines(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -407,7 +406,7 @@ pub(crate) fn expanded_session_lines(
     detailed_activity_clocks: bool,
     git: Option<&str>,
 ) {
-    let style = Style::default().fg(session_band_color(detail, unreachable, session.state));
+    let style = Style::default().fg(session_band_color(attention, detail, session.state));
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
     // The ellipsis action occupies the last three cells of the first line.
     // Keep the activity and output lines at the full content width so a
@@ -445,6 +444,7 @@ pub(crate) fn expanded_session_lines(
         detail,
         review,
         unreachable,
+        attention,
         operation,
         now_epoch_seconds,
         target,
@@ -496,6 +496,7 @@ pub(crate) fn session_activity_line(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -509,6 +510,7 @@ pub(crate) fn session_activity_line(
         unreachable,
         state: session.state,
         now_epoch_seconds,
+        attention,
     };
     let mut status = if let Some(operation) = operation {
         let (label, started_at) = operation_status(operation);
@@ -646,6 +648,7 @@ pub(crate) fn compact_session_lines(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -658,6 +661,7 @@ pub(crate) fn compact_session_lines(
         unreachable,
         state: session.state,
         now_epoch_seconds,
+        attention,
     };
     let style = facts.style();
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
@@ -681,6 +685,7 @@ pub(crate) fn compact_session_lines(
         detail,
         review,
         unreachable,
+        attention,
         operation,
         now_epoch_seconds,
         target,
@@ -698,6 +703,10 @@ pub(crate) struct SessionRowFacts<'a> {
     unreachable: bool,
     state: SessionState,
     now_epoch_seconds: u64,
+    /// How much this session needs a person, from the one shared ladder. The
+    /// symbol and the band colour both read it, so a row cannot say one thing
+    /// with its glyph and another with its colour.
+    attention: AttentionLevel,
 }
 
 impl SessionRowFacts<'_> {
@@ -705,44 +714,35 @@ impl SessionRowFacts<'_> {
     /// lifecycle and attention state remains visible at every width.
     pub(crate) fn status_symbol(
         &self,
-        review: Option<&RuntimeReviewView>,
         operation: Option<&SessionOperationDisplay>,
     ) -> &'static str {
-        use crate::AttentionLevel;
-
         let glyphs = theme::glyphs();
         if operation.is_some() {
             return glyphs.working;
         }
-        match self.state {
-            SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
-                return glyphs.failed;
-            }
-            SessionState::Stopped => return glyphs.stopped,
-            SessionState::Provisioning => return glyphs.starting,
-            SessionState::Checkpointing => return glyphs.checkpointing,
-            SessionState::Closing => return glyphs.stopping,
-            SessionState::Destroying => return glyphs.destroying,
-            SessionState::Disconnected => return glyphs.unreachable,
-            SessionState::Running => {}
-        }
-        if self.unreachable {
-            return glyphs.unreachable;
-        }
         // The same scale the attention queue and the badges read, so a row
         // can never show a symbol the queue disagrees with.
-        match crate::dashboard_sessions::attention_level(
-            self.detail,
-            review,
-            self.state,
-            false,
-            false,
-        ) {
-            AttentionLevel::Waiting => glyphs.waiting,
-            AttentionLevel::Failed => glyphs.failed,
-            AttentionLevel::Working => glyphs.working,
-            AttentionLevel::Unread => glyphs.unread,
-            AttentionLevel::Idle | AttentionLevel::Inactive => match self.detail {
+        match self.attention {
+            AttentionLevel::Failed => return glyphs.failed,
+            AttentionLevel::Unreachable => return glyphs.unreachable,
+            AttentionLevel::Waiting => return glyphs.waiting,
+            AttentionLevel::Unread => return glyphs.unread,
+            AttentionLevel::Working => return glyphs.working,
+            AttentionLevel::Idle | AttentionLevel::Inactive => {}
+        }
+        // What is left is a session that wants nothing: name the lifecycle
+        // state it is in, or say how idle it is.
+        match self.state {
+            SessionState::Stopped => glyphs.stopped,
+            SessionState::Provisioning => glyphs.starting,
+            SessionState::Checkpointing => glyphs.checkpointing,
+            SessionState::Closing => glyphs.stopping,
+            SessionState::Destroying => glyphs.destroying,
+            SessionState::Lost
+            | SessionState::Error
+            | SessionState::DestroyedWithDataLoss
+            | SessionState::Disconnected
+            | SessionState::Running => match self.detail {
                 Some(detail)
                     if detail.materialized_applied_event_ordinal.is_some()
                         || detail.activity.execution.is_some()
@@ -756,11 +756,7 @@ impl SessionRowFacts<'_> {
     }
 
     pub(crate) fn style(&self) -> Style {
-        Style::default().fg(session_band_color(
-            self.detail,
-            self.unreachable,
-            self.state,
-        ))
+        Style::default().fg(session_band_color(self.attention, self.detail, self.state))
     }
 
     pub(crate) fn clock(&self, detailed: bool) -> String {
@@ -837,6 +833,7 @@ pub(crate) fn session_display_clock(
             unreachable,
             state: session.state,
             now_epoch_seconds,
+            attention: dashboard.attention_level(&session.id),
         }
         .clock(detailed),
     )
@@ -944,46 +941,35 @@ pub(crate) fn sessions_title(
     ])
 }
 
-/// Reserve a title suffix for the number of pending questions. At narrow
+/// Reserve a title suffix for the sessions that want a person. At narrow
 /// widths a compact form keeps that count visible while preserving the
-/// Sessions label.
-pub(crate) fn sessions_title_with_pending(
+/// Sessions label; the narrowest form is the most urgent level's own glyph.
+pub(crate) fn sessions_title_with_attention(
     workspace_name: &str,
     width: u16,
-    pending_count: usize,
+    badge: Option<(AttentionLevel, usize)>,
     maximize_enabled: bool,
 ) -> Line<'static> {
     let base = sessions_title(workspace_name, width, maximize_enabled);
-    if pending_count == 0 {
+    let Some((level, count)) = badge else {
         return base;
-    }
+    };
     let budget = usize::from(pane_title_content_width(width, maximize_enabled));
-    let suffix = Span::styled(
-        format!(" · Needs input: {pending_count}"),
-        Style::default()
-            .fg(theme::palette().session_attention)
-            .add_modifier(Modifier::BOLD),
-    );
+    let style = Style::default()
+        .fg(attention_color(level))
+        .add_modifier(Modifier::BOLD);
+    let glyph = attention_glyph(level);
+    let suffix = Span::styled(format!(" · Attention: {count}"), style);
     if base.width().saturating_add(suffix.width()) <= budget {
         let mut spans = base.spans;
         spans.push(suffix);
         return Line::from(spans);
     }
-    let compact = Line::styled(
-        format!(" Sessions [{pending_count}]"),
-        Style::default()
-            .fg(theme::palette().session_attention)
-            .add_modifier(Modifier::BOLD),
-    );
+    let compact = Line::styled(format!(" Sessions [{glyph}{count}]"), style);
     if compact.width() <= budget {
         return compact;
     }
-    let tiny = Line::styled(
-        format!(" Q{pending_count}"),
-        Style::default()
-            .fg(theme::palette().session_attention)
-            .add_modifier(Modifier::BOLD),
-    );
+    let tiny = Line::styled(format!(" {glyph}{count}"), style);
     if tiny.width() <= budget {
         return tiny;
     }
@@ -995,38 +981,53 @@ pub(crate) fn sessions_block(
     workspace_name: &str,
     width: u16,
     size: PaneSize,
-    pending_count: usize,
+    badge: Option<(AttentionLevel, usize)>,
     maximize_enabled: bool,
 ) -> Block<'static> {
     theme::panel(focused)
-        .title(sessions_title_with_pending(
+        .title(sessions_title_with_attention(
             workspace_name,
             width,
-            if size == PaneSize::Minimized {
-                pending_count
-            } else {
-                0
-            },
+            badge.filter(|_| size == PaneSize::Minimized),
             maximize_enabled,
         ))
         .title(pane_size_controls(size, maximize_enabled))
 }
 
-/// The ` !2` or ` ✓3` a folded heading or a workspace tab carries: waiting
-/// sessions when there are any, otherwise unread ones, otherwise nothing.
-pub(crate) fn attention_badge(waiting: usize, unread: usize) -> Option<Span<'static>> {
+/// The glyph that stands for an attention level wherever it is named: a row
+/// symbol, a badge, or a pane title.
+pub(crate) fn attention_glyph(level: AttentionLevel) -> &'static str {
     let glyphs = theme::glyphs();
-    let text = if waiting > 0 {
-        format!(" {}{waiting}", glyphs.waiting)
-    } else if unread > 0 {
-        format!(" {}{unread}", glyphs.unread)
-    } else {
-        return None;
-    };
+    match level {
+        AttentionLevel::Failed => glyphs.failed,
+        AttentionLevel::Unreachable => glyphs.unreachable,
+        AttentionLevel::Waiting => glyphs.waiting,
+        AttentionLevel::Unread => glyphs.unread,
+        AttentionLevel::Working => glyphs.working,
+        AttentionLevel::Idle | AttentionLevel::Inactive => glyphs.idle,
+    }
+}
+
+/// The colour an attention level carries: red for something broken, the
+/// attention colour for something that is only waiting on a person.
+pub(crate) fn attention_color(level: AttentionLevel) -> Color {
+    match level {
+        AttentionLevel::Failed | AttentionLevel::Unreachable => theme::palette().session_error,
+        AttentionLevel::Waiting | AttentionLevel::Unread => theme::palette().session_attention,
+        AttentionLevel::Working | AttentionLevel::Inactive => theme::palette().session_activity,
+        AttentionLevel::Idle => theme::palette().session_idle,
+    }
+}
+
+/// The ` ×1` or ` ✓3` a folded heading, a workspace tab, or the footer
+/// carries: the most urgent level's glyph and how many sessions need a
+/// person at all.
+pub(crate) fn attention_badge(summary: Option<(AttentionLevel, usize)>) -> Option<Span<'static>> {
+    let (level, count) = summary?;
     Some(Span::styled(
-        text,
+        format!(" {}{count}", attention_glyph(level)),
         Style::default()
-            .fg(theme::palette().session_attention)
+            .fg(attention_color(level))
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -1071,7 +1072,7 @@ pub(crate) fn render_sessions(
             &filter_label,
             area.width,
             dashboard.pane_size(SupportPane::Sessions),
-            dashboard.pending_input_count(),
+            dashboard.sessions_attention_summary(),
             dashboard.pane_maximize_enabled(SupportPane::Sessions),
         ),
         area,
@@ -1385,31 +1386,27 @@ pub(crate) fn review_status_label(review: Option<&RuntimeReviewView>) -> Option<
 
 /// The colour a session's summary rows carry.
 ///
-/// Red means the session needs attention rather than reading: its relay is
-/// unreachable, or the session itself failed. A live, truly idle session is
-/// blue even after its messages have been read. Pending questions remain an
-/// attention signal, and lifecycle states do not claim to be idle.
+/// A session that wants a person takes that level's colour, so the band and
+/// the row symbol always agree: red for a failure or an unreachable worker,
+/// the attention colour for a question or unread output. What is left is a
+/// live session: blue when it is genuinely idle, amber while it or its
+/// lifecycle is busy.
 pub(crate) fn session_band_color(
+    level: AttentionLevel,
     detail: Option<&SessionDetail>,
-    unreachable: bool,
     state: SessionState,
 ) -> Color {
-    if unreachable || state == SessionState::Error {
-        return theme::palette().session_error;
+    if level == AttentionLevel::Idle {
+        // Without a detail projection there is nothing to call idle yet.
+        return if state == SessionState::Running
+            && detail.is_some_and(|detail| detail.activity.is_idle(detail.current_turn_started_at))
+        {
+            theme::palette().session_idle
+        } else {
+            theme::palette().session_activity
+        };
     }
-    let Some(detail) = detail else {
-        return theme::palette().session_activity;
-    };
-    if !detail.pending_elicitations.is_empty() {
-        return theme::palette().session_attention;
-    }
-    if state == SessionState::Running && detail.activity.is_idle(detail.current_turn_started_at) {
-        return theme::palette().session_idle;
-    }
-    if detail.has_unread() {
-        return theme::palette().session_attention;
-    }
-    theme::palette().session_activity
+    attention_color(level)
 }
 
 pub(crate) fn checkpoint_age(now_epoch_seconds: u64, checkpointed_at: &str) -> String {

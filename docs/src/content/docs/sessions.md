@@ -26,17 +26,28 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `■` | Stopped |
 | `⊗` | Destroying |
 
-Active work and requests for input take precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
-
-The same scale drives `prefix+o`, which opens the session that most needs you
-across every workspace, and the `!N` and `✓N` counts on workspace tabs and
-folded project headings. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
+A failure takes precedence over an unreachable worker, which takes precedence over a request for input, which takes precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
 
 With the ASCII symbol set (**Setup → Advanced → Symbols**, or automatically on
 a terminal without UTF-8) the same states read `*` working, `!` waiting, `+`
 unread, `-` idle, `.` unknown, `?` unreachable, `x` failed, `^` starting, `~`
 resuming, `<>` moving, `#` checkpointing, `v` stopping, `=` stopped, and `X`
 destroying.
+
+## Needs attention
+
+A session needs attention when it is waiting for you rather than working. There are four reasons, from most to least urgent:
+
+1. `×` **Failed**: the session, its last stop or move, or its review failed.
+2. `?` **Unreachable**: the worker cannot be reached, so nothing shown about the session is current.
+3. `!` **Needs input**: the agent asked a question, or a review produced findings to answer.
+4. `✓` **Unread**: the turn finished and nobody has read what it said.
+
+A session that is working, starting, stopping, or already read needs no attention.
+
+Each workspace tab carries the most urgent symbol among its own sessions and how many of them are flagged, as in `Default !2`. A tab with nothing flagged carries no badge. A folded project heading and a minimized Sessions pane carry the same badge.
+
+`prefix+o` opens the next session that needs you, in that order, and switches workspace when the next one is on another tab. `prefix+a` marks every session read, which clears only the `✓` reason; questions, failures, and unreachable sessions stay flagged. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
 
 ## Create a session
 

@@ -181,7 +181,7 @@ The default bindings:
 | `refresh` | `prefix+shift+r` | Refresh target capacity and profile quota |
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
-| `mark_all_read` | `prefix+a` | Mark all session activity as read |
+| `mark_all_read` | `prefix+a` | Mark unread session activity as read |
 | `next_attention` | `prefix+o` | Open the next session that needs you |
 | `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |

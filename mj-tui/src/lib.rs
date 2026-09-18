@@ -147,7 +147,10 @@ impl SessionStateFilter {
 
     pub(crate) fn admits(self, level: AttentionLevel) -> bool {
         match self {
-            Self::Blocked => matches!(level, AttentionLevel::Waiting | AttentionLevel::Failed),
+            Self::Blocked => matches!(
+                level,
+                AttentionLevel::Waiting | AttentionLevel::Unreachable | AttentionLevel::Failed
+            ),
             Self::Working => level == AttentionLevel::Working,
             Self::Idle => matches!(level, AttentionLevel::Idle | AttentionLevel::Inactive),
             Self::Done => level == AttentionLevel::Unread,
