@@ -1,5 +1,40 @@
 use super::*;
 
+/// Whether a session's durable state means its relay actor should stop.
+///
+/// `Closing` and `Destroying` are still in flight and their owners need the
+/// actor. The rest have ended: nothing will ever answer on this session's
+/// control socket again.
+fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
+    use mj_core::state::SessionState;
+    matches!(
+        state,
+        SessionState::Error
+            | SessionState::Lost
+            | SessionState::Stopped
+            | SessionState::DestroyedWithDataLoss
+    )
+}
+
+/// This session's durable state and stored cause, read off the actor's task.
+///
+/// Read only when the relay has already failed repeatedly, so the database
+/// work is rare, and on the blocking pool, because the actor's own task also
+/// serves this session's view.
+async fn durable_session_outcome(
+    session_id: &str,
+) -> Option<(mj_core::state::SessionState, Option<String>)> {
+    let session_id = session_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let state = crate::database::load_state().ok()?;
+        let record = state.sessions.get(&session_id)?;
+        Some((record.state, record.last_error.clone()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 pub(super) async fn run_session_actor(
     target: RelaySessionTarget,
     mut commands: mpsc::Receiver<ActorCommand>,
@@ -95,6 +130,32 @@ pub(super) async fn run_session_actor(
                                     ViewError::Unreachable(detail)
                                 }),
                             }, &view_tx, &updates);
+                        }
+                        // A session whose record has reached a terminal state
+                        // is never coming back on this actor. Without this the
+                        // actor reconnects to a socket that will never exist
+                        // for as long as the daemon runs, logging a failure
+                        // every backoff period (#1078).
+                        if failures >= UNREACHABLE_FAILURE_THRESHOLD
+                            && let Some((state, last_error)) =
+                                durable_session_outcome(&target.session_id).await
+                            && terminal_for_reconnect(state)
+                        {
+                            tracing::info!(
+                                session_id = target.session_id,
+                                ?state,
+                                "session reached a terminal state; retiring its relay actor"
+                            );
+                            let snapshot = view_tx.borrow().snapshot.clone();
+                            publish_view(&target.session_id, ManagedSessionView {
+                                snapshot,
+                                connected: false,
+                                error: Some(ViewError::Unreachable(match last_error {
+                                    Some(cause) => format!("this session ended as {state:?}: {cause}"),
+                                    None => format!("this session ended as {state:?}"),
+                                })),
+                            }, &view_tx, &updates);
+                            break;
                         }
                         if recovery_due {
                             last_recovery_probe = Some(tokio::time::Instant::now());
