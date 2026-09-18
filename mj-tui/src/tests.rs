@@ -3639,3 +3639,71 @@ fn the_notice_log_lists_notices_newest_first_and_stacked_failures() {
     dashboard.handle_key(key(KeyCode::Esc));
     assert_eq!(dashboard.mode, Mode::Dashboard);
 }
+
+#[test]
+fn a_failed_session_shows_its_error_instead_of_an_attach_that_cannot_finish() {
+    let mut session = running_session();
+    session.state = SessionState::Error;
+    session.last_error = Some("connect worker at /var/lib/hel/workers/abc: no such file".into());
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    assert!(dashboard.session_failed("session-1"));
+    let lines = drawn(&mut dashboard, 120, 40);
+    let text = lines.join("\n");
+    assert!(text.contains("Session failed"), "{lines:#?}");
+    assert!(text.contains("connect worker at"), "{lines:#?}");
+    assert!(
+        text.contains("Enter in Sessions opens its transcript or recovers it"),
+        "{lines:#?}"
+    );
+    assert!(!text.contains("Bringing your conversation"), "{lines:#?}");
+    // Enter still asks what to do rather than attaching blindly.
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(dashboard.mode, Mode::Confirm(_)),
+        "{:?}",
+        dashboard.mode
+    );
+}
+
+#[test]
+fn a_daemon_notice_about_another_workspace_names_that_workspace_first() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    assert_eq!(
+        dashboard.notice_naming_workspace("remote", "Credential sync failed".into()),
+        "In workspace Other: Credential sync failed"
+    );
+    assert_eq!(
+        dashboard.notice_naming_workspace("asks", "Credential sync failed".into()),
+        "Credential sync failed"
+    );
+    assert_eq!(
+        dashboard.notice_naming_workspace("missing", "Credential sync failed".into()),
+        "Credential sync failed"
+    );
+}
+
+#[test]
+fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    let long = format!(
+        "Credential sync for profile codex (session 2ac006c1) failed: relay proxy stderr (last 4 lines): {} the-very-last-word",
+        "x".repeat(150)
+    );
+    dashboard.set_failure_notice(long);
+    dashboard.dispatch_command(CommandId::NoticeLog);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let text = lines.join("\n");
+    assert!(text.contains("the-very-last-word"), "{lines:#?}");
+    let first = lines
+        .iter()
+        .position(|line| line.contains("Credential sync for profile"))
+        .expect("the message starts");
+    assert!(lines[first].contains("ago"), "{lines:#?}");
+    assert!(
+        lines[first + 1].contains("xxxx") || lines[first + 2].contains("xxxx"),
+        "continuation lines under the age column: {lines:#?}"
+    );
+}

@@ -92,6 +92,14 @@ Opening times out after 15 seconds. A failed or cancelled open stays stopped;
 press `Enter` on the session in Sessions to retry. Cancelling attachment leaves
 the agent running.
 
+A session whose target failed is never opened on its own: the startup pick
+skips it, and selecting it shows a **Session failed** band with the recorded
+error instead of an attach that cannot finish. `Enter` on it asks whether to
+read its transcript or recover it, and **Delete session** removes it. A daemon
+notice about a session in another workspace starts with that workspace's
+name, and the palette's **Recent messages** keeps the whole text of every
+notice, wrapped, so a long failure is readable after the footer cut it off.
+
 Draft saves run in the background. If the daemon does not confirm a save within
 15 seconds, Mjolnir reports the uncertainty and allows exit. An unconfirmed
 draft-save warning remains visible after the terminal closes; reconnect to

@@ -848,7 +848,28 @@ fn render_combined_themed(
                     pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
                 })
                 .and_then(|session_id| chats.get_mut(session_id));
+            let pane_failed = pane_session
+                .as_deref()
+                .filter(|session_id| opening.is_none() && dashboard.session_failed(session_id))
+                .map(str::to_owned);
             match (chat, pane_transition) {
+                (_, None) if pane_failed.is_some() => {
+                    let session_id = pane_failed.unwrap_or_default();
+                    render_empty_transcript(
+                        frame,
+                        transcript_area,
+                        EmptyConversation::Failed,
+                        dashboard.config.spinner,
+                        Some(dashboard.session_failure_text(&session_id)),
+                    );
+                    render_empty_prompt_advice(
+                        frame,
+                        prompt_area,
+                        false,
+                        EmptyConversation::Failed,
+                        dashboard,
+                    );
+                }
                 (_, Some((session_id, transition, failed))) => render_transition_surface(
                     frame,
                     transcript_area,
@@ -883,6 +904,7 @@ fn render_combined_themed(
                         transcript_area,
                         reason,
                         dashboard.config.spinner,
+                        None,
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
                 }
@@ -965,8 +987,16 @@ fn render_combined_themed(
                 }
                 None => {
                     let opening = dashboard.opening_session().is_some();
+                    // A selected session whose target failed has no worker to
+                    // attach to; say so and how to get out of it.
+                    let failed = (!opening)
+                        .then(|| selected_session_id.clone())
+                        .flatten()
+                        .filter(|session_id| dashboard.session_failed(session_id));
                     let reason = if opening {
                         EmptyConversation::Opening
+                    } else if failed.is_some() {
+                        EmptyConversation::Failed
                     } else if dashboard.ordered_sessions().is_empty() {
                         EmptyConversation::NoLiveSession
                     } else {
@@ -977,6 +1007,9 @@ fn render_combined_themed(
                         transcript_area,
                         reason,
                         dashboard.config.spinner,
+                        failed
+                            .as_deref()
+                            .map(|session_id| dashboard.session_failure_text(session_id)),
                     );
                     if opening {
                         // The real composer parks in the prompt band while the
@@ -1062,6 +1095,9 @@ enum EmptyConversation {
     NoConversationOpen,
     /// An attach is in flight, so a conversation is on its way.
     Opening,
+    /// The selected session's target failed: nothing to attach to until it
+    /// is recovered or its transcript is opened on purpose.
+    Failed,
 }
 
 /// The bordered chrome that stands in for a conversation when none is on
@@ -1075,7 +1111,38 @@ fn render_empty_transcript(
     transcript_area: Rect,
     reason: EmptyConversation,
     spinner_style: spinner::SpinnerStyle,
+    failure: Option<String>,
 ) {
+    if matches!(reason, EmptyConversation::Failed) {
+        let panel = theme::panel(false).title(" Session failed ").title_style(
+            Style::default()
+                .fg(theme::palette().error)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        );
+        let inner = panel.inner(transcript_area);
+        frame.render_widget(panel, transcript_area);
+        let body = Rect::new(
+            inner.x.saturating_add(1),
+            inner.y.saturating_add(1),
+            inner.width.saturating_sub(2),
+            inner.height.saturating_sub(1),
+        );
+        let mut lines = vec![
+            Line::styled(
+                "The session's target failed, so there is no conversation to open.",
+                Style::default().fg(theme::palette().error),
+            ),
+            Line::default(),
+        ];
+        lines.extend(
+            failure
+                .unwrap_or_default()
+                .lines()
+                .map(|line| Line::styled(line.to_owned(), theme::muted())),
+        );
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+        return;
+    }
     let mut panel = theme::panel(false).title(" Conversation ");
     if matches!(reason, EmptyConversation::Opening) {
         panel = panel.title(
@@ -1104,6 +1171,7 @@ fn render_empty_transcript(
                 "Bringing your conversation into focus{}",
                 theme::glyphs().ellipsis
             ),
+            EmptyConversation::Failed => String::new(),
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -1163,6 +1231,19 @@ fn render_empty_prompt_advice(
                         format!("Esc cancels · select another session to switch · {detach} quits")
                     }
                     None => "Esc cancels · select another session to switch".to_owned(),
+                },
+            ],
+        ),
+        EmptyConversation::Failed => (
+            " Session failed ",
+            [
+                "Enter in Sessions opens its transcript or recovers it on a fresh target."
+                    .to_owned(),
+                match dashboard.first_key_label(crate::CommandId::Palette) {
+                    Some(palette) => {
+                        format!("{palette} then Delete session removes it for good.")
+                    }
+                    None => "Delete session in the command palette removes it for good.".to_owned(),
                 },
             ],
         ),

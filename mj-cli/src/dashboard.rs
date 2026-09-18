@@ -168,7 +168,11 @@ fn startup_session_choice<'a>(
     sessions
         .into_iter()
         .filter(|session| {
-            Some(session.workspace_id.as_str()) == workspace_id && session.state.is_active()
+            Some(session.workspace_id.as_str()) == workspace_id
+                && session.state.is_active()
+                // A failed target has no worker: opening it is a decision
+                // for the person, not a place to start.
+                && session.state != mj_core::state::SessionState::Error
         })
         .max_by(|left, right| {
             activity_at_ms(&left.id)

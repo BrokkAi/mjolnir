@@ -115,7 +115,10 @@ impl DashboardContext {
                 continue;
             }
             self.reported_notice_id = Some(notice.id);
-            self.dashboard.set_notice(notice.text);
+            let text = self
+                .dashboard
+                .notice_naming_workspace(&notice.session_id, notice.text);
+            self.dashboard.set_notice(text);
         }
     }
 
