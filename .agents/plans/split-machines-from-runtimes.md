@@ -11,7 +11,7 @@ After this change the configuration file and the Settings screen have two separa
 ## Progress
 
 - [x] (2026-09-17) Milestone 1: stored configuration shape (`Machine`, `StoredTarget`, `StoredConfig`), lossless conversion both ways, legacy migration on load, version 11, validation, and round-trip tests in `mj-core`.
-- [ ] Milestone 2: shared cache host keyed by machine (`CacheHost::Local | Ssh`), `preview_build_cache` taking a machine, and the controller's mbx tests.
+- [x] (2026-09-17) Milestone 2: shared cache host keyed by machine (`CacheHost::Local | Ssh`), `preview_build_cache` taking a machine, `resolve_machine_input_path`, the dashboard action payloads, and the controller's mbx tests.
 - [ ] Milestone 3: Settings screen pages "Machines" and "Runtimes", machine choice on runtimes, build cache preview under machines, path resolution under machines, detection inserting runtimes on `local`, and TUI behavior tests.
 - [ ] Milestone 4: documentation, the launch-template script, and the end-to-end fixtures write the new shape; full workspace validation.
 
@@ -25,7 +25,18 @@ Known transient state: between Milestone 1 and Milestone 3, four Settings-screen
 - Observation: a `Config` assembled in memory carries no `machines`, but the same configuration read back from a file does, because saving names the hosts its targets share. Equality between "the config I built" and "the config that was loaded" is therefore not automatic.
   Evidence: `raw_ssh_permissions_are_required_and_podman_rejects_them` and `controller::resume::tests::a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint` both compared a hand-built config against a loaded one and failed with `machines: {}` on one side and `machines: {"builder": Ssh { .. }}` on the other. Both tests now state the machine that saving names.
 
+- Observation: `save_setup_at` in `mj-cli/src/dashboard/io/spawn.rs` decided whether an implicit local target was "unchanged" by comparing the editor's JSON against `serde_json::to_value(&TargetTemplate)`, which is the fused shape. Once the editor works in the stored shape those never matched, the merge base lost every implicit target, and saving an edited implicit target failed with "Setup / targets changed in another client."
+  Evidence: `dashboard::io::tests::settings_can_override_an_implicit_local_target_without_a_setup_file` failed with exactly that message. The comparison now uses the stored form taken from `serde_json::to_value(&Config::default().with_local_targets())`.
+
 ## Decision Log
+
+- Decision: `CacheHost` carries no container engine, and `git_cache`'s `managed_sessions` takes the engine name as an argument instead.
+  Rationale: the plan's `CacheHost::Local | Ssh` is a machine, but `mj-controller/src/controller/git_cache.rs` used the old five variants to choose between `podman ps`, `docker ps` and `container list`. The engine belongs to the runtime, and `targets::TargetTemplate::container_engine()` already names it, so the caller in `prepare` passes it down.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: `resolve_target_input_path` stays for launch-time path resolution, and a new `resolve_machine_input_path` serves the Settings screen. Both share `resolve_ssh_input_path`.
+  Rationale: the Settings screen edits machines and runtimes that may not resolve into a target at all, while the launch surfaces still hold a target. One shared SSH implementation keeps the two honest.
+  Date/Author: 2026-09-17, Fable.
 
 - Decision: Keep `mj_core::config::TargetTemplate` (the eight-variant fused enum) as the in-memory, resolved type that every consumer already matches on, and introduce the machine/runtime split only in the stored form (the TOML file and the JSON draft the Settings screen edits).
   Rationale: an inventory found over a hundred match sites on the fused enum across mj-core, mj-controller, mj-cli, mj-client, and mj-tui, plus the SQLite `session_targets.kind` CHECK constraint and the web viewer's `kind` strings, all of which need the resolved host-plus-runtime pair. Rewriting them would be pure churn with no behavior change. The user-visible goals (one host concept, machine-owned mbx settings, separate pages) are all at the stored layer.
@@ -62,6 +73,8 @@ Known transient state: between Milestone 1 and Milestone 3, four Settings-screen
 - Decision: Config version 11 is a breaking file change for older builds, handled by the existing `newer_version` guard which makes an older build refuse to load or overwrite the file with a clear "Update Mjolnir" message.
   Rationale: this is the established mechanism in `Config::load_from` and `Config::ensure_writable`; no new mechanism is needed.
   Date/Author: 2026-09-17, Fable.
+
+Note on stored session state: `SessionBuildCache.host` in an existing session record holds an old host key such as `local-podman` or `ssh-podman:dev@example.test`. After this change the keys are `local` and `ssh:<destination>`, so a session resumed across the upgrade does not recognise its recorded host and resolves the cache again on the machine it is resuming on. That is the same path a moved session already takes, it inspects the same machine, and nothing is lost.
 
 ## Outcomes & Retrospective
 

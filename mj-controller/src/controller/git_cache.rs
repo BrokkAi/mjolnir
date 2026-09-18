@@ -31,39 +31,28 @@ impl CacheHost {
             .stage(ProvisionStage::Cloning)
     }
 
-    fn managed_sessions(&self, executor: &impl CommandExecutor) -> Result<Vec<String>> {
-        let remote = match self {
-            Self::LocalPodman | Self::SshPodman(_) => vec![
-                "podman".to_owned(),
-                "ps".to_owned(),
-                "--all".to_owned(),
-                "--filter".to_owned(),
-                format!("label={}=true", targets::MANAGED_LABEL),
-                "--format".to_owned(),
-                "json".to_owned(),
-            ],
-            Self::LocalDocker => vec![
-                "docker".to_owned(),
-                "ps".to_owned(),
-                "--all".to_owned(),
-                "--filter".to_owned(),
-                format!("label={}=true", targets::MANAGED_LABEL),
-                "--format".to_owned(),
-                "json".to_owned(),
-            ],
-            Self::SshDocker(_) => vec![
-                "docker".to_owned(),
-                "ps".to_owned(),
-                "--all".to_owned(),
-                "--filter".to_owned(),
-                format!("label={}=true", targets::MANAGED_LABEL),
-                "--format".to_owned(),
-                "json".to_owned(),
-            ],
-            Self::Apple => vec![
+    /// The sessions `engine` still has containers for on this host. The
+    /// engine is a property of the runtime, not of the machine, so the caller
+    /// names it.
+    fn managed_sessions(
+        &self,
+        engine: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<Vec<String>> {
+        let remote = match engine {
+            "container" => vec![
                 "container".to_owned(),
                 "list".to_owned(),
                 "--all".to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+            ],
+            engine => vec![
+                engine.to_owned(),
+                "ps".to_owned(),
+                "--all".to_owned(),
+                "--filter".to_owned(),
+                format!("label={}=true", targets::MANAGED_LABEL),
                 "--format".to_owned(),
                 "json".to_owned(),
             ],
@@ -101,7 +90,7 @@ impl PreparedCloneCache {
     #[cfg(test)]
     pub(super) fn from_mirrors(mirrors: BTreeMap<String, PathBuf>) -> Self {
         Self {
-            host: CacheHost::LocalPodman,
+            host: CacheHost::Local,
             session_root: PathBuf::from("/tmp/hel-git-cache"),
             mirrors,
         }
@@ -120,6 +109,7 @@ pub(super) fn prepare(
     executor: &(impl CommandExecutor + Sync),
 ) -> Option<PreparedCloneCache> {
     let host = CacheHost::for_target(target)?;
+    let engine = target.container_engine()?;
     let repositories = bundle
         .repositories
         .iter()
@@ -236,7 +226,7 @@ pub(super) fn prepare(
         access: crate::targets::MountAccess::Ro,
     });
 
-    let mut live_sessions = match host.managed_sessions(executor) {
+    let mut live_sessions = match host.managed_sessions(engine, executor) {
         Ok(sessions) => sessions,
         Err(error) => {
             executor.notify_notice(&format!(
@@ -581,7 +571,7 @@ mod tests {
         };
         let token = "github-token-that-must-stay-private";
         let _ = prepare_repository(
-            &CacheHost::LocalPodman,
+            &CacheHost::Local,
             Path::new("/home/test/.cache/mjolnir/git"),
             "abc123",
             "https://github.com/example/app.git",
@@ -599,11 +589,11 @@ mod tests {
     }
 
     #[test]
-    fn apple_and_ssh_hosts_use_their_native_command_boundaries() {
-        let apple = CacheHost::Apple.git_shell_command("true", [], "probe");
-        assert_eq!(apple.program, "sh");
+    fn local_and_ssh_hosts_use_their_native_command_boundaries() {
+        let local = CacheHost::Local.git_shell_command("true", [], "probe");
+        assert_eq!(local.program, "sh");
 
-        let ssh = CacheHost::SshPodman(SshTarget {
+        let ssh = CacheHost::Ssh(SshTarget {
             destination: "dev@example.test".to_owned(),
             ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
         })
@@ -634,7 +624,7 @@ mod tests {
 
         let host = CacheHost::for_target(&target).expect("Docker has a clone-cache host");
         assert_eq!(
-            host.managed_sessions(&executor).unwrap(),
+            host.managed_sessions("docker", &executor).unwrap(),
             [session_id.to_owned()]
         );
 
@@ -708,7 +698,7 @@ mod tests {
         }
 
         prepare_repository(
-            &CacheHost::LocalPodman,
+            &CacheHost::Local,
             &cache_root,
             "repository",
             source.to_str().unwrap(),
@@ -781,14 +771,8 @@ mod tests {
         assert!(oldest > 0, "du must see the older mirror's blocks");
         let limit = total - oldest.div_ceil(2);
 
-        collect_garbage_with_limit(
-            &CacheHost::LocalPodman,
-            &cache_root,
-            &[],
-            limit,
-            &ProcessExecutor,
-        )
-        .unwrap();
+        collect_garbage_with_limit(&CacheHost::Local, &cache_root, &[], limit, &ProcessExecutor)
+            .unwrap();
 
         assert!(!old.exists());
         assert!(recent.exists());
@@ -809,7 +793,7 @@ mod tests {
         }
 
         collect_garbage_with_limit(
-            &CacheHost::LocalPodman,
+            &CacheHost::Local,
             &cache_root,
             &["live-session".to_owned()],
             CACHE_MAX_KIB,

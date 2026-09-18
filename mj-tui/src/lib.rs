@@ -169,14 +169,16 @@ pub enum DashboardAction {
         draft: serde_json::Value,
         path: Vec<String>,
         value: String,
-        target: Box<mj_core::config::TargetTemplate>,
+        /// The machine the path belongs to, which is what owns a home
+        /// directory to expand `~` against.
+        machine: Box<mj_core::config::Machine>,
     },
-    /// Resolve the automatic build cache values for a target's host so the
-    /// settings page can show them. `key` identifies the settings resolved.
+    /// Resolve the automatic build cache values for a machine so the settings
+    /// page can show them. `key` identifies the settings resolved.
     PreviewBuildCache {
         generation: u64,
         key: serde_json::Value,
-        target: Box<mj_core::config::TargetTemplate>,
+        machine: Box<mj_core::config::Machine>,
         global: mj_core::config::BuildCacheConfig,
     },
     /// Measure how much disk Mjolnir's session copies use, and how much an

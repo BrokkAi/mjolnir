@@ -716,33 +716,59 @@ impl SetupDialog {
         {
             return Ok(None);
         }
-        let target: mj_core::config::TargetTemplate =
-            serde_json::from_value(self.draft["targets"][&editor.path[1]].clone())
-                .map_err(|e| e.to_string())?;
+        let machine = self
+            .machine_for_path(&editor.path)
+            .ok_or_else(|| "This setting has no machine to resolve the path on".to_owned())?;
         self.notice = Some("Resolving path…".into());
         Ok(Some(DashboardAction::ResolveSetupPath {
             generation: self.generation,
             draft: self.draft.clone(),
             path: editor.path.clone(),
             value: editor.input.value().to_owned(),
-            target: Box::new(target),
+            machine: Box::new(machine),
         }))
     }
 
-    /// The target whose build cache page is showing, with the settings its
+    /// The machine a draft path belongs to: the machine itself under
+    /// `machines`, and the machine a runtime names under `targets`.
+    fn machine_for_path(&self, path: &[String]) -> Option<mj_core::config::Machine> {
+        let machine_id = match path.first().map(String::as_str)? {
+            "machines" => path.get(1)?.clone(),
+            "targets" => self.draft["targets"][path.get(1)?]["machine"]
+                .as_str()
+                .unwrap_or(mj_core::config::LOCAL_MACHINE_ID)
+                .to_owned(),
+            _ => return None,
+        };
+        self.machine(&machine_id)
+    }
+
+    /// One machine from the draft. This machine is always available, whether
+    /// or not the draft spells it out.
+    fn machine(&self, machine_id: &str) -> Option<mj_core::config::Machine> {
+        match self.draft["machines"].get(machine_id) {
+            Some(machine) => serde_json::from_value(machine.clone()).ok(),
+            None if machine_id == mj_core::config::LOCAL_MACHINE_ID => {
+                Some(mj_core::config::Machine::Local { build_cache: None })
+            }
+            None => None,
+        }
+    }
+
+    /// The machine whose build cache page is showing, with the settings its
     /// preview depends on.
     fn build_cache_page(&self) -> Option<(String, Value)> {
-        let [section, target_id, page] = self.path.as_slice() else {
+        let [section, machine_id, page] = self.path.as_slice() else {
             return None;
         };
-        if section != "targets" || page != "build_cache" {
+        if section != "machines" || page != "build_cache" {
             return None;
         }
         let key = serde_json::json!({
-            "target": self.draft["targets"][target_id],
+            "machine": self.draft["machines"][machine_id],
             "global": self.draft["build_cache"],
         });
-        Some((target_id.clone(), key))
+        Some((machine_id.clone(), key))
     }
 
     /// Start resolving the build cache page's automatic values on the target's
@@ -758,23 +784,23 @@ impl SetupDialog {
         {
             return DashboardAction::None;
         }
-        let target: mj_core::config::TargetTemplate =
-            match serde_json::from_value(key["target"].clone()) {
-                Ok(target) => target,
-                // A draft that does not parse yet has nothing to resolve.
-                Err(_) => return DashboardAction::None,
-            };
+        let machine: mj_core::config::Machine = match serde_json::from_value(key["machine"].clone())
+        {
+            Ok(machine) => machine,
+            // A draft that does not parse yet has nothing to resolve.
+            Err(_) => return DashboardAction::None,
+        };
         let global: mj_core::config::BuildCacheConfig =
             serde_json::from_value(key["global"].clone()).unwrap_or_default();
         self.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: BuildCachePreviewResult::Resolving,
         });
-        self.notice = Some("Resolving the build cache defaults on the target's host…".into());
+        self.notice = Some("Resolving the build cache defaults on the machine…".into());
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
-            target: Box::new(target),
+            machine: Box::new(machine),
             global,
         }
     }
@@ -791,7 +817,7 @@ impl SetupDialog {
         let label = match &preview.result {
             BuildCachePreviewResult::Resolving => "Resolving…".to_owned(),
             BuildCachePreviewResult::Failed(_) => "Unknown".to_owned(),
-            BuildCachePreviewResult::Ready(None) => "Not available for this target kind".to_owned(),
+            BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
                 "enabled" if preview.off_reason.is_some() => "Off".to_owned(),
                 "enabled" => "On".to_owned(),
