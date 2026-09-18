@@ -316,7 +316,7 @@ pub(crate) fn test_git(directory: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-pub(super) fn committed_repository() -> tempfile::TempDir {
+pub(crate) fn committed_repository() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     test_git(directory.path(), &["init", "--initial-branch=master"]);
     test_git(directory.path(), &["config", "user.name", "Hel Tests"]);
@@ -405,7 +405,7 @@ impl crate::targets::CommandExecutor for FixtureRemoteExecutor {
 }
 
 /// A managed raw session whose worktree really exists in `repository`.
-pub(super) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
+pub(crate) fn managed_worktree_session(repository: &Path, session_id: &str) -> SessionRecord {
     let worktree = ManagedWorktree {
         source_project_directory: repository.to_path_buf(),
         source_repository: repository.to_path_buf(),

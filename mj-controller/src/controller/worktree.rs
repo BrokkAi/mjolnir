@@ -1374,6 +1374,28 @@ pub(super) fn managed_worktree_checkout_exists(
     path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)
 }
 
+/// Whether a managed worktree's checkout holds work that removing it would
+/// destroy. A checkout that is already gone holds nothing.
+///
+/// This asks the session's own worktree the porcelain question
+/// [`create_managed_worktree`] asks of the primary checkout.
+pub(super) fn managed_worktree_checkout_is_dirty(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+) -> Result<bool> {
+    if !path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
+        return Ok(false);
+    }
+    let status = managed_git_stdout(
+        executor,
+        &worktree.target,
+        &worktree.worktree_root,
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        "inspect managed worktree changes",
+    )?;
+    Ok(!status.is_empty())
+}
+
 /// Whether a new managed worktree needs the primary checkout to be clean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrimaryCheckoutRequirement {

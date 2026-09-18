@@ -208,11 +208,18 @@ pub(super) async fn handle_action(
             detail,
             updated_at,
         } => {
+            let marked_session_id = session_id.clone();
             let changed = blocking(move || {
                 crate::database::mark_session_target_missing(&session_id, &detail, &updated_at)
             })
             .await?;
             refresh_runtime_controller(state).await;
+            // The same discard the daemon's own view watcher does, so a
+            // surface that reports the missing target over RPC ends up with
+            // the same store.
+            if changed == Some(SessionState::Lost) {
+                state.discard_lost_session(marked_session_id).await;
+            }
             Ok(DaemonReply::OptionalSessionState(changed))
         }
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
