@@ -12,7 +12,10 @@ use super::worker_binary::{WorkerProbe, probe_worker};
 
 /// A harness such as Codex can spend minutes on its first launch, so the
 /// readiness wait has to outlast a slow harness boot rather than a fast one.
-const NATIVE_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// The daemon's own readiness timer reuses this, so the two cannot disagree
+/// about how long a harness is given to open its session.
+pub(crate) const NATIVE_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a worker that has said nothing at all is waited for. A worker that
 /// is recording startup progress is waited for longer; see
