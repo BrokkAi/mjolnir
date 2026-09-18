@@ -72,7 +72,9 @@ pub(super) fn write_checkpoint_gate_archive(
 
 /// The same archive for a session whose harness is not Codex. Whether a resume
 /// keeps native continuity is decided by the archived harness kind, so a test
-/// about a same-harness move has to be able to name it.
+/// about a same-harness move has to be able to name it. Its only caller is the
+/// Unix-gated in-place move fixture, so on Windows it would be dead code.
+#[cfg(unix)]
 pub(super) fn write_checkpoint_gate_archive_for_harness(
     directory: &Path,
     session_id: &str,

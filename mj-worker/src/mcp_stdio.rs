@@ -63,8 +63,9 @@ impl Progress {
     }
 
     /// A handle that reports nothing, for tests that call a handler directly
-    /// with no client behind it.
-    #[cfg(test)]
+    /// with no client behind it. Only the Unix-socket subagent tests need one,
+    /// so on Windows it would be dead code.
+    #[cfg(all(test, unix))]
     pub fn silent(interval: Duration) -> Self {
         Self {
             token: None,

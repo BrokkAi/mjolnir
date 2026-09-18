@@ -9,6 +9,11 @@ pub struct ViewerSnapshot {
     /// Clients use this as the clock for live activity cards.
     #[serde(default)]
     pub server_time_ms: i64,
+    /// The controller build serving this viewer, so a browser or the desktop
+    /// window can name the Mjolnir it is talking to. Absent from a snapshot
+    /// written by an older controller.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_version: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<ViewerWorkspace>,
     pub sessions: Vec<ViewerSession>,
@@ -223,6 +228,7 @@ impl ViewerSnapshot {
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
+            server_version: env!("CARGO_PKG_VERSION").to_owned(),
             workspaces: Vec::new(),
             sessions,
             profiles,
