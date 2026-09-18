@@ -268,7 +268,12 @@ pub(super) async fn set_session_config(
         .block_task()
         .await
         .with_context(|| format!("set session {key} to {value}"))?;
-    *options = response.config_options;
+    // An answer with no configuration at all says nothing about the session.
+    // Adopting it would drop every selector the harness advertises, which is
+    // worse than a stale value, so the catalogue in hand stays.
+    if !response.config_options.is_empty() {
+        *options = response.config_options;
+    }
     adopt_requested_value(options, &option_id, previous.as_deref(), value);
     Ok(())
 }
@@ -288,7 +293,11 @@ fn selector_current_value(kind: &SessionConfigKind) -> Option<String> {
 /// the next turn. The request succeeded, so the requested value is the applied
 /// one and the answer has to say so.
 ///
-/// Only that one case is corrected. A harness that reports any other value has
+/// A harness that reports no value for the selector at all is corrected the
+/// same way, for the same reason: it has not named an effective value, and the
+/// request it just accepted did.
+///
+/// Only those cases are corrected. A harness that reports any other value has
 /// normalized or replaced the request, so its answer stands and the mismatch
 /// stays visible. Every other selector keeps what the harness reported too,
 /// because a model change can legitimately reset the rest of the configuration.
@@ -307,8 +316,9 @@ fn adopt_requested_value(
     let SessionConfigKind::Select(select) = &mut applied.kind else {
         return;
     };
-    if select.current_value.to_string() != value
-        && previous.is_some_and(|previous| previous == select.current_value.to_string())
+    let reported = select.current_value.to_string();
+    if reported != value
+        && (reported.trim().is_empty() || previous.is_some_and(|previous| previous == reported))
     {
         select.current_value = SessionConfigValueId::new(value.to_owned());
     }

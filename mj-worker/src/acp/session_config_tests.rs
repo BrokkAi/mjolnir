@@ -154,6 +154,47 @@ for line in sys.stdin:
     script
 }
 
+/// A harness that applies a selector change and answers with no configuration
+/// at all, saying nothing about what the session now uses.
+fn silent_answer_harness(root: &std::path::Path) -> PathBuf {
+    let script = root.join("silent_answer.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+model, effort = 'default', 'low'
+def options():
+    return [
+      {'id':'model_id','name':'Model','category':'model','type':'select',
+       'currentValue':model,'options':[{'value':x,'name':x} for x in ['default','chosen']]},
+      {'id':'thinking','name':'Thinking','category':'thought_level','type':'select',
+       'currentValue':effort,'options':[{'value':x,'name':x} for x in ['low','high','max']]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params = request.get('params', {})
+    if method == 'initialize': result = {'protocolVersion':1}
+    elif method in ('session/new','session/load'):
+        result = {'sessionId':'native','configOptions':options()}
+    elif method == 'session/set_config_option':
+        key, value = params['configId'], params['value']
+        if key == 'model_id': model = value
+        elif key == 'thinking': effort = value
+        else: raise AssertionError(key)
+        # Applied, and answered with nothing.
+        result = {'configOptions':[]}
+    elif method == 'session/prompt':
+        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ok'}}}}), flush=True)
+        result = {'stopReason':'end_turn'}
+    else: result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#,
+    )
+    .unwrap();
+    script
+}
+
 fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
@@ -676,6 +717,44 @@ async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_
     // real mismatch and it has to stay visible.
     let options = set_config(&commands, &mut events, "effort", "max").await;
     assert_eq!(reported(&options, "effort"), "high");
+
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_change_the_harness_answers_with_no_configuration_keeps_the_selectors_and_the_new_value()
+{
+    let root = tempfile::tempdir().unwrap();
+    let spec = launch(
+        root.path(),
+        silent_answer_harness(root.path()),
+        AcceptedSessionConfig::default(),
+    );
+    let (commands, requests) = mpsc::channel(8);
+    let (events_tx, mut events) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    configured(&mut events).await;
+
+    let options = set_config(&commands, &mut events, "model", "chosen").await;
+    assert_eq!(
+        reported(&options, "model"),
+        "chosen",
+        "an empty answer must not hide the value the call applied"
+    );
+    assert_eq!(
+        reported(&options, "effort"),
+        "low",
+        "an empty answer must not drop the selectors the session still has"
+    );
+
+    let options = set_config(&commands, &mut events, "effort", "max").await;
+    assert_eq!(reported(&options, "effort"), "max");
+    assert_eq!(reported(&options, "model"), "chosen");
 
     drop(commands);
     tokio::time::timeout(Duration::from_secs(10), runtime)
