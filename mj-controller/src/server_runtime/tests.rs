@@ -1008,9 +1008,12 @@ async fn a_new_action_that_never_publishes_still_answers_its_phone() {
 
     // Registration failed before the session reached the loop, which is
     // the completion path rather than the publication path.
-    replies.resolve(7, ActionOutcome::Failed);
+    let failed = ActionOutcome::Failed {
+        reference: "1234-7".to_owned(),
+    };
+    replies.resolve(7, failed.clone());
 
-    assert_eq!(answer.await.unwrap(), ActionOutcome::Failed);
+    assert_eq!(answer.await.unwrap(), failed);
     // A second resolution is a no-op, so a completion after a publication
     // cannot overwrite the answer already sent.
     replies.resolve(7, ActionOutcome::accepted());
@@ -1276,10 +1279,47 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
 }
 
 #[test]
+fn a_refused_action_reports_its_reason_and_any_other_failure_reports_a_reference() {
+    let refused = PhoneActionFailure::of(
+        &anyhow::Error::new(Refusal::precondition(
+            "this instance has no workspace yet; create one before starting a session",
+        ))
+        .context("start a phone session"),
+    );
+    assert_eq!(
+        refused.outcome("77-4"),
+        ActionOutcome::Refused(Refusal::precondition(
+            "this instance has no workspace yet; create one before starting a session"
+        ))
+    );
+
+    let internal = PhoneActionFailure::of(
+        &anyhow::anyhow!("ssh host build-07 refused the connection")
+            .context("provision the target"),
+    );
+    assert_eq!(
+        internal.outcome("77-4"),
+        ActionOutcome::Failed {
+            reference: "77-4".to_owned()
+        },
+        "an unmarked failure must not put its own text on the wire"
+    );
+    assert!(
+        internal.detail.contains("build-07"),
+        "the daemon log still gets the whole chain: {}",
+        internal.detail
+    );
+}
+
+#[test]
 fn a_later_successful_action_clears_a_session_s_recorded_failure() {
     let mut pending = std::collections::BTreeMap::new();
 
-    record_action_result(&mut pending, Some("session-1"), &Err("relay hiccup".into()));
+    record_action_result(
+        &mut pending,
+        Some("session-1"),
+        &Err(PhoneActionFailure::internal("relay hiccup")),
+    );
     assert_eq!(
         pending.get("session-1").map(String::as_str),
         Some("relay hiccup")
@@ -1293,7 +1333,11 @@ fn a_later_successful_action_clears_a_session_s_recorded_failure() {
     );
 
     // A completion with no session cannot clear or record anything.
-    record_action_result(&mut pending, None, &Err("orphaned".into()));
+    record_action_result(
+        &mut pending,
+        None,
+        &Err(PhoneActionFailure::internal("orphaned")),
+    );
     assert!(pending.is_empty());
 }
 

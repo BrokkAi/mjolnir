@@ -3512,9 +3512,25 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
             "no cancellable operation",
         ),
         (
-            ActionOutcome::Failed,
+            ActionOutcome::Failed {
+                reference: "4321-9".to_owned(),
+            },
             StatusCode::INTERNAL_SERVER_ERROR,
-            "could not start this action",
+            "reference 4321-9",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(
+                "this instance has no workspace yet; create one before starting a session",
+            )),
+            StatusCode::CONFLICT,
+            "no workspace yet",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::unusable(
+                "no target named laptop is configured",
+            )),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no target named laptop",
         ),
     ] {
         let (app, mut actions, _, _, _) = app();

@@ -11,6 +11,26 @@ fn newer_daemon_protocol_requires_updating_the_client() {
 }
 
 #[test]
+fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
+    let refused = LifecycleFailure::of(
+        &anyhow::Error::new(Refusal::precondition(
+            "repository \"app\" needs a network Git remote",
+        ))
+        .context("provision the session target"),
+    );
+    let rebuilt = refused.clone().into_error();
+    assert_eq!(
+        Refusal::of(&rebuilt).map(|refusal| refusal.message().to_owned()),
+        Some("repository \"app\" needs a network Git remote".to_owned()),
+        "a waiter reading the channel must still see the reason, not a bare string"
+    );
+
+    let internal = LifecycleFailure::of(&anyhow::anyhow!("ssh host build-07 refused"));
+    assert!(internal.refusal.is_none());
+    assert!(internal.detail.contains("build-07"));
+}
+
+#[test]
 fn graceful_close_retires_worker_polling_only_during_target_teardown() {
     assert!(!lifecycle_owns_worker_target(
         LifecycleKind::Close,

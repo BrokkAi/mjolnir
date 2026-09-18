@@ -164,9 +164,7 @@ impl RuntimeState {
     pub(super) fn start_deferred_cleanup(
         self: &Arc<Self>,
         session_id: String,
-    ) -> Result<
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
-    > {
+    ) -> Result<LifecycleWatch> {
         let result = self.start_or_join_lifecycle(
             session_id.clone(),
             LifecycleKind::Cleanup,

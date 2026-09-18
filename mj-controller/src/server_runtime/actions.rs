@@ -76,14 +76,14 @@ pub(super) fn track_started_phone_session(
 pub(super) fn record_action_result(
     pending_action_errors: &mut std::collections::BTreeMap<String, String>,
     session_id: Option<&str>,
-    result: &std::result::Result<(), String>,
+    result: &std::result::Result<(), PhoneActionFailure>,
 ) {
     let Some(session_id) = session_id else {
         return;
     };
     match result {
-        Err(error) => {
-            pending_action_errors.insert(session_id.to_owned(), error.clone());
+        Err(failure) => {
+            pending_action_errors.insert(session_id.to_owned(), failure.detail.clone());
         }
         Ok(()) => {
             pending_action_errors.remove(session_id);
@@ -101,7 +101,9 @@ pub(super) fn record_launch_failure(
     error: Option<String>,
 ) {
     failures.push(crate::server::ViewerLaunchFailure {
-        id: format!("{}-{action_id}", std::process::id()),
+        // The notice id is the same reference a generic 500 reports, so a
+        // browser notice and a CLI failure name the same daemon-log entry.
+        id: action_reference(action_id),
         workspace_id,
         session_id,
         error,
@@ -141,8 +143,18 @@ pub(super) async fn apply_phone_action(
                 let workspaces = crate::database::list_workspaces()?;
                 match workspaces.as_slice() {
                     [workspace] => workspace.id.clone(),
-                    [] => bail!("create a workspace before starting a phone session"),
-                    _ => bail!("phone session creation requires a workspace_id"),
+                    // Both are preconditions the caller can fix, so each says
+                    // so in its own words rather than becoming a generic 500.
+                    [] => {
+                        return Err(anyhow::Error::new(Refusal::precondition(
+                            "this instance has no workspace yet; create one before starting a session",
+                        )));
+                    }
+                    _ => {
+                        return Err(anyhow::Error::new(Refusal::precondition(
+                            "this instance holds more than one workspace; name the one to start the session in",
+                        )));
+                    }
                 }
             } else {
                 workspace_id

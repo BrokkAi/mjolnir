@@ -174,7 +174,10 @@ pub struct ViewerPromptImage {
 ///
 /// Only the outcome crosses this boundary. The controller's own failure text
 /// names profile homes, project paths and SSH hosts, so it stays on the
-/// controller and the phone gets a fixed message it can act on.
+/// controller. A caller therefore gets one of two things: a [`Refusal`], whose
+/// sentence was written for it at the place the failure was produced, or a
+/// generic internal failure carrying a reference that also appears in the
+/// daemon log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutcome {
     /// Admitted and now running; watch the snapshot for what happens next.
@@ -188,8 +191,13 @@ pub enum ActionOutcome {
     SessionBusy,
     /// A cancel found no operation to cancel.
     NotCancellable,
-    /// The controller could not start the action at all.
-    Failed,
+    /// The action was refused for a reason the caller can act on, and the
+    /// refusal says what it is.
+    Refused(Refusal),
+    /// The controller could not start the action, for a reason that stays
+    /// server-side. `reference` is logged with the failure, so the person who
+    /// owns the daemon can find the entry that explains it.
+    Failed { reference: String },
 }
 
 impl ActionOutcome {
@@ -222,9 +230,22 @@ impl ActionOutcome {
                 StatusCode::CONFLICT,
                 "the session has no cancellable operation",
             )),
-            Self::Failed => Some(ApiError::new(
+            // A refusal is a precondition the caller can fix, so it answers
+            // 4xx with the sentence written for it: 409 for a state that has
+            // to change first, 422 for a request naming something unusable.
+            Self::Refused(refusal) => Some(ApiError::new(
+                match refusal.kind() {
+                    RefusalKind::Precondition => StatusCode::CONFLICT,
+                    RefusalKind::Unusable => StatusCode::UNPROCESSABLE_ENTITY,
+                },
+                refusal.message().to_owned(),
+            )),
+            Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "the controller could not start this action",
+                format!(
+                    "the controller could not start this action; \
+                     the daemon log records the reason under reference {reference}"
+                ),
             )),
         }
     }
