@@ -104,6 +104,30 @@ impl ApiClient {
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        self.dispatch(request).await?.map_err(ApiError::into_error)
+    }
+
+    /// Send a request whose subject may simply not exist: a 404 is `None`
+    /// rather than an error, and every other refusal is reported as
+    /// [`ApiClient::send`] reports it.
+    async fn send_optional(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Option<reqwest::Response>> {
+        match self.dispatch(request).await? {
+            Ok(response) => Ok(Some(response)),
+            Err(failure) if failure.status == reqwest::StatusCode::NOT_FOUND => Ok(None),
+            Err(failure) => Err(failure.into_error()),
+        }
+    }
+
+    /// One request, separating "the API refused it" from "the API could not be
+    /// reached or does not speak this contract". Only the refusal is something
+    /// a caller may interpret.
+    async fn dispatch(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<std::result::Result<reqwest::Response, ApiError>> {
         let response = request
             .bearer_auth(&self.token)
             .send()
@@ -112,7 +136,7 @@ impl ApiClient {
         check_version(&response)?;
         let status = response.status();
         if status.is_success() {
-            return Ok(response);
+            return Ok(Ok(response));
         }
         let body = response.bytes().await.unwrap_or_default();
         let message = serde_json::from_slice::<serde_json::Value>(&body)
@@ -123,10 +147,7 @@ impl ApiClient {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_owned());
-        match message.is_empty() {
-            true => Err(anyhow!("the Mjolnir API answered {status}")),
-            false => Err(anyhow!("the Mjolnir API answered {status}: {message}")),
-        }
+        Ok(Err(ApiError { status, message }))
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -210,8 +231,47 @@ impl ApiClient {
         .await
     }
 
-    pub(crate) async fn session(&self, session_id: &str) -> Result<ApiSession> {
-        self.get_json(&format!("/sessions/{session_id}")).await
+    /// One session, or `None` when the daemon knows no session with that id.
+    /// An id that names nothing here may still name a SessionWiki row.
+    pub(crate) async fn session_if_known(&self, session_id: &str) -> Result<Option<ApiSession>> {
+        let request = self
+            .http
+            .get(self.url(&format!("/sessions/{session_id}")))
+            .timeout(REQUEST_TIMEOUT);
+        match self.send_optional(request).await? {
+            Some(response) => decode(response).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// What the SessionWiki index knows about one row, or `None` when the
+    /// index holds no session with that id.
+    pub(crate) async fn wiki_session(
+        &self,
+        wiki_id: &str,
+    ) -> Result<Option<mj_client::daemon::WikiSessionInfo>> {
+        let request = self
+            .http
+            .get(self.url(&format!("/wiki/sessions/{wiki_id}")))
+            .timeout(REQUEST_TIMEOUT);
+        match self.send_optional(request).await? {
+            Some(response) => decode(response).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Start a new session carrying a hand-off compacted from an indexed one.
+    pub(crate) async fn wiki_restore(
+        &self,
+        wiki_id: &str,
+        request: &mj_controller::server::api::WikiRestoreBody,
+    ) -> Result<StartSessionResponse> {
+        self.post_json(
+            &format!("/wiki/sessions/{wiki_id}/restore"),
+            request,
+            Duration::from_secs(660),
+        )
+        .await
     }
 
     pub(crate) async fn start(
@@ -488,6 +548,22 @@ async fn probe_api(base_url: &str) -> Result<()> {
     )
 }
 
+/// A request the API refused, kept apart from a transport failure so a caller
+/// can tell "there is no such thing" from "the call did not work".
+struct ApiError {
+    status: reqwest::StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn into_error(self) -> anyhow::Error {
+        match self.message.is_empty() {
+            true => anyhow!("the Mjolnir API answered {}", self.status),
+            false => anyhow!("the Mjolnir API answered {}: {}", self.status, self.message),
+        }
+    }
+}
+
 /// What an export answered with.
 pub(crate) enum ExportResult {
     Branch(PushedBranch),
@@ -639,7 +715,11 @@ mod tests {
 
         let sessions = client.sessions_in_workspace(None).await.unwrap();
         assert_eq!(sessions.sessions[0].id, "session-1");
-        let session = client.session("session-2").await.unwrap();
+        let session = client
+            .session_if_known("session-2")
+            .await
+            .unwrap()
+            .expect("the route answers with the session");
         assert_eq!(session.id, "session-2");
         assert_eq!(
             client

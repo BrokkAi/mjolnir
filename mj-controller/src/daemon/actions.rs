@@ -238,6 +238,9 @@ pub(super) async fn handle_action(
                 .wiki_hits(wiki_id, query, context_messages, per_message_chars)
                 .await?,
         )),
+        DaemonAction::WikiSession { wiki_id } => Ok(DaemonReply::WikiSession(
+            state.wiki_session(wiki_id).await?.map(Box::new),
+        )),
         DaemonAction::WikiRestore(request) => {
             let wiki_id = request.wiki_id.clone();
             let registered = state

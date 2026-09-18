@@ -94,7 +94,33 @@ impl ImportCommand {
 
 pub(crate) fn import(args: ImportArgs, workspace_id: &str) -> Result<()> {
     let (harness, args) = args.command.split();
-    import_native(harness, args, workspace_id)
+    import_native(harness, args, workspace_id).map(|_| ())
+}
+
+/// Adopt one named native session, answering with the Mjolnir session id the
+/// import produced, or `None` when the person declined the safety prompt.
+///
+/// This is `mj import <harness> --session <id>` without the subcommand, for
+/// `mj resume --wiki` continuing a row another tool wrote. It reads the same
+/// stock harness home, so a session the harness itself no longer keeps there
+/// cannot be imported this way.
+pub(crate) fn import_named_native_session(
+    harness: HarnessKind,
+    native_session_id: String,
+    workspace_id: &str,
+) -> Result<Option<String>> {
+    import_native(
+        harness,
+        NativeImportArgs {
+            session: Some(native_session_id),
+            latest: false,
+            bundle: None,
+            title: None,
+            allow_dirty_local: false,
+            allow_omitted_non_git: false,
+        },
+        workspace_id,
+    )
 }
 
 /// How the CLI names a harness while it reports what it selected.
@@ -116,7 +142,11 @@ fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
 /// Adopt one native session from the command line. Every harness takes these
 /// same steps; only the locator and the importer bound in [`LocatedImport`]
 /// differ.
-fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &str) -> Result<()> {
+fn import_native(
+    harness: HarnessKind,
+    args: NativeImportArgs,
+    workspace_id: &str,
+) -> Result<Option<String>> {
     let home = harness_config_home(harness)?;
     let selection = match args.session {
         Some(session) => ClaudeSessionSelection::NativeSessionId(session),
@@ -137,7 +167,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     let targets = session_edit_targets(&transcript, &home)?;
     if !confirm_import_safety(&targets, args.allow_dirty_local, args.allow_omitted_non_git)? {
         println!("{IMPORT_CANCELLED_MESSAGE}");
-        return Ok(());
+        return Ok(None);
     }
     // Resolve and persist a synthesized bundle while holding the config lock;
     // the archive scan then runs outside that lock so other settings do not
@@ -168,7 +198,7 @@ fn import_native(harness: HarnessKind, args: NativeImportArgs, workspace_id: &st
     session.workspace_id = workspace_id.to_owned();
     persist_imported_session(session)?;
     println!("{}", import_success_message(&imported));
-    Ok(())
+    Ok(Some(imported.session_id))
 }
 
 fn import_success_message(imported: &ImportedClaudeSession) -> String {

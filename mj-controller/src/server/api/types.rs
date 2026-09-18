@@ -563,7 +563,7 @@ pub struct WikiHitsQuery {
 
 /// The fields of a start request a restore needs. The archived session decides
 /// the rest: its title, and the project it ran in when the caller names none.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WikiRestoreBody {
     #[serde(default)]
