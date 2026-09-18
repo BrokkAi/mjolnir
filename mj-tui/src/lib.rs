@@ -75,6 +75,7 @@ pub use crate::ingest::{
 };
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
+pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
 pub use crate::workspaces::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 pub use mj_core::workspace::{PaneSize, PaneSizes};
 
@@ -339,6 +340,7 @@ pub enum DashboardAction {
     OpenConfig,
     DiscoverSetup {
         generation: u64,
+        scope: DetectScope,
     },
     SaveSetup {
         generation: u64,

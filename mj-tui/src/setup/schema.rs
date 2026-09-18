@@ -278,12 +278,14 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "theme" => {
             "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
         }
-        "profiles" => "Add an agent profile for each installed agent you want to run.",
+        "profiles" => {
+            "Add an agent profile for each installed agent you want to run, or use Detect profiles to find the agents installed on this machine."
+        }
         "home" => {
             "The agent's existing account directory, such as ~/.codex. ~ expands to your home when you apply. Sign in using the agent's own login command."
         }
         "targets" => {
-            "Add a machine or runtime, or use Detect machine to find this machine's installed agents. Choose its Type to see the settings it needs."
+            "Add a machine or runtime, or use Detect runtimes to find this machine's usable container runtimes. Choose its Type to see the settings it needs."
         }
         "phone" => {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."

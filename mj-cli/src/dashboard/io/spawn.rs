@@ -455,35 +455,53 @@ pub(crate) fn review_settings_choices(
 
 pub(crate) fn spawn_setup_discovery(
     generation: u64,
+    scope: DetectScope,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> JoinHandle<()> {
     spawn_cancellable_io(
         tracker,
-        "detecting setup",
+        match scope {
+            DetectScope::Profiles => "detecting agent profiles",
+            DetectScope::Runtimes => "detecting container runtimes",
+        },
         updates,
         move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE, RuntimeKind};
+            use mj_controller::setup::{self, DEFAULT_IMAGE};
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let discovery = setup::discover_current(&executor);
-            let mut config = setup::build_config(
-                &discovery.homes,
-                discovery.repository.as_ref(),
-                RuntimeKind::Podman,
-                DEFAULT_IMAGE,
-            );
-            config.targets.clear();
-            for runtime in discovery.runtimes.iter().filter(|runtime| runtime.usable) {
-                let (id, target) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                config.targets.insert(id.to_owned(), target);
+            let mut config = Config::default();
+            let mut rejected_runtimes = Vec::new();
+            match scope {
+                DetectScope::Profiles => {
+                    config = setup::profiles_config(&setup::discover_profiles(&executor));
+                }
+                DetectScope::Runtimes => {
+                    for runtime in setup::discover_runtimes(&executor) {
+                        if runtime.usable {
+                            let (id, target) =
+                                setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
+                            config.targets.insert(id.to_owned(), target);
+                        } else {
+                            rejected_runtimes.push(RejectedRuntime {
+                                label: runtime.kind.label().to_owned(),
+                                detail: runtime.detail,
+                                remediation: runtime.remediation,
+                            });
+                        }
+                    }
+                    #[cfg(unix)]
+                    config.targets.insert(
+                        "localhost".into(),
+                        mj_core::config::TargetTemplate::LocalBare,
+                    );
+                }
             }
-            #[cfg(unix)]
-            config.targets.insert(
-                "localhost".into(),
-                mj_core::config::TargetTemplate::LocalBare,
-            );
-            Ok(config)
+            Ok(SetupDetection {
+                scope,
+                config,
+                rejected_runtimes,
+            })
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )

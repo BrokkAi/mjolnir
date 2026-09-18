@@ -73,7 +73,7 @@ impl RuntimeKind {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Podman => "Podman",
             Self::Docker => "Docker",
@@ -212,6 +212,22 @@ pub fn run_setup_dialog(config_path: &Path) -> Result<SetupOutcome> {
 
 pub fn discover_current(executor: &impl CommandExecutor) -> SetupDiscovery {
     let home = dirs::home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    SetupDiscovery {
+        homes: discover_profiles(executor),
+        repository: discover_github_repository(executor, &cwd),
+        runtimes: discover_runtimes(executor),
+        aws: detect_aws(&CancellableProcessExecutor::with_timeout(AWS_PROBE_TIMEOUT)),
+        ssh_hosts: discover_ssh_hosts(home.as_deref()),
+    }
+}
+
+/// The installed agent homes alone. Callers that only add profiles use this
+/// instead of `discover_current`, which also runs container, AWS, and SSH
+/// probes whose results they would discard.
+pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome> {
+    let home = dirs::home_dir();
     let overrides = HarnessKind::ALL
         .into_iter()
         .filter_map(|kind| {
@@ -221,15 +237,19 @@ pub fn discover_current(executor: &impl CommandExecutor) -> SetupDiscovery {
     let mut homes =
         discover_harness_homes_with_executor(home.as_deref(), overrides.clone(), executor);
     discover_installed_harnesses(home.as_deref(), &overrides, &mut homes, executor);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    homes
+}
 
-    SetupDiscovery {
-        homes,
-        repository: discover_github_repository(executor, &cwd),
-        runtimes: probe_local_runtimes(executor, cfg!(target_os = "macos")),
-        aws: detect_aws(&CancellableProcessExecutor::with_timeout(AWS_PROBE_TIMEOUT)),
-        ssh_hosts: discover_ssh_hosts(home.as_deref()),
-    }
+/// The container runtimes on this machine alone, usable or not, so a caller
+/// can report why an unusable one was skipped.
+pub fn discover_runtimes(executor: &impl CommandExecutor) -> Vec<RuntimeProbe> {
+    probe_local_runtimes(executor, cfg!(target_os = "macos"))
+}
+
+/// A configuration holding the discovered profiles and nothing else, for
+/// merging into an existing configuration.
+pub fn profiles_config(homes: &[DiscoveredHome]) -> Config {
+    build_config_with_runtimes(homes, None, &[], None, None)
 }
 
 /// Read the concrete `Host` aliases from `~/.ssh/config`.

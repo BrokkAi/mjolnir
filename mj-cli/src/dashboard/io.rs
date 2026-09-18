@@ -27,9 +27,10 @@ use mj_controller::controller::ResumeRepositorySourcePreflight;
 use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
-    DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
-    RemoteRepositoryPreview, ReviewSettingsChoices, ReviewSettingsDiscoveryResult,
-    SessionOperationKind, WebViewerAccess,
+    DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
+    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
+    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, SetupDetection,
+    WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
@@ -174,7 +175,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     SetupDiscovered {
         generation: u64,
-        result: std::result::Result<Config, String>,
+        result: std::result::Result<mj_tui::SetupDetection, String>,
     },
     BuildCachePreviewed {
         generation: u64,
