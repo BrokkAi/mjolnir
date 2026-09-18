@@ -116,6 +116,30 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     })?;
     for row in rows {
         let (child_id, record) = row?;
+        // A relation whose child or parent is not among the sessions this load
+        // returned describes nothing. Keeping it would fail the state check
+        // below and make every later operation fail with it, which is how a
+        // sub-agent spawn came to be refused with "sub-agent ... has no child
+        // session" long after the child in question was gone (#1065). The load
+        // already skips a session whose harness it cannot parse; a relation
+        // that pointed at such a session is the same kind of residue, and
+        // `save_state_to` deletes these rows on the next save.
+        let missing = if !state.sessions.contains_key(&child_id) {
+            Some("child")
+        } else if !state.sessions.contains_key(&record.parent_session_id) {
+            Some("parent")
+        } else {
+            None
+        };
+        if let Some(missing) = missing {
+            tracing::warn!(
+                child_session_id = child_id,
+                parent_session_id = record.parent_session_id,
+                missing,
+                "dropping a sub-agent relation whose session is not in this state"
+            );
+            continue;
+        }
         state.subagents.insert(child_id, record);
     }
     load_targets(&connection, &mut state)?;
