@@ -44,6 +44,9 @@ A move that changes the target keeps today's behaviour. Failure or a daemon rest
 - Observation: `validate_move_checkpoint` re-reads the configuration with `Config::load()` and compares its fingerprint, so any controller test that reaches it must persist its config (and set `MJ_CONFIG_DIR`), not just hold it in memory.
   Evidence: `mj-controller/src/controller/move_session.rs`, `validate_move_checkpoint`.
 
+- Observation: `tests/e2e/session_move.py` cannot currently pass on this branch or on master, for a reason unrelated to this plan. Its first move is a combined profile-and-target move (the fresh path), and the destination worker exits with "the installed Codex adapter cannot pause a goal before explicit resume; update the adapter". That check (`mj-worker/src/acp/session.rs`, added in 73dfe169 on 2026-09-12) requires the adapter's initialize metadata to advertise `goal.resumePolicies` containing `pause` whenever a Codex session resumes with a native session id; the lab's fake adapter in `tests/e2e/reliability_lab.py` never advertises `resumePolicies`, and its last update (d28f9735, 2026-09-14) did not add it. The new in-place assertions in the script are therefore unexercised until the fixture learns goal pause. The in-place path is proved instead by `in_place_move_reinstalls_the_harness_without_removing_the_worker_root`, which drives `execute_move` with a real executor and a live relay.
+  Evidence: run of `python3 tests/e2e/session_move.py --hel ./target/debug/mj` on 560923c8; `grep -n resumePolicies tests/e2e/reliability_lab.py` is empty.
+
 ## Decision Log
 
 - Decision: in-place applies only when target template, attached mounts, and resource allocation are unchanged and `clear_resource_allocation` is false; retries and sub-agents always use the full path.
