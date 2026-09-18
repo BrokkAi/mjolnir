@@ -1,8 +1,9 @@
 //! Session provisioning, rollback, and worker-side Git bootstrap.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -41,6 +42,44 @@ const INHERITED_GIT_SETTINGS: &[&str] = &[
     "user.email",
     "user.name",
 ];
+
+/// How many sub-agent children may be brought up inside one container at the
+/// same time.
+///
+/// Starting a child means starting a harness, and a harness start inside a
+/// container is expensive: the reviewer sidecar already caps its own
+/// specialist lanes at three for the same reason. Measured on a local Podman
+/// target, ten children started one after another each reached their harness
+/// in about seven seconds, while four started at once left two or three of
+/// them past the 300-second harness-startup wait. Admitting two at a time
+/// keeps a burst slower but finished, instead of fast and failed.
+const CONTAINER_START_ADMISSION: usize = 2;
+
+/// The admission gate for one container, created on first use.
+///
+/// Keyed by the container the children share. A bare target has no gate: a
+/// child there is an ordinary process on a whole machine, and twenty
+/// sequential and four concurrent starts measured 2.8 seconds each.
+fn container_start_gate(locator: &targets::TargetLocator) -> Option<Arc<tokio::sync::Semaphore>> {
+    static GATES: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>> = OnceLock::new();
+    let container = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. }
+        | targets::TargetLocator::LocalDocker { container_id, .. }
+        | targets::TargetLocator::AppleContainer { container_id, .. }
+        | targets::TargetLocator::SshPodman { container_id, .. }
+        | targets::TargetLocator::SshDocker { container_id, .. } => container_id.clone(),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::SshBare { .. }
+        | targets::TargetLocator::AwsEc2 { .. } => return None,
+    };
+    let gates = GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Some(Arc::clone(gates.entry(container).or_insert_with(|| {
+        Arc::new(tokio::sync::Semaphore::new(CONTAINER_START_ADMISSION))
+    })))
+}
 
 /// Whether starting a child worker can be tried again.
 ///
@@ -215,6 +254,13 @@ impl Controller {
                     self.prepare_worker_files(session_id, &backend, &worker_root, syncing);
                 let result = match prepared {
                     Ok(()) => {
+                        // Held across the harness startup wait, which is the
+                        // part that does not survive a crowd.
+                        let gate = container_start_gate(&backend);
+                        let _admitted = match &gate {
+                            Some(gate) => gate.acquire().await.ok(),
+                            None => None,
+                        };
                         self.connect_and_start_worker(
                             session_id,
                             executor,
