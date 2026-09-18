@@ -1384,6 +1384,26 @@ fn build_cache_sizes_accept_the_spellings_mbx_accepts() {
 }
 
 #[test]
+fn build_cache_sizes_convert_to_and_from_whole_gigabytes() {
+    for (text, gigabytes) in [
+        ("20GB", 20),
+        ("100GiB", 107),
+        ("500GiB", 537),
+        ("25000000000B", 25),
+        ("400MB", 0),
+        ("600MB", 1),
+    ] {
+        assert_eq!(build_cache_size_gigabytes(text), Some(gigabytes), "{text}");
+    }
+    assert_eq!(build_cache_size_gigabytes("20 gigabytes"), None);
+    assert_eq!(build_cache_size_from_gigabytes(25), "25GB");
+    assert_eq!(
+        build_cache_size_gigabytes(&build_cache_size_from_gigabytes(7)),
+        Some(7)
+    );
+}
+
+#[test]
 fn subagents_reject_invalid_limits_and_unavailable_profiles() {
     let profile = "[profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n";
     for section in [

@@ -152,7 +152,7 @@ pub(super) fn label(key: &str) -> String {
         "subagents" => "Sub-agents",
         "build_cache" => "Build cache (mbx)",
         "directory" => "Cache directory",
-        "max_size" => "Cache size limit",
+        "max_size" => "Cache size limit (GB)",
         "max_concurrent" => "Maximum concurrent children",
         "eligible_profiles" => "Additional eligible profiles",
         "profiles" => "Agent Profiles",
@@ -557,7 +557,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Cache directory on the machine itself. Blank uses that machine's native mbx cache if mbx is installed there, otherwise ~/.cache/mbx."
         }
         "max_size" => {
-            "Largest the cache may grow, such as 100GiB. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
+            "Largest the cache may grow, as a whole number of GB. Blank uses the host's own mbx limits, or min(100 GB, 1/4 of free space)."
         }
         "memory" => "Examples: 8g or 4096m. Leave blank for no limit.",
         "pull_policy" => {

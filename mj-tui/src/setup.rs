@@ -474,6 +474,21 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
     schema::label(key)
 }
 
+/// A size string as the whole number of GB the field is measured in, or the
+/// string itself when it is not a size at all.
+fn build_cache_gigabytes_label(size: &str) -> String {
+    mj_core::config::build_cache_size_gigabytes(size)
+        .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
+}
+
+/// Whether a full path names the given field of a machine's build cache.
+fn is_build_cache_field(path: &[String], field: &str) -> bool {
+    match path {
+        [section, _, page, key] => section == "machines" && page == "build_cache" && key == field,
+        _ => false,
+    }
+}
+
 /// What one row reports, which on the first page is the state of a whole
 /// section rather than the size of it.
 fn row_summary(
@@ -513,6 +528,11 @@ fn value_summary(
             if *value { "☑" } else { "☐" }.to_owned()
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
+        // The cache size is measured in whole GB, whatever unit the file
+        // spells it in. Only a hand-edited invalid value keeps its own text.
+        Value::String(size) if is_build_cache_field(&child_path, "max_size") => {
+            build_cache_gigabytes_label(size)
+        }
         Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path, draft)),
         // The archive window's live estimate carries the value itself, so it
         // replaces the number as well as the "Never" placeholder.
@@ -882,6 +902,13 @@ impl SetupDialog {
                 } else {
                     EditorInput::Text(TextInput::from(if value.is_null() {
                         String::new()
+                    } else if let Some(size) = value
+                        .as_str()
+                        .filter(|_| is_build_cache_field(&path, "max_size"))
+                    {
+                        // The field is edited in whole GB, so a value written
+                        // in another unit is offered converted.
+                        build_cache_gigabytes_label(size)
                     } else {
                         value
                             .as_str()
@@ -1132,11 +1159,13 @@ impl SetupDialog {
                     .as_ref()
                     .map(|directory| directory.display().to_string())
                     .unwrap_or_else(|| "Unknown".to_owned()),
+                // Resolved sizes are shown in the same whole GB the field is
+                // edited in.
                 "max_size" => match &preview.max_size {
-                    Some(BuildCacheLimit::Size(size)) => size.clone(),
+                    Some(BuildCacheLimit::Size(size)) => build_cache_gigabytes_label(size),
                     // The value column is narrow, so these stay short.
                     Some(BuildCacheLimit::HostConfiguration(Some(size))) => {
-                        format!("{size}, host mbx config")
+                        format!("{}, host mbx config", build_cache_gigabytes_label(size))
                     }
                     Some(BuildCacheLimit::HostConfiguration(None)) => "host mbx config".to_owned(),
                     None => "Unknown".to_owned(),
@@ -1314,6 +1343,22 @@ impl SetupDialog {
                         .parse::<u64>()
                         .map_err(|_| "Enter a whole number of bytes.".to_owned())?,
                 )
+            }
+        } else if is_build_cache_field(&editor.path, "max_size") {
+            let text = editor.input.trim().to_owned();
+            if text.is_empty() {
+                Value::Null
+            } else {
+                let gigabytes = text
+                    .parse::<u64>()
+                    .map_err(|_| "Enter a whole number of gigabytes.".to_owned())?;
+                if gigabytes == 0 {
+                    return Err(
+                        "Enter at least 1 GB, or clear the field to use the host's own limits."
+                            .into(),
+                    );
+                }
+                Value::String(mj_core::config::build_cache_size_from_gigabytes(gigabytes))
             }
         } else if editor.input.trim().is_empty() && old.is_null() {
             Value::Null

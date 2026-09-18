@@ -217,6 +217,22 @@ pub fn parse_build_cache_size(value: &str) -> Option<u64> {
     count.checked_mul(multiplier)
 }
 
+/// An mbx size string as a whole number of gigabytes, rounded to the nearest
+/// one. The setup editor measures the cache in GB, so a value written in any
+/// other unit still has a number to show.
+#[must_use]
+pub fn build_cache_size_gigabytes(value: &str) -> Option<u64> {
+    const GIGABYTE: u64 = 1_000_000_000;
+    let bytes = parse_build_cache_size(value)?;
+    Some(bytes.saturating_add(GIGABYTE / 2) / GIGABYTE)
+}
+
+/// The size string stored for a whole number of gigabytes.
+#[must_use]
+pub fn build_cache_size_from_gigabytes(gigabytes: u64) -> String {
+    format!("{gigabytes}GB")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {

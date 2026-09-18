@@ -1410,7 +1410,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         "Enabled",
         "Off",
         "/mnt/fast/mbx-cache",
-        "500GiB, host mbx config",
+        "537, host mbx config",
         "run without the build cache: the filesystem under",
     ] {
         assert!(
@@ -1428,6 +1428,68 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::PreviewBuildCache { .. }
     ));
+}
+
+/// The cache size is typed, stored and shown as a whole number of GB.
+#[test]
+fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "max_size");
+    dashboard.handle_key(key(KeyCode::Char('2')));
+    dashboard.handle_key(key(KeyCode::Char('5')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["max_size"],
+        json!("25GB")
+    );
+    let drawn = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(
+        drawn.contains("Cache size limit (GB)") && drawn.contains("25"),
+        "the row reports the number of GB:\n{drawn}"
+    );
+
+    // A value in another unit is offered for editing in GB.
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.draft["machines"]["local"]["build_cache"]["max_size"] = json!("100GiB");
+    choose(&mut dashboard, "max_size");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog
+            .editor
+            .as_ref()
+            .map(|editor| editor.input.to_string()),
+        Some("107".to_owned())
+    );
+
+    // A suffix, a word, or zero is refused and the stored value stands.
+    for (typed, message) in [
+        ("GiB", "Enter a whole number of gigabytes."),
+        (
+            "",
+            "Enter at least 1 GB, or clear the field to use the host's own limits.",
+        ),
+    ] {
+        let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+        let editor = dialog.editor.as_mut().expect("the size editor is open");
+        *editor.input = mj_chat::text_input::TextInput::from(if typed.is_empty() {
+            "0".to_owned()
+        } else {
+            format!("10{typed}")
+        });
+        dashboard.handle_key(key(KeyCode::Enter));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+        assert_eq!(dialog.notice.as_deref(), Some(message));
+        assert_eq!(
+            dialog.draft["machines"]["local"]["build_cache"]["max_size"],
+            json!("100GiB"),
+            "a rejected edit leaves the stored size alone"
+        );
+    }
 }
 
 #[test]
