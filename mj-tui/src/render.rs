@@ -40,8 +40,8 @@ use crate::widgets::{Truncate, format_resource_bytes, truncate_to_cells};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::workspaces::render_workspace_manager;
 use crate::{
-    DashboardState, Focus, Mode, PaneSize, SelectionDirection, SessionOperationKind, SessionsRow,
-    SupportPane,
+    AttentionLevel, DashboardState, Focus, Mode, PaneSize, SelectionDirection,
+    SessionOperationKind, SessionsRow, SupportPane,
 };
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;

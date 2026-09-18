@@ -950,8 +950,7 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     let badges = ids
         .iter()
         .map(|id| {
-            let (waiting, unread) = dashboard.workspace_attention_counts(id);
-            crate::render::sessions::attention_badge(waiting, unread)
+            crate::render::sessions::attention_badge(dashboard.workspace_attention_summary(id))
         })
         .collect::<Vec<_>>();
     let widths = labels

@@ -229,7 +229,10 @@ fn full_materialized_projection_carries_pending_questions_into_session_detail() 
         dashboard.session_details["session-1"].pending_elicitations,
         vec![request]
     );
-    assert_eq!(dashboard.pending_input_count(), 1);
+    assert_eq!(
+        dashboard.attention_level("session-1"),
+        crate::AttentionLevel::Waiting
+    );
 
     let mut answered = session;
     answered.applied_event_ordinal += 1;
@@ -240,7 +243,10 @@ fn full_materialized_projection_carries_pending_questions_into_session_detail() 
             .pending_elicitations
             .is_empty()
     );
-    assert_eq!(dashboard.pending_input_count(), 0);
+    assert_ne!(
+        dashboard.attention_level("session-1"),
+        crate::AttentionLevel::Waiting
+    );
 }
 
 #[test]

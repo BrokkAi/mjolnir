@@ -99,17 +99,6 @@ impl DashboardState {
         self.narrow_layout.get() || self.pane_size(SupportPane::Sessions) == PaneSize::Minimized
     }
 
-    /// Number of pending agent questions across the sessions shown by the
-    /// navigator. The minimized navigator uses this as its one compact
-    /// aggregate while expanded rows identify the individual sessions.
-    pub(crate) fn pending_input_count(&self) -> usize {
-        self.ordered_sessions()
-            .into_iter()
-            .filter_map(|session| self.session_details.get(&session.id))
-            .map(|detail| detail.pending_elicitations.len())
-            .sum()
-    }
-
     /// The pending questions from the latest accepted full projection. A
     /// startup summary intentionally returns `None`, because it does not
     /// carry the complete request list and must not invalidate a local draft.
