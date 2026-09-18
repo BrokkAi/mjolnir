@@ -931,22 +931,25 @@ fn the_root_page_takes_the_full_width_and_shows_only_the_footer_action() {
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings");
     };
-    // The root row is `{name:<32}  {summary}`, the widest line this config
-    // renders. The root page has no actions of its own, so the body keeps the
-    // whole width and nothing may clip that row.
-    let summary = value_summary(
+    // The root page has no actions of its own, so the body keeps the whole
+    // width: the name sits in the gutter and its value against the far edge,
+    // and neither may be clipped.
+    let summary = row_summary(
         &[],
         "targets",
         &dialog.draft["targets"],
         &dialog.draft,
         None,
     );
-    let row = format!("{:<32}  {summary}", schema::label("targets"));
+    let row = format!("{SETTING_GUTTER}{}", schema::label("targets"));
     let line = lines
         .iter()
         .find(|line| line.contains("Runtimes"))
         .unwrap_or_else(|| panic!("missing the runtimes row in\n{}", lines.join("\n")));
-    assert!(line.contains(&row), "the page row was clipped: {line:?}");
+    assert!(
+        line.contains(&row) && line.contains(&summary),
+        "the page row was clipped: {line:?}"
+    );
     let text = lines.join("\n");
     // Save and Close is the only action the root page offers, and it sits in
     // the footer row rather than a column beside the body.
@@ -984,7 +987,7 @@ fn a_collection_page_stacks_its_own_actions_above_the_footer_row() {
         back_column < save_column,
         "Back does not lead the footer row:\n{text}"
     );
-    let body_column = point(&lines, "podman").0;
+    let body_column = point(&lines, &format!("{SETTING_GUTTER}podman")).0;
     assert_eq!(
         back_column, body_column,
         "the footer is not packed to the body's left edge:\n{text}"
@@ -1397,7 +1400,8 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
-        "Enabled                           Off",
+        "Enabled",
+        "Off",
         "/mnt/fast/mbx-cache",
         "500GiB, host mbx config",
         "run without the build cache: the filesystem under",
@@ -1863,5 +1867,55 @@ fn search_lists_every_setting_with_its_section_and_value() {
     assert!(
         drawn.contains("Runtimes \u{203a} podman"),
         "a result must name the section it lives in:\n{drawn}"
+    );
+}
+
+#[test]
+fn moving_the_selection_does_not_change_the_text_a_page_draws() {
+    // A list identifies its contents by the text it draws, so a row that drew
+    // itself differently while selected would read as a new list on every
+    // arrow key and cancel the gesture a double-click is halfway through.
+    // Selection is the highlight's job, never the row's.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let first = drawn(&mut dashboard, 140, 40);
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Down));
+    let moved = drawn(&mut dashboard, 140, 40);
+    assert_eq!(
+        first,
+        moved,
+        "the selection changed the drawn text:\n{}",
+        moved.join("\n")
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_ne!(dialog.selected, 0, "the arrows must have moved the row");
+}
+
+#[test]
+fn the_first_page_groups_its_sections_and_reports_what_each_one_is_set_to() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let drawn = drawn(&mut dashboard, 140, 40).join("\n");
+    for heading in ROOT_GROUPS.iter().map(|(heading, _)| *heading) {
+        assert!(
+            drawn.contains(heading),
+            "missing the {heading:?} group:\n{drawn}"
+        );
+    }
+    // Every section says what state it is in; none of them reports a count of
+    // the settings it holds.
+    for state in [
+        "claude-1, codex-1, codex-2",
+        "podman",
+        "On \u{b7} 127.0.0.1:3765",
+        "Keeps every session",
+        "Midnight \u{b7} sidebar left",
+    ] {
+        assert!(drawn.contains(state), "missing {state:?} in\n{drawn}");
+    }
+    assert!(
+        !drawn.contains("settings  \u{203a}"),
+        "a first-page section counted its settings instead of reporting them:\n{drawn}"
     );
 }

@@ -248,6 +248,93 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     }
 }
 
+/// What a section of the first page is actually set to.
+///
+/// The first page lists sections rather than values, and a count of what is
+/// inside one answers no question anyone has: what a reader wants from
+/// "Web Access" is whether it is on and where it listens. `None` leaves a
+/// section to the ordinary value summary.
+pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
+    let section = &draft[key];
+    Some(match key {
+        "interface" => format!(
+            "{} · sidebar {}",
+            choice_label(&["theme".to_owned()], &draft["theme"], draft),
+            choice_label(
+                &["sessions_side".to_owned()],
+                &draft["sessions_side"],
+                draft
+            )
+            .to_lowercase()
+        ),
+        "advanced" => match ["detailed_activity_clocks", "show_stopped_sessions"]
+            .iter()
+            .filter(|field| section[*field] == Value::Bool(true))
+            .count()
+        {
+            0 => "All off".to_owned(),
+            count => format!("{count} on"),
+        },
+        "profiles" | "machines" | "targets" | "bundles" => named_entries(section),
+        "phone" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else {
+                match section["bind"].as_str() {
+                    Some(bind) => format!("On · {bind}"),
+                    None => "On".to_owned(),
+                }
+            }
+        }
+        "review" => {
+            if section["enabled"] != Value::Bool(true) {
+                "Off".to_owned()
+            } else {
+                let tier = choice_label(&["tier".to_owned()], &section["tier"], draft);
+                match section["profile"].as_str() {
+                    Some(profile) => format!("{tier} · {profile}"),
+                    None => format!("{tier} · no reviewer"),
+                }
+            }
+        }
+        "subagents" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else {
+                match section["max_concurrent"].as_u64() {
+                    Some(limit) => format!("On · up to {limit}"),
+                    None => "On".to_owned(),
+                }
+            }
+        }
+        "sessionwiki" => match section["archive_after_days"].as_u64() {
+            Some(days) => format!("Archives after {days} days"),
+            None => "Keeps every session".to_owned(),
+        },
+        "build_cache" => {
+            if section["enabled"].as_bool().unwrap_or(true) {
+                "Shared".to_owned()
+            } else {
+                "Off".to_owned()
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The entries of a section the user names, listed rather than counted. Past
+/// three the tail becomes a count, so the column stays one line.
+fn named_entries(value: &Value) -> String {
+    let Some(entries) = value.as_object().filter(|entries| !entries.is_empty()) else {
+        return "None yet".to_owned();
+    };
+    let names = entries.keys().map(String::as_str).collect::<Vec<_>>();
+    if names.len() <= 3 {
+        return names.join(", ");
+    }
+    format!("{}, +{} more", names[..2].join(", "), names.len() - 2)
+}
+
 pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     let Some(value) = value.as_str() else {
         return if value.is_null() {
@@ -435,6 +522,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "guardian_review_model" => {
             "For a Codex profile with a custom model provider: newest-flash reviews with the newest flash model, session reviews with the session's own model, or name a model from the provider's catalog. Leave blank for newest-flash."
         }
+        // The first page has no parent setting to describe, so it says what
+        // the whole screen does instead.
+        "" => "Changes stay in this draft until you save.",
         _ => "Enter opens or edits a setting. Changes stay in this draft until you save.",
     }
 }

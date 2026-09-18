@@ -5,7 +5,7 @@
 //! row addressable by what it is called, what it does, and what it is set to,
 //! so the dialog can jump straight to one.
 
-use super::{pointer, row_label, schema, value_summary, visible_keys};
+use super::{pointer, row_label, row_summary, schema, visible_keys};
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -46,8 +46,8 @@ fn walk(draft: &Value, path: &mut Vec<String>, trail: &str, entries: &mut Vec<Se
             continue;
         };
         let label = row_label(&parent, current, &key, Some(value));
-        let summary = page_summary(path, value)
-            .unwrap_or_else(|| value_summary(&parent, &key, value, draft, None));
+        let summary = page_summary(path, value, draft)
+            .unwrap_or_else(|| row_summary(&parent, &key, value, draft, None));
         entries.push(SearchEntry {
             haystack: format!("{label} {trail} {key} {summary} {}", schema::help(path))
                 .to_lowercase(),
@@ -73,9 +73,15 @@ fn walk(draft: &Value, path: &mut Vec<String>, trail: &str, entries: &mut Vec<Se
 /// What a page row holds, counted the way the page itself lists it: `interface`
 /// gathers three settings stored at the root, and hidden keys are left out. The
 /// stored key count answers neither.
-fn page_summary(path: &[String], value: &Value) -> Option<String> {
+fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String> {
     if !value.is_object() && !value.is_array() {
         return None;
+    }
+    // A first-page section says what it is set to, exactly as the page does.
+    if let [key] = path
+        && let Some(summary) = schema::section_summary(key, draft)
+    {
+        return Some(summary);
     }
     let count = visible_keys(path, value).len();
     Some(if value.is_array() {

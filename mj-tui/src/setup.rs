@@ -26,7 +26,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::Modifier,
-    text::Line,
+    text::{Line, Span},
     widgets::{List as RatatuiList, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
@@ -277,25 +277,98 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     serde_json::from_value(draft)
 }
 
+/// The first page's groups, in the order they are drawn.
+///
+/// A root key no group names is still listed, under `Other`, so a setting
+/// added to the configuration can never go missing by being forgotten here.
+const ROOT_GROUPS: &[(&str, &[&str])] = &[
+    ("Setup", &["profiles", "bundles", "targets", "machines"]),
+    (
+        "Sessions",
+        &["review", "subagents", "sessionwiki", "build_cache", "phone"],
+    ),
+    ("Display", &["interface", "advanced"]),
+];
+
+/// A row of a settings page. The first page puts a heading above each group
+/// and a blank line between them; every page below it is a plain list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageRow {
+    Heading(&'static str),
+    Gap,
+    /// An index into the page's keys.
+    Setting(usize),
+}
+
+/// Every row `keys` draws on the page `path`, in order.
+fn page_plan(path: &[String], keys: &[String]) -> Vec<PageRow> {
+    if !path.is_empty() {
+        return (0..keys.len()).map(PageRow::Setting).collect();
+    }
+    let mut plan = Vec::new();
+    let mut group = None;
+    for (index, key) in keys.iter().enumerate() {
+        let heading = root_group(key);
+        if group != Some(heading) {
+            if group.is_some() {
+                plan.push(PageRow::Gap);
+            }
+            plan.push(PageRow::Heading(heading));
+            group = Some(heading);
+        }
+        plan.push(PageRow::Setting(index));
+    }
+    plan
+}
+
+/// The group heading a first-page row belongs under.
+fn root_group(key: &str) -> &'static str {
+    ROOT_GROUPS
+        .iter()
+        .find(|(_, keys)| keys.contains(&key))
+        .map_or("Other", |(heading, _)| *heading)
+}
+
+/// Root keys the page never lists: the file's version, the three settings the
+/// synthetic Interface page gathers, the keybindings, and the deprecated
+/// stopped-session flag that Advanced now owns.
+fn hidden_root_key(key: &str) -> bool {
+    matches!(
+        key,
+        "version"
+            | "advanced"
+            | "sessions_side"
+            | "spinner"
+            | "theme"
+            | "keys"
+            | "show_stopped_sessions"
+    )
+}
+
 fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     if path.is_empty() {
-        let mut keys = vec!["interface".to_owned(), "advanced".to_owned()];
-        keys.extend(
-            value
-                .as_object()
-                .into_iter()
-                .flat_map(|entries| {
-                    entries.keys().filter(|key| {
-                        key.as_str() != "version"
-                            && !matches!(
-                                key.as_str(),
-                                "advanced" | "sessions_side" | "spinner" | "theme" | "keys"
-                            )
-                            && key.as_str() != "show_stopped_sessions"
-                    })
-                })
-                .cloned(),
-        );
+        let object = value.as_object();
+        // `interface` is synthetic and `advanced` is always offered, so both
+        // are listed whether or not the draft stores a key for them.
+        let present = |key: &str| {
+            matches!(key, "interface" | "advanced")
+                || object.is_some_and(|entries| entries.contains_key(key))
+        };
+        let mut keys = ROOT_GROUPS
+            .iter()
+            .flat_map(|(_, keys)| keys.iter())
+            .filter(|key| present(key))
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        let ungrouped = object
+            .into_iter()
+            .flat_map(|entries| entries.keys())
+            .filter(|key| {
+                !hidden_root_key(key) && !keys.iter().any(|placed| placed == key.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.extend(ungrouped);
         return keys;
     }
     if path == ["interface"] {
@@ -337,6 +410,40 @@ fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
     }
 }
 
+/// One row of a settings page: its name on the left and what it is set to on
+/// the right, against the far edge, so the column reads down the page.
+///
+/// Nothing here may depend on whether the row is selected. A list identifies
+/// its contents by the text it draws (`Form::set_list_contents`), so a caret
+/// in the gutter would read as a different list the moment the selection
+/// moved, cancelling the gesture a double-click is halfway through.
+fn setting_row(name: &str, value: &str, width: u16) -> Line<'static> {
+    let width = usize::from(width).max(SETTING_GUTTER.len() + 4);
+    let name = truncate(name, width.saturating_sub(SETTING_GUTTER.len() + 4));
+    let room = width.saturating_sub(SETTING_GUTTER.len() + name.chars().count() + 2);
+    let value = truncate(value, room);
+    let gap = room.saturating_sub(value.chars().count()) + 1;
+    Line::from(vec![
+        Span::raw(SETTING_GUTTER),
+        Span::raw(name),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(value, theme::muted()),
+        Span::raw(" "),
+    ])
+}
+
+const SETTING_GUTTER: &str = "  ";
+
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    text.chars()
+        .take(width.saturating_sub(1))
+        .chain(['…'])
+        .collect()
+}
+
 /// Whether `path` lists entries the user named rather than fixed settings.
 fn is_collection(path: &[String], value: &Value) -> bool {
     value.is_array()
@@ -365,6 +472,23 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
         return key.to_owned();
     }
     schema::label(key)
+}
+
+/// What one row reports, which on the first page is the state of a whole
+/// section rather than the size of it.
+fn row_summary(
+    path: &[String],
+    key: &str,
+    value: &Value,
+    draft: &Value,
+    automatic: Option<String>,
+) -> String {
+    if path.is_empty()
+        && let Some(summary) = schema::section_summary(key, draft)
+    {
+        return summary;
+    }
+    value_summary(path, key, value, draft, automatic)
 }
 
 /// `automatic` replaces the placeholder for an unset value when its resolved
@@ -409,13 +533,10 @@ fn value_summary(
 }
 
 fn preferred_size(draft: &Value) -> SetupSize {
-    fn walk(
-        path: &[String],
-        value: &Value,
-        draft: &Value,
-        max_width: &mut usize,
-        max_height: &mut u16,
-    ) {
+    fn walk(path: &mut Vec<String>, draft: &Value, max_width: &mut usize, max_height: &mut u16) {
+        let Some(value) = draft.pointer(&pointer(path)) else {
+            return;
+        };
         let keys = visible_keys(path, value);
         let breadcrumb = std::iter::once("Settings".to_owned())
             .chain(path.iter().map(|key| schema::label(key)))
@@ -423,54 +544,42 @@ fn preferred_size(draft: &Value) -> SetupSize {
             .join(" › ");
         *max_width = (*max_width).max(Line::raw(breadcrumb).width());
         *max_height = (*max_height).max(
-            u16::try_from(keys.len())
+            u16::try_from(page_plan(path, &keys).len())
                 .unwrap_or(u16::MAX)
                 .saturating_add(10),
         );
         for key in keys {
-            let child = if let Some(entries) = value.as_object() {
-                entries.get(&key)
-            } else {
-                key.parse::<usize>().ok().and_then(|index| value.get(index))
-            };
-            if path.is_empty() && key == "interface" {
-                let interface = json!({
-                    "sessions_side": draft["sessions_side"].clone(),
-                    "spinner": draft["spinner"].clone(),
-                    "theme": draft["theme"].clone(),
-                });
-                walk(
-                    &["interface".to_owned()],
-                    &interface,
-                    draft,
-                    max_width,
-                    max_height,
-                );
+            let parent = path.clone();
+            path.push(key.clone());
+            let Some(child) = draft.pointer(&pointer(path)) else {
+                path.pop();
                 continue;
-            }
-            let Some(child) = child else { continue };
-            let name = row_label(path, value, &key, Some(child));
-            let mut child_path = path.to_vec();
-            child_path.push(key.clone());
-            let mut summary = value_summary(path, &key, child, draft, None);
+            };
+            let name = row_label(&parent, value, &key, Some(child));
+            let mut summary = row_summary(&parent, &key, child, draft, None);
             if !child.is_object()
                 && !child.is_array()
                 && !child.is_boolean()
-                && schema::choices(&storage_path(&child_path), draft).is_empty()
+                && schema::choices(&storage_path(path), draft).is_empty()
             {
                 summary = summary.chars().take(24).collect();
             }
-            let line = format!("{name:<32}  {summary}");
+            // The gutter, the name, the gap the value is pushed away by, and
+            // the trailing column the row ends with.
+            let line = format!("{}{name}    {summary} ", SETTING_GUTTER);
             *max_width = (*max_width).max(Line::raw(line).width());
-            if child.is_object() || child.is_array() {
-                walk(&child_path, child, draft, max_width, max_height);
+            // `interface` resolves to the draft root, which holds the three
+            // settings its page gathers; every other page is its own value.
+            if (child.is_object() || child.is_array()) && path.as_slice() != ["review"] {
+                walk(path, draft, max_width, max_height);
             }
+            path.pop();
         }
     }
 
     let mut max_width = 0usize;
     let mut max_height = 20;
-    walk(&[], draft, draft, &mut max_width, &mut max_height);
+    walk(&mut Vec::new(), draft, &mut max_width, &mut max_height);
     // The page's own actions stack in a column at its right edge, so the
     // dialog is as wide as the widest page body plus that column. Back and the
     // commit sit in the footer row instead and take no width here.
@@ -2127,15 +2236,27 @@ pub(crate) fn render_setup(
         Rect::new(inner.x, help_y, inner.width, 2),
     );
     let body_y = help_y + 3;
+    // Back and the commit share the dialog's bottom row; the page's own
+    // actions stack in a column beside the body.
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
     let band = Rect::new(
         inner.x,
         body_y,
         inner.width,
         inner.height.saturating_sub(7 + u16::from(nested)).max(1),
     );
-    // Back and the commit share the dialog's bottom row; the page's own
-    // actions stack in a column beside the body.
-    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    // The three rows a notice would occupy belong to the page while no notice
+    // is showing in them, never to the footer's row.
+    let band = if dialog.notice.is_some() {
+        band
+    } else {
+        Rect::new(
+            band.x,
+            band.y,
+            band.width,
+            footer_row.y.saturating_sub(band.y).max(1),
+        )
+    };
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
     let footer = dialog.footer_actions();
@@ -2167,7 +2288,12 @@ pub(crate) fn render_setup(
         theme::title(true),
         !dialog.saving && !choice_editor,
     );
-    frame.render_widget(theme::modal().title(title), popup);
+    frame.render_widget(
+        theme::modal()
+            .title(title)
+            .title_bottom(mj_chat::components::DialogShell::hints(false)),
+        popup,
+    );
     let mut initial;
     let mut background_offset = form.list_offset(List);
     if text_editor {
@@ -2202,47 +2328,55 @@ pub(crate) fn render_setup(
         }
         initial = Field;
     } else {
-        let rows = dialog
-            .keys()
-            .iter()
-            .map(|key| {
-                let value = dialog
-                    .current()
-                    .as_object()
-                    .and_then(|object| object.get(key))
-                    .or_else(|| {
-                        key.parse::<usize>()
-                            .ok()
-                            .and_then(|index| dialog.current().get(index))
-                    });
-                let interface = dialog.path.is_empty() && key == "interface";
-                let name = row_label(&dialog.path, dialog.current(), key, value);
-                Line::raw(format!(
-                    "{name:<32}  {}",
-                    if interface {
-                        "3 settings  ›".to_owned()
-                    } else if let Some(value) = value {
-                        value_summary(
-                            &dialog.path,
-                            key,
-                            value,
-                            &dialog.draft,
-                            dialog
-                                .build_cache_automatic_label(key)
-                                .or_else(|| dialog.archive_space_automatic_label(key)),
-                        )
-                    } else {
-                        String::new()
-                    }
-                ))
-            })
-            .collect::<Vec<_>>();
+        let keys = dialog.keys();
+        let mut rows = Vec::new();
+        let mut row_map = Vec::new();
+        for row in page_plan(&dialog.path, &keys) {
+            let index = match row {
+                PageRow::Gap => {
+                    rows.push(Line::raw(""));
+                    row_map.push(None);
+                    continue;
+                }
+                PageRow::Heading(heading) => {
+                    rows.push(Line::styled(
+                        format!("{SETTING_GUTTER}{heading}"),
+                        theme::muted().add_modifier(Modifier::BOLD),
+                    ));
+                    row_map.push(None);
+                    continue;
+                }
+                PageRow::Setting(index) => index,
+            };
+            let key = &keys[index];
+            let mut child_path = dialog.path.clone();
+            child_path.push(key.clone());
+            let value = dialog.draft.pointer(&pointer(&child_path));
+            let name = row_label(&dialog.path, dialog.current(), key, value);
+            let summary = match value {
+                Some(value) => row_summary(
+                    &dialog.path,
+                    key,
+                    value,
+                    &dialog.draft,
+                    dialog
+                        .build_cache_automatic_label(key)
+                        .or_else(|| dialog.archive_space_automatic_label(key)),
+                ),
+                None => String::new(),
+            };
+            rows.push(setting_row(&name, &summary, body.width));
+            row_map.push(Some(index));
+        }
         if choice_editor {
             // The page remains visible behind a choice popup, but its controls
             // must not remain interactive through the overlay.
+            let selected_row = row_map
+                .iter()
+                .position(|item| *item == Some(dialog.selected));
             let mut state = ListState::default()
                 .with_offset(background_offset)
-                .with_selected(Some(dialog.selected));
+                .with_selected(selected_row);
             frame.render_stateful_widget(
                 RatatuiList::new(rows.iter().cloned().map(ListItem::new).collect::<Vec<_>>())
                     .highlight_style(theme::selection(false)),
@@ -2251,7 +2385,16 @@ pub(crate) fn render_setup(
             );
             background_offset = state.offset();
         } else {
-            ChoiceList::render(frame, body, &rows, dialog.selected, &mut form, List);
+            ChoiceList::render_with_rows(
+                frame,
+                body,
+                &rows,
+                dialog.selected,
+                &row_map,
+                &[],
+                &mut form,
+                List,
+            );
         }
         initial = List;
     }
