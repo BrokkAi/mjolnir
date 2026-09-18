@@ -1796,7 +1796,7 @@ fn detection_notice(scope: DetectScope, added: &[String], rejected: &[RejectedRu
         let names = added.join(", ");
         sentences.push(match scope {
             DetectScope::Profiles => format!("Added agent profiles: {names}."),
-            DetectScope::Runtimes => format!("Added machines and runtimes: {names}."),
+            DetectScope::Runtimes => format!("Added runtimes: {names}."),
         });
     }
     for runtime in rejected {

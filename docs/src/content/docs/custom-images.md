@@ -145,7 +145,7 @@ those before starting a container.
 
 ```toml
 [targets.podman]
-kind = "local-podman"
+kind = "podman"
 image = "localhost/mjolnir/agent-dev:latest"
 # Selects the image platform and the matching mj worker architecture.
 platform = "linux/amd64"
@@ -157,5 +157,5 @@ memory = "32g"
 RUSTFLAGS = "-D warnings"
 ```
 
-Use `kind = "local-docker"` under a `[targets.docker]` table for the same image
+Use `kind = "docker"` under a `[targets.docker]` table for the same image
 contract on Docker.

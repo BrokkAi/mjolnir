@@ -639,7 +639,7 @@ for line in sys.stdin:
                 f"tls_cert = {json.dumps(str(certificate))}\n"
                 f"tls_key = {json.dumps(str(private_key))}\n"
             )
-        config = f'''version = 1
+        config = f'''version = 11
 
 [phone]
 enabled = true
@@ -661,7 +661,7 @@ local = {json.dumps(str(self.project))}
 destination = "fixture"
 
 [targets.localhost]
-kind = "local-bare"
+kind = "bare"
 '''
         (self.config / "config.toml").write_text(config)
         self.record_action("prepared", port=port)

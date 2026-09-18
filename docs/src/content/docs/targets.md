@@ -3,7 +3,8 @@ title: Targets
 description: Compare local, container, SSH, and AWS execution targets and choose the right isolation, project, resource, and lifecycle model.
 ---
 
-A target is a named execution template. A session combines one
+A runtime is a named execution template under `[targets.<id>]`, and it names
+the machine it runs on under `[machines.<id>]`. A session combines one
 [profile](/profiles/), one target, and either a configured
 [bundle](/workspaces-bundles/#bundles-define-managed-projects) or an existing
 Git project directory. The target decides where work runs, what isolation
@@ -12,22 +13,23 @@ removed after a verified stop.
 
 Local target choices are supplied automatically and checked live when you open
 the target picker. Add SSH and AWS connections or customize runtime defaults in
-**F7 Settings → Machines and Runtimes**. No setup command is required. A target
+**F7 Settings → Machines** and **F7 Settings → Runtimes**. No setup command is
+required. A target
 that is checking or unavailable cannot advance; **F5** in the picker rechecks
 all targets. Dashboard **F5** refreshes host capacity. The optional
 `mj doctor --smoke` command exercises container creation and removal.
 
 ## Capability matrix
 
-| Kind | Runs on | Isolation boundary | New-session project | Supplemental directories | Resource choice | Target lifecycle |
+| Runtime | Machine | Isolation boundary | New-session project | Supplemental directories | Resource choice | Target lifecycle |
 | --- | --- | --- | --- | --- | --- | --- |
-| `local-bare` | Linux controller machine | none | Existing local Git directory | no | host-owned | Machine persists; managed session worktree is archived and retired on stop. |
-| `local-podman` | Local Linux/WSL2 | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
-| `local-docker` | Local Linux/WSL2 | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
-| `apple-container` | Apple-silicon macOS 26+ | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
-| `ssh-bare` | Named remote Linux host | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; per-session worktree/workspace is archived and retired. |
-| `ssh-podman` | Named remote Linux host | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
-| `aws-ec2` | Your AWS account | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
+| `bare` | `local` (Linux controller machine) | none | Existing local Git directory | no | host-owned | Machine persists; managed session worktree is archived and retired on stop. |
+| `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory | no | host-owned | Host persists; per-session worktree/workspace is archived and retired. |
+| `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
+| `podman` | `local` (Linux/WSL2) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
+| `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
+| `docker` | `local` (Linux/WSL2) or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
+| `apple-container` | `local` (Apple-silicon macOS 26+) | Apple container VM | Bundle | read-only mounts | CPU and memory | Container is removed after verified stop. |
 
 “Verified stop” means Mjolnir has created a recovery archive and checked its
 SHA-256 on the controller before tearing the resource down. See
@@ -35,8 +37,8 @@ SHA-256 on the controller before tearing the resource down. See
 
 ## Harness versions
 
-Mjolnir installs and caches its pinned harness runtimes for `local-bare`,
-`ssh-bare`, and `aws-ec2` sessions. Local sessions use the selected profile's
+Mjolnir installs and caches its pinned harness runtimes for every bare session,
+on this machine, on an SSH machine, and on an EC2 instance. Local sessions use the selected profile's
 existing home and credentials, while their runtime is managed independently
 of commands such as `codex` installed for native terminal use. Containers use
 the runtimes supplied by their image.
@@ -47,15 +49,15 @@ current runtime until upgraded.
 
 ## Execution policy
 
-Mjolnir selects approval behavior from the target, then translates it into the
+Mjolnir selects approval behavior from the runtime, then translates it into the
 chosen harness's controls:
 
-| Target | Effective policy |
+| Runtime | Effective policy |
 | --- | --- |
-| `local-bare` | Preserve the profile and harness's configured approvals. |
-| `ssh-bare`, `permissions = "guardian"` | Preserve configured approvals. |
-| `ssh-bare`, `permissions = "yolo"` | Unconstrained. |
-| Every container and EC2 target | Unconstrained inside the isolation boundary. |
+| `bare` on `local` | Preserve the profile and harness's configured approvals. |
+| `bare` on an SSH machine, `permissions = "guardian"` | Preserve configured approvals. |
+| `bare` on an SSH machine, `permissions = "yolo"` | Unconstrained. |
+| Every container runtime, and a bare runtime on an EC2 machine | Unconstrained inside the isolation boundary. |
 
 The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, and Grok Build
@@ -67,18 +69,20 @@ targets. Kimi Code cannot, so Mjolnir displays a prominent warning when it is
 selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
-## Bare targets
+## Bare runtimes
 
-Bare targets select an existing absolute Git project directory rather than a
+A bare runtime selects an existing absolute Git project directory rather than a
 bundle. They do not accept supplemental directory attachments or container
 resource sizing.
 
-### Local bare
+### Bare on this machine
 
 ```toml
 [targets.localhost]
-kind = "local-bare"
+kind = "bare"
 ```
+
+`machine` defaults to `local`, so it is omitted.
 
 The directory must exist locally. For a Git project, the final review offers
 **Create managed worktree**. It is checked by default for a primary checkout
@@ -91,7 +95,7 @@ must be completely clean, including staged, unstaged, and untracked files.
 Uncheck it to use the selected directory directly. The choice survives stop
 and resume. Plain directories are used directly with the checkbox disabled.
 
-Although the controller and viewer support macOS, current `local-bare` worker
+Although the controller and viewer support macOS, current local bare worker
 launch requires Linux. Use Apple Container or a remote target for sessions from
 a macOS controller.
 
@@ -100,15 +104,19 @@ your controller account. The harness also uses the configured profile home
 directly. Use this target only when you trust both the agent and its approval
 configuration.
 
-### SSH bare
+### Bare on an SSH machine
 
 ```toml
-[targets.builder]
-kind = "ssh-bare"
+[machines.builder]
+kind = "ssh"
 host = "builder.example.com"
 user = "ubuntu"
-permissions = "guardian"
 workspace_prefix = ".local/share/hel/workspaces"
+
+[targets.builder]
+kind = "bare"
+machine = "builder"
+permissions = "guardian"
 ```
 
 The wizard validates an existing Git directory on the remote host. The same
@@ -125,8 +133,8 @@ It does require Node.js 22 and npm for Codex and Claude, or curl and Bash for
 Kimi and Grok. Mjolnir never uses sudo to add these prerequisites and does not
 fall back to another harness executable from the remote `PATH`.
 
-`permissions` is required and accepts `guardian` or `yolo`. SSH connection
-fields include `identity_file` and `extra_args`. See
+`permissions` accepts `guardian` or `yolo` and defaults to `guardian`. The
+machine's SSH connection fields include `identity_file` and `extra_args`. See
 [SSH and SSH Podman](/ssh/) for host prerequisites, connection checks, and
 workspace cleanup.
 
@@ -150,7 +158,7 @@ harness bridge. See [Container targets](/containers/) and
 
 ```toml
 [targets.podman]
-kind = "local-podman"
+kind = "podman"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
@@ -163,7 +171,7 @@ See [Podman](/podman/).
 
 ```toml
 [targets.docker]
-kind = "local-docker"
+kind = "docker"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
@@ -186,31 +194,39 @@ Supplemental directories are mounted read-only; writable OverlayFS views and
 Podman workspace-storage overrides are unavailable. See
 [Apple container](/apple-container/).
 
-### Podman over SSH
+### Podman on an SSH machine
 
 ```toml
-[targets.remote-podman]
-kind = "ssh-podman"
+[machines.builder]
+kind = "ssh"
 host = "builder.example.com"
 user = "ubuntu"
+
+[targets.remote-podman]
+kind = "podman"
+machine = "builder"
 image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
-This combines the SSH connection fields with every Podman container field. The
-container and any workspace volume live on the remote host. Supplemental
+The machine carries the SSH connection; the runtime carries every Podman
+container field. The container and any workspace volume live on the remote host. Supplemental
 directory sources are therefore paths on that remote host, not paths on the
 controller. See [SSH and SSH Podman](/ssh/).
 
 ## AWS EC2
 
 ```toml
-[targets.aws]
+[machines.fleet]
 kind = "aws-ec2"
 aws_profile = "default"
 region = "eu-west-1"
 launch_template = "lt-0123456789abcdef0"
 ssh_user = "ubuntu"
 address_source = "public-dns"
+
+[targets.aws]
+kind = "bare"
+machine = "fleet"
 ```
 
 Mjolnir launches one instance per session from an existing launch template,

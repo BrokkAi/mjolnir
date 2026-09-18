@@ -13,9 +13,11 @@ After this change the configuration file and the Settings screen have two separa
 - [x] (2026-09-17) Milestone 1: stored configuration shape (`Machine`, `StoredTarget`, `StoredConfig`), lossless conversion both ways, legacy migration on load, version 11, validation, and round-trip tests in `mj-core`.
 - [x] (2026-09-17) Milestone 2: shared cache host keyed by machine (`CacheHost::Local | Ssh`), `preview_build_cache` taking a machine, `resolve_machine_input_path`, the dashboard action payloads, and the controller's mbx tests.
 - [x] (2026-09-17) Milestone 3: Settings screen pages "Machines" and "Runtimes", machine choice on runtimes, build cache preview under machines, path resolution under machines, detection inserting runtimes on `local`, and TUI behavior tests.
-- [ ] Milestone 4: documentation, the launch-template script, and the end-to-end fixtures write the new shape; full workspace validation.
+- [x] (2026-09-17) Milestone 4: documentation, the launch-template script, and the end-to-end fixtures write the new shape; full workspace validation.
 
 Resolved transient state: between Milestone 1 and Milestone 3, four Settings-screen tests in `mj-tui` fail (`setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft`, `the_automatic_download_policy_shows_what_it_does_to_this_image`, `remote_path_apply_preserves_failed_and_newer_drafts`, `the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields`). The Settings draft is literally `serde_json::to_value(&Config)`, so the moment the stored shape changes the screen's schema is out of date, and the schema is Milestone 3's subject. Every other package was green at each milestone, and Milestone 3 restored the whole suite.
+
+Remaining: prose in `docs/src/content/docs/security.md`, `profiles.md`, `cli-reference.md`, `install.md`, `overview.md`, `troubleshooting.md`, and `workspaces-bundles.md` still names the old fused kinds. Those files hold no `[targets.` table and no `kind = "` line, so this plan's documentation step left them alone; they need a separate pass over their prose and tables.
 
 ## Surprises & Discoveries
 
@@ -33,6 +35,9 @@ Resolved transient state: between Milestone 1 and Milestone 3, four Settings-scr
 
 - Observation: the Settings dialog is moved out of `DashboardState::mode` for the duration of a key press and put back at the end, so an early `return` from the key handler loses the whole dialog.
   Evidence: the first version of the "this machine cannot be removed" guard returned early and the next line of the test found no dialog at all (`called 'Option::unwrap()' on a 'None' value` on `setup_dialog_mut`). The guard is now an `else` branch.
+
+- Observation: `docs/src/content/docs/ssh.md`, `aws.md`, `podman.md` and `docker.md` are generated, not written. `docs/scripts/sync-podman.mjs` copies `docs/SSH.md`, `docs/AWS.md`, `mj-controller/docs/PODMAN.md` and `mj-controller/docs/DOCKER.md` into them with frontmatter, and the four generated pages are in `.gitignore`.
+  Evidence: `git checkout docs/src/content/docs/ssh.md` answered `pathspec ... did not match any file(s) known to git`, and `git check-ignore -v` pointed at `.gitignore:57`. The edits were redone on the four sources, the page titles in `sync-podman.mjs` were updated, and `node scripts/sync-podman.mjs` regenerated the pages.
 
 ## Decision Log
 
@@ -84,7 +89,25 @@ Note on stored session state: `SessionBuildCache.host` in an existing session re
 
 ## Outcomes & Retrospective
 
-Milestone 1 is done. `mj-core` now reads and writes `[machines.<id>]` and `[targets.<id>]` separately, migrates every pre-version-11 file on load, and refuses the old fused kinds in a version 11 file. Nothing outside `mj-core/src/config` changed shape: `TargetTemplate` still has its eight variants and every consumer still matches on it. The remaining milestones move the cache host, the Settings screen, and the documentation onto the new shape.
+All four milestones are done. A user opens Settings and sees Machines and
+Runtimes as separate pages: Machines always lists this machine and holds the
+build cache every runtime on it shares, and each runtime shows the machine it
+runs on. An existing configuration file loads unchanged and is rewritten in the
+new shape on the next save. Local Podman and local Docker now inspect one host
+once instead of twice. No session behavior changed otherwise, because
+`TargetTemplate` kept its eight fused variants and every consumer still matches
+on it.
+
+What the plan got wrong, and the fixes are in the Decision Log and Surprises
+sections above: the `permissions` check could not simply be deleted, SSH
+machines have to be matched by connection alone, four documentation pages are
+generated rather than written, and adding this machine to the Settings draft
+needed care so an untouched draft does not look edited.
+
+What remains: prose in seven documentation pages still names the old fused
+kinds, listed under Progress.
+
+Milestone 1, for the record: `mj-core` now reads and writes `[machines.<id>]` and `[targets.<id>]` separately, migrates every pre-version-11 file on load, and refuses the old fused kinds in a version 11 file. Nothing outside `mj-core/src/config` changed shape: `TargetTemplate` still has its eight variants and every consumer still matches on it. Milestones 2 through 4 moved the cache host, the Settings screen, and the documentation onto the new shape.
 
 ## Context and Orientation
 
@@ -269,7 +292,57 @@ Loading a version 11 file is a no-op conversion, so repeated loads and saves are
 
 ## Artifacts and Notes
 
-(fill in with the round-trip test output and the saved-TOML excerpt from acceptance step 1 when done)
+Acceptance step 1: the version 10 file in `VERSION_TEN_CONFIG`
+(`mj-core/src/config/tests.rs`) loads and saves as
+
+    version = 11
+
+    [machines.aws]
+    kind = "aws-ec2"
+    region = "us-east-1"
+    launch_template = "lt-0123"
+    ssh_user = "ubuntu"
+    address_source = "public-dns"
+
+    [machines."builder.example.com"]
+    kind = "ssh"
+    host = "builder.example.com"
+    workspace_prefix = ".local/share/hel/workspaces"
+
+    [machines.local]
+    kind = "local"
+
+    [machines.local.build_cache]
+    max_size = "50GiB"
+
+    [targets.aws]
+    kind = "bare"
+    machine = "aws"
+
+    [targets.builder]
+    kind = "bare"
+    machine = "builder.example.com"
+    permissions = "guardian"
+
+    [targets.builder-podman]
+    kind = "podman"
+    machine = "builder.example.com"
+    image = "example.invalid/agent:latest"
+
+    [targets.docker]
+    kind = "docker"
+    image = "example.invalid/agent:latest"
+
+    [targets.localhost]
+    kind = "bare"
+
+    [targets.podman]
+    kind = "podman"
+    image = "example.invalid/agent:latest"
+
+Both local container runtimes resolve with the one `50GiB` build cache the
+`podman` target used to own alone, and the two runtimes on
+`builder.example.com` share one machine entry.
 
 ## Interfaces and Dependencies
 

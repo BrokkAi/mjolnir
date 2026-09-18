@@ -1,6 +1,6 @@
 # Podman for Mjolnir
 
-This is the operational contract for a host that runs Mjolnir `local-podman`
+This is the operational contract for a host that runs Mjolnir Podman
 targets. For a coding-agent handoff, run `mj setup instructions --platform
 linux` and `mj doctor --json`, then give the instructions page plus the output
 of `mj doctor --json` to the coding agent. The host is ready only when every
@@ -20,13 +20,13 @@ For a target such as:
 
 ```toml
 [targets.podman]
-kind = "local-podman"
+kind = "podman"
 image = "localhost/mjolnir/agent-dev:latest"
 ```
 
 Mjolnir invokes the local `podman` CLI as the user running Mjolnir; it does not use
 `sudo`, a shared Podman socket, or a remote Podman connection. Before each
-`local-podman` session and while `mj setup` evaluates Podman, Mjolnir performs
+Podman session and while `mj setup` evaluates Podman, Mjolnir performs
 these fast runtime checks:
 
 ```console
@@ -116,18 +116,17 @@ Podman user because they may retain objects from private repositories. You can
 remove `~/.cache/mjolnir/git/mirrors` while no launch is updating it; do not remove
 the `sessions` directory while managed containers are running.
 
-`mj doctor --json` runs those three checks only when a `local-podman` target
-exists, and then checks `podman image exists` for each configured
-`local-podman` image. `mj doctor --json --smoke` replaces that presence check
+`mj doctor --json` runs those three checks only when a local Podman runtime
+exists, and then checks `podman image exists` for each configured image. `mj doctor --json --smoke` replaces that presence check
 with the full disposable run/exec/remove test, so it automates
 [Verification](#verification) sections 3 and 4 for every configured image.
 
-An `ssh-podman` target gets the same probes and the same smoke test, each
+A Podman runtime on an SSH machine gets the same probes and the same smoke test, each
 wrapped in a noninteractive `ssh` call to the configured host. Every
 remediation below then applies on that remote host, as the user that SSH logs
 in as.
 
-An `ssh-podman` target also gets a second check, `Host limits for target
+Such a runtime also gets a second check, `Host limits for target
 <id>`, for the two host limits that cause failures when many sessions start
 at once. It reports how many kernel keys the SSH login user holds against its
 quota in `/proc/key-users`, because every container takes a session keyring

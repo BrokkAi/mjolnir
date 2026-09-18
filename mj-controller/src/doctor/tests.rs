@@ -1394,6 +1394,6 @@ fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
     assert!(instructions.contains("mj doctor --json --smoke"));
     assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
     assert!(instructions.contains("Podman **4.3.0 or newer**"));
-    assert!(instructions.contains("kind = \"local-docker\""));
+    assert!(instructions.contains("kind = \"docker\""));
     assert!(instructions.contains("--opt type=overlay"));
 }
