@@ -10,28 +10,41 @@ pub(in crate::controller) type CatalogFetch<'a> = &'a dyn Fn(&str, &str) -> Resu
 /// unchanged on any target.
 pub(super) const STAGED_CATALOG_FILE: &str = "models.json";
 
+/// The `profile_config_cache` row one provider's fetched catalog is kept in.
+///
+/// That table is keyed by profile and model, and a discovered `ProfileConfig`
+/// for a profile's default model already occupies the empty model key, so a
+/// catalog body stored under it would evict the discovered configuration and
+/// be evicted by it in turn. A provider's base URL is not a model slug, so
+/// naming the row after it keeps the two apart and gives every provider a row
+/// of its own.
+pub(in crate::controller) fn catalog_cache_key(base_url: &str) -> String {
+    format!("catalog:{base_url}")
+}
+
 /// Where a fetched catalog is remembered so a provider outage cannot block a
 /// launch. The live store is one implementation; a test can supply another.
+/// `key` is [`catalog_cache_key`] of the provider the body came from.
 pub(in crate::controller) trait CatalogCache {
-    fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String>;
-    fn store(&self, profile_id: &str, fingerprint: &str, body: &str);
+    fn load(&self, profile_id: &str, key: &str) -> Option<String>;
+    fn store(&self, profile_id: &str, key: &str, body: &str);
 }
 
 /// The catalog cache backed by Mjolnir's own `profile_config_cache` table.
 pub(in crate::controller) struct SharedCatalogCache;
 
 impl CatalogCache for SharedCatalogCache {
-    fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String> {
-        crate::database::load_profile_config_cache(profile_id, "", fingerprint)
+    fn load(&self, profile_id: &str, key: &str) -> Option<String> {
+        crate::database::load_profile_config_cache(profile_id, key, key)
             .ok()
             .flatten()
     }
 
-    fn store(&self, profile_id: &str, fingerprint: &str, body: &str) {
+    fn store(&self, profile_id: &str, key: &str, body: &str) {
         if let Err(error) = crate::database::save_profile_config_cache(
             profile_id.to_owned(),
-            String::new(),
-            fingerprint.to_owned(),
+            key.to_owned(),
+            key.to_owned(),
             body.to_owned(),
         ) {
             tracing::warn!(profile_id, "could not cache the model catalog: {error:#}");
@@ -71,15 +84,15 @@ pub(in crate::controller) fn stage_codex_catalog(
         format!("profile {profile_id:?} has no {env_key} entry to read its model catalog with")
     })?;
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
-    let fingerprint = format!("catalog:{}", provider.base_url);
+    let key = catalog_cache_key(&provider.base_url);
     let body = match fetch(&url, api_key) {
         Ok(body) => {
             if let Ok(text) = std::str::from_utf8(&body) {
-                cache.store(profile_id, &fingerprint, text);
+                cache.store(profile_id, &key, text);
             }
             body
         }
-        Err(error) => match cache.load(profile_id, &fingerprint) {
+        Err(error) => match cache.load(profile_id, &key) {
             Some(body) => {
                 tracing::warn!(
                     profile_id,

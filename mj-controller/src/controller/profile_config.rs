@@ -130,9 +130,16 @@ pub async fn observe(
     .map(|_| ())
 }
 
+/// The files in a profile home that decide what a session advertises: the
+/// harness's own configuration, which names the model provider and the default
+/// model, and the model catalog Mjolnir merges over a provider's list. They are
+/// read for the discovery fingerprint, so editing one is not a change Mjolnir
+/// can answer from a catalogue discovered before the edit.
+const HOME_CATALOG_INPUTS: [&str; 3] = ["config.toml", "models.json", "settings.json"];
+
 fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"profile-config-v3\0");
+    hash.update(b"profile-config-v4\0");
     hash.update(serde_json::to_vec(profile)?);
     hash.update(serde_json::to_vec(environment)?);
     hash.update(
@@ -140,6 +147,23 @@ fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>)
             .install_id
             .as_bytes(),
     );
+    // The profile record names a home; what that home holds is what the
+    // harness reads. Pointing a Codex profile at another provider, or
+    // correcting its catalog, changes the models and efforts a session
+    // offers without changing a single field of the record, so the contents
+    // of those files belong in the key as much as the record does.
+    for name in HOME_CATALOG_INPUTS {
+        let path = profile.home.join(name);
+        hash.update(name.as_bytes());
+        match std::fs::read(&path) {
+            Ok(bytes) => hash.update(&bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hash.update(b"\0absent"),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", path.display()));
+            }
+        }
+        hash.update(b"\0");
+    }
     Ok(lower_hex(hash.finalize()))
 }
 
@@ -346,6 +370,48 @@ mod tests {
         assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
         assert_eq!(choices.models.len(), 1);
         assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
+    }
+
+    #[test]
+    fn pointing_a_profile_at_another_provider_invalidates_the_discovery_cache() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.path().into(),
+            environment: BTreeMap::new(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        };
+        let key = || fingerprint(&profile, &BTreeMap::new()).unwrap();
+
+        let built_in = key();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model = \"glm-5.3\"\n\
+             model_provider = \"zai\"\n\
+             \n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             env_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .unwrap();
+        let provider = key();
+        assert_ne!(
+            built_in, provider,
+            "a home that gained a model provider offers other models"
+        );
+        std::fs::write(
+            home.path().join("models.json"),
+            r#"{"models":[{"slug":"glm-5.3-flash"}]}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            provider,
+            key(),
+            "a catalog override changes the models a session offers"
+        );
     }
 
     #[test]
