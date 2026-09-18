@@ -815,6 +815,9 @@ fn render_combined_themed(
     ));
 
     let prompt_focused = dashboard.prompt_has_focus();
+    // A focused border only says anything when there is another pane to tell
+    // it apart from, so the single-pane surface draws as it always has.
+    let focus_borders = pane_bands.len() > 1;
     let mut drawn_sessions = Vec::new();
     let mut chat_drew_footer = false;
     // The focused pane draws last: its conversation may open an overlay over
@@ -858,8 +861,11 @@ fn render_combined_themed(
                     prompt_area,
                     dashboard,
                     &session_id,
-                    transition,
-                    failed,
+                    TransitionSurface {
+                        transition,
+                        failed,
+                        pane_focused: false,
+                    },
                 ),
                 (Some(chat), None) => {
                     drawn_sessions.push(chat.session_id().to_owned());
@@ -871,6 +877,7 @@ fn render_combined_themed(
                             footer: None,
                             overlay: pane_rect,
                             title_controls: title_controls(close_chip),
+                            pane_focused: false,
                         },
                         false,
                         false,
@@ -888,6 +895,7 @@ fn render_combined_themed(
                         reason,
                         dashboard.config.spinner,
                         title_controls(close_chip),
+                        false,
                     );
                     render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
                 }
@@ -911,7 +919,13 @@ fn render_combined_themed(
                 .and_then(|session_id| chats.get(session_id))
                 .is_some_and(|chat| chat.component_modal_open());
         chat_drew_footer = if launch_standby_drawn {
-            render_launch_standby_surface(frame, transcript_area, prompt_area, dashboard);
+            render_launch_standby_surface(
+                frame,
+                transcript_area,
+                prompt_area,
+                dashboard,
+                focus_borders,
+            );
             false
         } else if let Some((session_id, transition, failed)) = selected_transition.clone() {
             render_transition_surface(
@@ -920,8 +934,11 @@ fn render_combined_themed(
                 prompt_area,
                 dashboard,
                 &session_id,
-                transition,
-                failed,
+                TransitionSurface {
+                    transition,
+                    failed,
+                    pane_focused: focus_borders,
+                },
             );
             false
         } else {
@@ -958,6 +975,7 @@ fn render_combined_themed(
                             }),
                             overlay: area,
                             title_controls: title_controls(close_chip),
+                            pane_focused: focus_borders,
                         },
                         prompt_focused,
                         transcript_selected,
@@ -1000,6 +1018,7 @@ fn render_combined_themed(
                         reason,
                         dashboard.config.spinner,
                         title_controls(close_chip),
+                        focus_borders,
                     );
                     if opening {
                         // The real composer parks in the prompt band while the
@@ -1116,8 +1135,9 @@ fn render_empty_transcript(
     reason: EmptyConversation,
     spinner_style: spinner::SpinnerStyle,
     title_controls: u16,
+    pane_focused: bool,
 ) {
-    let mut panel = theme::panel(false).title(" Conversation ");
+    let mut panel = theme::panel(pane_focused).title(" Conversation ");
     if matches!(reason, EmptyConversation::Opening) {
         panel = panel.title(
             Line::from(vec![
@@ -1260,8 +1280,9 @@ fn render_launch_standby_surface(
     transcript_area: Rect,
     prompt_area: Rect,
     dashboard: &mut DashboardState,
+    pane_focused: bool,
 ) {
-    let panel = theme::panel(false)
+    let panel = theme::panel(pane_focused)
         .title(format!(
             " Transition · {} ",
             SessionTransitionKind::Starting.label()
@@ -1313,15 +1334,28 @@ fn render_launch_standby_surface(
 /// live (Enter holds the draft and explains), and the draft carries into the
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
+/// What one pane's transition panel reports: the operation under way, whether
+/// it failed, and whether the pane holding it has the keyboard.
+#[derive(Clone, Copy)]
+struct TransitionSurface {
+    transition: SessionTransitionKind,
+    failed: bool,
+    pane_focused: bool,
+}
+
 fn render_transition_surface(
     frame: &mut Frame,
     transcript_area: Rect,
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     session_id: &str,
-    transition: SessionTransitionKind,
-    failed: bool,
+    surface: TransitionSurface,
 ) {
+    let TransitionSurface {
+        transition,
+        failed,
+        pane_focused,
+    } = surface;
     let Some(session) = dashboard.state.sessions.get(session_id) else {
         return;
     };
@@ -1368,7 +1402,8 @@ fn render_transition_surface(
         .and_then(|operation| operation.resume_destination.as_ref())
         .map(|(profile, _)| profile.as_str())
         .unwrap_or(&session.last_profile);
-    let mut panel = theme::panel(false).title(format!(" Transition · {} ", transition.label()));
+    let mut panel =
+        theme::panel(pane_focused).title(format!(" Transition · {} ", transition.label()));
     if !failed {
         panel = panel.title(
             Line::from(vec![

@@ -475,7 +475,7 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, 0);
+            render_transcript(frame, frame.area(), &mut chat, false, 0, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -493,6 +493,27 @@ fn conversation_header_renders_the_session_title_in_a_distinct_color() {
     }
 }
 
+/// A host that tiles several panes says which one has the keyboard, and that
+/// pane's transcript border is drawn in the focused style.
+#[test]
+fn the_transcript_border_follows_the_hosts_pane_focus() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut border = |pane_focused| {
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_transcript(frame, frame.area(), &mut chat, false, 0, pane_focused);
+            })
+            .expect("render conversation");
+        terminal.backend().buffer()[(0, 0)].fg
+    };
+
+    assert_eq!(border(true), theme::palette().accent);
+    assert_eq!(border(false), theme::palette().border);
+}
+
 /// A host that draws its own chips at the right of the title row tells the
 /// chat how many columns to stay clear of, and the title stops short of them.
 #[test]
@@ -505,7 +526,7 @@ fn a_long_title_stops_short_of_the_columns_the_host_reserved() {
     let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
     terminal
         .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, reserve);
+            render_transcript(frame, frame.area(), &mut chat, false, reserve, false);
         })
         .expect("render conversation");
     let buffer = terminal.backend().buffer();
@@ -533,7 +554,7 @@ fn long_conversation_titles_use_the_header_width_while_working() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_transcript(frame, area, &mut chat, false, 0);
+                render_transcript(frame, area, &mut chat, false, 0, false);
             })
             .expect("render conversation");
         let buffer = terminal.backend().buffer();

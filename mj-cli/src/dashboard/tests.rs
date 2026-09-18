@@ -552,6 +552,7 @@ async fn transcript_scrollbar_gestures_bypass_text_selection() {
                     footer: None,
                     overlay: frame.area(),
                     title_controls: 0,
+                    pane_focused: false,
                 },
                 true,
                 false,

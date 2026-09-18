@@ -2,16 +2,19 @@ use super::*;
 
 /// `title_controls` is the number of columns the host reserves at the right
 /// of the title row for its own chips; the title stops short of them.
+/// `pane_focused` draws the border in the focused style, which is how a host
+/// with several panes shows which one has the keyboard.
 pub(crate) fn render_transcript(
     frame: &mut Frame,
     area: Rect,
     chat: &mut ChatState,
     gesture_active: bool,
     title_controls: u16,
+    pane_focused: bool,
 ) {
     let viewport_height = usize::from(area.height.saturating_sub(2));
     chat.last_viewport_height = viewport_height;
-    let block = theme::panel(false).padding(Padding::horizontal(1));
+    let block = theme::panel(pane_focused).padding(Padding::horizontal(1));
     let inner = block.inner(area);
     let content_width = inner.width;
     let window = chat.viewport(content_width, viewport_height);

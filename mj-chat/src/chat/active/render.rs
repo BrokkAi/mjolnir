@@ -37,6 +37,7 @@ pub(crate) fn render_full_frame(
             footer: Some(test_footer(chunks[2])),
             overlay: inner,
             title_controls: 0,
+            pane_focused: false,
         },
         true,
         transcript_selected,
@@ -120,6 +121,7 @@ pub(crate) fn render_in(
             chat,
             transcript_selected,
             regions.title_controls,
+            regions.pane_focused,
         );
         if question_height > 0
             && let Some(dialog) = chat.elicitation.as_ref()
@@ -174,6 +176,7 @@ pub(crate) fn render_in(
         chat,
         transcript_selected,
         regions.title_controls,
+        regions.pane_focused,
     );
     chat.reviewer_area = None;
     if let Some(area) = reviewer_area {

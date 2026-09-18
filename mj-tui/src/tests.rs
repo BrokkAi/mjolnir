@@ -2790,6 +2790,60 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
     assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
+/// The pane with the keyboard draws its transcript border in the focused
+/// style, and its neighbour does not, so the focused pane is visible without
+/// reading the composer.
+#[test]
+fn the_focused_pane_draws_an_accented_transcript_border() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .expect("the test conversation area has room for two panes");
+    assert_eq!(dashboard.focused_pane(), second);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw two panes");
+    let corner = |dashboard: &DashboardState, pane| {
+        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+        (transcript.x, transcript.y)
+    };
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer[corner(&dashboard, second)].fg,
+        mj_chat::theme::palette().accent,
+        "the focused pane's transcript border is accented"
+    );
+    assert_eq!(
+        buffer[corner(&dashboard, first)].fg,
+        mj_chat::theme::palette().border,
+        "an unfocused pane keeps the resting border"
+    );
+}
+
+/// With one pane there is nothing to tell apart, so the transcript border
+/// stays at rest and the single-pane surface draws as it always has.
+#[test]
+fn the_lone_pane_draws_a_resting_transcript_border() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let pane = dashboard.focused_pane();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw one pane");
+    let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
+    assert_eq!(
+        terminal.backend().buffer()[(transcript.x, transcript.y)].fg,
+        mj_chat::theme::palette().border,
+        "a lone pane draws the resting border whether or not it has the keyboard"
+    );
+}
+
 /// Closing a pane that does not hold the keyboard removes it and reports what
 /// it showed, leaving the focus and the highlight alone.
 #[test]

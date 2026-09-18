@@ -18,7 +18,7 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 - [x] M0: this ExecPlan written and committed (2026-09-18, ac500d28).
 - [x] M1: close a pane by id; a `×` chip on every conversation pane's title row. Done 2026-09-18T10:48-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] M2: split-open notices for a session that is already open. Done 2026-09-18T11:34-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
-- [ ] M3: wheel routes to the pane under the pointer; focused transcript border.
+- [x] M3: wheel routes to the pane under the pointer; focused transcript border. Done 2026-09-18T12:26-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [ ] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`).
 - [ ] M5: last pane on `prefix+;`.
 - [ ] Docs and screenshot regeneration for the key changes.
@@ -45,6 +45,18 @@ true whenever the focused pane shows the session, and a row selection sets
 selection-then-split path. The notice therefore fires only when the session was
 already in the focused pane with no earlier conversation to put back — a
 `⋯` menu split on the pane you are already in, or a repeated split key.
+
+An unfocused pane's chat needs no extra state for the wheel: `mj-chat`'s
+pointer handler scrolls the transcript from its fallback arm, on the host's
+promise that the pointer was over the conversation, and every hit-testing arm
+above it reads surfaces the pane registered in its own draw. Unfocused panes
+are drawn each frame, so those surfaces and `last_viewport_height` already
+describe the pane's own rectangle.
+
+A wheel over an unfocused pane holding no conversation now falls through to
+`DashboardState::handle_event_result` rather than scrolling the focused pane.
+That handler answers the wheel only inside the support panes, so a wheel over
+the conversation band does nothing, which is the intended result.
 
 `cargo build --workspace` fails in this checkout because `mj-desktop` needs
 GTK development packages that are not installed. The workspace's

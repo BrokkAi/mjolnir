@@ -1625,8 +1625,8 @@ fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
 /// no work.
 ///
 /// A mouse event goes where the pointer is, not where the keyboard is: the
-/// wheel over the transcript scrolls the transcript even while a pane has
-/// focus, and a click there hands the keyboard back to the composer. Keys go
+/// wheel over a transcript scrolls that transcript, including an unfocused
+/// pane's, and a click there hands the keyboard back to the composer. Keys go
 /// to the modal if one is open, then to the composer if it has focus, and
 /// otherwise to the panes.
 ///
@@ -1645,6 +1645,26 @@ fn dispatch_event(
             .is_some_and(|chat| chat.component_modal_open());
     let dashboard_pointer = !chat_modal
         && matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
+    // The wheel belongs to the pane under the pointer. Only an unfocused pane
+    // needs saying so: over the focused pane the conversation below is the one
+    // `visible_chat` already returns.
+    let wheel_pane = match &event {
+        Event::Mouse(mouse)
+            if !dashboard_pointer
+                && !chat_modal
+                && !context.dashboard.modal_open()
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) =>
+        {
+            context
+                .dashboard
+                .chat_region_contains(mouse.column, mouse.row)
+                .filter(|pane| *pane != context.dashboard.focused_pane())
+        }
+        _ => None,
+    };
     let to_chat = !dashboard_pointer
         && (chat_modal
             || match &event {
@@ -1674,7 +1694,11 @@ fn dispatch_event(
                 }
                 _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
             });
-    match context.visible_chat().filter(|_| to_chat) {
+    let chat = match wheel_pane {
+        Some(pane) if to_chat => context.pane_chat_mut(pane),
+        _ => context.visible_chat().filter(|_| to_chat),
+    };
+    match chat {
         Some(chat) => {
             let result = chat.handle_event_result(event);
             *chat_outcome = result
