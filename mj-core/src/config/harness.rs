@@ -19,6 +19,26 @@ pub enum HarnessKind {
     Muse,
 }
 
+/// The operating system of the machine a harness process will run on, as far
+/// as harness home scoping is concerned. It is not always this machine: the
+/// controller composes a launch environment for its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessHost {
+    MacOs,
+    Other,
+}
+
+impl HarnessHost {
+    /// The machine this process runs on.
+    pub const fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// The target-level execution policy Hel applies independently of the selected
 /// harness. Raw targets may preserve configured approvals; isolated targets
 /// force full access because their boundary contains the blast radius.
@@ -167,9 +187,14 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
 impl HarnessKind {
     /// Translate a harness home into its process environment. Muse's config
     /// directory must be named `muse`, as required by the XDG directory layout.
+    ///
+    /// `host` is the machine that will run the harness, because a harness home
+    /// is not scopable by environment on every operating system; see
+    /// [`HarnessKind::scopes_home_with_environment`].
     pub fn configure_home_environment(
         self,
         home: &Path,
+        host: HarnessHost,
         environment: &mut BTreeMap<String, String>,
     ) {
         let config_root = if self == Self::Muse {
@@ -181,10 +206,26 @@ impl HarnessKind {
         } else {
             home
         };
+        if !self.scopes_home_with_environment(host) {
+            return;
+        }
         environment.insert(
             self.home_env().into(),
             config_root.to_string_lossy().into_owned(),
         );
+    }
+
+    /// Whether [`HarnessKind::home_env`] actually scopes this harness's
+    /// configuration on `host`.
+    ///
+    /// Claude Code on macOS keeps every profile's OAuth credentials in one
+    /// Keychain item, `Claude Code-credentials`, whatever `CLAUDE_CONFIG_DIR`
+    /// says (anthropics/claude-code#20553). The variable isolates nothing
+    /// there: it only moves Claude off the settings, history and MCP servers
+    /// the person actually logged in with, while the credentials stay shared.
+    /// Mjolnir leaves it unset on macOS and lets Claude use its own home.
+    pub const fn scopes_home_with_environment(self, host: HarnessHost) -> bool {
+        !matches!((self, host), (Self::Claude, HarnessHost::MacOs))
     }
 
     pub fn home_from_environment(self, value: impl AsRef<Path>) -> PathBuf {

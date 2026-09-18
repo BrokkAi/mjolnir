@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{HarnessKind, ImagePullPolicy};
+use crate::config::{HarnessHost, HarnessKind, ImagePullPolicy};
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -1707,6 +1707,16 @@ impl TargetTemplate {
 }
 
 impl TargetLocator {
+    /// The operating system the harness will run on. Only a bare localhost
+    /// target runs it on this machine; every other locator is a Linux
+    /// container or a Linux host reached over SSH.
+    pub const fn harness_host(&self) -> HarnessHost {
+        match self {
+            Self::LocalBare { .. } => HarnessHost::current(),
+            _ => HarnessHost::Other,
+        }
+    }
+
     /// The target kind spelling shared with [`crate::config::TargetTemplate`].
     pub const fn kind_name(&self) -> &'static str {
         match self {

@@ -18,9 +18,9 @@ use crate::targets::{
     TargetTemplate as RuntimeTargetTemplate, run_setup_smoke_test,
 };
 use mj_core::config::{
-    AwsAddressSource, Config, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode,
-    ProjectBundle, ProjectRepository, SshConnection, TargetTemplate, unique_config_id as unique_id,
-    validate_id,
+    AwsAddressSource, Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile,
+    PermissionMode, ProjectBundle, ProjectRepository, SshConnection, TargetTemplate,
+    unique_config_id as unique_id, validate_id,
 };
 
 /// AWS credential detection must never stall an interactive first run, so the
@@ -414,13 +414,13 @@ fn harness_is_authenticated_with(
     if kind != HarnessKind::Claude {
         return false;
     }
-    if is_default_home && claude_keychain_reports_authenticated(executor) {
-        return true;
+    // Where `CLAUDE_CONFIG_DIR` does not scope the home, every Claude profile
+    // shares the one Keychain item, so asking the CLI about a scoped home
+    // would only report the default profile's state again.
+    if is_default_home || !kind.scopes_home_with_environment(HarnessHost::current()) {
+        return claude_keychain_reports_authenticated(executor);
     }
-    if !is_default_home && claude_cli_reports_authenticated(home, executor) {
-        return true;
-    }
-    false
+    claude_cli_reports_authenticated(home, executor)
 }
 
 /// Ask Claude Code about a scoped profile. Setting `CLAUDE_CONFIG_DIR` for the

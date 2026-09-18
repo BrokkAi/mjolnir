@@ -26,6 +26,16 @@ There are five harness kinds. A Codex profile can also authenticate with an API
 key against a model provider other than OpenAI; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
 
+On macOS, Claude Code keeps every profile's credentials in one Keychain item
+whatever `CLAUDE_CONFIG_DIR` says
+([anthropics/claude-code#20553](https://github.com/anthropics/claude-code/issues/20553)),
+so the variable scopes nothing and only moves Claude off the settings, history,
+and MCP servers you logged in with. Mjolnir therefore leaves it unset for a
+Claude session on this machine: the session uses `~/.claude` directly, with no
+staged per-session copy. A Claude profile whose `home` is somewhere else is
+reported by `mj doctor` as ignored. Container and SSH targets are unaffected,
+because the variable does scope a home on Linux.
+
 `mj setup` checks the home variable first and otherwise looks in the
 conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
