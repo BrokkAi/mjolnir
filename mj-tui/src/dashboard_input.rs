@@ -111,16 +111,6 @@ impl DashboardState {
         // has been on screen long enough to read: for a background failure
         // this bar is the only report there is.
         self.notices.dismiss(now);
-        if !self.modal_open() && key.modifiers.contains(KeyModifiers::CONTROL) {
-            let workspace_command = match key.code {
-                KeyCode::PageUp => Some(CommandId::SelectWorkspacePrevious),
-                KeyCode::PageDown => Some(CommandId::SelectWorkspaceNext),
-                _ => None,
-            };
-            if let Some(command) = workspace_command {
-                return self.dispatch_command(command);
-            }
-        }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Key(key));
         }
@@ -192,6 +182,8 @@ impl DashboardState {
     pub(crate) fn handle_mouse_inner(&mut self, mouse: MouseEvent) -> DashboardAction {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             self.notices.dismiss(Instant::now());
+            // Reaching for the mouse abandons a half-typed chord.
+            self.prefix_pending = false;
         }
         if matches!(self.mode, Mode::Help(_)) {
             return self.handle_help_mouse(mouse);
@@ -291,7 +283,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         // Minimized Targets and Quota show no selected row. Their summary can
-        // take focus so Alt-Z can restore it, but hidden rows do not move or
+        // take focus so the pane-size key can restore it, but hidden rows do not move or
         // activate underneath the user.
         let rows_visible = hovered == Focus::Sessions
             || hovered
@@ -384,7 +376,7 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             // Escape belongs to the composer and to modals. On a pane it does
-            // nothing: the combined surface is quit with Alt-Q, and a stray
+            // nothing: the combined surface is quit with the detach key, and a stray
             // Escape must never take the whole screen away.
             (KeyCode::Esc, _) => {
                 self.record_event_handled();
@@ -419,12 +411,24 @@ impl DashboardState {
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
+                // `ctrl+d` and `ctrl+u` page by half a screen, as they do in
+                // every other list on the surface.
+                (KeyCode::Char('u'), true) => {
+                    self.move_selection(-8);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
+                (KeyCode::Char('d'), true) => {
+                    self.move_selection(8);
+                    self.record_event_handled();
+                    return DashboardAction::None;
+                }
                 (KeyCode::Home, _) => {
                     self.set_selection_for(self.focus, 0);
                     self.record_event_handled();
                     return DashboardAction::None;
                 }
-                (KeyCode::End, _) => {
+                (KeyCode::End, _) | (KeyCode::Char('G'), false) => {
                     let len = self.focus_len_for(self.focus);
                     self.set_selection_for(self.focus, len.saturating_sub(1));
                     self.record_event_handled();
@@ -437,7 +441,8 @@ impl DashboardState {
         // while the config is empty, and an empty config has no sessions. The
         // registry cannot resolve this on the key alone, because `e` is also
         // the Sessions, Targets, and Quota panes' key, so the ambiguity is
-        // settled here and `Scope::Setup` is left out of `spec_for_key`.
+        // settled here and `Scope::Setup` is left out of
+        // `pane_command_for_key`.
         if plain && key.code == KeyCode::Char('e') && self.config_is_empty() {
             let action = self.dispatch_command(CommandId::OpenConfig);
             self.record_event_handled();
@@ -453,7 +458,7 @@ impl DashboardState {
             self.record_event_handled();
             return DashboardAction::None;
         }
-        match crate::actions::spec_for_key(key, self.focus) {
+        match crate::actions::pane_command_for_key(key, self.focus) {
             Some(id) => {
                 let action = self.dispatch_command(id);
                 self.record_event_handled();
@@ -562,10 +567,12 @@ impl DashboardState {
             return DashboardAction::None;
         }
         if let Some(operation) = self.session_operations.get(&session.id) {
-            self.notices.set(format!(
-                "{} is in progress; press Alt-X to cancel it.",
-                operation.kind.label()
-            ));
+            let label = operation.kind.label();
+            self.notices
+                .set(match self.first_key_label(CommandId::CancelOperation) {
+                    Some(cancel) => format!("{label} is in progress; press {cancel} to cancel it."),
+                    None => format!("{label} is in progress."),
+                });
             return DashboardAction::None;
         }
         if let Some(transition) = self.transition_kind(&session.id) {

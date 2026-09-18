@@ -669,6 +669,7 @@ pub(super) fn viewer_activity_details(
         step_started_at_ms: details.step_started_at_ms,
         background_started_at_ms: details.background_started_at_ms,
         idle_since_ms: details.idle_since_ms,
+        last_activity_at_ms: details.last_activity_at_ms,
         label: details.label.clone(),
     }
 }

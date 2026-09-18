@@ -317,6 +317,16 @@ pub(crate) fn render_chat_footer(
     // chords that answer from anywhere, then the function keys. Only the
     // first group changes with what the composer is doing.
     let footer_area = footer.area;
+    // A host banner owns the whole row: it is reporting a state the composer's
+    // own hints would only bury.
+    if let Some(banner) = footer.banner {
+        chat.footer_command_areas.borrow_mut().clear();
+        frame.render_widget(
+            Paragraph::new(banner.clone()).style(theme::base().fg(theme::palette().muted)),
+            footer_area,
+        );
+        return;
+    }
     let queued_keys = format!(
         "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · {}",
         chat.turn_control_intent().escape_hint(),
@@ -324,11 +334,11 @@ pub(crate) fn render_chat_footer(
     let composer_keys = if !prompt_focused {
         "Tab pane · PgUp/PgDn transcript"
     } else if chat.voice_active {
-        "Listening… Alt-V stop · PgUp/PgDn transcript"
+        "Listening… click the microphone to stop · PgUp/PgDn transcript"
     } else if !chat.queued_prompts.is_empty() {
         &queued_keys
     } else {
-        "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Alt-T rendering · Shift-Enter newline"
+        "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Shift-Enter newline"
     };
     let groups = theme::fit_footer_items(
         [
@@ -351,6 +361,13 @@ pub(crate) fn render_chat_footer(
         ],
         footer_area.width,
         |(_, text)| *text,
+        // The host ranks its hints, and puts the two it wants kept longest —
+        // the palette and the help key — at the end of the list.
+        |(command, _)| {
+            command.is_some_and(|index| {
+                index + 2 >= footer.chords.len().saturating_add(footer.functions.len())
+            })
+        },
     );
     let default_footer = theme::footer_items_text(&groups, |(_, text)| *text);
     let search_footer = chat.history_search.as_ref().map(history_search_footer);
@@ -414,14 +431,9 @@ pub(crate) fn render_chat_footer(
 pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     ChatFooter {
         area,
-        chords: &["Alt-G panes", "Alt-Q detach"],
-        functions: &[
-            "F2 palette",
-            "F4 web",
-            "F5 refresh",
-            "F7 settings",
-            "F1 help",
-        ],
+        chords: &["ctrl+b then: b panes", "q detach", ": palette", "? keys"],
+        functions: &[],
+        banner: None,
     }
 }
 

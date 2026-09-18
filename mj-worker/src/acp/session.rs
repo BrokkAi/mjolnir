@@ -473,16 +473,11 @@ pub(super) async fn serve_session(
                 // Start the stall clock at send time so the watchdog measures
                 // silence within this turn, not idle time carried from before.
                 spec.acp_activity.mark();
-                // Claude and Codex mark their own turn ends, so a lost reply
-                // cannot hang them and the watchdog stays out of their way.
-                let stall_policy = if turn_ends_only_on_prompt_reply(spec.harness) {
-                    spec.stall_policy.unwrap_or_else(turn_stall_policy)
-                } else {
-                    mj_core::activity::StallPolicy {
-                        silence: None,
-                        tool_call: None,
-                    }
-                };
+                // One policy for every harness, off unless the operator set a
+                // bound. No harness ends the turn Mjolnir reports without the
+                // `session/prompt` reply, so there is no harness that is safe
+                // to exempt and nothing left to special-case.
+                let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))

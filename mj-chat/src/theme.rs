@@ -244,48 +244,87 @@ pub fn hints(text: &str) -> Line<'static> {
 pub const FOOTER_SEPARATOR: &str = " · ";
 pub const FOOTER_GROUP_SEPARATOR: &str = " │ ";
 
+/// The footer row drawn while the prefix key is waiting for the key that
+/// completes a chord. `prefix` is the resolved prefix label and `help_key` the
+/// key that lists the bindings.
+pub fn prefix_banner(prefix: &str, help_key: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            " PREFIX ".to_owned(),
+            Style::default()
+                .fg(palette().background)
+                .bg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" esc cancel · {prefix} send · {help_key} keys"),
+            muted(),
+        ),
+    ])
+}
+
 /// Keep complete footer hints within the terminal width. Pane hints give way
-/// before global chords, then function keys; palette and help survive longest.
-pub fn fit_footer(pane: &[&str], chords: &[&str], functions: &[&str], width: u16) -> String {
+/// before the prefix chords; `protected` names the hints that survive longest.
+pub fn fit_footer(
+    pane: &[&str],
+    chords: &[&str],
+    functions: &[&str],
+    width: u16,
+    protected: impl Fn(&&str) -> bool,
+) -> String {
     footer_items_text(
         &fit_footer_items(
             [pane.to_vec(), chords.to_vec(), functions.to_vec()],
             width,
             |text| *text,
+            protected,
         ),
         |text| *text,
     )
 }
 
 /// Fit structured command hints while retaining their identities for hit testing.
+///
+/// Whole segments are dropped rather than truncated, because half a hint names
+/// a key that does not exist. They give way from the left-hand group first, and
+/// from the right within a group, so the reader loses what the pane offers
+/// before what answers from anywhere. A hint `protected` accepts is dropped
+/// only once nothing else is left, which is how the palette and the help key
+/// stay visible on the narrowest terminal.
 pub fn fit_footer_items<T>(
-    [mut pane, mut chords, mut functions]: [Vec<T>; 3],
+    groups: [Vec<T>; 3],
     width: u16,
     label: impl Fn(&T) -> &str,
+    protected: impl Fn(&T) -> bool,
 ) -> [Vec<T>; 3] {
+    let mut groups = groups;
     loop {
-        let groups = [pane, chords, functions];
         let text = footer_items_text(&groups, &label);
         if unicode_width::UnicodeWidthStr::width(text.as_str()) <= usize::from(width) {
             return groups;
         }
-        [pane, chords, functions] = groups;
-        if pane.pop().is_some() || chords.pop().is_some() {
-            continue;
-        }
-        let removable = functions
+        let victim = groups
             .iter()
-            .rposition(|hint| !label(hint).starts_with("F1 ") && !label(hint).starts_with("F2 "))
-            .or_else(|| {
-                functions
+            .enumerate()
+            .find_map(|(group, hints)| {
+                hints
                     .iter()
-                    .rposition(|hint| !label(hint).starts_with("F1 "))
+                    .rposition(|hint| !protected(hint))
+                    .map(|index| (group, index))
             })
-            .or_else(|| functions.len().checked_sub(1));
-        if let Some(index) = removable {
-            functions.remove(index);
-        } else {
-            return [pane, chords, functions];
+            // Only protected hints are left: give up the leading one, so the
+            // last hint standing is the one the table ranked last.
+            .or_else(|| {
+                groups
+                    .iter()
+                    .position(|hints| !hints.is_empty())
+                    .map(|group| (group, 0))
+            });
+        match victim {
+            Some((group, index)) => {
+                groups[group].remove(index);
+            }
+            None => return groups,
         }
     }
 }

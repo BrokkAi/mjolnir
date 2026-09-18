@@ -12,6 +12,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mj_chat::components::EventResult;
+use mj_core::config::KeyAction;
 use mj_core::state::SessionTransitionKind;
 
 use crate::dialogs::{ConfirmDialog, Confirmation};
@@ -52,16 +53,21 @@ pub enum CommandId {
     ManageProfiles,
     ManageTargets,
     CycleFocus,
+    CycleFocusReverse,
     CycleFocusedPaneSize,
     TogglePanePreset,
     Workspaces,
+    FocusWorkspaces,
     SelectWorkspacePrevious,
     SelectWorkspaceNext,
+    SwitchWorkspace,
     WebViewer,
     RestartDaemon,
     QuitDetach,
     Palette,
     CycleSpinner,
+    ToggleTranscriptRendering,
+    ToggleDictation,
     Help,
 }
 
@@ -124,51 +130,21 @@ pub(crate) enum Availability {
     Blocked(&'static str),
 }
 
-/// One key that runs a command, with the text used to name it on screen.
+/// One plain key a focused pane answers, with the text used to name it.
 ///
-/// `modifiers` holds `KeyModifiers::ALT` for a chord, which answers from every
-/// surface including the composer. `KeyModifiers::NONE` on a character means
-/// the plain letter, which only reaches a pane because the composer is a
-/// separate focus; a command that has a chord has no plain letter as well.
+/// Pane keys are never configurable: they are the bare letters, Enter, Tab,
+/// Space, and `?` that only reach a pane, because the composer is a separate
+/// focus and reads those characters as text. Everything a user can rebind is
+/// a [`KeyAction`] on the spec instead.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KeyHint {
     pub(crate) code: KeyCode,
-    pub(crate) modifiers: KeyModifiers,
     pub(crate) label: &'static str,
 }
 
 impl KeyHint {
     const fn plain(code: KeyCode, label: &'static str) -> Self {
-        Self {
-            code,
-            modifiers: KeyModifiers::NONE,
-            label,
-        }
-    }
-
-    const fn alt(code: KeyCode, label: &'static str) -> Self {
-        Self {
-            code,
-            modifiers: KeyModifiers::ALT,
-            label,
-        }
-    }
-
-    const fn ctrl(code: KeyCode, label: &'static str) -> Self {
-        Self {
-            code,
-            modifiers: KeyModifiers::CONTROL,
-            label,
-        }
-    }
-
-    /// Whether this hint is a chord: an Alt letter, Ctrl page key, or function key. Chords
-    /// are the keys [`global_chord`] answers from every surface, including
-    /// while the composer owns the keyboard.
-    const fn is_chord(self) -> bool {
-        matches!(self.code, KeyCode::F(_))
-            || self.modifiers.contains(KeyModifiers::ALT)
-            || self.modifiers.contains(KeyModifiers::CONTROL)
+        Self { code, label }
     }
 
     /// Whether a pressed key is this hint. `plain` is the caller's reading of
@@ -177,33 +153,28 @@ impl KeyHint {
         if self.code != key.code {
             return false;
         }
-        if self.modifiers.contains(KeyModifiers::ALT) {
-            key.modifiers.contains(KeyModifiers::ALT)
-        } else if self.modifiers.contains(KeyModifiers::CONTROL) {
-            key.modifiers.contains(KeyModifiers::CONTROL)
-        } else if matches!(self.code, KeyCode::Char(_)) {
+        if matches!(self.code, KeyCode::Char(_)) {
             // Plain letters are pane keys: a modifier means something else.
             plain
         } else {
-            // Enter, Tab, and the function keys have always answered whatever
-            // modifiers came with them.
+            // Enter and Tab have always answered whatever modifiers came
+            // with them.
             true
         }
     }
 }
 
-/// Which of the footer's three groups a hint prints in.
+/// Which of the footer's two groups a hint prints in.
 ///
-/// The row reads `pane commands │ Alt chords │ function keys`, so the reader
-/// always finds a key in the same place: what applies here, what applies
-/// everywhere, and the reference keys. Group membership is stated here rather
-/// than inferred from [`Scope`], because `Tab` and `Alt-G` share a scope and
-/// belong in different groups.
+/// The row reads `pane commands │ prefix chords`, so the reader always finds a
+/// key in the same place: what applies here, then what applies everywhere
+/// after the prefix. Group membership is stated here rather than inferred from
+/// [`Scope`], because `Tab` and the pane preset share a scope and belong in
+/// different groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FooterGroup {
     Pane,
     Chord,
-    Function,
 }
 
 /// One command: what it is called, what runs it, and when it applies.
@@ -212,7 +183,10 @@ pub(crate) struct CommandSpec {
     pub(crate) label: &'static str,
     pub(crate) description: &'static str,
     pub(crate) scope: Scope,
-    pub(crate) keys: &'static [KeyHint],
+    /// Plain keys a focused pane answers. Not configurable.
+    pub(crate) pane_keys: &'static [KeyHint],
+    /// The configurable action that also runs this command, if any.
+    pub(crate) action: Option<KeyAction>,
     /// The word the footer prints after the key, or `None` for commands the
     /// footer never has room to name. Dynamic because
     /// [`CommandId::CancelOperation`] names the operation it would cancel.
@@ -406,7 +380,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Change fast-start setup",
         description: "Choose and remember a new account, target, or isolation for this project.",
         scope: Scope::Settings,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::ChangeGoSetup),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -423,7 +398,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Open session",
         description: "Show the selected session's conversation and type in it.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
+        pane_keys: &[KeyHint::plain(KeyCode::Enter, "Enter")],
+        action: None,
         footer: footer_word!("open"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -436,7 +412,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         // No key in this milestone: the split commands are reached from the
         // session row's menu and the command palette.
         scope: Scope::Session,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -447,7 +424,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Open in split below",
         description: "Show the selected session under the conversation you are in.",
         scope: Scope::Session,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -458,7 +436,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Close pane",
         description: "Remove the conversation pane you are in; the last one is emptied instead.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -469,7 +448,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Focus pane left",
         description: "Move the keyboard to the conversation pane left this one.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -480,7 +460,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Focus pane down",
         description: "Move the keyboard to the conversation pane below this one.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -491,7 +472,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Focus pane up",
         description: "Move the keyboard to the conversation pane above this one.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -502,7 +484,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Focus pane right",
         description: "Move the keyboard to the conversation pane right this one.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -513,7 +496,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Resize pane left",
         description: "Move the border of the conversation pane you are in left one step.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -524,7 +508,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Resize pane down",
         description: "Move the border of the conversation pane you are in down one step.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -535,7 +520,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Resize pane up",
         description: "Move the border of the conversation pane you are in up one step.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -546,7 +532,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Resize pane right",
         description: "Move the border of the conversation pane you are in right one step.",
         scope: Scope::Pane,
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -557,12 +544,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Create session",
         description: "Choose the profile, project, target, and mounts in the full wizard.",
         scope: Scope::Sessions,
-        keys: &[
-            KeyHint::alt(KeyCode::Char('n'), "Alt-N"),
+        pane_keys: &[
             KeyHint::plain(KeyCode::Char('n'), "n"),
             KeyHint::plain(KeyCode::Char('N'), "N"),
-            KeyHint::alt(KeyCode::Char('w'), "Alt-W"),
         ],
+        action: Some(KeyAction::NewSession),
         footer: footer_word!("create"),
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
@@ -573,9 +559,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Restart session",
         description: "Restart with the same profile, target, and mounts, without confirmation.",
         scope: Scope::Session,
-        // No key: a mis-hit must not restart a live session. Reachable from
-        // the palette and the row menu.
-        keys: &[],
+        // No pane key: a mis-hit must not restart a live session. Reachable
+        // from the palette, the row menu, and an explicit `[keys]` binding.
+        pane_keys: &[],
+        action: Some(KeyAction::RestartSession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 2,
@@ -586,7 +573,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Resume a session",
         description: "Open the picker for every session that is not live.",
         scope: Scope::Global,
-        keys: &[KeyHint::alt(KeyCode::Char('s'), "Alt-S")],
+        pane_keys: &[],
+        action: Some(KeyAction::Resume),
         footer: footer_word!("resume"),
         footer_group: FooterGroup::Chord,
         footer_rank: 1,
@@ -597,7 +585,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Mark all read",
         description: "Clear the unread marker on every session at once.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::alt(KeyCode::Char('a'), "Alt-A")],
+        pane_keys: &[],
+        action: Some(KeyAction::MarkAllRead),
         footer: footer_word!("read"),
         footer_group: FooterGroup::Chord,
         footer_rank: 2,
@@ -608,7 +597,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Cancel operation",
         description: "Stop the launch, resume, or stop the selected session is in the middle of.",
         scope: Scope::Global,
-        keys: &[KeyHint::alt(KeyCode::Char('x'), "Alt-X")],
+        pane_keys: &[],
+        action: Some(KeyAction::CancelOperation),
         footer: cancel_footer,
         footer_group: FooterGroup::Chord,
         footer_rank: 5,
@@ -619,7 +609,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Fold project",
         description: "Space folds the selected session's project; 1 to 9 fold by number.",
         scope: Scope::Sessions,
-        keys: &[KeyHint::plain(KeyCode::Char(' '), "Space")],
+        pane_keys: &[KeyHint::plain(KeyCode::Char(' '), "Space")],
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -630,7 +621,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Rename session",
         description: "Give the selected session your own title.",
         scope: Scope::Session,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::RenameSession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -641,7 +633,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Container settings",
         description: "Edit CPU, memory, and mounts for the next time the container is created.",
         scope: Scope::Session,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::ContainerSettings),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -652,9 +645,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Stop session",
         description: "Stop the selected session without confirmation, or retry a stop that failed part-way.",
         scope: Scope::Session,
-        // No key: a mis-hit must not stop a live session. Reachable from the
-        // palette and the row menu.
-        keys: &[],
+        // No pane key: a mis-hit must not stop a live session.
+        pane_keys: &[],
+        action: Some(KeyAction::StopSession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -665,7 +658,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Move session…",
         description: "Restore the selected session on another profile and/or target.",
         scope: Scope::Session,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::MoveSession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -676,9 +670,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Delete session",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
         scope: Scope::Session,
-        // No key: a mis-hit must not begin deleting a session. Reachable from
-        // the palette and the row menu.
-        keys: &[],
+        // No pane key: a mis-hit must not begin deleting a session.
+        pane_keys: &[],
+        action: Some(KeyAction::DeleteSession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -691,10 +685,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Target actions",
         description: "Test or rename the selected target.",
         scope: Scope::Targets,
-        keys: &[
+        pane_keys: &[
             KeyHint::plain(KeyCode::Enter, "Enter"),
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
+        action: None,
         footer: footer_word!("actions"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -705,10 +700,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Rename profile",
         description: "Rename the selected profile's configuration id.",
         scope: Scope::Quota,
-        keys: &[
+        pane_keys: &[
             KeyHint::plain(KeyCode::Enter, "Enter"),
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
+        action: None,
         footer: footer_word!("edit profile"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -719,7 +715,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Manage agent profiles",
         description: "Add or edit agent accounts, harnesses, and environment settings.",
         scope: Scope::Settings,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::ManageProfiles),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -730,7 +727,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Manage machines and runtimes",
         description: "Add SSH or EC2 connections and edit runtime settings.",
         scope: Scope::Settings,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::ManageTargets),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -741,22 +739,33 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Open settings",
         description: "Edit all configuration in the Settings modal.",
         scope: Scope::Settings,
-        keys: &[KeyHint::plain(KeyCode::F(7), "F7")],
+        pane_keys: &[],
+        action: Some(KeyAction::OpenSettings),
         footer: footer_word!("settings"),
-        footer_group: FooterGroup::Function,
-        footer_rank: 4,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 9,
         available: always_ready,
     },
     CommandSpec {
         id: CommandId::CycleFocus,
         label: "Next pane",
-        description: "Move the keyboard down the layout; Shift-Tab or Shift-F6 reverses it.",
+        description: "Move the keyboard down the layout; Shift-Tab reverses it.",
         scope: Scope::Pane,
-        keys: &[
-            KeyHint::plain(KeyCode::Tab, "Tab"),
-            KeyHint::plain(KeyCode::F(6), "F6 / Shift-F6"),
-        ],
+        pane_keys: &[KeyHint::plain(KeyCode::Tab, "Tab")],
+        action: Some(KeyAction::NextPane),
         footer: footer_word!("pane"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 1,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::CycleFocusReverse,
+        label: "Previous pane",
+        description: "Move the keyboard up the layout.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::PreviousPane),
+        footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 1,
         available: always_ready,
@@ -766,7 +775,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Pane size",
         description: "Cycle the focused pane through minimized, standard, and maximized.",
         scope: Scope::Pane,
-        keys: &[KeyHint::alt(KeyCode::Char('z'), "Alt-Z")],
+        pane_keys: &[],
+        action: Some(KeyAction::PaneSize),
         footer: footer_word!("size"),
         footer_group: FooterGroup::Chord,
         footer_rank: 3,
@@ -777,7 +787,8 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Pane preset",
         description: "Restore standard panes, or minimize all three for the conversation.",
         scope: Scope::Pane,
-        keys: &[KeyHint::alt(KeyCode::Char('g'), "Alt-G")],
+        pane_keys: &[],
+        action: Some(KeyAction::PanePreset),
         footer: footer_word!("panes"),
         footer_group: FooterGroup::Chord,
         footer_rank: 4,
@@ -786,13 +797,26 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::Workspaces,
         label: "Workspaces",
-        description: "Switch to another workspace.",
+        description: "Open the workspace manager to add, rename, or delete a workspace.",
         scope: Scope::Global,
-        // Workspace management is opened by the pinned hamburger or the
-        // command palette. It intentionally has no global key or footer hint.
-        keys: &[],
+        // Workspace management is opened by the pinned hamburger, its key, or
+        // the command palette. It intentionally has no footer hint.
+        pane_keys: &[],
+        action: Some(KeyAction::WorkspaceManager),
         footer: no_footer,
-        footer_group: FooterGroup::Function,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::FocusWorkspaces,
+        label: "Focus the workspace strip",
+        description: "Put the keyboard on the workspace tabs.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::FocusWorkspaces),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: always_ready,
     },
@@ -801,9 +825,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Previous workspace",
         description: "Select the previous workspace tab.",
         scope: Scope::Global,
-        keys: &[KeyHint::ctrl(KeyCode::PageUp, "Ctrl-PageUp")],
+        pane_keys: &[],
+        action: Some(KeyAction::PreviousWorkspace),
         footer: no_footer,
-        footer_group: FooterGroup::Chord,
+        footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: always_ready,
     },
@@ -812,9 +837,22 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Next workspace",
         description: "Select the next workspace tab.",
         scope: Scope::Global,
-        keys: &[KeyHint::ctrl(KeyCode::PageDown, "Ctrl-PageDown")],
+        pane_keys: &[],
+        action: Some(KeyAction::NextWorkspace),
         footer: no_footer,
-        footer_group: FooterGroup::Chord,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::SwitchWorkspace,
+        label: "Switch to workspace by number",
+        description: "Select the first to ninth workspace tab directly.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::SwitchWorkspace),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: always_ready,
     },
@@ -823,10 +861,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Web viewer",
         description: "Show the address and code for the browser and phone viewer.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(4), "F4")],
+        pane_keys: &[],
+        action: Some(KeyAction::WebViewer),
         footer: footer_word!("web"),
-        footer_group: FooterGroup::Function,
-        footer_rank: 2,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 7,
         available: always_ready,
     },
     CommandSpec {
@@ -838,9 +877,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         // from the palette rather than from a key that could be hit by
         // accident. It is always offered: the daemon being gone is exactly
         // when it is needed, and that is also when nothing can be asked.
-        keys: &[],
+        pane_keys: &[],
+        action: None,
         footer: no_footer,
-        footer_group: FooterGroup::Function,
+        footer_group: FooterGroup::Chord,
         footer_rank: 0,
         available: always_ready,
     },
@@ -849,10 +889,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Refresh targets and quotas",
         description: "Re-probe every target's capacity and ask every profile for its quota again.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(5), "F5")],
+        pane_keys: &[],
+        action: Some(KeyAction::Refresh),
         footer: footer_word!("refresh"),
-        footer_group: FooterGroup::Function,
-        footer_rank: 3,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 8,
         available: always_ready,
     },
     CommandSpec {
@@ -860,10 +901,35 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Detach from this terminal",
         description: "Leave this terminal client; the daemon and its sessions keep running.",
         scope: Scope::Global,
-        keys: &[KeyHint::alt(KeyCode::Char('q'), "Alt-Q")],
+        pane_keys: &[],
+        action: Some(KeyAction::Detach),
         footer: footer_word!("detach"),
         footer_group: FooterGroup::Chord,
         footer_rank: 6,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::ToggleTranscriptRendering,
+        label: "Toggle transcript rendering",
+        description: "Switch the conversation between rendered Markdown and raw text.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::ToggleTranscriptRendering),
+        footer: footer_word!("rendering"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 10,
+        available: always_ready,
+    },
+    CommandSpec {
+        id: CommandId::ToggleDictation,
+        label: "Dictation",
+        description: "Start or stop dictating into the composer.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::ToggleDictation),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 13,
         available: always_ready,
     },
     CommandSpec {
@@ -871,10 +937,11 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Command palette",
         description: "Search every command that applies right now and run one.",
         scope: Scope::Global,
-        keys: &[KeyHint::plain(KeyCode::F(2), "F2")],
+        pane_keys: &[],
+        action: Some(KeyAction::Palette),
         footer: footer_word!("palette"),
-        footer_group: FooterGroup::Function,
-        footer_rank: 0,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 11,
         available: always_ready,
     },
     CommandSpec {
@@ -882,9 +949,10 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Next spinner style",
         description: "Cycle activity animations: scan, pulse, wave, bars, shimmer, globe.",
         scope: Scope::Settings,
-        keys: &[],
+        pane_keys: &[],
+        action: Some(KeyAction::CycleSpinner),
         footer: no_footer,
-        footer_group: FooterGroup::Function,
+        footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: spinner_available,
     },
@@ -893,40 +961,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         label: "Help",
         description: "List every key this surface answers.",
         scope: Scope::Global,
-        keys: &[
-            KeyHint::plain(KeyCode::F(1), "F1"),
-            KeyHint::plain(KeyCode::Char('?'), "?"),
-        ],
-        footer: footer_word!("help"),
-        footer_group: FooterGroup::Function,
-        footer_rank: 4,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('?'), "?")],
+        action: Some(KeyAction::Help),
+        footer: footer_word!("keys"),
+        footer_group: FooterGroup::Chord,
+        footer_rank: 12,
         available: always_ready,
     },
-];
-
-/// The commands a chord runs from every surface, including while the composer
-/// owns the keyboard.
-///
-/// Each one's chord is the entry in its `keys` list that [`KeyHint::is_chord`]
-/// accepts — a function key or an Alt letter. Plain-letter aliases remain
-/// local to their pane because the composer reads bare letters as text.
-///
-const GLOBAL_CHORDS: &[CommandId] = &[
-    CommandId::Help,
-    CommandId::Palette,
-    CommandId::SelectWorkspacePrevious,
-    CommandId::SelectWorkspaceNext,
-    CommandId::WebViewer,
-    CommandId::Refresh,
-    CommandId::NewSessionWizard,
-    CommandId::OpenConfig,
-    CommandId::ResumeDialog,
-    CommandId::MarkAllRead,
-    CommandId::CycleFocusedPaneSize,
-    CommandId::CycleFocus,
-    CommandId::TogglePanePreset,
-    CommandId::QuitDetach,
-    CommandId::CancelOperation,
 ];
 
 /// The commands the palette omits because a visible control already runs them.
@@ -939,27 +980,12 @@ const PALETTE_HIDDEN: &[CommandId] = &[
     CommandId::Workspaces,       // the pinned ☰ in the Workspaces pane
     CommandId::NewSessionWizard, // the Create button in the Sessions pane
     CommandId::ResumeDialog,     // the Resume button in the Sessions pane
+    CommandId::SwitchWorkspace,  // the numbered keys act on the visible tab strip
 ];
 
 /// Whether [`palette_entries`](crate::palette::palette_entries) skips `id`.
 pub(crate) fn hidden_from_palette(id: CommandId) -> bool {
     PALETTE_HIDDEN.contains(&id)
-}
-
-/// The command this key press runs from anywhere, or `None` if it is not a
-/// global chord.
-///
-/// The controller calls this before the event is routed to a pane or to the
-/// composer, so a chord answers even while the user is typing. Whether the
-/// chord survives an open dialog is a separate question, answered by
-/// [`DashboardState::global_chord_allowed`].
-pub fn global_chord(key: &KeyEvent) -> Option<CommandId> {
-    GLOBAL_CHORDS.iter().copied().find(|id| {
-        spec(*id)
-            .keys
-            .iter()
-            .any(|hint| hint.is_chord() && hint.matches(*key, false))
-    })
 }
 
 /// The specification for one command. Panics only if `COMMANDS` has lost an
@@ -973,7 +999,8 @@ pub(crate) fn spec(id: CommandId) -> &'static CommandSpec {
 
 /// Whether a command in `scope` can be run while `focus` owns the keyboard.
 ///
-/// `Setup` is deliberately excluded from key matching (see [`spec_for_key`]);
+/// `Setup` is deliberately excluded from key matching (see
+/// [`pane_command_for_key`]);
 /// it is listed here so the footer can offer it while the configuration is
 /// still empty.
 fn scope_applies(scope: Scope, focus: Focus) -> bool {
@@ -996,7 +1023,7 @@ fn scope_applies(scope: Scope, focus: Focus) -> bool {
 /// Targets, and Quota panes also use; the caller resolves that ambiguity by
 /// checking for an empty configuration first, exactly as the surface always
 /// has.
-pub(crate) fn spec_for_key(key: KeyEvent, focus: Focus) -> Option<CommandId> {
+pub(crate) fn pane_command_for_key(key: KeyEvent, focus: Focus) -> Option<CommandId> {
     let plain = !key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
@@ -1005,13 +1032,10 @@ pub(crate) fn spec_for_key(key: KeyEvent, focus: Focus) -> Option<CommandId> {
         .find(|spec| {
             spec.scope != Scope::Setup
                 && scope_applies(spec.scope, focus)
-                && spec.keys.iter().any(|hint| {
-                    // At the composer a bare letter is text. Only a chord —
-                    // an Alt letter or a function key — reaches the panes.
-                    if focus == Focus::Prompt
-                        && matches!(hint.code, KeyCode::Char(_))
-                        && !hint.modifiers.contains(KeyModifiers::ALT)
-                    {
+                && spec.pane_keys.iter().any(|hint| {
+                    // At the composer a bare letter is text, so no pane
+                    // character key reaches the panes from there.
+                    if focus == Focus::Prompt && matches!(hint.code, KeyCode::Char(_)) {
                         return false;
                     }
                     hint.matches(key, plain)
@@ -1037,15 +1061,28 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
         .collect()
 }
 
+/// Whether a bound command still answers while the conversation owns a modal
+/// of its own.
+///
+/// Help and detach have always answered from every surface, and the pane
+/// preset only changes the layout underneath, so all three survive it;
+/// refreshing only asks the daemon for fresh figures.
+pub fn survives_chat_modal(id: CommandId) -> bool {
+    matches!(
+        id,
+        CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh
+    )
+}
+
 impl DashboardState {
-    /// Whether a global chord still answers with the current dialog open.
+    /// Whether a bound command still answers with the current dialog open.
     ///
     /// Help and detach have always answered from every surface, and the pane
     /// preset only changes the layout underneath, so all three survive a modal.
     /// The rest would act on a surface the user cannot see, so they wait for
     /// the dialog to close — except over the help overlay, which is a
     /// reference rather than a decision.
-    pub fn global_chord_allowed(&self, id: CommandId) -> bool {
+    pub fn command_allowed_now(&self, id: CommandId) -> bool {
         match id {
             // Refreshing is harmless over a modal: it asks the daemon for
             // fresh capacity and quota figures and changes nothing on screen
@@ -1054,11 +1091,18 @@ impl DashboardState {
             | CommandId::QuitDetach
             | CommandId::TogglePanePreset
             | CommandId::Refresh => true,
-            // While the target-actions dialog is up, Alt-X belongs to the test
-            // that dialog is running, so it must not be caught here; the
-            // modal check is what leaves it to the dialog's own handler.
-            CommandId::CancelOperation => !self.modal_open(),
+            // Cancel is allowed through exactly one modal: the target-actions
+            // dialog, where it cancels the test that dialog is running.
+            CommandId::CancelOperation => self.target_test_running() || !self.modal_open(),
             CommandId::CycleFocusedPaneSize => !self.modal_open(),
+            // Moving the keyboard or the workspace out from under an open
+            // dialog would act on a surface the user cannot see.
+            CommandId::CycleFocus
+            | CommandId::CycleFocusReverse
+            | CommandId::FocusWorkspaces
+            | CommandId::SelectWorkspacePrevious
+            | CommandId::SelectWorkspaceNext
+            | CommandId::SwitchWorkspace => !self.modal_open(),
             _ => !self.modal_open() || matches!(self.mode, crate::Mode::Help(_)),
         }
     }
@@ -1164,6 +1208,11 @@ impl DashboardState {
             }
             CommandId::MarkAllRead => self.mark_all_read(),
             CommandId::CancelOperation => {
+                // The target-actions dialog's running test is the one thing
+                // cancel reaches through a modal.
+                if let Some(action) = self.cancel_target_test() {
+                    return action;
+                }
                 let operation = self.selected_session().and_then(|session| {
                     self.session_operation_kind(&session.id)
                         .map(|kind| (session.id.clone(), kind))
@@ -1191,11 +1240,9 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Refresh => {
-                // F5 re-probes target readiness as well. This global Refresh
-                // chord is allowed through an open modal (see
-                // `global_chord_allowed`), so it consumes the key before a New
-                // or Resume wizard's own F5 handler runs; clearing here is what
-                // makes the target step's documented "F5 recheck" work. A
+                // Refreshing re-probes target readiness as well. It is allowed
+                // through an open modal (see `command_allowed_now`), so a
+                // wizard sitting on its target step sees fresh readiness. A
                 // cleared entry is re-probed on the next render.
                 self.target_readiness.clear();
                 DashboardAction::RefreshAll
@@ -1216,6 +1263,10 @@ impl DashboardState {
                 self.cycle_focus(false);
                 DashboardAction::None
             }
+            CommandId::CycleFocusReverse => {
+                self.cycle_focus(true);
+                DashboardAction::None
+            }
             CommandId::CycleFocusedPaneSize => {
                 self.cycle_focused_pane_size();
                 DashboardAction::None
@@ -1225,6 +1276,18 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::Workspaces => self.begin_workspace_manager(),
+            CommandId::FocusWorkspaces => {
+                self.focus = Focus::Workspaces;
+                self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Tabs;
+                self.set_session_action_focus(None);
+                DashboardAction::None
+            }
+            // The numbered workspace keys carry an index, and a registry
+            // command carries no argument, so the router calls
+            // `select_workspace_index` directly.
+            CommandId::SwitchWorkspace => DashboardAction::None,
+            CommandId::ToggleTranscriptRendering => DashboardAction::ToggleTranscriptRendering,
+            CommandId::ToggleDictation => DashboardAction::ToggleDictation,
             CommandId::SelectWorkspacePrevious => self.select_adjacent_workspace(-1),
             CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
@@ -1259,22 +1322,29 @@ impl DashboardState {
 mod tests {
     use super::*;
     use crate::SessionOperationKind;
+    use crate::keybinds::command_for_action;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
+    use mj_core::config::Keybinds;
 
     /// A mis-hit key once stopped a live session, so no command that starts a
-    /// session transition may claim one. They stay reachable from the palette
-    /// and the row's ⋯ menu.
+    /// session transition may claim one, either as a pane key or as a default
+    /// binding. They stay reachable from the palette, the row's ⋯ menu, and an
+    /// explicit `[keys]` entry.
     #[test]
     fn session_transition_commands_bind_no_key() {
+        let defaults = Keybinds::default();
         for id in [
             CommandId::StopSession,
             CommandId::RestartSession,
             CommandId::MoveSession,
             CommandId::ForceDestroySession,
         ] {
+            let spec = spec(id);
+            assert!(spec.pane_keys.is_empty(), "{id:?} must not bind a pane key");
+            let action = spec.action.expect("a session command is bindable");
             assert!(
-                spec(id).keys.is_empty(),
-                "{id:?} must not bind a dashboard key"
+                defaults.bindings(action).is_empty(),
+                "{id:?} must not carry a default binding"
             );
         }
     }
@@ -1309,14 +1379,37 @@ mod tests {
     }
 
     #[test]
-    fn workspace_manager_runs_from_its_button_without_a_key_or_palette_row() {
+    fn workspace_manager_has_a_prefix_key_and_no_palette_row() {
         let dashboard = dashboard_with_session(running_session());
-        assert!(global_chord(&key(KeyCode::F(3))).is_none());
-        assert!(spec(CommandId::Workspaces).keys.is_empty());
+        assert!(spec(CommandId::Workspaces).pane_keys.is_empty());
+        assert_eq!(
+            dashboard.key_labels(CommandId::Workspaces),
+            vec!["ctrl+b shift+n".to_owned()]
+        );
         // Still dispatchable: the pinned hamburger runs it through
         // `run_available_command`, which needs the command to stay available.
         assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
         assert!(hidden_from_palette(CommandId::Workspaces));
+    }
+
+    /// The footer, the help overlay, and the palette all read one command per
+    /// action, so a new `[keys]` field cannot advertise a key that runs
+    /// nothing, and two actions cannot quietly share a command.
+    #[test]
+    fn every_key_action_maps_to_exactly_one_command() {
+        for action in KeyAction::ALL.iter().copied() {
+            let id = command_for_action(action);
+            assert_eq!(
+                spec(id).action,
+                Some(action),
+                "{action:?} maps to {id:?}, which claims a different action"
+            );
+        }
+        for entry in COMMANDS {
+            if let Some(action) = entry.action {
+                assert_eq!(command_for_action(action), entry.id);
+            }
+        }
     }
 
     #[test]
@@ -1326,6 +1419,7 @@ mod tests {
             CommandId::NewSessionWizard,
             CommandId::ResumeDialog,
             CommandId::Palette,
+            CommandId::SwitchWorkspace,
         ] {
             assert!(hidden_from_palette(id), "{id:?}");
         }
@@ -1418,18 +1512,18 @@ mod tests {
     #[test]
     fn no_two_commands_claim_the_same_key_in_one_pane() {
         for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
-            let mut seen: Vec<(KeyCode, KeyModifiers)> = Vec::new();
+            let mut seen: Vec<KeyCode> = Vec::new();
             for entry in COMMANDS {
                 if entry.scope == Scope::Setup || !scope_applies(entry.scope, focus) {
                     continue;
                 }
-                for hint in entry.keys {
-                    let key = (hint.code, hint.modifiers);
+                for hint in entry.pane_keys {
                     assert!(
-                        !seen.contains(&key),
-                        "{key:?} is claimed twice at {focus:?}"
+                        !seen.contains(&hint.code),
+                        "{:?} is claimed twice at {focus:?}",
+                        hint.code
                     );
-                    seen.push(key);
+                    seen.push(hint.code);
                 }
             }
         }

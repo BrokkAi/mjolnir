@@ -169,7 +169,8 @@ fn a_disconnected_daemon_never_reports_idle() {
     assert_eq!(
         state.last_known(),
         &ActivityState::Turn {
-            started_at_ms: Some(NOW - 70 * MINUTE as i64)
+            started_at_ms: Some(NOW - 70 * MINUTE as i64),
+            last_activity_at_ms: None,
         }
     );
 
@@ -390,6 +391,7 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
         ActivityState::Tool {
             tool_call_id: "bash".into(),
             started_at_ms: NOW - MINUTE as i64,
+            last_activity_at_ms: None,
         }
     );
     assert_eq!(
@@ -407,7 +409,8 @@ fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
     assert_eq!(
         classify(&turn),
         ActivityState::Turn {
-            started_at_ms: Some(NOW)
+            started_at_ms: Some(NOW),
+            last_activity_at_ms: None,
         }
     );
 
@@ -443,6 +446,7 @@ fn an_unrecognized_published_state_is_cautious_rather_than_fatal() {
     let known = ActivityState::Tool {
         tool_call_id: "bash".into(),
         started_at_ms: 7,
+        last_activity_at_ms: Some(5),
     };
     let text = serde_json::to_string(&known).expect("serialize");
     assert_eq!(
@@ -486,4 +490,88 @@ fn checkpoint_admission_asks_only_about_provider_owned_work() {
         ..ActivityFacts::default()
     };
     assert!(checkpoint_blocker(&busy_kimi, HarnessKind::Kimi).is_some());
+}
+
+/// Silence is published as a fact and never turned into a verdict.
+///
+/// This is the whole answer to #1017 on Mjolnir's side: the turn a harness
+/// finished without telling us cannot be recovered, so what a person or an
+/// orchestrator gets instead is an honest "running, and nothing has arrived
+/// for eleven minutes" that they can act on. Reporting it must not depend on
+/// the harness, and it must never be reported for a session that is not
+/// running anything, because silence means nothing there.
+#[test]
+fn a_running_session_reports_how_long_the_harness_has_been_quiet() {
+    let quiet_turn = ActivityFacts {
+        prompt_started_at_ms: Some(NOW - 12 * MINUTE as i64),
+        last_acp_activity_at_ms: Some(NOW - 11 * MINUTE as i64),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(
+        silent_for_ms(&quiet_turn, NOW),
+        Some(11 * MINUTE),
+        "a running turn reports its silence age"
+    );
+    assert_eq!(
+        silence_note(&classify(&quiet_turn), NOW).as_deref(),
+        Some("no harness activity for about 11 minute(s)")
+    );
+
+    // A tool call is running, which is the ordinary reason for silence. The
+    // age is still reported; deciding what it means is the reader's job.
+    let quiet_tool = ActivityFacts {
+        tools_in_flight: vec![tool("build", NOW - 30 * MINUTE as i64)],
+        last_acp_activity_at_ms: Some(NOW - 30 * MINUTE as i64),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(silent_for_ms(&quiet_tool, NOW), Some(30 * MINUTE));
+
+    // Just-spoke, idle, and a worker too old to report the clock all say
+    // nothing rather than guessing.
+    let talking = ActivityFacts {
+        prompt_started_at_ms: Some(NOW - MINUTE as i64),
+        last_acp_activity_at_ms: Some(NOW - 1_000),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(silent_for_ms(&talking, NOW), Some(1_000));
+    assert_eq!(
+        silence_note(&classify(&talking), NOW),
+        None,
+        "a second of quiet is not news"
+    );
+
+    let idle = ActivityFacts {
+        last_acp_activity_at_ms: Some(NOW - 60 * MINUTE as i64),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(
+        silent_for_ms(&idle, NOW),
+        None,
+        "an idle session is quiet because it has nothing to say"
+    );
+
+    let old_worker = ActivityFacts {
+        prompt_started_at_ms: Some(NOW - 12 * MINUTE as i64),
+        last_acp_activity_at_ms: None,
+        ..ActivityFacts::default()
+    };
+    assert_eq!(silent_for_ms(&old_worker, NOW), None);
+}
+
+/// A session nobody can see reports no silence age.
+///
+/// The daemon losing sight of a worker says nothing about whether the harness
+/// is talking, and presenting a disconnection as harness silence would send a
+/// reader to cancel a turn that is running perfectly well.
+#[test]
+fn a_disconnected_session_reports_no_silence_age() {
+    let unknown = while_disconnected(
+        MaterializedExecutionState::Running {
+            started_at_ms: NOW - 5 * MINUTE as i64,
+        },
+        Some(NOW),
+    );
+    assert!(unknown.is_working(), "{unknown:?}");
+    assert_eq!(unknown.silent_for_ms(NOW), None);
+    assert_eq!(silence_note(&unknown, NOW), None);
 }

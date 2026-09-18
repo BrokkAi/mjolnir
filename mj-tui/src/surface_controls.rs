@@ -266,7 +266,7 @@ pub(crate) fn render_footer_command(
 mod tests {
     use super::*;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, key, mouse_at, point, running_session,
+        buffer_lines, chord, dashboard_with_session, key, mouse_at, point, running_session,
     };
     use crate::{Focus, Mode, PaneSize, SupportPane};
     use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
@@ -536,7 +536,7 @@ mod tests {
         // Save the dashboard button location before opening the help overlay;
         // the overlay may contain its own prose mentioning "Create".
         let create = point(&lines, "Create");
-        click(&mut dashboard, point(&lines, "F1 help"));
+        click(&mut dashboard, point(&lines, "? keys"));
         let lines = draw(&mut dashboard, (120, 40));
         click(&mut dashboard, create);
         assert!(matches!(dashboard.mode, Mode::Help(_)));
@@ -545,7 +545,7 @@ mod tests {
         assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll > 0));
         click(&mut dashboard, dismiss);
         assert!(matches!(dashboard.mode, Mode::Dashboard));
-        dashboard.handle_key(key(KeyCode::F(7)));
+        chord(&mut dashboard, CommandId::OpenConfig);
         let previous = dashboard.mode.clone();
         dashboard.dispatch_command(CommandId::Help);
         let lines = draw(&mut dashboard, (120, 40));

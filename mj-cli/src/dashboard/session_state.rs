@@ -180,6 +180,23 @@ impl DashboardContext {
             })
     }
 
+    /// The dashboard and the conversation on screen, borrowed together, so a
+    /// caller can act on one and report through the other.
+    pub(crate) fn dashboard_and_visible_chat(
+        &mut self,
+    ) -> (&mut DashboardState, Option<&mut mj_chat::chat::ActiveChat>) {
+        let visible = self.visible_chat().is_some();
+        let Self {
+            dashboard, chats, ..
+        } = self;
+        let focused = dashboard.current_session_id().map(str::to_owned);
+        let chat = focused
+            .as_deref()
+            .filter(|_| visible)
+            .and_then(|session_id| chats.get_mut(session_id));
+        (dashboard, chat)
+    }
+
     pub(crate) fn needs_animation(&mut self) -> bool {
         self.dashboard.needs_fast_tick()
             || self

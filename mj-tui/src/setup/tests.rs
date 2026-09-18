@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::{
-    buffer_lines, cell_column, config, dashboard_with_session, drawn, key, point, running_session,
-    stopped_session,
+    buffer_lines, cell_column, chord, config, dashboard_with_session, drawn, key, point,
+    running_session, stopped_session,
 };
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
@@ -82,7 +82,7 @@ fn activate(dashboard: &mut DashboardState, control: SetupControl) {
 }
 
 fn choose_light_theme(dashboard: &mut DashboardState) {
-    dashboard.handle_key(key(KeyCode::F(7)));
+    chord(dashboard, crate::CommandId::OpenConfig);
     choose(dashboard, "interface");
     choose(dashboard, "theme");
     dashboard.handle_key(key(KeyCode::Down));
@@ -525,7 +525,9 @@ fn detection_adds_conflicting_installations_to_the_draft_without_losing_settings
     discovered.bundles.get_mut("hel").unwrap().repositories[0].github =
         Some("owner/new-repository".into());
     for _ in 0..2 {
-        dashboard.setup_discovered(generation, Ok(discovered.clone()));
+        for scope in [DetectScope::Profiles, DetectScope::Runtimes] {
+            dashboard.setup_discovered(generation, Ok(detection(scope, discovered.clone())));
+        }
         let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
         let draft: Config = config_from_draft(dialog.draft.clone()).unwrap();
         assert_eq!(draft.profiles["codex-1"], original.profiles["codex-1"]);
@@ -538,12 +540,74 @@ fn detection_adds_conflicting_installations_to_the_draft_without_losing_settings
             draft.targets["podman-2"],
             mj_core::config::TargetTemplate::LocalBare
         ));
-        assert_eq!(draft.bundles["hel"], original.bundles["hel"]);
-        assert_eq!(draft.bundles.len(), original.bundles.len() + 1);
+        // Neither detection touches projects, so the draft keeps only the
+        // bundles the user already had.
+        assert_eq!(draft.bundles, original.bundles);
         assert_eq!(draft.profiles.len(), original.profiles.len() + 1);
         assert_eq!(draft.targets.len(), original.targets.len() + 1);
     }
     assert_eq!(dashboard.config, original, "discovery only edits the draft");
+}
+
+fn detection(scope: DetectScope, config: Config) -> crate::setup::SetupDetection {
+    crate::setup::SetupDetection {
+        scope,
+        config,
+        rejected_runtimes: Vec::new(),
+    }
+}
+
+#[test]
+fn detecting_runtimes_names_what_it_added_and_what_it_skipped() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
+    let mut discovered = Config::default();
+    discovered.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    dashboard.setup_discovered(
+        generation,
+        Ok(crate::setup::SetupDetection {
+            scope: DetectScope::Runtimes,
+            config: discovered,
+            rejected_runtimes: vec![crate::setup::RejectedRuntime {
+                label: "Docker".into(),
+                detail: "the Docker daemon is not running".into(),
+                remediation: Some("Start Docker Desktop".into()),
+            }],
+        }),
+    );
+    let notice = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone()
+        .expect("detection reports what it did");
+    assert!(notice.contains("localhost"), "{notice}");
+    assert!(
+        notice.contains("Skipped Docker: the Docker daemon is not running."),
+        "{notice}"
+    );
+    assert!(notice.contains("Start Docker Desktop"), "{notice}");
+
+    // A second run finds nothing new and says so rather than claiming an
+    // addition.
+    let mut again = Config::default();
+    again.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    dashboard.setup_discovered(generation, Ok(detection(DetectScope::Runtimes, again)));
+    let notice = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone()
+        .expect("detection reports what it did");
+    assert!(
+        notice.starts_with("No usable runtime was found"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -560,7 +624,7 @@ fn results_from_a_closed_setup_do_not_change_the_new_draft() {
         "stale-discovery".into(),
         mj_core::config::TargetTemplate::LocalBare,
     );
-    dashboard.setup_discovered(old, Ok(detected));
+    dashboard.setup_discovered(old, Ok(detection(DetectScope::Runtimes, detected)));
     dashboard.setup_saved(old, Ok(dashboard.config.clone()));
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(dialog.generation, new);
@@ -712,14 +776,14 @@ fn setup_actions_offer_only_the_controls_that_apply_to_the_page() {
     choose(&mut dashboard, "targets");
     assert_eq!(
         action_labels(&dashboard),
-        ["Back", "Add", "Remove", "Detect machine", "Save and Close"],
-        "machines: item actions and the detection only this page offers"
+        ["Back", "Add", "Remove", "Detect runtimes", "Save and Close"],
+        "machines: item actions and the runtime detection only this page offers"
     );
     assert_eq!(
         split_action_labels(&dashboard),
         (
             vec!["Back", "Save and Close"],
-            vec!["Add", "Remove", "Detect machine"]
+            vec!["Add", "Remove", "Detect runtimes"]
         ),
         "machines: navigation in the footer, page actions in the column"
     );
@@ -734,8 +798,8 @@ fn setup_actions_offer_only_the_controls_that_apply_to_the_page() {
     choose(&mut dashboard, "profiles");
     assert_eq!(
         action_labels(&dashboard),
-        ["Back", "Add", "Remove", "Save and Close"],
-        "profiles: a plain collection, so no Create and no detection"
+        ["Back", "Add", "Remove", "Detect profiles", "Save and Close"],
+        "profiles: item actions and the profile detection only this page offers"
     );
     dashboard.handle_key(key(KeyCode::Backspace));
     choose(&mut dashboard, "phone");
@@ -801,7 +865,7 @@ fn the_root_page_takes_the_full_width_and_shows_only_the_footer_action() {
     let text = lines.join("\n");
     // Save and Close is the only action the root page offers, and it sits in
     // the footer row rather than a column beside the body.
-    for absent in ["  Back  ", "  Add  ", "  Remove  ", "  Detect machine  "] {
+    for absent in ["  Back  ", "  Add  ", "  Remove  ", "  Detect runtimes  "] {
         assert!(
             !text.contains(absent),
             "{absent:?} on the root page:\n{text}"
@@ -842,7 +906,8 @@ fn a_collection_page_stacks_its_own_actions_above_the_footer_row() {
     );
     // The page's own actions stay stacked at the dialog's right edge, above
     // the footer row.
-    let stacked = ["  Add  ", "  Remove  ", "  Detect machine  "].map(|label| point(&lines, label));
+    let stacked =
+        ["  Add  ", "  Remove  ", "  Detect runtimes  "].map(|label| point(&lines, label));
     for (column, row) in stacked {
         assert_eq!(
             column, stacked[0].0,
@@ -864,7 +929,7 @@ fn a_collection_page_stacks_its_own_actions_above_the_footer_row() {
     // The widest button ends against the inner margin and the modal border.
     let detect = &lines[usize::from(stacked[2].1)];
     assert!(
-        detect.contains("Detect machine   │"),
+        detect.contains("Detect runtimes   │"),
         "the column is not packed against the right edge: {detect:?}"
     );
 }
@@ -912,7 +977,7 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
         assert!(text.contains("Settings › Machines and Runtimes"), "{text}");
         // Every page action keeps its own row in one column at the dialog's
         // right edge, on top of each other rather than spread along a row.
-        let labels = ["Add", "Remove", "Detect machine"];
+        let labels = ["Add", "Remove", "Detect runtimes"];
         let width = labels
             .iter()
             .map(|label| label.len())
@@ -1290,8 +1355,177 @@ fn empty_archive_after_days_renders_as_never() {
             &serde_json::json!({"phone": {"tls_cert": null}}),
             None,
         ),
-        "Automatic / default"
+        "None (HTTP only)"
     );
+}
+
+#[test]
+fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    // One target of every kind and one blank repository, so every optional
+    // field in the schema takes part in the walk below.
+    for kind in [
+        "local-bare",
+        "local-podman",
+        "local-docker",
+        "apple-container",
+        "ssh-bare",
+        "ssh-podman",
+        "ssh-docker",
+        "aws-ec2",
+    ] {
+        dialog.draft["targets"]
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("every-{kind}"), json!({"kind": kind}));
+    }
+    for bundle in dialog.draft["bundles"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        bundle["repositories"]
+            .as_array_mut()
+            .unwrap()
+            .push(schema::repository_default());
+    }
+    schema::expand(&mut dialog.draft, &mut Vec::new());
+    let draft = dialog.draft.clone();
+
+    fn walk(path: &[String], value: &Value, draft: &Value, rows: &mut Vec<(String, String)>) {
+        let children: Vec<(String, &Value)> = match value {
+            Value::Object(entries) => entries
+                .iter()
+                .map(|(key, child)| (key.clone(), child))
+                .collect(),
+            Value::Array(entries) => entries
+                .iter()
+                .enumerate()
+                .map(|(index, child)| (index.to_string(), child))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for (key, child) in children {
+            let mut child_path = path.to_vec();
+            child_path.push(key.clone());
+            rows.push((
+                child_path.join("."),
+                value_summary(path, &key, child, draft, None),
+            ));
+            walk(&child_path, child, draft, rows);
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&[], &draft, &draft, &mut rows);
+    assert!(rows.len() > 40, "the walk missed the draft: {rows:?}");
+
+    // Labels that legitimately carry the word: a named AWS template version,
+    // an engine's or OpenSSH's own choice, and a reviewer profile's settings.
+    let names_a_real_default = |summary: &str| {
+        [
+            "$Default",
+            "Engine default",
+            "AWS CLI default profile",
+            "OpenSSH default keys",
+        ]
+        .iter()
+        .any(|label| summary.contains(label))
+            || summary.contains("'s default")
+    };
+    for (path, summary) in &rows {
+        let lowered = summary.to_lowercase();
+        assert!(
+            !lowered.contains("automatic"),
+            "{path} still shows a placeholder: {summary:?}"
+        );
+        assert!(
+            !lowered.contains("default") || names_a_real_default(summary),
+            "{path} still shows a placeholder: {summary:?}"
+        );
+    }
+    // Spot-check the values behind the blanks rather than only their shape.
+    let summary = |wanted: &str| {
+        rows.iter()
+            .find(|(path, _)| path == wanted)
+            .unwrap_or_else(|| panic!("missing {wanted} in {rows:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(summary("targets.every-ssh-podman.cpus"), "No limit");
+    assert_eq!(
+        summary("targets.every-aws-ec2.launch_template_version"),
+        "$Default"
+    );
+    assert_eq!(summary("review.model"), "Not set");
+    assert_eq!(
+        summary("targets.every-ssh-podman.identity_file"),
+        "OpenSSH default keys"
+    );
+    assert_eq!(
+        summary("targets.every-local-podman.platform"),
+        format!("Engine default ({})", std::env::consts::ARCH)
+    );
+    assert!(
+        summary("profiles.codex-1.context_window_bytes").starts_with("262144"),
+        "the context budget shows the number it defaults to"
+    );
+    assert_eq!(
+        summary("profiles.codex-1.guardian_review_model"),
+        "newest-flash"
+    );
+    // With a reviewer chosen, model and effort name whose defaults they follow.
+    let mut with_reviewer = draft.clone();
+    with_reviewer["review"]["profile"] = json!("codex-1");
+    assert_eq!(
+        value_summary(
+            &["review".to_owned()],
+            "effort",
+            &Value::Null,
+            &with_reviewer,
+            None,
+        ),
+        "codex-1's default"
+    );
+}
+
+#[test]
+fn the_automatic_download_policy_shows_what_it_does_to_this_image() {
+    let draft = json!({"targets": {
+        "latest": {"kind": "local-podman", "image": "ghcr.io/example/dev:latest", "pull_policy": "auto"},
+        "pinned": {"kind": "local-podman", "image": "ghcr.io/example/dev@sha256:abc", "pull_policy": "auto"},
+    }});
+    let path = |target: &str| {
+        vec![
+            "targets".to_owned(),
+            target.to_owned(),
+            "pull_policy".to_owned(),
+        ]
+    };
+    // A remote :latest image is the one case the daemon refreshes on its own.
+    assert_eq!(
+        schema::choice_label(&path("latest"), &json!("auto"), &draft),
+        "Pull if missing at launch; refresh :latest in background"
+    );
+    assert_eq!(
+        schema::choice_label(&path("pinned"), &json!("auto"), &draft),
+        "Pull if missing"
+    );
+    // An explicit policy reads the same whatever the image is.
+    assert_eq!(
+        schema::choice_label(&path("latest"), &json!("never"), &draft),
+        "Never pull"
+    );
+    assert_eq!(
+        schema::choice_label(&path("pinned"), &json!("newer"), &draft),
+        "Pull when the registry is newer"
+    );
+    // The stored value is untouched: only the display changes.
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("targets", None);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.draft["targets"]["podman"]["pull_policy"], "auto");
 }
 
 #[test]

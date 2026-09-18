@@ -85,7 +85,22 @@ pub(super) async fn wait(
                     usage: None,
                     outcome: WaitOutcome::Timeout,
                     stop_reason: None,
-                    message: Some(format!("the turn was still running after {timeout} seconds")),
+                    // A caller that times out has to decide what to do next,
+                    // and the one fact that bears on it is whether the harness
+                    // is still saying anything. Mjolnir will not end the turn
+                    // for silence on its own, so it reports the silence here
+                    // and leaves `mj cancel-turn` to the caller.
+                    message: Some(match session
+                        .activity_state
+                        .as_ref()
+                        .and_then(|state| {
+                            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
+                        }) {
+                        Some(note) => format!(
+                            "the turn was still running after {timeout} seconds, with {note}"
+                        ),
+                        None => format!("the turn was still running after {timeout} seconds"),
+                    }),
                     final_message: None,
                     turn_id: request.turn_id.or_else(|| {
                         observation.active_turn.as_ref().and_then(|turn| turn.accepted_ordinal)

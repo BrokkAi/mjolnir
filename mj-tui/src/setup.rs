@@ -31,6 +31,32 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 
+/// Which section of the configuration a detection run fills in. Each scope
+/// runs only the probes that section needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectScope {
+    Profiles,
+    Runtimes,
+}
+
+/// A container runtime that detection found but cannot use, carrying the
+/// reason so the Settings notice can name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRuntime {
+    pub label: String,
+    pub detail: String,
+    pub remediation: Option<String>,
+}
+
+/// What one detection run found: entries for the scope it was asked about,
+/// and the runtimes it turned down.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupDetection {
+    pub scope: DetectScope,
+    pub config: Config,
+    pub rejected_runtimes: Vec<RejectedRuntime>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupControl {
     List,
@@ -41,7 +67,8 @@ pub(crate) enum SetupControl {
     Remove,
     Clear,
     Apply,
-    Detect,
+    DetectProfiles,
+    DetectRuntimes,
     Save,
     Cancel,
 }
@@ -199,7 +226,7 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
                         key.as_str() != "version"
                             && !matches!(
                                 key.as_str(),
-                                "advanced" | "sessions_side" | "spinner" | "theme"
+                                "advanced" | "sessions_side" | "spinner" | "theme" | "keys"
                             )
                             && key.as_str() != "show_stopped_sessions"
                     })
@@ -248,12 +275,12 @@ fn value_summary(
             if *value { "☑" } else { "☐" }.to_owned()
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
-        Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path).to_owned()),
+        Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path, draft)),
         // The archive window's live estimate carries the value itself, so it
         // replaces the number as well as the "Never" placeholder.
         _ => match automatic.filter(|_| key == "archive_after_days") {
             Some(label) => label,
-            None => schema::choice_label(&child_path, value),
+            None => schema::choice_label(&child_path, value, draft),
         },
     };
     if !value.is_object()
@@ -345,7 +372,8 @@ fn preferred_size(draft: &Value) -> SetupSize {
         "Add",
         "Create",
         "Remove",
-        "Detect machine",
+        "Detect profiles",
+        "Detect runtimes",
         "Use default",
         "Apply",
     ]
@@ -463,12 +491,17 @@ impl SetupDialog {
             actions.push((Add, add_label, interactive));
             actions.push((Remove, "Remove", interactive && !self.keys().is_empty()));
         }
-        // Detection inspects this machine and writes machine profiles, so it
-        // belongs to the machines page alone.
-        if self.path == ["targets"] {
+        // Each detection writes only the section it belongs to, so each button
+        // appears on that section's page alone.
+        let detect = match self.path.first().map(String::as_str) {
+            Some("profiles") if self.path.len() == 1 => Some((DetectProfiles, "Detect profiles")),
+            Some("targets") if self.path.len() == 1 => Some((DetectRuntimes, "Detect runtimes")),
+            _ => None,
+        };
+        if let Some((control, label)) = detect {
             actions.push((
-                Detect,
-                "Detect machine",
+                control,
+                label,
                 interactive && !self.discovering && !self.saving,
             ));
         }
@@ -1422,11 +1455,25 @@ impl DashboardState {
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
                 action = dialog.save();
             }
-            Some(Interaction::Activate(Detect)) if !dialog.discovering => {
+            Some(Interaction::Activate(control @ (DetectProfiles | DetectRuntimes)))
+                if !dialog.discovering =>
+            {
+                let scope = if control == DetectProfiles {
+                    DetectScope::Profiles
+                } else {
+                    DetectScope::Runtimes
+                };
                 dialog.discovering = true;
-                dialog.notice = Some("Detecting agent profiles and usable local runtimes…".into());
+                dialog.notice = Some(
+                    match scope {
+                        DetectScope::Profiles => "Looking for installed agents…",
+                        DetectScope::Runtimes => "Looking for usable container runtimes…",
+                    }
+                    .into(),
+                );
                 action = DashboardAction::DiscoverSetup {
                     generation: dialog.generation,
+                    scope,
                 };
             }
             _ => {}
@@ -1579,7 +1626,7 @@ impl DashboardState {
         }
     }
 
-    pub fn setup_discovered(&mut self, generation: u64, result: Result<Config, String>) {
+    pub fn setup_discovered(&mut self, generation: u64, result: Result<SetupDetection, String>) {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
         };
@@ -1588,7 +1635,12 @@ impl DashboardState {
         }
         dialog.discovering = false;
         match result {
-            Ok(config) => {
+            Ok(detection) => {
+                let SetupDetection {
+                    scope,
+                    config,
+                    rejected_runtimes,
+                } = detection;
                 // Reconcile against the current draft, including edits made
                 // while discovery was running, rather than dropping collisions.
                 let current: Config = match config_from_draft(dialog.draft.clone()) {
@@ -1603,30 +1655,76 @@ impl DashboardState {
                 };
                 let additions = current.setup_additions(&config);
                 let discovered = serde_json::to_value(additions).expect("config serializes");
-                for section in ["profiles", "targets", "bundles"] {
-                    if let Some(entries) = discovered[section].as_object() {
-                        for (key, value) in entries {
-                            let inserted = dialog.draft[section].get(key).is_none();
-                            dialog.draft[section]
-                                .as_object_mut()
-                                .unwrap()
-                                .entry(key.clone())
-                                .or_insert_with(|| value.clone());
-                            if section == "profiles" && inserted {
-                                dialog.invalidate_review_validation_for(Some(key));
-                            }
+                // A detection only writes its own section, so a profile run
+                // cannot add machines and a runtime run cannot add projects.
+                let section = match scope {
+                    DetectScope::Profiles => "profiles",
+                    DetectScope::Runtimes => "targets",
+                };
+                let mut added = Vec::new();
+                if let Some(entries) = discovered[section].as_object() {
+                    for (key, value) in entries {
+                        if dialog.draft[section].get(key).is_some() {
+                            continue;
+                        }
+                        dialog.draft[section]
+                            .as_object_mut()
+                            .unwrap()
+                            .insert(key.clone(), value.clone());
+                        added.push(key.clone());
+                        if section == "profiles" {
+                            dialog.invalidate_review_validation_for(Some(key));
                         }
                     }
                 }
                 schema::expand(&mut dialog.draft, &mut Vec::new());
                 populate_subagent_profile_choices(&mut dialog.draft);
-                dialog.notice =
-                    Some("New discoveries added to the draft; conflicting settings have separate names. Review them, then Save.".into());
+                dialog.notice = Some(detection_notice(scope, &added, &rejected_runtimes));
             }
             Err(error) => dialog.notice = Some(format!("Detection failed: {error}")),
         }
         dialog.prepare();
     }
+}
+
+/// What the Settings screen says after a detection run: the entries it added
+/// by name, and for runtimes the ones it turned down and why.
+fn detection_notice(scope: DetectScope, added: &[String], rejected: &[RejectedRuntime]) -> String {
+    let mut sentences = Vec::new();
+    if added.is_empty() {
+        sentences.push(match scope {
+            DetectScope::Profiles => {
+                "No agent installation was found that this draft does not already have.".to_owned()
+            }
+            DetectScope::Runtimes => {
+                "No usable runtime was found that this draft does not already have.".to_owned()
+            }
+        });
+    } else {
+        let names = added.join(", ");
+        sentences.push(match scope {
+            DetectScope::Profiles => format!("Added agent profiles: {names}."),
+            DetectScope::Runtimes => format!("Added machines and runtimes: {names}."),
+        });
+    }
+    for runtime in rejected {
+        let mut reason = format!("Skipped {}: {}", runtime.label, runtime.detail.trim());
+        if !reason.ends_with('.') {
+            reason.push('.');
+        }
+        if let Some(remediation) = &runtime.remediation {
+            reason.push(' ');
+            reason.push_str(remediation.trim());
+            if !reason.ends_with('.') {
+                reason.push('.');
+            }
+        }
+        sentences.push(reason);
+    }
+    if !added.is_empty() {
+        sentences.push("Review them, then Save.".to_owned());
+    }
+    sentences.join(" ")
 }
 
 fn setup_dialog_mut(mode: &mut Mode) -> Option<&mut SetupDialog> {
@@ -1906,13 +2004,13 @@ pub(crate) fn render_setup(
         let rows = editor
             .choices
             .iter()
-            .map(|value| Line::raw(schema::choice_label(&editor.path, value)))
+            .map(|value| Line::raw(schema::choice_label(&editor.path, value, &dialog.draft)))
             .collect::<Vec<_>>();
         let selected = editor.combo.selection(Choices, editor.selected);
         let value = editor
             .choices
             .get(selected)
-            .map(|value| schema::choice_label(&editor.path, value))
+            .map(|value| schema::choice_label(&editor.path, value, &dialog.draft))
             .unwrap_or_default();
         ComboBox::render(
             frame,
