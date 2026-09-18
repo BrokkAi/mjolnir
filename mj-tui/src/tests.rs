@@ -3616,6 +3616,21 @@ fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
         lines.iter().any(|line| line.contains("Sessions · /qui")),
         "{lines:#?}"
     );
+    // At this width the count has no room, and the pane keeps its own name
+    // rather than shortening to `S · ` to make the number fit.
+    assert!(
+        !lines.iter().any(|line| line.contains("hidden")),
+        "{lines:#?}"
+    );
+
+    // Given the room, the title says how many rows the filter holds back, so a
+    // shortened list never reads as the whole truth.
+    let wide = drawn(&mut dashboard, 240, 40);
+    assert!(
+        wide.iter()
+            .any(|line| line.contains("Sessions · /qui · 2 hidden")),
+        "{wide:#?}"
+    );
 
     // Enter keeps the filter and returns the letters to the pane; `j` moves
     // again instead of typing.

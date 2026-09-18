@@ -262,6 +262,18 @@ impl DashboardState {
         parts.join(" · ")
     }
 
+    /// How many rows the Sessions filter is holding back, or zero when no
+    /// filter is in force. A shortened list that does not say it is shortened
+    /// reads as the whole truth.
+    pub(crate) fn sessions_hidden_count(&self) -> usize {
+        if self.sessions_filter.is_none() {
+            return 0;
+        }
+        self.ordered_sessions_unfiltered()
+            .len()
+            .saturating_sub(self.ordered_sessions().len())
+    }
+
     /// Answers a key for the Sessions filter, or `None` when the filter does
     /// not claim it. While editing, printable keys are text and the arrows
     /// still move the selection; `Enter` keeps the filter and returns the

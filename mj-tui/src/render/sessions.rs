@@ -913,6 +913,17 @@ pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, widt
         .fold(0, u16::saturating_add)
 }
 
+/// The pane name the title carries when there is room for it beside a label.
+const FULL_TITLE_PREFIX: &str = " Sessions · ";
+
+/// Whether a label is short enough for the pane to keep its full name rather
+/// than falling back to `S · `. Callers that want to add to the label ask this
+/// first, so the pane name never loses its place to something optional.
+pub(crate) fn label_keeps_full_prefix(label: &str, width: u16, maximize_enabled: bool) -> bool {
+    let budget = usize::from(pane_title_content_width(width, maximize_enabled));
+    FULL_TITLE_PREFIX.chars().count() + label.chars().count() < budget
+}
+
 /// The Sessions title keeps the workspace ahead of the long pane label when
 /// the screen is narrow, while visible size controls retain their cells.
 pub(crate) fn sessions_title(
@@ -924,9 +935,8 @@ pub(crate) fn sessions_title(
     if workspace_name.is_empty() {
         return Line::raw(truncate_to_cells(" Sessions ", budget, Truncate::SUMMARY));
     }
-    let full_prefix = " Sessions · ";
-    let prefix = if full_prefix.chars().count() + workspace_name.chars().count() < budget {
-        full_prefix
+    let prefix = if label_keeps_full_prefix(workspace_name, width, maximize_enabled) {
+        FULL_TITLE_PREFIX
     } else {
         " S · "
     };
@@ -1065,7 +1075,21 @@ pub(crate) fn render_sessions(
         drawn_session_rows(dashboard, width)
     };
     let focused = dashboard.focus() == Focus::Sessions;
+    let maximize_enabled = dashboard.pane_maximize_enabled(SupportPane::Sessions);
     let filter_label = dashboard.sessions_filter_label();
+    // The count is the first thing to give up its place. Below the width that
+    // keeps both, the pane name is worth more than the number.
+    let filter_label = match dashboard.sessions_hidden_count() {
+        0 => filter_label,
+        hidden => {
+            let counted = format!("{filter_label} · {hidden} hidden");
+            if label_keeps_full_prefix(&counted, area.width, maximize_enabled) {
+                counted
+            } else {
+                filter_label
+            }
+        }
+    };
     frame.render_widget(
         sessions_block(
             focused,
@@ -1073,7 +1097,7 @@ pub(crate) fn render_sessions(
             area.width,
             dashboard.pane_size(SupportPane::Sessions),
             dashboard.sessions_attention_summary(),
-            dashboard.pane_maximize_enabled(SupportPane::Sessions),
+            maximize_enabled,
         ),
         area,
     );
