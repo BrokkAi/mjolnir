@@ -259,3 +259,5 @@ because `mj-core/src/targets.rs` has no test module and the controller crate
 re-exports all of `mj_core::targets`. The command lines in `Concrete Steps`
 were corrected to the real package names. The Apple `container` argument forms
 remain unverified against the real CLI, which needs macOS.
+
+Revision (2026-09-18, Fable): live check on an isolated instance with the user's local Podman target plus `docker.io/library/alpine:3.20` (absent before): the daemon logged `pulled a newer container image host="local podman" image="docker.io/library/alpine:3.20"` two seconds after start and `podman image exists` then succeeded. The same run showed the default configuration's `docker` target producing "could not refresh a container image ... No such file or directory" on a machine without Docker; a local engine that is not on PATH is now skipped at debug level (`local_engine_installed`, test `an_uninstalled_local_engine_is_skipped_by_the_image_refresh`). Apple `container` argument forms remain unverified on macOS.

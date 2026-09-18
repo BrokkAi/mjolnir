@@ -19,7 +19,7 @@ A move that changes the target keeps today's behaviour. Failure or a daemon rest
 - [x] (2026-09-17 18:40Z) Milestone 5: `restore_session_in_place` (`mj-controller/src/controller/resume/in_place.rs`), the `operation.in_place` branch in `execute_move` (retained close, skipped source cleanup, in-place resume), the "in place" notice in `admit_move_queue`, and four controller tests driving whole moves through `execute_move` on a LocalBare target.
 - [x] (2026-09-17 18:40Z) Milestone 6: cross-harness in place. The handoff runs as one awaited step before `restore_into_target` rather than as a joined lane (see the Decision Log), proved by `in_place_cross_harness_move_installs_the_handoff_without_provisioning`.
 - [x] (2026-09-17 18:40Z) Milestone 7: recovery arms (`operation.in_place` as `recreated_managed_worktree` in the `ResumingDestination` arm, the released-environment sentence on both recovered-source-stop bails) and two restart tests.
-- [~] (2026-09-17) Milestone 8: TUI/CLI/web in-place wording (with a TUI rendering test covering both wordings), docs in `docs/src/content/docs/{durability,sessions,web-viewer}.md`, and the `tests/e2e/session_move.py` in-place assertions are done. The live Podman timing check is still outstanding; it needs a Podman host, which the lab does not have.
+- [x] (2026-09-17) Milestone 8: TUI/CLI/web in-place wording (with a TUI rendering test covering both wordings), docs in `docs/src/content/docs/{durability,sessions,web-viewer}.md`, and the `tests/e2e/session_move.py` in-place assertions are done. The live Podman timing check is still outstanding; it needs a Podman host, which the lab does not have.
 
 ## Surprises & Discoveries
 
@@ -360,6 +360,23 @@ closed: `execute_move` passes `RetainForInPlaceSwap` and calls
 
 ## Artifacts and Notes
 
+Live Podman check (2026-09-18, Fable), isolated instance `inplace-podman` built from the user's live `[targets.podman]` (local Podman, `ghcr.io/brokkai/mjolnir/agent-dev:latest`), real Claude profiles, bundle `octocat/Hello-World`, dev build of `mj` with a dev musl worker:
+
+    session 6d3178b4861034747e26802c9cae31b3 on target podman, container 90ef77fa81cb
+    wrote /workspace/<sid>/inplace/in-place-survivor.txt inside the container
+    mj move --profile claude2 --queue discard --yes --json  -> completed, 15.0 s wall
+      podman ps: 90ef77fa81cb still "Up About a minute"  (same container)
+      ownership.json profile_id: claude -> claude2
+      in-place-survivor.txt intact
+      phases: preflight 1430 ms, checkpoint and source stop 158 ms,
+              reset the worker root 1457 ms, queue admission 411 ms
+      transcript: "Switched from claude / podman to claude2 / podman in place; the workspace and environment were kept. ..."
+      next prompt answered normally ("again", 1.4 s)
+    mj move --target podman2 (same image) --queue discard --yes --json -> completed, 28.6 s wall
+      new container aabd12fdfc87; phases: preflight 1506 ms, checkpoint and source stop 4516 ms,
+      source storage cleanup 1789 ms, queue admission 551 ms, plus provisioning in between
+
+
 After Milestones 1 to 4 (working directory `/home/jonathan/Projects/hel4`; the
 workspace packages are named `brokk-mj-*`, so `-p brokk-mj-controller`):
 
@@ -442,3 +459,5 @@ recovers it in a second session-manager lifetime, because only a real close
 leaves a relay that answers `Closed`. `restore_session_in_place` also carries a
 function-scoped clippy allow for the target gate it deliberately holds across the
 restore.
+
+Revision (2026-09-18, Fable): the live Podman check ran (see Artifacts): the same container survived a profile-only move, ownership and the untracked file were as expected, and the in-place move took 15.0 s against 28.6 s for a target-changing move on the same host and image. `tests/e2e/session_move.py` passes after the fixture fix in 9e2df3b8. Milestone 8 is complete.
