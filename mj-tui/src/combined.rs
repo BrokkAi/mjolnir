@@ -18,11 +18,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
-    MINIMUM_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement, capacity_table_width,
-    minimized_pane_size_controls, minimized_quota_line, minimized_sessions_content_height,
-    minimized_targets_line, pane_size_control_areas, pane_title_content_width, quota_table_width,
-    render_capacity, render_footer, render_modal, render_onboarding_surface, render_quotas,
-    render_sessions, render_terminal_too_small, sessions_content_height,
+    MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement,
+    capacity_table_width, minimized_pane_size_controls, minimized_quota_line,
+    minimized_sessions_content_height, minimized_targets_line, pane_size_control_areas,
+    pane_title_content_width, quota_table_width, render_capacity, render_footer, render_modal,
+    render_onboarding_surface, render_quotas, render_sessions, render_terminal_too_small,
+    sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
@@ -374,15 +375,19 @@ fn render_combined_themed(
         area.y += height;
         area.height = area.height.saturating_sub(height);
     }
-    if area.width < MINIMUM_TERMINAL_WIDTH {
+    if area.width < NARROW_TERMINAL_WIDTH {
         render_terminal_too_small(
             frame,
             area,
-            TerminalSizeRequirement::Width(MINIMUM_TERMINAL_WIDTH),
+            TerminalSizeRequirement::Width(NARROW_TERMINAL_WIDTH),
         );
         dashboard.end_surface_frame();
         return Vec::new();
     }
+    // Below the sidebar width the Sessions list stacks above the
+    // conversation in its compact form, and the support panes go under it.
+    let narrow = area.width < MINIMUM_TERMINAL_WIDTH;
+    dashboard.narrow_layout.set(narrow);
     dashboard.resume_sessions_area = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => Some(resume_sessions_pane(
             area,
@@ -395,15 +400,25 @@ fn render_combined_themed(
         return Vec::new();
     }
 
-    let sidebar_width =
-        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions));
-    let sidebar_right = dashboard.config.sessions_side == mj_core::config::SessionsSide::Right;
-    let content_area = Rect::new(
-        area.x + if sidebar_right { 0 } else { sidebar_width },
-        area.y,
-        area.width.saturating_sub(sidebar_width),
-        area.height,
-    );
+    let sidebar_width = if narrow {
+        area.width
+    } else {
+        sessions_sidebar_width(area.width, dashboard.pane_size(SupportPane::Sessions))
+    };
+    let sidebar_right =
+        !narrow && dashboard.config.sessions_side == mj_core::config::SessionsSide::Right;
+    // Stacked, the sidebar's band height is only known once the bands are
+    // allocated; the content area's top is moved down then.
+    let content_area = if narrow {
+        area
+    } else {
+        Rect::new(
+            area.x + if sidebar_right { 0 } else { sidebar_width },
+            area.y,
+            area.width.saturating_sub(sidebar_width),
+            area.height,
+        )
+    };
     let sidebar_area = Rect::new(
         if sidebar_right {
             content_area.right()
@@ -522,7 +537,11 @@ fn render_combined_themed(
     let sizes = [
         (
             SupportPane::Sessions,
-            dashboard.pane_size(SupportPane::Sessions),
+            if narrow {
+                PaneSize::Minimized
+            } else {
+                dashboard.pane_size(SupportPane::Sessions)
+            },
         ),
         (
             SupportPane::Targets,
@@ -572,20 +591,35 @@ fn render_combined_themed(
             dimensions.standard_cap,
         )
     });
-    let sessions = PaneBand {
-        minimum: 0,
-        full: 0,
-        cap: 0,
+    // Beside the conversation the sidebar takes no rows from it. Stacked, its
+    // compact band (tabs, actions, and rows) is a fixed-height band above.
+    let sessions = if narrow {
+        let band = dimensions[0]
+            .1
+            .minimized
+            .saturating_add(WORKSPACE_PANE_HEIGHT);
+        PaneBand {
+            minimum: band,
+            full: band,
+            cap: band,
+        }
+    } else {
+        PaneBand {
+            minimum: 0,
+            full: 0,
+            cap: 0,
+        }
     };
     let targets = bands[1];
     let quota = bands[2];
     // Keep the support panes stacked together, using the space left by the
     // current sidebar size to decide whether they fit beside Sessions.
-    let supports_adjacent = support_panes_fit(content_area.width, dashboard);
+    let supports_adjacent = !narrow && support_panes_fit(content_area.width, dashboard);
     let mut maximize_enabled =
         maximized_pane_is_effective(area.height, dimensions, desired_prompt, sizes);
-    maximize_enabled[0].1 = sessions_sidebar_width(area.width, PaneSize::Maximized)
-        > sessions_sidebar_width(area.width, PaneSize::Standard);
+    maximize_enabled[0].1 = !narrow
+        && sessions_sidebar_width(area.width, PaneSize::Maximized)
+            > sessions_sidebar_width(area.width, PaneSize::Standard);
     dashboard.set_pane_maximize_enabled(maximize_enabled);
     let allocation =
         allocate_combined_heights(area.height, sessions, targets, quota, desired_prompt, sizes);
@@ -605,7 +639,9 @@ fn render_combined_themed(
     };
 
     let upper_content_height = heights.transcript.saturating_add(heights.prompt);
-    let sessions_height = if supports_adjacent {
+    let sessions_height = if narrow {
+        heights.sessions.saturating_sub(sidebar_top)
+    } else if supports_adjacent {
         area.height
             .saturating_sub(FOOTER_HEIGHT)
             .saturating_sub(sidebar_top)
@@ -618,12 +654,14 @@ fn render_combined_themed(
         sessions_area.width,
         sessions_height,
     );
+    // Stacked, everything below the sidebar band moves down by its height.
+    let stacked_band = if narrow { heights.sessions } else { 0 };
     // The whole conversation band, before it is divided into a transcript
     // and a prompt. The tiled panes are laid out in this rectangle, so it is
     // what a split or a directional pane move is measured against.
     let conversation_area = Rect::new(
         content_area.x,
-        content_area.y,
+        content_area.y.saturating_add(stacked_band),
         content_area.width,
         upper_content_height,
     );
@@ -669,7 +707,9 @@ fn render_combined_themed(
         } else {
             area.x
         },
-        area.y.saturating_add(upper_content_height),
+        area.y
+            .saturating_add(stacked_band)
+            .saturating_add(upper_content_height),
         if supports_adjacent {
             content_area.width
         } else {

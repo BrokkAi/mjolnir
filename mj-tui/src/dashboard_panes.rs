@@ -96,7 +96,7 @@ impl DashboardState {
 
     #[must_use]
     pub fn sessions_minimized(&self) -> bool {
-        self.pane_size(SupportPane::Sessions) == PaneSize::Minimized
+        self.narrow_layout.get() || self.pane_size(SupportPane::Sessions) == PaneSize::Minimized
     }
 
     /// Number of pending agent questions across the sessions shown by the

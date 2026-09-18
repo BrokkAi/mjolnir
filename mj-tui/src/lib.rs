@@ -765,6 +765,10 @@ pub struct DashboardState {
     /// to a different row than the highlight.
     opening_session: Option<String>,
     pub(crate) pane_areas: Option<[Rect; DASHBOARD_PANE_COUNT]>,
+    /// Whether the last frame was too narrow for a sidebar, so the Sessions
+    /// list was stacked above the conversation in its compact form. Read by
+    /// the renderer's size checks; set once per frame.
+    pub(crate) narrow_layout: Cell<bool>,
     /// Where each conversation pane's transcript and composer sat on the last
     /// frame, so the controller can route a mouse event by what the pointer
     /// is over rather than by what has focus, and to the pane it is over.
@@ -964,6 +968,7 @@ impl DashboardState {
             pane_sessions: BTreeMap::new(),
             opening_session: None,
             pane_areas: None,
+            narrow_layout: Cell::new(false),
             conversation_pane_areas: Vec::new(),
             conversation_area: None,
             resume_sessions_area: None,

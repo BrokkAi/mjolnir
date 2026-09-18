@@ -28,7 +28,7 @@ from reliability_lab import Lab, ScenarioFailure
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 # The combined dashboard deliberately refuses to render below 80 columns.
 # Keep both sides of that boundary in the real-terminal evidence.
-DIMENSIONS = ((79, 18), (80, 18), (140, 40), (200, 60))
+DIMENSIONS = ((59, 18), (79, 18), (80, 18), (140, 40), (200, 60))
 DEFAULT_TIMEOUT = 15.0
 
 
@@ -457,7 +457,10 @@ def create_session(
 def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
     for columns, rows in DIMENSIONS:
         tmux.resize(columns, rows)
-        if columns < 80:
+        # Below 60 columns the dashboard shows its size requirement; from 60
+        # the Sessions list stacks above the conversation, and from 80 it
+        # sits beside it.
+        if columns < 60:
             screen = tmux.wait_for("Terminal too small", f"dashboard width guard at {columns} columns")
         else:
             screen = tmux.wait_for_any(
@@ -595,7 +598,7 @@ def run_workflow(
         tmux.resize(columns, rows)
         screen = (
             tmux.wait_for("Terminal too small", "container width guard")
-            if columns < 80
+            if columns < 60
             else tmux.wait_for("Edit container", "resize with container form open")
         )
         evidence.event(f"container-resize-{columns}x{rows}", f"resize to {columns}x{rows}", "form or minimum-size message is rendered", "minimum-size message" if "Terminal too small" in screen else "form rendered", evidence.capture(f"container-resize-{columns}x{rows}", screen))

@@ -36,8 +36,8 @@ not list the command, because the button is always visible. Selecting a tab, or
 pressing an arrow while the workspace tabs have focus, changes the live-session
 filter immediately. Tabs are local
 views, so sessions in other workspaces continue running independently. The web
-viewer shows each workspace as a separate tab. The terminal surface requires at
-least 80 columns.
+viewer shows each workspace as a separate tab. The terminal surface needs at
+least 60 columns.
 
 The manager can create, rename, and delete workspaces and recover drafts. Names
 are trimmed, must be 1–64 Unicode characters, cannot contain control characters,

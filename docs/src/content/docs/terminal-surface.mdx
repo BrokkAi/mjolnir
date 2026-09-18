@@ -132,16 +132,18 @@ the terminal on narrow screens. The Workspaces pane keeps one bordered tab row
 above the Sessions list at every sidebar size. Sessions, Targets, and Quota each
 have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls.
 Click a control, or focus a support pane and press `prefix+z` to cycle through
-its sizes. Max is hidden when it adds no space over Standard. The dashboard
-still requires at least 80 columns, so standard and maximized are both 40
-columns at the minimum width.
+its sizes. Max is hidden when it adds no space over Standard. The sidebar
+needs at least 80 columns, so standard and maximized are both 40 columns at
+that width.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
 - A minimized sidebar narrows the workspace tabs and shows two lines per session.
 - Only one support pane can be maximized at a time.
 - Maximized Sessions widens the sidebar. Maximized Targets or Quota receives available vertical space below Prompt.
 
-Targets and Quota stay together. When both full tables fit beside a maximized sidebar, they appear below the conversation. Otherwise, they move below both Sessions and the conversation and span the terminal width. Quota retains exact percentages and reset times. The dashboard requires at least 80 columns.
+Targets and Quota stay together. When both full tables fit beside a maximized sidebar, they appear below the conversation. Otherwise, they move below both Sessions and the conversation and span the terminal width. Quota retains exact percentages and reset times.
+
+Between 60 and 79 columns, such as a phone over SSH, there is no room for a sidebar: the workspace tabs and a compact Sessions list stack above the conversation, Targets and Quota become one summary row each below it, and every key and click works as before. Below 60 columns the dashboard shows what size it needs instead.
 
 `prefix+b` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
 

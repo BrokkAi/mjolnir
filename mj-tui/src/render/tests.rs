@@ -1330,9 +1330,10 @@ fn dashboard_replaces_too_short_layout_with_required_height() {
 }
 
 #[test]
-fn dashboard_replaces_layouts_narrower_than_80_columns() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    let mut terminal = Terminal::new(TestBackend::new(79, 24)).expect("terminal");
+fn dashboard_stacks_below_80_columns_and_gives_up_below_60() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    let mut terminal = Terminal::new(TestBackend::new(59, 30)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw narrow dashboard");
@@ -1344,22 +1345,46 @@ fn dashboard_replaces_layouts_narrower_than_80_columns() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("Terminal too small"));
-    assert!(rendered.contains("Need at least 80 columns"));
-    assert!(rendered.contains("Current width: 79"));
+    assert!(rendered.contains("Need at least 60 columns"));
+    assert!(rendered.contains("Current width: 59"));
 
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw exact minimum-width dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(!rendered.contains("Terminal too small"));
-    assert!(dashboard.pane_areas.unwrap()[0].width > 0);
+    // Between 60 and 79 columns the Sessions list stacks above the
+    // conversation in its compact form, and Targets and Quota go below.
+    let lines = drawn(&mut dashboard, 70, 30);
+    assert!(
+        !lines.join("\n").contains("Terminal too small"),
+        "{lines:#?}"
+    );
+    let [sessions, targets, quota] = dashboard.pane_areas.expect("pane geometry");
+    let conversation = dashboard.conversation_area.expect("conversation geometry");
+    assert_eq!(sessions.width, 70, "{lines:#?}");
+    assert_eq!(sessions.y, 3, "the workspace tabs sit above the list");
+    assert_eq!(conversation.y, sessions.bottom(), "{lines:#?}");
+    assert_eq!(conversation.width, 70);
+    assert_eq!(targets.y, conversation.bottom());
+    assert_eq!(targets.width, 70);
+    assert_eq!(quota.y, targets.bottom());
+    assert!(
+        dashboard.sessions_minimized(),
+        "the stacked list is compact"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("ACP pretty name")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Conversation")),
+        "{lines:#?}"
+    );
+    assert!(lines.last().unwrap().contains("ctrl+b"), "{lines:#?}");
+
+    // From 80 columns the sidebar sits beside the conversation again.
+    let lines = drawn(&mut dashboard, 80, 30);
+    let [sessions, _, _] = dashboard.pane_areas.expect("pane geometry");
+    let conversation = dashboard.conversation_area.expect("conversation geometry");
+    assert!(sessions.width < 80, "{lines:#?}");
+    assert_eq!(conversation.x, sessions.right());
+    assert!(!dashboard.sessions_minimized());
 }
 
 #[test]

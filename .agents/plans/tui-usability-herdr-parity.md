@@ -20,7 +20,7 @@ Milestone numbers match the "Plan of Work" section.
 - [x] (2026-09-19 01:30Z) M4 Keyboard consistency: one-time tmux/screen prefix collision notice (client-hints.json beside config.toml), a letter for every confirmation button derived from its label and printed under the text, `manage_machines` and `restart_daemon` bindable, Stop and Restart ask only while the agent is mid-turn, Esc closes help when its filter is empty, Esc on a pane clears the notice. The first-launch prefix hint from M7 landed here too because it shares the hints store.
 - [x] (2026-09-19 03:00Z) M5 Per-session context: the checkout's branch, upstream distance, and changed-file count on the session title line (read on the target about once a minute per visible live session, through the same executor path go mode uses), and a `prefix+d` changed-files overlay with per-file kinds and line counts. Context-window usage was dropped (see Surprises & Discoveries).
 - [x] (2026-09-19 06:30Z) M6a Terminal integration: the notice bar keeps a thirty-entry history behind a **Recent messages** palette command and counts failures that overwrite each other (`2 failures · latest: …`); a Monochrome theme (`theme = "mono"`, also forced by `NO_COLOR`) that carries focus and selection with bold and reverse video; an ASCII symbol set (`[advanced] symbols`, or automatic on the Linux console and non-UTF-8 locales) covering status marks, transitions, badges, pane controls, borders, rules, ellipses, quota bars, scrollbars, footer separators, the spinner, and the branch text.
-- [ ] M6b Narrow layout: stack Sessions above the conversation between 60 and 79 columns instead of the "Terminal too small" message. The second transcript column is dropped: upstream's conversation split panes (`.agents/plans/conversation-split-panes.md`, merged 2026-09-19) already show several conversations side by side.
+- [x] (2026-09-19 08:00Z) M6b Narrow layout: between 60 and 79 columns the workspace tabs and a compact Sessions list stack above the conversation, Targets and Quota become one summary row each below it, and every hitbox follows; the "Terminal too small" floor moved to 60 columns. The second transcript column is dropped: upstream's conversation split panes (`.agents/plans/conversation-split-panes.md`, merged 2026-09-19) already show several conversations side by side.
 - [ ] M7 Onboarding and docs: Terminal surface page corrections (remaining: the Commands-button drift). The first-launch prefix hint landed in M4; per-feature docs landed with each milestone.
 
 ## Surprises & Discoveries
@@ -43,6 +43,9 @@ Milestone numbers match the "Plan of Work" section.
 - Decision: Implement all seven milestones in one plan, committed per milestone, rather than seven plans.
   Rationale: The user asked for the whole review to be implemented as a series. The milestones share the command registry (`mj-tui/src/actions.rs`) and the configuration types, so one document keeps the shared decisions in one place. Each milestone is still independently verifiable.
   Date/Author: 2026-09-18, Claude.
+- Decision: The narrow layout reuses the one frame routine with three geometry switches (full-width sidebar band, forced compact Sessions, support panes below) rather than a second renderer.
+  Rationale: Upstream's tiled conversation panes made the frame routine the only place that knows how panes, standby composers, and transitions are drawn; duplicating it for narrow terminals would have to be kept in step by hand. The stacked band is one more entry for the existing height allocator, which already handles a fixed-height band.
+  Date/Author: 2026-09-19, Claude.
 - Decision: Every glyph the dashboard draws goes through one `Glyphs` table in `mj-chat/src/theme.rs`, selected per frame like the theme, rather than a per-site ASCII fallback.
   Rationale: The audit found thirty-odd distinct glyphs across a dozen files; a table is the only way a new glyph cannot be added without an ASCII counterpart, and the test that draws the whole dashboard in ASCII and rejects any non-ASCII cell enforces it.
   Date/Author: 2026-09-19, Claude.
@@ -238,6 +241,7 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-19: M6b complete (stacked layout from 60 columns).
 - 2026-09-19: M6a complete (notice history, Monochrome and NO_COLOR, ASCII symbols). M6 split into 6a and 6b so the narrow layout lands on its own.
 - 2026-09-19: Merged origin/master (2.13.0, conversation split panes). Dropped the M6 second-transcript item as superseded; recorded the merge-as-you-go decision.
 - 2026-09-19: M5 complete. The branch went onto the session title line rather than the metadata line: at a 40-column sidebar the target and profile already fill the metadata line, and names rarely do the same to the title line. A narrow sidebar keeps the branch and drops the counts.

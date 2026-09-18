@@ -3,7 +3,7 @@ title: CLI reference
 description: Public mj commands for the dashboard, setup, diagnosis, login, import, checkpoints, daemon control, and recovery.
 ---
 
-Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name and leaves it ready for an explicit new session. Otherwise it opens the requested workspace or the most recently opened workspace. The terminal surface requires at least 80 columns.
+Running `mj` without a subcommand starts the per-user daemon when necessary and opens the terminal dashboard. If no workspace exists, it creates one using the current directory name and leaves it ready for an explicit new session. Otherwise it opens the requested workspace or the most recently opened workspace. The terminal surface needs at least 60 columns, and 80 for the Sessions sidebar to sit beside the conversation.
 
 ```text
 mj [--instance <name>] [--workspace <name>] [command]

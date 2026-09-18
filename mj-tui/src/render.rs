@@ -235,7 +235,11 @@ pub(crate) fn render(frame: &mut Frame, dashboard: &mut DashboardState) {
     crate::combined::render_combined(frame, dashboard, &mut chats, &opening, false);
 }
 
+/// The width from which the Sessions sidebar sits beside the conversation.
+/// Below it, down to [`NARROW_TERMINAL_WIDTH`], the sidebar stacks above.
 pub(crate) const MINIMUM_TERMINAL_WIDTH: u16 = 80;
+/// The narrowest frame the dashboard draws at all.
+pub(crate) const NARROW_TERMINAL_WIDTH: u16 = 60;
 
 pub(crate) enum TerminalSizeRequirement {
     Width(u16),
