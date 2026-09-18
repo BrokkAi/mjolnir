@@ -377,14 +377,19 @@ fn a_literal_draft_envelope_prefix_round_trips_as_text() {
 }
 
 #[test]
-fn alt_v_is_disabled_until_voice_is_available() {
+fn dictation_toggle_is_inert_until_voice_is_available() {
     let mut chat = ChatState::new(&snapshot(), &[]);
-    let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-    assert_eq!(chat.handle_key(key), ChatAction::None);
+    assert_eq!(chat.dictation_toggle_action(), ChatAction::None);
 
     chat.set_voice_available(true);
-    let action = chat.handle_key(key);
-    assert_eq!(action, ChatAction::ToggleVoice);
+    assert_eq!(chat.dictation_toggle_action(), ChatAction::ToggleVoice);
+
+    // The key that used to start dictation is the host's now, so the composer
+    // reads Alt-V as nothing at all.
+    assert_eq!(
+        chat.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)),
+        ChatAction::None
+    );
     assert!(chat.input.is_empty());
 }
 
@@ -393,9 +398,8 @@ fn active_voice_remains_stoppable_after_availability_is_lost() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.voice_active = true;
     chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
-    let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
 
-    assert_eq!(chat.handle_key(key), ChatAction::ToggleVoice);
+    assert_eq!(chat.dictation_toggle_action(), ChatAction::ToggleVoice);
     assert_eq!(
         chat.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1946,11 +1950,15 @@ fn editor_preserves_uppercase_text_while_shortcuts_remain_case_insensitive() {
     assert_eq!(chat.history_search.as_ref().unwrap().query, "N");
     chat.handle_key(key(KeyCode::Esc));
 
+    // A shifted Alt chord still reaches the readline shortcut it names, so
+    // Alt-Shift-B moves back a word rather than typing one.
+    assert_eq!(chat.input_cursor, 2);
     chat.handle_key(KeyEvent::new(
-        KeyCode::Char('T'),
+        KeyCode::Char('B'),
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
+    assert_eq!(chat.input_cursor, 0);
+    assert_eq!(chat.input, "HI");
 }
 
 #[test]
@@ -2010,16 +2018,21 @@ fn ctrl_v_returns_paste_request_action() {
 }
 
 #[test]
-fn alt_t_toggles_rendering() {
+fn toggle_render_mode_flips_between_rich_and_raw() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    chat.handle_key(alt('t'));
+    chat.toggle_render_mode();
     assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
-    chat.handle_key(alt('t'));
+    chat.toggle_render_mode();
     assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    // Ctrl-T stayed free for readline when the toggle moved to Alt-T.
-    chat.handle_key(ctrl('t'));
+
+    // The keys that used to run these toggles belong to the host's registry
+    // now, so the composer answers none of them.
+    for key in [alt('t'), ctrl('t'), alt('v')] {
+        chat.handle_key(key);
+    }
     assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+    assert!(chat.input.is_empty());
 }
 
 #[test]

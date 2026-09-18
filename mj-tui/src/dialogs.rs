@@ -9,7 +9,7 @@ pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use mj_chat::theme;
 use qrcode::QrCode;
 use qrcode::types::{Color as QrColor, EcLevel};
@@ -644,25 +644,32 @@ impl DashboardState {
         });
     }
 
+    /// Whether the target-actions dialog is running a test right now.
+    ///
+    /// The cancel command answers over this dialog, which is the one modal it
+    /// is allowed through, so both the availability gate and the dispatch arm
+    /// ask this question.
+    pub(crate) fn target_test_running(&self) -> bool {
+        matches!(&self.mode, Mode::TargetActions(dialog) if dialog.testing.is_some())
+    }
+
+    /// Cancels the target test the dialog is running, if there is one.
+    pub(crate) fn cancel_target_test(&mut self) -> Option<DashboardAction> {
+        let Mode::TargetActions(dialog) = &mut self.mode else {
+            return None;
+        };
+        dialog.testing.as_ref()?;
+        dialog.testing = None;
+        dialog.result = Some(("Target test".into(), Err("cancelled".into())));
+        sync_target_actions_form(dialog);
+        Some(DashboardAction::CancelTargetTest)
+    }
+
     pub(crate) fn handle_target_actions_event(
         &mut self,
         event: Event,
         mut dialog: TargetActionsDialog,
     ) -> DashboardAction {
-        // Alt-X is the surface's one cancel chord. The controller's chord
-        // pre-filter deliberately leaves it alone while a dialog is open, so
-        // here it cancels the test this dialog is running.
-        if let Event::Key(key) = &event
-            && dialog.testing.is_some()
-            && key.modifiers.contains(KeyModifiers::ALT)
-            && key.code == KeyCode::Char('x')
-        {
-            dialog.testing = None;
-            dialog.result = Some(("Target test".into(), Err("cancelled".into())));
-            sync_target_actions_form(&mut dialog);
-            self.mode = Mode::TargetActions(dialog);
-            return DashboardAction::CancelTargetTest;
-        }
         // Preserve the convenient Up/Down target selection from the old
         // surface while letting the form own the selection metadata.
         if let Event::Key(key) = &event

@@ -48,6 +48,7 @@ mod dialogs;
 mod go;
 mod help;
 mod ingest;
+mod keybinds;
 mod modal_surface;
 mod palette;
 mod render;
@@ -65,7 +66,7 @@ mod docs_screenshots;
 #[cfg(test)]
 mod test_support;
 
-pub use crate::actions::{CommandId, global_chord};
+pub use crate::actions::{CommandId, survives_chat_modal};
 pub use crate::combined::render_combined;
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;
@@ -73,6 +74,7 @@ pub use crate::ingest::{
     MaterializedProjectionCache, PreparedMaterializedSessionDetail,
     PreparedMaterializedSessionSummary,
 };
+pub use crate::keybinds::KeyRoute;
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
@@ -401,6 +403,10 @@ pub enum DashboardAction {
         generation: u64,
         draft_id: String,
     },
+    /// Switch the visible conversation between rendered Markdown and raw text.
+    ToggleTranscriptRendering,
+    /// Start or stop dictating into the visible conversation's composer.
+    ToggleDictation,
     QuitDetach,
 }
 
@@ -585,6 +591,12 @@ struct SessionOrderCache {
 pub struct DashboardState {
     session_order_cache: RefCell<SessionOrderCache>,
     pub(crate) config: Config,
+    /// The resolved `[keys]` bindings, refreshed whenever configuration is
+    /// replaced so a `config.toml` edit takes effect without a restart.
+    pub(crate) keybinds: mj_core::config::Keybinds,
+    /// Whether the prefix key has been pressed and the next key completes a
+    /// chord. Cleared by that key, by Esc, and by any mouse press.
+    pub(crate) prefix_pending: bool,
     pub(crate) state: State,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
@@ -790,6 +802,8 @@ impl DashboardState {
 
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
         let mut dashboard = Self {
+            keybinds: config.keybinds(),
+            prefix_pending: false,
             config,
             state,
             quotas,

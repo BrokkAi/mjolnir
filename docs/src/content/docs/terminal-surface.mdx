@@ -42,7 +42,7 @@ while you type and while a notice replaces the footer. Each session row has a
 including global shortcuts in the composer's footer. Help supports wheel
 scrolling and a **Close** button.
 
-Open Settings (`F7`) to choose Midnight (the default), Light, Darcula, or High
+Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula, or High
 Contrast. Saving applies the palette to the dashboard, conversation, and dialogs
 and preserves it for future launches. Setup groups the theme, spinner, and
 Sessions sidebar position under **Interface**. It also edits Advanced display
@@ -64,7 +64,12 @@ Each list supports the same navigation keys:
 | --- | --- |
 | `↑` / `↓` or `j` / `k` | Select the previous or next row |
 | `Ctrl+P` / `Ctrl+N` | Select the previous or next row |
-| `Home` / `End` | Select the first or last row |
+| `Ctrl+D` / `Ctrl+U` | Move eight rows down or up |
+| `Home` / `End` or `G` | Select the first or last row |
+
+These keys work in the support panes, dialogs, and wizards. A focused text
+field keeps them as text, so typing `j` or `Ctrl+U` in a search or name field
+edits the field instead of moving the selection.
 
 The Sessions pane keeps **Create** and **Resume** above the session list. They
 remain available when the list is empty or filtered. Both Create shortcuts open
@@ -87,7 +92,6 @@ Pane-specific actions are deliberately small:
 | Sessions | `Enter` | Open the selected session |
 | Workspaces | `↑` / `↓` | Select the previous or next workspace tab immediately |
 | Sessions | `n` / `N` | Open the full session creation wizard |
-| Sessions | `Alt+S` | Open the stopped-session Resume picker |
 | Sessions | `Space` | Fold or unfold the selected project |
 | Sessions | `1`–`9` | Fold or unfold the numbered project |
 | Targets | `Enter` or `e` | Open target actions, including test and rename |
@@ -101,10 +105,10 @@ columns; maximized uses half, bounded to 40–100 columns. Both stay within half
 the terminal on narrow screens. The Workspaces pane keeps one bordered tab row
 above the Sessions list at every sidebar size. Sessions, Targets, and Quota each
 have minimized (`▁`), standard (`▪`), and maximized (`□`) title-bar controls.
-Click a control, or focus a support pane and press `Alt+Z` to cycle through its
-sizes. Max is hidden when it adds no space over Standard. The dashboard still
-requires at least 80 columns, so standard and maximized are both 40 columns at
-the minimum width.
+Click a control, or focus a support pane and press `prefix+z` to cycle through
+its sizes. Max is hidden when it adds no space over Standard. The dashboard
+still requires at least 80 columns, so standard and maximized are both 40
+columns at the minimum width.
 
 - A minimized Targets or Quota pane becomes a one-line summary.
 - A minimized sidebar narrows the workspace tabs and shows two lines per session.
@@ -113,32 +117,47 @@ the minimum width.
 
 Targets and Quota stay together. When both full tables fit beside a maximized sidebar, they appear below the conversation. Otherwise, they move below both Sessions and the conversation and span the terminal width. Quota retains exact percentages and reset times. The dashboard requires at least 80 columns.
 
-`Alt+G` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
+`prefix+b` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
 
-## Global keys
+## Prefix key
 
-Function keys and `Alt` chords work no matter which dashboard pane has focus:
+Mjolnir uses a tmux-style prefix key instead of one direct chord per command: press the prefix, release it, then press a second key. The footer shows a `PREFIX` banner while a prefix press is pending. The default prefix is `ctrl+b`, the same as tmux and [herdr](https://github.com/herdrdev/herdr), so the same muscle memory carries over. `Esc` cancels a pending prefix without sending anything; an unbound key after the prefix shows a footer notice instead of doing nothing silently.
+
+The commands below run from any dashboard pane and from the composer, once the prefix has been pressed. They are written here as `prefix+<key>` because every one of them, including the prefix itself, can be rebound:
 
 | Key | Action |
 | --- | --- |
-| `F1` | Open help; `?` also opens it when a non-Prompt pane has focus |
-| `F2` | Open the command palette |
-| `F4` | Show the web viewer address and access code |
-| `F5` | Refresh all target capacity and profile quota data |
-| `F7` | Open Settings |
-| `Alt+N` / `Alt+W` | Open the full session creation wizard |
-| `Alt+S` | Resume any non-live session through the resume picker |
-| `Alt+A` | Mark all session activity as read |
-| `Alt+X` | Cancel the selected session's in-flight launch, resume, or stop operation |
-| `Alt+Z` | Cycle the focused support pane's size |
-| `Alt+G` | Toggle the dashboard pane preset |
-| `Alt+Q` | Detach this terminal while the daemon and sessions continue |
+| `prefix+?` | Open help; `?` also opens it when a non-Prompt pane has focus |
+| `prefix+:` | Open the command palette |
+| `prefix+s` | Open Settings |
+| `prefix+c` | Open the full session creation wizard |
+| `prefix+g` | Resume any non-live session through the resume picker |
+| `prefix+shift+n` | Open workspace management |
+| `prefix+w` | Focus the workspace tab row |
+| `prefix+n` / `prefix+p` | Select the next or previous workspace |
+| `prefix+1`–`prefix+9` | Select a workspace by number |
+| `prefix+tab` | Focus the next support pane |
+| `prefix+shift+tab` | Focus the previous support pane |
+| `prefix+z` | Cycle the focused support pane's size |
+| `prefix+b` | Toggle the dashboard pane preset |
+| `prefix+shift+r` | Refresh all target capacity and profile quota data |
+| `prefix+shift+c` | Cancel the selected session's in-flight launch, resume, or stop operation |
+| `prefix+a` | Mark all session activity as read |
+| `prefix+u` | Show the web viewer address and access code |
+| `prefix+shift+t` | Rename the selected session |
+| `prefix+t` | Toggle the transcript between rendered and raw text |
+| `prefix+m` | Start or stop dictation when voice input is available |
+| `prefix+q` | Detach this terminal while the daemon and sessions continue |
 
-`Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `Alt+X` is different: it cancels a lifecycle operation such as launch or resume.
+`Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `prefix+shift+c` is different: it cancels a lifecycle operation such as launch or resume. Stop, Restart, Move, Delete session, container settings, and managing profiles or targets have no default key; run them from the command palette so a mis-hit key cannot act on a live session.
+
+Pressing the prefix twice sends the literal key through to whatever has focus instead of running a command. In the composer this is how you still reach `Ctrl-B`, backward-character: press `ctrl+b ctrl+b`.
+
+Every binding above, including the prefix itself, is editable in `config.toml` under `[keys]`; see [Configuration](/configuration/#keys-keys).
 
 ## Command palette
 
-Click **Commands** or press `F2` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands. Click a command and **Run** to execute it, or **Close** to dismiss the palette. A session row's **⋯** button opens a palette limited to that session's actions.
+Click **Commands** or press `prefix+:` to expose both shortcut-backed and palette-only actions. Commands for the selected session come first, followed by commands for the focused pane and then global commands. Click a command and **Run** to execute it, or **Close** to dismiss the palette. A session row's **⋯** button opens a palette limited to that session's actions.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotCommandPalette.src} aria-label="Open the full-size screenshot: Mjolnir command palette">
@@ -151,13 +170,13 @@ Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it,
 
 ## New session and Setup
 
-Press **Create** or `n`, `N`, `Alt+N`, or `Alt+W` to open the full session
+Press **Create**, `n`, `N`, or `prefix+c` to open the full session
 creation wizard. It asks for the profile, project, target, and launch options,
 then provisions the session in the selected workspace. The new row appears
 immediately with background launch progress; when it is ready, the normal Prompt
 receives focus. No separate fast path or task-entry dialog remains.
 
-Press `F7` to edit all configuration in Settings: accounts, targets and remote
+Press `prefix+s` to edit all configuration in Settings: accounts, targets and remote
 machines, projects, Interface settings (sidebar position, activity animation,
 and theme), Advanced display options, review, and web access. Enter opens a
 section or edits a value. Fixed choices open in a compact menu over the page;
@@ -213,8 +232,6 @@ changing the prompt draft.
 | `Page Up` / `Page Down` | Scroll the transcript |
 | `↑` / `↓` | Move within multiline input or walk prompt history |
 | `Ctrl+R` | Search prompt history; `Alt+R` changes the search scope |
-| `Alt+T` | Toggle the transcript between rendered and raw text |
-| `Alt+V` | Start or stop dictation when voice input is available |
 | `Ctrl+V` | Paste the system clipboard |
 | `Ctrl+A` / `Ctrl+E` | Move to the start or end of the line |
 | `Ctrl+B` / `Ctrl+F` | Move back or forward one character |
@@ -227,6 +244,8 @@ changing the prompt draft.
 | `Ctrl+P` / `Ctrl+N` | Move to the previous or next line, then through history |
 
 Inside history search, `Ctrl+R` or `↑` selects an older match, `Ctrl+S` or `↓` selects a newer match, `Enter` accepts it, and `Esc` or `Ctrl+C` cancels the search.
+
+Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
 
 ## Shell commands
 
@@ -242,12 +261,10 @@ Press `Esc` to cancel a running shell command. The same `!` syntax works in the 
 
 ## Help, footer, and terminal setup
 
-Press `F1` for scrollable contextual help and `Esc` to close it. The footer is generated from the same command registry: pane-local commands appear first, `Alt` chords second, and function keys last. On a narrow terminal, the leftmost hints disappear first while the global function keys remain visible.
+Press `prefix+?` for scrollable contextual help and `Esc` to close it. The footer is generated from the same command registry: pane-local commands appear first, then the live prefix chord group, so the footer never names a key that is not actually bound.
 
-If `Alt` shortcuts arrive as `Esc` followed by a letter, configure the terminal to send Meta. In iTerm2 set the left Option key to **Esc+**; in Terminal.app enable **Use Option as Meta key**. Under tmux, a short escape delay keeps chords responsive:
+Inside help, press `/` to filter the rows. Typing narrows them to the rows whose key, command name, or description contains what you typed; `Ctrl+U` clears the filter text; `Esc` clears the filter and a second `Esc` closes help; `Enter` closes it from either state. The arrow and page keys keep scrolling while the filter has focus.
 
-```text
-set -sg escape-time 10
-```
+If you run Mjolnir inside tmux or GNU screen with its default `ctrl+b` prefix, the multiplexer sees `ctrl+b` first and Mjolnir's prefix never arms. Press `ctrl+b` twice to send it through, as you would for tmux's own prefix, or set `prefix` to a different key in `[keys]`.
 
 For session states and recovery behavior, continue to [sessions](/sessions/). The [CLI reference](/cli-reference/) covers non-interactive commands, while [troubleshooting](/troubleshooting/) covers key handling, target failures, and viewer connectivity.

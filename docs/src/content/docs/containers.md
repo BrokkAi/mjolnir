@@ -93,9 +93,9 @@ podman build --pull=always \
 
 Create a session and choose a local runtime in the target picker. Mjolnir checks
 its availability in the background and blocks unavailable choices. Start a
-stopped service, then press **F5** to recheck. No `mj setup` command is required.
+stopped service, then press **prefix+shift+r** to recheck. No `mj setup` command is required.
 
-Use **F7 Settings → Machines and Runtimes** to override the container image,
+Use **prefix+s Settings → Machines and Runtimes** to override the container image,
 resource defaults, or environment, or to add an SSH or EC2 connection. The
 optional CLI setup command remains available.
 
@@ -183,8 +183,8 @@ mj doctor --json --smoke
 mj
 ```
 
-This opens Mjolnir's terminal surface. Press **Create**, **Alt-N**, or
-**Alt-W** from anywhere for the full new-session wizard.
+This opens Mjolnir's terminal surface. Press **Create** or **prefix+c** from
+anywhere for the full new-session wizard.
 It walks you through picking a profile, a target, and a bundle.
 
 Before launch, you can size the container's CPU and memory allocation. The

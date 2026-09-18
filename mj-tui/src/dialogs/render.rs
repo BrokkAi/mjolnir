@@ -433,7 +433,13 @@ pub(crate) fn render_target_actions(
                     format!(" Testing {target_id}…"),
                     Style::default().fg(theme::palette().accent),
                 ),
-                Span::styled(" Alt-X cancels test", theme::muted()),
+                Span::styled(
+                    match dashboard.first_key_label(crate::CommandId::CancelOperation) {
+                        Some(key) => format!(" {key} cancels test"),
+                        None => " Esc cancels test".to_owned(),
+                    },
+                    theme::muted(),
+                ),
             ])),
             Rect::new(inner.x, status_y, inner.width, 1),
         );

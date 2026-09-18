@@ -998,12 +998,18 @@ impl<K: Copy + Eq> Form<K> {
                     EventResult::with_action(Interaction::Activate(id))
                 });
             }
-            if expanded && let Some(next) = list_selection(key.code, selected, len) {
+            if expanded && let Some(next) = list_selection(key.code, key.modifiers, selected, len) {
                 self.set_selected(id, next);
                 return Some(EventResult::with_action(Interaction::Select(id, next)));
             }
         }
-        if ordinary && let ControlKind::ChoiceList { len, selected } = kind {
+        // `ctrl+d` and `ctrl+u` page a list, so they are the one pair allowed
+        // past the modifier gate; every other list key is unmodified.
+        let list_page = key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('u'));
+        if (ordinary || list_page)
+            && let ControlKind::ChoiceList { len, selected } = kind
+        {
             if is_press && matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
                 let control = self.control(id)?;
                 let allowed = if control.row_map.is_empty() {
@@ -1025,7 +1031,7 @@ impl<K: Copy + Eq> Form<K> {
                     EventResult::handled()
                 });
             }
-            if let Some(next) = self.list_selection(id, key.code, selected, len) {
+            if let Some(next) = self.list_selection(id, key.code, key.modifiers, selected, len) {
                 self.set_selected(id, next);
                 return Some(EventResult::with_action(Interaction::Select(id, next)));
             }
@@ -1110,10 +1116,17 @@ impl<K: Copy + Eq> Form<K> {
         false
     }
 
-    fn list_selection(&self, id: K, code: KeyCode, selected: usize, len: usize) -> Option<usize> {
+    fn list_selection(
+        &self,
+        id: K,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        selected: usize,
+        len: usize,
+    ) -> Option<usize> {
         let control = self.control(id)?;
         if control.row_map.is_empty() {
-            return list_selection(code, selected, len);
+            return list_selection(code, modifiers, selected, len);
         }
         let len = control.row_map.len();
         let current = control
@@ -1121,22 +1134,18 @@ impl<K: Copy + Eq> Form<K> {
             .iter()
             .position(|row| *row == Some(selected))
             .unwrap_or(0);
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let target = match code {
-            KeyCode::Up => (0..current).rev().find(|row| {
-                control.row_enabled.get(*row).copied().unwrap_or(true)
-                    && control.row_map[*row].is_some()
-                    && control.row_map[*row] != Some(selected)
-            }),
-            KeyCode::Down => ((current + 1)..len).find(|row| {
-                control.row_enabled.get(*row).copied().unwrap_or(true)
-                    && control.row_map[*row].is_some()
-                    && control.row_map[*row] != Some(selected)
-            }),
+            KeyCode::Char('d') if ctrl => step_rows(control, current, selected, true, HALF_PAGE),
+            KeyCode::Char('u') if ctrl => step_rows(control, current, selected, false, HALF_PAGE),
+            _ if ctrl => None,
+            KeyCode::Up | KeyCode::Char('k') => step_rows(control, current, selected, false, 1),
+            KeyCode::Down | KeyCode::Char('j') => step_rows(control, current, selected, true, 1),
             KeyCode::Home => (0..len).find(|row| {
                 control.row_enabled.get(*row).copied().unwrap_or(true)
                     && control.row_map[*row].is_some()
             }),
-            KeyCode::End => (0..len).rev().find(|row| {
+            KeyCode::End | KeyCode::Char('G') => (0..len).rev().find(|row| {
                 control.row_enabled.get(*row).copied().unwrap_or(true)
                     && control.row_map[*row].is_some()
             }),
@@ -1213,7 +1222,9 @@ impl<K: Copy + Eq> Form<K> {
                         KeyCode::Down
                     };
                     self.focus(id);
-                    if let Some(next) = self.list_selection(id, code, selected, len) {
+                    if let Some(next) =
+                        self.list_selection(id, code, KeyModifiers::NONE, selected, len)
+                    {
                         self.set_selected(id, next);
                         return Some(EventResult::with_action(Interaction::Select(id, next)));
                     }
@@ -1513,20 +1524,76 @@ fn is_back_tab(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-fn list_selection(code: KeyCode, selected: usize, rows: usize) -> Option<usize> {
+/// How far `ctrl+d` and `ctrl+u` move a list, following the vim convention of
+/// half a screen; the lists this serves are short, so the step is a constant.
+const HALF_PAGE: usize = 8;
+
+/// The keys every list answers: arrows, Home/End, the Page keys, and the vim
+/// set (`j`, `k`, `G`, `ctrl+d`, `ctrl+u`). A focused text field never reaches
+/// here, because fields answer with [`Interaction::Edit`] first, so the letters
+/// stay text wherever text is being typed.
+fn list_selection(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    selected: usize,
+    rows: usize,
+) -> Option<usize> {
     if rows == 0 {
         return None;
     }
     let last = rows - 1;
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
-        KeyCode::Up => Some(selected.saturating_sub(1)),
-        KeyCode::Down => Some((selected + 1).min(last)),
+        KeyCode::Char('d') if ctrl => Some((selected + HALF_PAGE).min(last)),
+        KeyCode::Char('u') if ctrl => Some(selected.saturating_sub(HALF_PAGE)),
+        _ if ctrl => None,
+        KeyCode::Up | KeyCode::Char('k') => Some(selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => Some((selected + 1).min(last)),
         KeyCode::Home => Some(0),
-        KeyCode::End => Some(last),
+        KeyCode::End | KeyCode::Char('G') => Some(last),
         KeyCode::PageUp => Some(selected.saturating_sub(5)),
         KeyCode::PageDown => Some((selected + 5).min(last)),
         _ => None,
     }
+}
+
+/// Whether a display row can be selected: it is enabled, it stands for an
+/// item, and it is not another row of the item already selected.
+fn row_selectable<K>(control: &Control<K>, row: usize, selected: usize) -> bool {
+    control.row_enabled.get(row).copied().unwrap_or(true)
+        && control.row_map[row].is_some()
+        && control.row_map[row] != Some(selected)
+}
+
+/// Walks `times` selectable rows from `from`, stopping at the end of the list
+/// and returning the last row reached.
+fn step_rows<K>(
+    control: &Control<K>,
+    from: usize,
+    selected: usize,
+    forward: bool,
+    times: usize,
+) -> Option<usize> {
+    let len = control.row_map.len();
+    let mut current = from;
+    let mut reached = None;
+    for _ in 0..times {
+        let next = if forward {
+            ((current + 1)..len).find(|row| row_selectable(control, *row, selected))
+        } else {
+            (0..current)
+                .rev()
+                .find(|row| row_selectable(control, *row, selected))
+        };
+        match next {
+            Some(row) => {
+                current = row;
+                reached = Some(row);
+            }
+            None => break,
+        }
+    }
+    reached
 }
 
 fn page_target<K>(control: &Control<K>, current: usize, forward: bool) -> Option<usize> {

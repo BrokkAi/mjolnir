@@ -196,7 +196,7 @@ fn a_modal_overlays_the_dashboard_instead_of_replacing_it() {
     dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());
     // The rename editor is reached through the command palette now.
     dashboard.focus_sessions();
-    dashboard.handle_key(crate::test_support::key(KeyCode::F(2)));
+    open_palette(&mut dashboard);
     for character in "rename".chars() {
         dashboard.handle_key(crate::test_support::key(KeyCode::Char(character)));
     }
@@ -588,11 +588,11 @@ fn unavailable_sessions_maximum_is_hidden_and_returns_on_resize() {
 
     dashboard.focus_sessions();
     dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
-    dashboard.handle_key(alt_key('z'));
+    chord(&mut dashboard, crate::CommandId::CycleFocusedPaneSize);
     assert_eq!(
         dashboard.pane_size(SupportPane::Sessions),
         PaneSize::Minimized,
-        "Alt-Z skips unavailable Maximized from Standard"
+        "the pane-size chord skips unavailable Maximized from Standard"
     );
 
     dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
@@ -688,7 +688,7 @@ fn maximize_availability_tracks_content_and_works_from_minimized() {
 }
 
 #[test]
-fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
+fn the_pane_preset_compacts_sessions_and_returns_space_to_the_conversation() {
     for (height, expected_sessions_height) in [(32, 28), (44, 40)] {
         let mut dashboard = minimized_sessions_dashboard(3, 2);
         dashboard
@@ -701,7 +701,7 @@ fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
         assert!(standard.contains("Idle"), "{standard}");
         assert!(standard.contains("codex-1"), "{standard}");
 
-        dashboard.handle_key(alt_key('g'));
+        chord(&mut dashboard, crate::CommandId::TogglePanePreset);
         let compact = drawn(&mut dashboard, 120, height).join("\n");
         let compact_panes = dashboard.pane_areas.unwrap();
         assert_eq!(compact_panes[0].height, expected_sessions_height);
@@ -713,7 +713,7 @@ fn alt_g_compacts_sessions_and_returns_space_to_the_conversation() {
         assert!(!compact.contains("Agent:"), "{compact}");
         assert!(!dashboard.session_row_areas.is_empty());
 
-        dashboard.handle_key(alt_key('g'));
+        chord(&mut dashboard, crate::CommandId::TogglePanePreset);
         drawn(&mut dashboard, 120, height);
         assert_eq!(dashboard.pane_areas.unwrap(), standard_panes);
         assert_eq!(dashboard.chat_transcript_area.unwrap(), standard_transcript);
@@ -1275,7 +1275,7 @@ fn marking_all_read_removes_the_unread_tint_while_the_session_keeps_working() {
         theme::palette().session_attention
     );
     assert_eq!(
-        dashboard.handle_key(alt_key('a')),
+        chord(&mut dashboard, crate::CommandId::MarkAllRead),
         DashboardAction::MarkAllRead {
             receipts: vec![("session-1".into(), 4)]
         }
@@ -1362,7 +1362,10 @@ fn dashboard_replaces_layouts_narrower_than_80_columns() {
 #[test]
 fn new_session_picker_keeps_choices_and_controls_visible_at_minimum_width() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    assert_eq!(dashboard.handle_key(alt_key('w')), DashboardAction::None);
+    assert_eq!(
+        open_new_session_wizard(&mut dashboard),
+        DashboardAction::None
+    );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -1422,13 +1425,13 @@ fn the_footer_is_one_row_that_a_notice_takes_over() {
     let hotkeys = (buffer.area.x..buffer.area.right())
         .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
         .collect::<String>();
-    assert!(hotkeys.contains("Alt-N create"), "{hotkeys:?}");
-    assert!(hotkeys.contains("Alt-A read"), "{hotkeys:?}");
+    assert!(hotkeys.contains("ctrl+b then: c create"), "{hotkeys:?}");
+    assert!(hotkeys.contains("a read"), "{hotkeys:?}");
     assert!(!hotkeys.contains("[S]ort"));
 }
 
-/// The footer is the only place a beginner learns what `Alt-X` does, so it
-/// must name the operation it would cancel — and must not offer the key at
+/// The footer is the only place a beginner learns what the cancel chord does,
+/// so it must name the operation it would cancel — and must not offer the key at
 /// all while there is nothing in flight.
 #[test]
 fn footer_lists_cancel_only_while_an_operation_is_in_flight() {
@@ -1447,7 +1450,7 @@ fn footer_lists_cancel_only_while_an_operation_is_in_flight() {
         1_000,
     );
     let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("Alt-X cancel launch"), "{footer}");
+    assert!(footer.contains("shift+c cancel launch"), "{footer}");
 
     dashboard.finish_session_operation("session-1");
     assert!(
@@ -1460,13 +1463,13 @@ fn footer_lists_cancel_only_while_an_operation_is_in_flight() {
 /// Help is the one hint that is worth more than any other, so it survives
 /// every focus and every width squeeze.
 #[test]
-fn footer_ends_with_f1_help_at_every_focus() {
+fn footer_ends_with_help_at_every_focus() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     for focus in [Focus::Sessions, Focus::Targets, Focus::Quota, Focus::Prompt] {
         dashboard.focus = focus;
         let footer = combined_footer_text(&dashboard, 200);
-        assert!(footer.ends_with("F1 help"), "{focus:?}: {footer}");
+        assert!(footer.ends_with("? keys"), "{focus:?}: {footer}");
     }
 }
 
@@ -1482,11 +1485,11 @@ fn footer_drops_whole_hints_when_the_width_runs_out() {
     for width in 0_u16..=80 {
         let footer = combined_footer_text(&dashboard, width);
         assert!(Line::raw(footer.as_str()).width() <= usize::from(width));
-        if width >= 7 {
-            assert!(footer.ends_with("F1 help"), "{width}: {footer}");
+        if width >= 6 {
+            assert!(footer.ends_with("? keys"), "{width}: {footer}");
         }
         if width >= 20 {
-            assert!(footer.contains("F2 palette"), "{width}: {footer}");
+            assert!(footer.contains(": palette"), "{width}: {footer}");
         }
         // Every hint that survived is a whole hint of the full text.
         for hint in footer_hints(&footer) {
@@ -1496,6 +1499,51 @@ fn footer_drops_whole_hints_when_the_width_runs_out() {
             );
         }
     }
+}
+
+/// A half-typed chord owns the footer: the reader needs the way out of it and
+/// the key that lists the rest, not the hints they are part-way through.
+#[test]
+fn the_footer_shows_the_prefix_banner_while_a_chord_is_pending() {
+    for focus in [Focus::Sessions, Focus::Prompt] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus = focus;
+        assert_eq!(
+            dashboard.route_bound_key(&crate::test_support::prefix_key()),
+            crate::KeyRoute::Consumed
+        );
+        assert!(dashboard.prefix_pending(), "{focus:?}");
+        let lines = drawn(&mut dashboard, 120, 40);
+        let footer = lines.last().expect("the footer row");
+        assert!(footer.contains("PREFIX"), "{focus:?}: {footer}");
+        assert!(
+            footer.contains("esc cancel · ctrl+b send · ? keys"),
+            "{focus:?}: {footer}"
+        );
+        assert!(!footer.contains("detach"), "{focus:?}: {footer}");
+
+        // Cancelling puts the hints back.
+        dashboard.cancel_prefix();
+        let lines = drawn(&mut dashboard, 120, 40);
+        assert!(
+            lines.last().expect("the footer row").contains("q detach"),
+            "{focus:?}"
+        );
+    }
+}
+
+/// The letters in the chord group mean nothing without the key that starts
+/// them, so the group leads with whichever prefix is configured.
+#[test]
+fn footer_chord_group_starts_with_the_live_prefix() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    let mut config = config();
+    config.keys.prefix = "ctrl+a".to_owned();
+    dashboard.set_config(config);
+    let footer = combined_footer_text(&dashboard, 200);
+    assert!(footer.contains("│ ctrl+a then: c create"), "{footer}");
+    assert!(!footer.contains("ctrl+b"), "{footer}");
 }
 
 /// Every hint in the footer, whichever separator it sits between.
@@ -1508,17 +1556,18 @@ fn footer_hints(footer: &str) -> Vec<String> {
         .collect()
 }
 
-/// The row is read left to right by someone hunting one key, so the kinds
-/// of key never swap places: what this pane answers, then the chords that
-/// answer anywhere, then the function keys.
+/// The row is read left to right by someone hunting one key, so the kinds of
+/// key never swap places: what this pane answers, then the keys that follow
+/// the prefix, in one rank order. The chord group leads with the prefix
+/// itself, because the letters after it mean nothing without it.
 #[test]
-fn footer_groups_pane_alt_and_function_keys_in_that_order() {
+fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · Tab pane │ Alt-N create · Alt-S resume · Alt-A read · Alt-Z size · Alt-G panes \
-         · Alt-Q detach │ F2 palette · F4 web · F5 refresh · F7 settings · F1 help"
+        "Enter open · Tab pane │ ctrl+b then: c create · g resume · a read · z size · b panes \
+         · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys"
     );
 
     // The cancel chord takes its fixed place before detach, and only while
@@ -1531,21 +1580,20 @@ fn footer_groups_pane_alt_and_function_keys_in_that_order() {
         1_000,
     );
     let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("│ Alt-N"), "{footer}");
+    assert!(footer.contains("│ ctrl+b then: c create"), "{footer}");
     assert!(
-        footer.contains("Alt-G panes · Alt-X cancel launch · Alt-Q detach"),
+        footer.contains("b panes · shift+c cancel launch · q detach"),
         "{footer}"
     );
 }
 
-/// Pane hints give way before chords, and help and palette remain visible
-/// after the less important function-key hints have been dropped.
+/// Pane hints give way before the prefix chords, and help and palette remain
+/// visible after every other chord has been dropped.
 #[test]
-fn footer_drops_pane_hints_before_alt_hints_and_keeps_help_longest() {
+fn footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.focus_sessions();
-    const FUNCTION_KEYS: &str = "F2 palette · F4 web · F5 refresh · F7 settings · F1 help";
 
     let full = combined_footer_text(&dashboard, 200);
     assert!(
@@ -1556,15 +1604,11 @@ fn footer_drops_pane_hints_before_alt_hints_and_keeps_help_longest() {
     // Narrow enough to lose the pane group, wide enough to keep chords.
     let squeezed = combined_footer_text(&dashboard, 90);
     assert!(!squeezed.contains("Enter open"), "{squeezed}");
-    assert!(squeezed.contains("Alt-N create"), "{squeezed}");
-    assert!(squeezed.ends_with(FUNCTION_KEYS), "{squeezed}");
+    assert!(squeezed.contains("ctrl+b then: c create"), "{squeezed}");
+    assert!(squeezed.ends_with(": palette · ? keys"), "{squeezed}");
 
-    assert_eq!(
-        combined_footer_text(&dashboard, 32),
-        "F2 palette · F4 web · F1 help"
-    );
-    assert_eq!(combined_footer_text(&dashboard, 20), "F2 palette · F1 help");
-    assert_eq!(combined_footer_text(&dashboard, 7), "F1 help");
+    assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
+    assert_eq!(combined_footer_text(&dashboard, 6), "? keys");
     assert!(combined_footer_text(&dashboard, 5).is_empty());
     assert!(combined_footer_text(&dashboard, 0).is_empty());
 }
@@ -1590,12 +1634,12 @@ fn every_footer_hint_dispatches_the_command_it_names() {
             let Some(word) = (spec.footer)(&dashboard) else {
                 continue;
             };
-            let Some(hint) = spec.keys.first() else {
+            let Some(key_label) = dashboard.footer_key(id) else {
                 continue;
             };
             let footer = combined_footer_text(&dashboard, 400);
             assert!(
-                footer.contains(&format!("{} {word}", hint.label)),
+                footer.contains(&format!("{key_label} {word}")),
                 "{focus:?}: {footer} omits {:?}",
                 spec.label
             );
@@ -1621,12 +1665,17 @@ fn every_footer_hint_dispatches_the_command_it_names() {
             );
             dispatched.focus = focus;
 
-            // A hint that carries a modifier on a letter is an Alt chord.
-            let key_event = match (hint.modifiers.is_empty(), hint.code) {
-                (false, KeyCode::Char(character)) => alt_key(character),
-                _ => key(hint.code),
+            let keys = match spec.footer_group {
+                crate::actions::FooterGroup::Chord => chord_keys(&pressed, id),
+                crate::actions::FooterGroup::Pane => {
+                    vec![key(spec
+                        .pane_keys
+                        .first()
+                        .expect("a pane hint has a key")
+                        .code)]
+                }
             };
-            let by_key = pressed.handle_key(key_event);
+            let by_key = route(&mut pressed, &keys);
             let by_dispatch = dispatched.dispatch_command(id);
             assert_eq!(by_key, by_dispatch, "{focus:?}: {:?}", spec.label);
             assert_eq!(
@@ -1688,7 +1737,10 @@ fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
     let mut empty = DashboardState::new(config(), State::default(), BTreeMap::new());
     let lines = drawn(&mut empty, 120, 44).join("\n");
     assert!(lines.contains("No live session"), "{lines}");
-    assert!(lines.contains("Alt-N to create one"), "{lines}");
+    assert!(
+        lines.contains("ctrl+b c to create a session or ctrl+b g to resume one"),
+        "{lines}"
+    );
 
     // A live session that simply is not open says so instead.
     let mut live = dashboard_with_session(running_session());
@@ -1801,7 +1853,7 @@ fn minimizing_the_support_panes_gives_their_rows_to_the_transcript() {
     // Every row the tables and the Sessions pane give up lands in the
     // transcript; the composer and footer are untouched.
     let tables_freed = (band(&before, "Targets", "Quota") - band(&after, "Targets", "Quota"))
-        + (band(&before, "Quota", "Alt-Q detach") - band(&after, "Quota", "Alt-Q detach"));
+        + (band(&before, "Quota", "q detach") - band(&after, "Quota", "q detach"));
     let sessions_freed = 0;
     let transcript_gain = band(&after, "Conversation", "No conversation open")
         - band(&before, "Conversation", "No conversation open");
@@ -1809,7 +1861,7 @@ fn minimizing_the_support_panes_gives_their_rows_to_the_transcript() {
     assert_eq!(transcript_gain, tables_freed + sessions_freed);
     // Each minimized pane really is one row.
     assert_eq!(band(&after, "Targets", "Quota"), 1);
-    assert_eq!(band(&after, "Quota", "Alt-Q detach"), 1);
+    assert_eq!(band(&after, "Quota", "q detach"), 1);
 }
 
 fn now_seconds() -> u64 {

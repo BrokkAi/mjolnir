@@ -241,11 +241,11 @@ impl DashboardState {
     /// Keys for the standby composer shown while a Starting/Resuming
     /// transition or an in-flight attach owns the selected session. It is the
     /// real composer, so the whole readline chord set edits the draft; only
-    /// the dashboard's own chords are reserved, which keeps, say, Alt-X
-    /// cancel working while typing. `Enter` on a plain prompt returns
-    /// `QueueStartupPrompt` so the host can have the daemon deliver it when
-    /// the session is live; a command keeps the draft and explains. `Some`
-    /// means the key was consumed, including as a no-op.
+    /// the dashboard's own pane keys are reserved. Everything configurable is
+    /// matched by the prefix router before the key reaches here. `Enter` on a
+    /// plain prompt returns `QueueStartupPrompt` so the host can have the
+    /// daemon deliver it when the session is live; a command keeps the draft
+    /// and explains. `Some` means the key was consumed, including as a no-op.
     ///
     /// The launch standby, which has no session id yet, takes the same keys
     /// the same way; its Enter only keeps the preview, because the prompt is
@@ -259,9 +259,9 @@ impl DashboardState {
             None if self.launch_standby_capturing() => None,
             None => return None,
         };
-        // Chords the dashboard answers from every surface — the palette, the
-        // pane keys, canceling an operation — still belong to it.
-        if crate::actions::spec_for_key(key, self.focus).is_some() {
+        // Pane keys still belong to the dashboard; the prefix router has
+        // already taken everything a user can rebind.
+        if crate::actions::pane_command_for_key(key, self.focus).is_some() {
             return None;
         }
         // On macOS the dashboard's primary accelerator is represented by

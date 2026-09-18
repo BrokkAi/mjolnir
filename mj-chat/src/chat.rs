@@ -165,11 +165,16 @@ pub struct ChatRegions<'a> {
 }
 
 /// The footer area and global hints supplied by the host's command registry.
+///
+/// `banner` replaces the groups entirely while the host is in the middle of
+/// something the row has to report instead, such as a pending prefix chord.
+/// It is borrowed so the whole structure stays `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatFooter<'a> {
     pub area: Rect,
     pub chords: &'a [&'a str],
     pub functions: &'a [&'a str],
+    pub banner: Option<&'a Line<'static>>,
 }
 
 /// The local form state saved while the dashboard attaches another session.

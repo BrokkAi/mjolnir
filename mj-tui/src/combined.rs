@@ -709,19 +709,14 @@ fn render_combined_themed(
             Some(chat) => {
                 let chords =
                     crate::render::footer_commands(dashboard, crate::actions::FooterGroup::Chord);
-                let functions = crate::render::footer_commands(
-                    dashboard,
-                    crate::actions::FooterGroup::Function,
-                );
-                let commands = chords.iter().chain(&functions).cloned().collect::<Vec<_>>();
+                let commands = chords.clone();
                 let chords = chords
                     .iter()
                     .map(|(_, text)| text.as_str())
                     .collect::<Vec<_>>();
-                let functions = functions
-                    .iter()
-                    .map(|(_, text)| text.as_str())
-                    .collect::<Vec<_>>();
+                let banner = dashboard
+                    .prefix_pending()
+                    .then(|| crate::render::prefix_banner_line(dashboard));
                 chat.draw_in(
                     frame,
                     ChatRegions {
@@ -730,7 +725,8 @@ fn render_combined_themed(
                         footer: prompt_focused.then_some(ChatFooter {
                             area: footer_area,
                             chords: &chords,
-                            functions: &functions,
+                            functions: &[],
+                            banner: banner.as_ref(),
                         }),
                         overlay: area,
                     },
@@ -778,7 +774,13 @@ fn render_combined_themed(
                         draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
                     }
                 } else {
-                    render_empty_prompt_advice(frame, prompt_area, prompt_focused, reason);
+                    render_empty_prompt_advice(
+                        frame,
+                        prompt_area,
+                        prompt_focused,
+                        reason,
+                        dashboard,
+                    );
                 }
                 false
             }
@@ -861,32 +863,46 @@ fn render_empty_prompt_advice(
     prompt_area: Rect,
     prompt_focused: bool,
     reason: EmptyConversation,
+    dashboard: &DashboardState,
 ) {
     let (title, lines) = match reason {
         EmptyConversation::NoLiveSession => (
             " No live session ",
             [
-                "No live session in this workspace.",
-                "Press Alt-N to create one, or Alt-S to resume one.",
+                "No live session in this workspace.".to_owned(),
+                match (
+                    dashboard.first_key_label(crate::CommandId::NewSessionWizard),
+                    dashboard.first_key_label(crate::CommandId::ResumeDialog),
+                ) {
+                    (Some(create), Some(resume)) => {
+                        format!("Press {create} to create a session or {resume} to resume one.")
+                    }
+                    _ => "Create a session, or resume one, from the buttons above.".to_owned(),
+                },
             ],
         ),
         EmptyConversation::NoConversationOpen => (
             " No conversation open ",
             [
-                "No conversation open.",
-                "Press Tab for Sessions, then Enter on the one to open.",
+                "No conversation open.".to_owned(),
+                "Press Tab for Sessions, then Enter on the one to open.".to_owned(),
             ],
         ),
         EmptyConversation::Opening => (
             " Opening session ",
             [
-                "Opening session…",
-                "Esc cancels · select another session to switch · Alt-Q quits",
+                "Opening session…".to_owned(),
+                match dashboard.first_key_label(crate::CommandId::QuitDetach) {
+                    Some(detach) => {
+                        format!("Esc cancels · select another session to switch · {detach} quits")
+                    }
+                    None => "Esc cancels · select another session to switch".to_owned(),
+                },
             ],
         ),
     };
     frame.render_widget(
-        Paragraph::new(lines.map(Line::raw).to_vec())
+        Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>())
             .style(theme::muted())
             .wrap(Wrap { trim: true })
             .block(theme::panel(prompt_focused).title(title)),
@@ -1086,7 +1102,13 @@ fn render_transition_surface(
             .is_some_and(|operation| operation.cancellable)
             .then(|| {
                 Line::styled(
-                    format!(" Alt-X to cancel {} ", transition.label().to_lowercase()),
+                    format!(
+                        " {} to cancel {} ",
+                        dashboard
+                            .first_key_label(crate::CommandId::CancelOperation)
+                            .unwrap_or_else(|| "the cancel key".to_owned()),
+                        transition.label().to_lowercase()
+                    ),
                     theme::muted(),
                 )
                 .left_aligned()
@@ -1095,7 +1117,13 @@ fn render_transition_surface(
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
-        format!("Alt-X to cancel {}", transition.label().to_lowercase())
+        format!(
+            "{} to cancel {}",
+            dashboard
+                .first_key_label(crate::CommandId::CancelOperation)
+                .unwrap_or_else(|| "The cancel key".to_owned()),
+            transition.label().to_lowercase()
+        )
     } else if failed {
         format!(
             "Operation failed: {}",
@@ -1199,7 +1227,7 @@ mod tests {
         // ...and the cancel chord sits on the pane's bottom border row.
         let border = &lines[prompt.bottom() as usize - 1];
         assert!(
-            border.contains("Alt-X to cancel starting"),
+            border.contains("ctrl+b shift+c to cancel starting"),
             "cancel chord missing from {border:?}"
         );
         assert!(
@@ -1298,7 +1326,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Alt-X to cancel stopping")),
+                .any(|line| line.contains("ctrl+b shift+c to cancel stopping")),
             "cancel chord missing: {lines:?}"
         );
     }

@@ -226,7 +226,7 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
                         key.as_str() != "version"
                             && !matches!(
                                 key.as_str(),
-                                "advanced" | "sessions_side" | "spinner" | "theme"
+                                "advanced" | "sessions_side" | "spinner" | "theme" | "keys"
                             )
                             && key.as_str() != "show_stopped_sessions"
                     })

@@ -253,7 +253,7 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{alt_key, buffer_lines, dashboard_with_session, running_session};
+    use crate::test_support::{buffer_lines, chord, dashboard_with_session, running_session};
     use crate::{CommandId, Mode};
 
     fn mode() -> GoMode {
@@ -286,10 +286,8 @@ mod tests {
             }
         );
         let before = dashboard.state.clone();
-        let command = crate::global_chord(&alt_key('n')).unwrap();
-        assert!(dashboard.global_chord_allowed(command));
         assert_eq!(
-            dashboard.dispatch_command(command),
+            chord(&mut dashboard, CommandId::NewSessionWizard),
             DashboardAction::GoLaunch { recipe: expected }
         );
         assert_eq!(dashboard.state, before);
@@ -330,8 +328,8 @@ mod tests {
     fn workspace_management_remains_available_from_go() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_go(mode(), false);
-        assert!(dashboard.global_chord_allowed(CommandId::Workspaces));
-        dashboard.dispatch_command(CommandId::Workspaces);
+        assert!(dashboard.command_allowed_now(CommandId::Workspaces));
+        chord(&mut dashboard, CommandId::Workspaces);
         assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
     }
 
@@ -434,7 +432,7 @@ mod tests {
         assert!(rendered.contains("Working: /actual/checkout"));
         assert!(rendered.contains("branch: feature-x"));
         assert!(rendered.contains(" Menu "));
-        for visible in ["Workspaces", "Targets", "Quota", "Alt-G"] {
+        for visible in ["Workspaces", "Targets", "Quota", "b panes"] {
             assert!(
                 rendered.contains(visible),
                 "missing dashboard detail: {visible}"

@@ -274,9 +274,13 @@ fn render_onboarding(frame: &mut Frame, area: Rect, dashboard: &DashboardState) 
             )),
             Line::raw(""),
             Line::raw(format!("Settings can create {missing} from this machine.")),
-            Line::raw(
-                "Press F7 for Settings to add accounts or connections. Local runtimes are checked automatically.",
-            ),
+            Line::raw(match dashboard.first_key_label(crate::CommandId::OpenConfig) {
+                Some(key) => format!(
+                    "Press {key} for Settings to add accounts or connections. Local runtimes are checked automatically."
+                ),
+                None => "Open Settings to add accounts or connections. Local runtimes are checked automatically."
+                    .to_owned(),
+            }),
         ])
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true })

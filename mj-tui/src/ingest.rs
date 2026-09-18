@@ -519,6 +519,9 @@ impl DashboardState {
             .retain(|id, _| config.enabled_profile(id).is_some());
         self.quota_refreshing
             .retain(|id| config.enabled_profile(id).is_some());
+        // A `[keys]` edit takes effect with the reload that carried it, so the
+        // bindings are rebuilt before the configuration they came from lands.
+        self.keybinds = config.keybinds();
         self.config = config;
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.

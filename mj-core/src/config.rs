@@ -8,16 +8,19 @@
 //! caller already uses stays the same:
 //!
 //! * `harness` -- [`HarnessKind`], [`HarnessProfile`] and execution policy.
+//! * `keys` -- the `[keys]` section: the prefix key and every bindable action.
 //! * `targets` -- projects, containers and [`TargetTemplate`].
 //! * `ui` -- terminal appearance settings.
 //! * `loading` -- instance names, directories, and atomic file writes.
 
 mod harness;
+mod keys;
 mod loading;
 mod targets;
 mod ui;
 
 pub use harness::*;
+pub use keys::*;
 pub use loading::*;
 pub use targets::*;
 pub use ui::*;
@@ -317,7 +320,7 @@ impl BuildCacheConfig {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 10;
+pub const CONFIG_VERSION: u32 = 11;
 pub const PRODUCT_DIR: &str = "mjolnir";
 pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
 
@@ -356,6 +359,8 @@ pub struct Config {
     pub subagents: SubagentConfig,
     #[serde(default, skip_serializing_if = "BuildCacheConfig::is_default")]
     pub build_cache: BuildCacheConfig,
+    #[serde(default, skip_serializing_if = "KeysConfig::is_default")]
+    pub keys: KeysConfig,
     #[serde(
         default,
         rename = "startup",
@@ -385,6 +390,7 @@ impl Default for Config {
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             build_cache: BuildCacheConfig::default(),
+            keys: KeysConfig::default(),
             legacy_startup: (),
             profiles: BTreeMap::new(),
             bundles: BTreeMap::new(),
@@ -477,7 +483,16 @@ impl Config {
         for (id, target) in &self.targets {
             target.validate(id)?;
         }
+        self.keys.resolve()?;
         Ok(())
+    }
+
+    /// The key bindings in force.
+    ///
+    /// A `Config` in hand has already passed `validate`, so the fallback to
+    /// the defaults here can only be reached by an unvalidated value.
+    pub fn keybinds(&self) -> Keybinds {
+        self.keys.resolve().unwrap_or_default()
     }
 
     pub fn load() -> Result<Self> {
@@ -551,9 +566,10 @@ impl Config {
         // optional advanced settings; version 7 restores stopped-session
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
-        // SessionWiki section. Earlier configs acquire defaults in memory and
-        // upgrade on the next ordinary save.
-        if matches!(config.version, 1..=9) {
+        // SessionWiki section; version 11 adds the key bindings. Earlier
+        // configs acquire defaults in memory and upgrade on the next
+        // ordinary save.
+        if matches!(config.version, 1..=10) {
             config.version = CONFIG_VERSION;
         }
         config.validate()?;

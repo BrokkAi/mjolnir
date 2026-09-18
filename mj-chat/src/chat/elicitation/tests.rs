@@ -170,8 +170,8 @@ fn smallest_question_pane_keeps_other_and_its_draft_visible() {
     );
     assert!(text.contains("Submit"), "submit is hidden: {text}");
     assert!(
-        text.contains("F6/Shift-F6"),
-        "pane shortcut is hidden: {text}"
+        text.contains("Tab fields/buttons"),
+        "the footer hints are hidden: {text}"
     );
 }
 
@@ -196,8 +196,8 @@ fn six_row_plan_pane_keeps_text_and_page_down_actionable() {
         "submit is hidden: {before_text}"
     );
     assert!(
-        before_text.contains("F6/Shift-F6"),
-        "pane shortcut is hidden: {before_text}"
+        before_text.contains("PgUp/PgDn"),
+        "the footer hints are hidden: {before_text}"
     );
 
     dialog.handle_key(KeyCode::PageDown, KeyModifiers::NONE);

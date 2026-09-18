@@ -1164,13 +1164,13 @@ fn resume_table_has_headers_repeated_profiles_and_last_active_values() {
     assert!(rendered.contains("Search:"), "{rendered}");
 }
 
-/// The dialog is the only surface for non-live sessions, and `Alt-S`
+/// The dialog is the only surface for non-live sessions, and the resume chord
 /// opens it from anywhere.
 #[test]
 fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
     let mut dashboard = dashboard_with_session(running_session());
     assert_eq!(
-        dashboard.handle_key(alt_key('s')),
+        chord(&mut dashboard, crate::CommandId::ResumeDialog),
         DashboardAction::OpenResumeDialog
     );
     assert_eq!(dashboard.handle_key(ctrl_key('t')), DashboardAction::None);
@@ -1181,7 +1181,7 @@ fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .expect("draw the dashboard");
     let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("Alt-S resume"), "{rendered}");
+    assert!(rendered.contains("g resume"), "{rendered}");
     assert!(!rendered.contains("Import"), "{rendered}");
 }
 

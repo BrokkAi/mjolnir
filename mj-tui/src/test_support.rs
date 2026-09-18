@@ -18,8 +18,11 @@ use mj_core::state::{
 
 use mj_core::targets::{DeploymentCapacityKind, DeploymentCapacityTarget, ProvisionStage};
 
+use mj_core::config::Trigger;
+
 use crate::ingest::SessionOperationDisplay;
-use crate::{DashboardState, SessionOperationKind};
+use crate::keybinds::{KeyRoute, combo_key_event};
+use crate::{CommandId, DashboardAction, DashboardState, SessionOperationKind};
 
 pub(crate) fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -93,10 +96,77 @@ pub(crate) fn ctrl_key(character: char) -> KeyEvent {
     )
 }
 
-/// An Alt chord. Alt is the same modifier everywhere, so this must not go
-/// through [`ctrl_key`], which reports SUPER on macOS.
+/// An Alt chord, for the composer's readline keys. Alt is the same modifier
+/// everywhere, so this must not go through [`ctrl_key`], which reports SUPER
+/// on macOS.
 pub(crate) fn alt_key(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::ALT)
+}
+
+/// The default prefix key exactly as a terminal delivers it.
+///
+/// Deliberately literal rather than [`ctrl_key`]: that helper reports SUPER on
+/// macOS, and the prefix is matched as Control on every platform.
+pub(crate) fn prefix_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)
+}
+
+/// Presses a sequence of keys through the prefix router and dispatches what it
+/// decides exactly as the mj-cli event loop does, so a test drives the same
+/// path the live terminal does.
+pub(crate) fn route(dashboard: &mut DashboardState, keys: &[KeyEvent]) -> DashboardAction {
+    let mut action = DashboardAction::None;
+    for key in keys {
+        match dashboard.route_bound_key(key) {
+            KeyRoute::Command { id, index } => {
+                if !dashboard.command_allowed_now(id) {
+                    continue;
+                }
+                action = if id == CommandId::SwitchWorkspace {
+                    index
+                        .map(|index| dashboard.select_workspace_index(index))
+                        .unwrap_or(DashboardAction::None)
+                } else {
+                    dashboard.dispatch_command(id)
+                };
+            }
+            KeyRoute::Consumed => {}
+            KeyRoute::Forward => action = dashboard.handle_key(*key),
+        }
+    }
+    action
+}
+
+/// The key presses that run a command through its first live binding.
+pub(crate) fn chord_keys(dashboard: &DashboardState, id: CommandId) -> Vec<KeyEvent> {
+    let action = crate::actions::spec(id)
+        .action
+        .unwrap_or_else(|| panic!("{id:?} has no bindable action"));
+    let binding = *dashboard
+        .keybinds()
+        .bindings(action)
+        .first()
+        .unwrap_or_else(|| panic!("{id:?} is not bound to any key"));
+    let key = combo_key_event(binding.combo);
+    match binding.trigger {
+        Trigger::Prefix => vec![combo_key_event(dashboard.keybinds().prefix), key],
+        Trigger::Direct => vec![key],
+    }
+}
+
+/// Runs a command the way a person does: its first live binding, through the
+/// router, dispatched as mj-cli would.
+pub(crate) fn chord(dashboard: &mut DashboardState, id: CommandId) -> DashboardAction {
+    let keys = chord_keys(dashboard, id);
+    route(dashboard, &keys)
+}
+
+pub(crate) fn open_new_session_wizard(dashboard: &mut DashboardState) -> DashboardAction {
+    chord(dashboard, CommandId::NewSessionWizard)
+}
+
+pub(crate) fn open_palette(dashboard: &mut DashboardState) -> DashboardAction {
+    chord(dashboard, CommandId::Palette)
 }
 
 pub(crate) fn mouse_in(kind: MouseEventKind, area: Rect) -> MouseEvent {
@@ -122,6 +192,7 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 
 pub(crate) fn config() -> Config {
     Config {
+        keys: Default::default(),
         build_cache: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,

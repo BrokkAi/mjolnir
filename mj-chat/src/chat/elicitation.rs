@@ -1235,23 +1235,23 @@ fn render_elicitation_body(
             .saturating_add(chunks[0].height)
             .min(total_lines);
         Some(format!(
-            "F6/Shift-F6 panes · Plan {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Tab fields/buttons · ↑/↓ choose · Enter continue"
+            "Plan {start}–{end}/{total_lines} · PgUp/PgDn or wheel scroll · Tab fields/buttons · ↑/↓ choose · Enter continue"
         ))
     } else {
         None
     };
     let footer = if let Some(error) = dialog.error.as_deref() {
-        format!("F6/Shift-F6 panes · {error}")
+        error.to_owned()
     } else if let Some(scroll_help) = scroll_help {
         scroll_help
     } else {
-        "F6/Shift-F6 panes · Tab fields/buttons · ↑/↓ choose · Space toggle · Enter continue · Esc cancel".to_owned()
+        "Tab fields/buttons · ↑/↓ choose · Space toggle · Enter continue · Esc cancel".to_owned()
     };
     frame.render_widget(
         Paragraph::new(if focused {
             footer.as_str()
         } else {
-            "Click to answer · F6 to change pane"
+            "Click to answer"
         })
         .style(Style::default().fg(if dialog.error.is_some() && focused {
             theme::palette().error

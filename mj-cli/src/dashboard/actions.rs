@@ -32,6 +32,32 @@ use crate::import::{DashboardImportSafety, PendingDashboardImport};
 use crate::pollers::{LifecycleSuccess, spawn_aws_resource_options_resolution};
 use crate::short_id;
 
+/// The chat-scoped toggles the host's keys can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatToggle {
+    TranscriptRendering,
+    Dictation,
+}
+
+/// Applies a toggle to the conversation on screen, or says there is none.
+///
+/// The keys that run these live in the dashboard's command registry, so they
+/// answer from every surface, including a pane that has never opened a chat.
+pub(crate) fn apply_chat_toggle(
+    dashboard: &mut mj_tui::DashboardState,
+    chat: Option<&mut mj_chat::chat::ActiveChat>,
+    toggle: ChatToggle,
+) {
+    let Some(chat) = chat else {
+        dashboard.set_notice("No conversation is open.");
+        return;
+    };
+    match toggle {
+        ChatToggle::TranscriptRendering => chat.toggle_transcript_rendering(),
+        ChatToggle::Dictation => chat.toggle_dictation(),
+    }
+}
+
 /// Carries out one dashboard action.
 pub(crate) async fn apply_dashboard_action(
     context: &mut DashboardContext,
@@ -40,6 +66,14 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        DashboardAction::ToggleTranscriptRendering => {
+            let (dashboard, chat) = context.dashboard_and_visible_chat();
+            apply_chat_toggle(dashboard, chat, ChatToggle::TranscriptRendering);
+        }
+        DashboardAction::ToggleDictation => {
+            let (dashboard, chat) = context.dashboard_and_visible_chat();
+            apply_chat_toggle(dashboard, chat, ChatToggle::Dictation);
+        }
         DashboardAction::GoPrepareProject { target_id: _ } => {
             if let Some(go) = context.dashboard.go_mode() {
                 spawn_create_bundle(
