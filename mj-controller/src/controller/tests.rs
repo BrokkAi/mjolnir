@@ -57,40 +57,217 @@ fn registration_config() -> Config {
     config
 }
 
-#[test]
-fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
-    struct CompletionExecutor;
-    impl CommandExecutor for CompletionExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
-            let script = command.args.last().unwrap();
-            let stdout = if script.contains("$HOME") {
-                b"/remote".to_vec()
-            } else {
-                assert!(script.contains("'/remote/cache/'"), "{script}");
-                b"/remote/cache/alpha/\n/remote/cache/alpine/\n".to_vec()
-            };
-            Ok(targets::CommandOutput {
-                status: 0,
-                stdout,
-                stderr: Vec::new(),
-            })
-        }
-    }
-    let target: TargetTemplate =
-        serde_json::from_str(r#"{"kind":"ssh-podman","host":"builder","image":"test"}"#).unwrap();
+/// A controller whose only configuration is one target template.
+fn completion_controller(target_id: &str, target: &str) -> Controller {
+    let target: TargetTemplate = serde_json::from_str(target).unwrap();
     let mut config = Config::default();
-    config.targets.insert("remote".into(), target);
-    let controller = Controller {
+    config.targets.insert(target_id.into(), target);
+    Controller {
         config,
         state: State::default(),
-    };
-    let candidates = controller
-        .complete_mount_source("remote", "~/cache/", &CompletionExecutor)
+    }
+}
+
+/// Answers a remote home probe and one completion listing, and records every
+/// remote command it was asked to run.
+struct CompletionExecutor {
+    home: &'static str,
+    listing: &'static str,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl CompletionExecutor {
+    fn new(home: &'static str, listing: &'static str) -> Self {
+        Self {
+            home,
+            listing,
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn scripts(&self) -> Vec<String> {
+        self.seen.borrow().clone()
+    }
+}
+
+impl CommandExecutor for CompletionExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        assert_eq!(command.program, "ssh");
+        let script = command.args.last().unwrap().clone();
+        self.seen.borrow_mut().push(script.clone());
+        let stdout = if script.contains("$HOME") {
+            self.home.as_bytes().to_vec()
+        } else {
+            self.listing.as_bytes().to_vec()
+        };
+        Ok(targets::CommandOutput {
+            status: 0,
+            stdout,
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// A host that must never be asked to run anything.
+struct UnusedExecutor;
+
+impl CommandExecutor for UnusedExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        panic!("a local completion ran {}", command.program);
+    }
+}
+
+#[test]
+fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
+    let controller = completion_controller(
+        "remote",
+        r#"{"kind":"ssh-podman","host":"builder-shorthand","image":"test"}"#,
+    );
+    let executor =
+        CompletionExecutor::new("/remote", "/remote/cache/alpha/\n/remote/cache/alpine/\n");
+
+    let completion = controller
+        .complete_path(
+            &CompletionHost::Target("remote".into()),
+            "~/cache/",
+            CompletionKind::Directories,
+            &executor,
+        )
         .unwrap();
-    assert_eq!(candidates, ["~/cache/alpha/", "~/cache/alpine/"]);
+
+    assert_eq!(completion.candidates, ["~/cache/alpha/", "~/cache/alpine/"]);
+    assert_eq!(completion.insert.as_deref(), Some("~/cache/alp"));
+    assert!(!completion.truncated);
+    assert!(
+        executor.scripts()[1].contains("'/remote/cache/'"),
+        "{:?}",
+        executor.scripts()
+    );
+}
+
+#[test]
+fn bare_ssh_target_completes_over_ssh() {
+    let controller = completion_controller(
+        "remote",
+        r#"{"kind":"ssh-bare","host":"builder-bare","permissions":"guardian"}"#,
+    );
+    let executor = CompletionExecutor::new("/remote", "/srv/projects/\n");
+
+    let completion = controller
+        .complete_path(
+            &CompletionHost::Target("remote".into()),
+            "/srv/pr",
+            CompletionKind::Directories,
+            &executor,
+        )
+        .unwrap();
+
+    assert_eq!(completion.candidates, ["/srv/projects/"]);
+    let scripts = executor.scripts();
+    assert_eq!(scripts.len(), 1, "an absolute path needs no home probe");
+    assert!(scripts[0].contains("ls -d --"), "{scripts:?}");
+}
+
+#[test]
+fn local_bare_and_ec2_targets_complete_on_the_controller() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("projects")).unwrap();
+    let prefix = format!("{}/pro", directory.path().display());
+    let expected = vec![format!("{}/projects/", directory.path().display())];
+
+    for target in [
+        r#"{"kind":"local-bare"}"#,
+        r#"{"kind":"aws-ec2","region":"us-east-1","launch_template":"lt-1","ssh_user":"ubuntu"}"#,
+    ] {
+        let controller = completion_controller("host", target);
+        let completion = controller
+            .complete_path(
+                &CompletionHost::Target("host".into()),
+                &prefix,
+                CompletionKind::Directories,
+                &UnusedExecutor,
+            )
+            .unwrap();
+        assert_eq!(completion.candidates, expected, "{target}");
+    }
+}
+
+#[test]
+fn machine_host_completes_files_for_any_kind() {
+    let machine: mj_core::config::Machine =
+        serde_json::from_str(r#"{"kind":"ssh","host":"builder-machine"}"#).unwrap();
+    let controller = Controller {
+        config: Config::default(),
+        state: State::default(),
+    };
+    let executor = CompletionExecutor::new("/remote", "/srv/keys/\n/srv/key.pub\n");
+
+    let completion = controller
+        .complete_path(
+            &CompletionHost::Machine(Box::new(machine)),
+            "/srv/key",
+            CompletionKind::Any,
+            &executor,
+        )
+        .unwrap();
+
+    assert_eq!(completion.candidates, ["/srv/key.pub", "/srv/keys/"]);
+    assert!(
+        executor.scripts()[0].contains("ls -dp --"),
+        "{:?}",
+        executor.scripts()
+    );
+}
+
+#[test]
+fn remote_home_is_probed_once_per_host() {
+    let controller = completion_controller(
+        "remote",
+        r#"{"kind":"ssh-bare","host":"builder-home-once","permissions":"guardian"}"#,
+    );
+    let executor = CompletionExecutor::new("/remote", "/remote/cache/alpha/\n");
+
+    for _ in 0..2 {
+        controller
+            .complete_path(
+                &CompletionHost::Target("remote".into()),
+                "~/cache/",
+                CompletionKind::Directories,
+                &executor,
+            )
+            .unwrap();
+    }
+
+    let probes = executor
+        .scripts()
+        .iter()
+        .filter(|script| script.contains("$HOME"))
+        .count();
+    assert_eq!(probes, 1, "{:?}", executor.scripts());
+}
+
+#[test]
+fn more_than_fifty_matches_are_truncated() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..60 {
+        std::fs::create_dir(directory.path().join(format!("project-{index:03}"))).unwrap();
+    }
+    let controller = completion_controller("host", r#"{"kind":"local-bare"}"#);
+
+    let completion = controller
+        .complete_path(
+            &CompletionHost::Target("host".into()),
+            &format!("{}/pro", directory.path().display()),
+            CompletionKind::Directories,
+            &UnusedExecutor,
+        )
+        .unwrap();
+
+    assert_eq!(completion.candidates.len(), 50);
+    assert!(completion.truncated);
     assert_eq!(
-        targets::path_completion("~/cache/", &candidates).as_deref(),
-        Some("~/cache/alp")
+        completion.insert.as_deref(),
+        Some(format!("{}/project-0", directory.path().display()).as_str())
     );
 }
 
@@ -113,13 +290,17 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
             })
         }
     }
-    let target: TargetTemplate =
-        serde_json::from_str(r#"{"kind":"ssh-bare","host":"builder","permissions":"guardian"}"#)
-            .unwrap();
+    // A resolved home is cached per host, so each case names its own host.
+    fn target(host: &str) -> TargetTemplate {
+        serde_json::from_str(&format!(
+            r#"{{"kind":"ssh-bare","host":"{host}","permissions":"guardian"}}"#
+        ))
+        .unwrap()
+    }
     let path = Path::new("~/資料/$(touch nope)");
     assert_eq!(
         resolve_target_input_path(
-            &target,
+            &target("builder-home-ok"),
             path,
             &HomeExecutor {
                 status: 0,
@@ -131,7 +312,7 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
     );
     assert!(
         resolve_target_input_path(
-            &target,
+            &target("builder-home-failed"),
             path,
             &HomeExecutor {
                 status: 1,
@@ -144,7 +325,7 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
     );
     assert!(
         resolve_target_input_path(
-            &target,
+            &target("builder-home-empty"),
             path,
             &HomeExecutor {
                 status: 0,
@@ -155,7 +336,7 @@ fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
     );
     assert!(
         resolve_target_input_path(
-            &target,
+            &target("builder-home-relative"),
             path,
             &HomeExecutor {
                 status: 0,

@@ -384,7 +384,20 @@ impl TextField {
         form: &mut Form<K>,
         id: K,
     ) {
-        Self::render_editor(frame, area, input, false, false, true, form, id);
+        Self::render_with_kind(frame, area, input, ControlKind::TextField, form, id);
+    }
+
+    /// Draws the same field but registers it as another kind of control, so a
+    /// path field can carry its completion state without a second editor.
+    pub(crate) fn render_with_kind<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        input: &TextInput,
+        kind: ControlKind,
+        form: &mut Form<K>,
+        id: K,
+    ) {
+        Self::render_editor(frame, area, input, false, false, true, kind, form, id);
     }
 
     /// Draws a vertically scrolling field and registers its two-dimensional
@@ -470,7 +483,17 @@ impl TextField {
         form: &mut Form<K>,
         id: K,
     ) {
-        Self::render_editor(frame, area, input, secret, true, focused, form, id);
+        Self::render_editor(
+            frame,
+            area,
+            input,
+            secret,
+            true,
+            focused,
+            ControlKind::TextField,
+            form,
+            id,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -481,6 +504,7 @@ impl TextField {
         secret: bool,
         inline: bool,
         focused: bool,
+        kind: ControlKind,
         form: &mut Form<K>,
         id: K,
     ) {
@@ -528,7 +552,7 @@ impl TextField {
         if inline {
             form.register_inline_editor(id, area, cursor_map);
         } else {
-            form.register_with_cursor_map(id, ControlKind::TextField, area, true, cursor_map);
+            form.register_with_cursor_map(id, kind, area, true, cursor_map);
         }
         let style = if focused && form.is_focused(id) {
             normal_style().add_modifier(Modifier::UNDERLINED)

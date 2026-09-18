@@ -8,7 +8,25 @@
 //! A host is a machine, not a runtime: local Podman and local Docker are the
 //! same computer, so they share one identity here and one inspection of it.
 
-use crate::targets::{self, CommandSpec, SshTarget};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, ensure};
+
+use crate::targets::{self, CommandExecutor, CommandSpec, SshTarget};
+
+/// How long a resolved login home is reused. A home does not move while a
+/// screen is open, and a burst of completions must not probe it per keystroke.
+const HOME_LIFETIME: Duration = Duration::from_secs(600);
+
+/// Successfully resolved login homes, keyed by `CacheHost::key`.
+static HOMES: LazyLock<Mutex<BTreeMap<String, (Instant, PathBuf)>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// `$0` for the shell that prints a remote home.
+const HOME_LABEL: &str = "hel-home";
 
 #[derive(Debug, Clone)]
 pub(super) enum CacheHost {
@@ -40,6 +58,81 @@ impl CacheHost {
             mj_core::config::Machine::Ssh { ssh, .. } => Some(Self::Ssh(SshTarget::from(ssh))),
             mj_core::config::Machine::AwsEc2 { .. } => None,
         }
+    }
+
+    /// The host that owns a path a target's runtime reads. Unlike
+    /// `for_target`, every target kind has one: a bare target's paths live on
+    /// its machine, and an EC2 template's editable paths are this machine's,
+    /// because no instance exists before a session starts.
+    pub(super) fn for_path_target(target: &mj_core::config::TargetTemplate) -> Result<Self> {
+        match target {
+            mj_core::config::TargetTemplate::LocalBare
+            | mj_core::config::TargetTemplate::LocalPodman { .. }
+            | mj_core::config::TargetTemplate::LocalDocker { .. }
+            | mj_core::config::TargetTemplate::AppleContainer { .. }
+            | mj_core::config::TargetTemplate::AwsEc2 { .. } => Ok(Self::Local),
+            mj_core::config::TargetTemplate::SshBare { ssh, .. }
+            | mj_core::config::TargetTemplate::SshPodman { ssh, .. }
+            | mj_core::config::TargetTemplate::SshDocker { ssh, .. } => Self::for_ssh_input(ssh),
+        }
+    }
+
+    /// The host that owns a path on a configured machine. An EC2 machine has
+    /// no standing instance, so its editable paths are this machine's.
+    pub(super) fn for_path_machine(machine: &mj_core::config::Machine) -> Result<Self> {
+        match machine {
+            mj_core::config::Machine::Local { .. } | mj_core::config::Machine::AwsEc2 { .. } => {
+                Ok(Self::Local)
+            }
+            mj_core::config::Machine::Ssh { ssh, .. } => Self::for_ssh_input(ssh),
+        }
+    }
+
+    /// An SSH host reached with the identity file as this machine reads it:
+    /// `~` in a configured key path is the controller user's home.
+    fn for_ssh_input(ssh: &mj_core::config::SshConnection) -> Result<Self> {
+        let mut ssh = ssh.clone();
+        ssh.identity_file = ssh
+            .identity_file
+            .as_deref()
+            .map(mj_core::path_input::expand_local)
+            .transpose()?;
+        Ok(Self::Ssh(SshTarget::from(&ssh)))
+    }
+
+    /// The login home on this host, cached for ten minutes per host. Only a
+    /// successful answer is cached; a host that was unreachable is retried.
+    pub(super) fn home(&self, executor: &impl CommandExecutor) -> Result<PathBuf> {
+        let Self::Ssh(_) = self else {
+            return dirs::home_dir().context("Cannot expand ~: the home directory is unavailable.");
+        };
+        let key = self.key();
+        if let Some((recorded, home)) = HOMES.lock().expect("resolved homes").get(&key)
+            && recorded.elapsed() < HOME_LIFETIME
+        {
+            return Ok(home.clone());
+        }
+        let command = self.shell_command(
+            r#"printf '%s' "$HOME""#,
+            HOME_LABEL,
+            [],
+            "resolve remote home directory",
+        );
+        let output = executor.execute(&command)?;
+        ensure!(
+            output.status == 0,
+            "Could not resolve remote home: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let home = String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
+        ensure!(!home.is_empty(), "Remote home is empty");
+        let home = PathBuf::from(home);
+        ensure!(home.is_absolute(), "Remote home is not absolute");
+        HOMES
+            .lock()
+            .expect("resolved homes")
+            .insert(key, (Instant::now(), home.clone()));
+        Ok(home)
     }
 
     /// The SSH connection to this host, or `None` when it is this machine.

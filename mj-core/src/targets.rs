@@ -427,68 +427,10 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
     unreachable!("a finite mount list always has an unused numbered destination")
 }
 
-/// Complete an on-disk directory path without spawning a shell.
-pub fn local_directory_completions(prefix: &str) -> Vec<String> {
-    let (directory, fragment) = match prefix.rsplit_once('/') {
-        Some((directory, fragment)) => (format!("{directory}/"), fragment),
-        None => (String::new(), prefix),
-    };
-    let lookup = if directory.is_empty() {
-        "."
-    } else {
-        &directory
-    };
-    let entries = match fs::read_dir(lookup) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::debug!(path = lookup, %error, "path completion directory could not be read");
-            return Vec::new();
-        }
-    };
-    let mut matches = entries
-        .filter_map(|entry| {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    tracing::debug!(path = lookup, %error, "path completion directory entry could not be read");
-                    return None;
-                }
-            };
-            let name = entry.file_name();
-            let name = match name.to_str() {
-                Some(name) => name,
-                None => {
-                    tracing::debug!(path = %entry.path().display(), "path completion skipped a non-UTF-8 directory entry");
-                    return None;
-                }
-            };
-            (name.starts_with(fragment) && entry.path().is_dir())
-                .then(|| format!("{directory}{name}/"))
-        })
-        .collect::<Vec<_>>();
-    matches.sort();
-    matches.dedup();
-    matches
-}
-
-/// Return the single match or the extra shared path prefix that Tab can add.
+// TODO(milestone 3): remove once `mj-tui` calls `path_completion::common_insert`.
+/// Deprecated alias for `crate::path_completion::common_insert`.
 pub fn path_completion(prefix: &str, candidates: &[String]) -> Option<String> {
-    let first = candidates.first()?;
-    if candidates.len() == 1 {
-        return Some(first.clone());
-    }
-    let common = candidates
-        .iter()
-        .skip(1)
-        .fold(first.clone(), |common, next| {
-            common
-                .chars()
-                .zip(next.chars())
-                .take_while(|(left, right)| left == right)
-                .map(|(character, _)| character)
-                .collect()
-        });
-    (common.len() > prefix.len() && common.starts_with(prefix)).then_some(common)
+    crate::path_completion::common_insert(prefix, candidates)
 }
 
 pub trait CommandExecutor {

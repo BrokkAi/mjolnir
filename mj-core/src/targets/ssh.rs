@@ -281,51 +281,6 @@ pub fn join_remote_command(args: &[String]) -> String {
         .join(" ")
 }
 
-/// Complete remote directory paths through the configured SSH target.
-///
-/// The SSH connection timeout and noninteractive mode keep a Tab press from
-/// blocking the wizard when a host is unavailable. The quoted prefix remains
-/// literal while the trailing glob is expanded only by the remote shell.
-pub fn ssh_directory_completions(
-    ssh: &SshTarget,
-    prefix: &str,
-    executor: &impl CommandExecutor,
-) -> Result<Vec<String>> {
-    if prefix.is_empty() {
-        return Ok(Vec::new());
-    }
-    let remote_command = format!("ls -d -- {}*/ 2>/dev/null", posix_quote(prefix));
-    let mut args = ssh.ssh_args.clone();
-    args.extend([
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "ConnectTimeout=3".into(),
-        "-o".into(),
-        "ServerAliveInterval=2".into(),
-        "-o".into(),
-        "ServerAliveCountMax=1".into(),
-    ]);
-    push_connection_reuse_args(&mut args);
-    args.extend([ssh.destination.clone(), remote_command]);
-    let output = executor.execute(
-        &CommandSpec::new("ssh", args)
-            .ssh_destination(ssh.destination.clone())
-            .purpose("complete remote mount directory"),
-    )?;
-    if output.status != 0 {
-        return Ok(Vec::new());
-    }
-    let mut matches = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|path| path.starts_with(prefix) && path.ends_with('/'))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    matches.sort();
-    matches.dedup();
-    Ok(matches)
-}
-
 /// Check whether a directory exists on the configured SSH host.
 pub fn ssh_directory_exists(
     ssh: &SshTarget,
@@ -1042,7 +997,13 @@ mod tests {
         };
         let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test").args;
         let executor = RecordingExecutor::default();
-        ssh_directory_completions(&ssh, "/srv/pr", &executor).expect("completion runs");
+        crate::path_completion::ssh_completions(
+            &ssh,
+            "/srv/pr",
+            crate::path_completion::CompletionKind::Directories,
+            &executor,
+        )
+        .expect("completion runs");
         let completion = executor.seen.borrow()[0].args.clone();
         set_ssh_connection_sharing_for_test(None);
 

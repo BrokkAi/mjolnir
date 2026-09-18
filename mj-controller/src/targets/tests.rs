@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::path_completion::{CompletionKind, common_insert, local_completions, ssh_completions};
 use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -2607,7 +2608,7 @@ fn local_path_completion_returns_directory_components_and_tab_prefix() {
     std::fs::write(directory.path().join("data.txt"), "not a directory").unwrap();
     let prefix = format!("{}/da", directory.path().display());
 
-    let matches = local_directory_completions(&prefix);
+    let matches = local_completions(&prefix, CompletionKind::Directories);
 
     assert_eq!(
         matches,
@@ -2616,15 +2617,7 @@ fn local_path_completion_returns_directory_components_and_tab_prefix() {
             format!("{}/data/", directory.path().display()),
         ]
     );
-    assert_eq!(path_completion(&prefix, &matches), None);
-    assert_eq!(
-        path_completion("/srv/da", &["/srv/data/".into(), "/srv/database/".into()],),
-        Some("/srv/data".into())
-    );
-    assert_eq!(
-        path_completion("/srv/da", &["/srv/data/".into()]),
-        Some("/srv/data/".into())
-    );
+    assert_eq!(common_insert(&prefix, &matches), None);
 }
 
 #[test]
@@ -2703,7 +2696,8 @@ fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
         stderr: vec![],
     }]);
 
-    let matches = ssh_directory_completions(&ssh(), "/srv/pr", &executor).unwrap();
+    let matches =
+        ssh_completions(&ssh(), "/srv/pr", CompletionKind::Directories, &executor).unwrap();
 
     assert_eq!(matches, vec!["/srv/projects/", "/srv/prompts/"]);
     let command = &executor.seen.borrow()[0];
@@ -2715,6 +2709,28 @@ fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
             .last()
             .unwrap()
             .contains("ls -d -- '/srv/pr'*/")
+    );
+}
+
+#[test]
+fn ssh_any_kind_lists_files_and_marks_directories() {
+    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 0,
+        stdout: "/srv/projects/\n/srv/prompts.txt\n/srv/pr\u{FFFD}x/\n/srv/projects/nested/\n"
+            .as_bytes()
+            .to_vec(),
+        stderr: vec![],
+    }]);
+
+    let matches = ssh_completions(&ssh(), "/srv/pr", CompletionKind::Any, &executor).unwrap();
+
+    assert_eq!(matches, vec!["/srv/projects/", "/srv/prompts.txt"]);
+    assert!(
+        executor.seen.borrow()[0]
+            .args
+            .last()
+            .unwrap()
+            .contains("ls -dp -- '/srv/pr'* 2>/dev/null")
     );
 }
 

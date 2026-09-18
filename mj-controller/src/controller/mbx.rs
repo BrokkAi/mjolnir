@@ -200,7 +200,7 @@ fn inspect_host(
         Some(directory) => directory.clone(),
         None => match &native {
             Some(native) => native_cache_directory(host, native, executor)?,
-            None => home(host, executor)?.join(DEFAULT_CACHE_RELATIVE),
+            None => host.home(executor)?.join(DEFAULT_CACHE_RELATIVE),
         },
     };
     ensure!(
@@ -357,19 +357,6 @@ fn native_cache_directory(
         .with_context(|| format!("mbx store path {store:?} has no parent"))
 }
 
-fn home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
-    let command = host.shell_command(
-        r#"printf '%s' "$HOME""#,
-        LABEL,
-        [],
-        "locate the container host home directory",
-    );
-    let output = checked(executor.execute(&command)?, &command)?;
-    let home = PathBuf::from(String::from_utf8(output.stdout).context("decode host HOME")?);
-    ensure!(home.is_absolute(), "container host HOME is not absolute");
-    Ok(home)
-}
-
 const READ_CONFIG_SCRIPT: &str = r#"[ -f "$1" ] || exit 3
 cat -- "$1""#;
 
@@ -377,7 +364,7 @@ cat -- "$1""#;
 /// so their mbx uses the host's own limits. mbx has no command that prints its
 /// effective configuration, so the file itself is the only accurate source.
 fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result<Option<String>> {
-    let path = home(host, executor)?.join(HOST_CONFIG_RELATIVE);
+    let path = host.home(executor)?.join(HOST_CONFIG_RELATIVE);
     let command = host.shell_command(
         READ_CONFIG_SCRIPT,
         LABEL,
@@ -871,6 +858,14 @@ mod tests {
         serde_json::from_value(serde_json::json!({"kind": "local"})).unwrap()
     }
 
+    /// Where a local host with no mbx configuration of its own keeps the
+    /// cache: this machine's home, which the controller reads directly.
+    fn default_cache_directory() -> PathBuf {
+        dirs::home_dir()
+            .expect("a home directory")
+            .join(DEFAULT_CACHE_RELATIVE)
+    }
+
     /// The canned answers a host with no native mbx and a reflink-capable
     /// home directory gives.
     fn plain_host() -> Vec<(&'static str, i32, &'static str)> {
@@ -994,7 +989,7 @@ mod tests {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&plain_host());
         let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor).unwrap();
-        assert_eq!(resolved.directory, PathBuf::from("/home/dev/.cache/mbx"));
+        assert_eq!(resolved.directory, default_cache_directory());
         // min(100 GB, 800 GB / 4) is the 100 GB cap.
         assert_eq!(resolved.max_size.as_deref(), Some("100000000000B"));
     }
@@ -1069,10 +1064,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(preview.native_mbx, None);
-        assert_eq!(
-            preview.directory,
-            Some(PathBuf::from("/home/dev/.cache/mbx"))
-        );
+        assert_eq!(preview.directory, Some(default_cache_directory()));
         assert_eq!(
             preview.max_size,
             Some(BuildCacheLimit::Size("100000000000B".into()))
@@ -1259,12 +1251,12 @@ mod tests {
             &executor,
         )
         .expect("a Rust session uses the build cache");
-        assert_eq!(build_cache.directory, PathBuf::from("/home/dev/.cache/mbx"));
+        assert_eq!(build_cache.directory, default_cache_directory());
         assert_eq!(
             mounts,
             vec![targets::AdditionalMount {
-                source: PathBuf::from("/home/dev/.cache/mbx"),
-                destination: PathBuf::from("/home/dev/.cache/mbx"),
+                source: default_cache_directory(),
+                destination: default_cache_directory(),
                 access: targets::MountAccess::Rw,
             }]
         );
@@ -1422,14 +1414,14 @@ mod tests {
         .expect("the destination host qualifies on its own");
 
         assert_eq!(build_cache.host, "local");
-        assert_eq!(build_cache.directory, PathBuf::from("/home/dev/.cache/mbx"));
+        assert_eq!(build_cache.directory, default_cache_directory());
         assert_eq!(build_cache.target_root, None);
         assert_eq!(
             mounts
                 .iter()
                 .map(|mount| mount.destination.clone())
                 .collect::<Vec<_>>(),
-            vec![PathBuf::from("/home/dev/.cache/mbx")]
+            vec![default_cache_directory()]
         );
         assert!(
             executor
