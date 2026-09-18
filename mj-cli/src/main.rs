@@ -738,6 +738,7 @@ async fn prompt_move_confirmation(
         .clone()
         .unwrap_or_else(|| source_target.clone());
     let cross_harness = preparation.cross_harness;
+    let in_place = preparation.in_place;
     let clear_resource_allocation = preparation.selection.clear_resource_allocation;
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
@@ -749,8 +750,17 @@ async fn prompt_move_confirmation(
         if cross_harness {
             eprintln!("This changes harnesses; the transcript handoff is text-only.");
         }
+        if in_place {
+            eprintln!(
+                "Only the harness and profile are replaced; the environment and workspace are kept."
+            );
+        }
         if active {
-            eprintln!("Active work will be interrupted and restored into a fresh environment.");
+            if in_place {
+                eprintln!("Active work will be interrupted; the session keeps its environment.");
+            } else {
+                eprintln!("Active work will be interrupted and restored into a fresh environment.");
+            }
         }
         if clear_resource_allocation {
             eprintln!(

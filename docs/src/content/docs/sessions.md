@@ -165,15 +165,31 @@ says which it is.
 Use **Move…** from the session action menu when a live session should continue
 with another profile, target, or both. Move is one daemon-owned operation: it
 prepares and checks the destination, interrupts the active turn only after you
-confirm, captures a verified checkpoint, tears down the source, and restores
-the same logical session on a fresh destination.
+confirm, captures a verified checkpoint, and restores the same logical session
+on the destination.
+
+How much is rebuilt depends on what changes. When the target, the attached
+directories, and the resource allocation all stay the same, Move replaces only
+the harness, in place: the container or bare worker root, the workspace,
+untracked files, and build caches are kept, and only the old worker daemon and
+profile home are removed before the new profile is staged and the harness state
+is restored. The confirmation says so: "Only the harness and profile are
+replaced; the environment and workspace are kept." When the target changes,
+Move tears the source down and rebuilds the environment from the checkpoint,
+which does not migrate a running process, installed packages, container layers,
+or files outside the declared workspace. Either way the old harness process
+stops, so running process memory is lost.
+
+If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
+not retry in place. It releases the environment and leaves the session stopped
+with its verified checkpoint, and the UI offers retry or resume with the
+previous settings.
 
 The web viewer and terminal confirmation show both source and destination. If
 the profile changes harness, the destination receives the same bounded
-transcript handoff used by cross-harness resume. A move does not migrate a
-running process, installed packages, container layers, or files outside the
-declared workspace. Target choices obey the current resume compatibility rules;
-unsupported host/worktree combinations fail before the source is interrupted.
+transcript handoff used by cross-harness resume. Target choices obey the current
+resume compatibility rules; unsupported host/worktree combinations fail before
+the source is interrupted.
 
 Queued prompts and configuration commands are listed during confirmation.
 **Discard queued work** is the default and leaves the destination idle.

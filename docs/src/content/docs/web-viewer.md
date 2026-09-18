@@ -62,7 +62,10 @@ preparation and interruption acknowledgement. The browser cannot implement a
 move by composing Stop and Resume, and a stale destination is rejected before
 the source is interrupted.
 
-The confirmation explains that a fresh environment is rebuilt. It warns before
+The confirmation explains what will be rebuilt. A move that keeps the same
+target, attached directories, and resource allocation replaces only the harness
+and profile and keeps the environment and workspace; a move that changes the
+target rebuilds a fresh environment from the checkpoint. It warns before
 interrupting an active turn, lists queued prompts and configuration changes,
 and defaults to discarding that queue. Selecting **Run queued work** admits the
 original commands only after the destination is ready. The daemon keeps moving

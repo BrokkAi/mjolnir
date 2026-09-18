@@ -1786,6 +1786,51 @@ fn move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind
     );
 }
 
+/// A profile-only move on an unchanged target keeps the container, the
+/// workspace, and the untracked files, so the review must not promise a fresh
+/// environment. The fresh-environment wording still has to appear when the
+/// environment really is rebuilt.
+#[test]
+fn move_review_says_an_in_place_move_keeps_the_environment() {
+    for in_place in [false, true] {
+        let mut dashboard = dashboard_with_session(running_session());
+        let request_id = open_move_review(&mut dashboard);
+        let mut preparation = move_preparation();
+        preparation.in_place = in_place;
+        assert!(dashboard.apply_move_preparation(request_id, preparation));
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw move review");
+        let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+        let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+        if in_place {
+            assert!(
+                rendered.contains(
+                    "Only the harness and profile are replaced; the environment and workspace are kept."
+                ),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("fresh environment"),
+                "an in-place move must not promise a fresh environment: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains(
+                    "Active work will be interrupted; the session is restored into a fresh environment."
+                ),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("Only the harness and profile are replaced"),
+                "{rendered}"
+            );
+        }
+    }
+}
+
 /// The resume preflight answers "this moves your checkout" before anything is
 /// stopped. Nothing may launch until the person says yes, and cancelling has
 /// to leave the wizard exactly where it was.
