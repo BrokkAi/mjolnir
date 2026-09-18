@@ -299,6 +299,18 @@ pub enum BundleFailure {
 pub enum PreflightRequest {
     New(NewPreflightRequest),
     Resume(ResumePreflightRequest),
+    CompletePath(PathCompletionRequest),
+}
+
+/// A browser asking what a half-typed path could be. It shares the preflight
+/// channel because it does the same kind of work: one short-lived, cancellable
+/// look at a local or remote filesystem, under the same concurrency cap.
+#[derive(Debug)]
+pub struct PathCompletionRequest {
+    pub host: CompletionHost,
+    pub prefix: String,
+    pub kind: CompletionKind,
+    pub reply: tokio::sync::oneshot::Sender<Result<PathCompletion, String>>,
 }
 
 #[derive(Debug)]

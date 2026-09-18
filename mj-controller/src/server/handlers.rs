@@ -483,6 +483,65 @@ pub(super) async fn preflight_new(
         })
 }
 
+/// The longest path prefix worth completing. A longer one is not a path a
+/// person is typing, and it has no business reaching a shell.
+const MAX_COMPLETION_PREFIX_BYTES: usize = 4096;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CompletePathRequest {
+    /// The target whose machine owns the path, or absent for the controller's
+    /// own filesystem.
+    #[serde(default)]
+    pub(super) target_id: Option<String>,
+    pub(super) prefix: String,
+    #[serde(default)]
+    pub(super) kind: CompletionKind,
+}
+
+/// List what a half-typed path could be, on the machine that owns it.
+///
+/// The browser asks this while a person types, so the answer says only what
+/// the candidates are: a controller failure is a single fixed sentence, and
+/// the reason it failed stays in the log.
+pub(super) async fn complete_path(
+    State(state): State<ServerState>,
+    Json(request): Json<CompletePathRequest>,
+) -> Result<Json<PathCompletion>, ApiError> {
+    if request.prefix.len() > MAX_COMPLETION_PREFIX_BYTES {
+        return Err(ApiError::bad_request("path prefix is too long"));
+    }
+    let host = match request.target_id {
+        Some(target_id) => {
+            require_target(&state.snapshot_rx.borrow(), &target_id)?;
+            CompletionHost::Target(target_id)
+        }
+        None => CompletionHost::Local,
+    };
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .preflight_tx
+        .send(PreflightRequest::CompletePath(PathCompletionRequest {
+            host,
+            prefix: request.prefix,
+            kind: request.kind,
+            reply,
+        }))
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(|error| {
+            tracing::debug!(error = %error, "path completion failed");
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the controller could not list that directory",
+            )
+        })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PreflightResumeRequest {

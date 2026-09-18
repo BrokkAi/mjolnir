@@ -863,3 +863,140 @@ test('an unanswered turn offers the prompt that was running', () => {
   );
   assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
 });
+
+// Live path suggestions must never fight the person typing: a superseded
+// request is aborted, a stale reply is dropped, and accepting a row both
+// sets the value and re-announces the edit.
+test('path suggestions abort superseded requests and drop stale replies', async () => {
+  const requests = [];
+  const input = {
+    value: '',
+    className: '',
+    listeners: new Map(),
+    after(node) {
+      this.next = node;
+    },
+    setAttribute() {},
+    addEventListener(type, listener) {
+      const existing = this.listeners.get(type) || [];
+      this.listeners.set(type, [...existing, listener]);
+    },
+    dispatchEvent(event) {
+      for (const listener of this.listeners.get(event.type) || []) listener(event);
+    },
+    fire(type, event = {}) {
+      this.dispatchEvent({ type, preventDefault() {}, ...event });
+    },
+  };
+  const makeElement = (name, className, textContent) => ({
+    tagName: name.toUpperCase(),
+    className: className || '',
+    textContent: textContent === undefined ? '' : textContent,
+    dataset: {},
+    children: [],
+    classList: {
+      add(name) {
+        this.owner.className = `${this.owner.className.replace(` ${name}`, '')} ${name}`.trim();
+      },
+      remove(name) {
+        this.owner.className = this.owner.className.replace(name, '').trim();
+      },
+    },
+    append(...children) {
+      this.children.push(...children);
+    },
+    replaceChildren(...children) {
+      this.children = children;
+    },
+    setAttribute(key, value) {
+      this.attributes[key] = value;
+    },
+    attributes: {},
+    addEventListener() {},
+  });
+  const el = (name, className, textContent) => {
+    const node = makeElement(name, className, textContent);
+    node.classList.owner = node;
+    return node;
+  };
+  let pending = null;
+  const context = vm.createContext({
+    el,
+    PATH_SUGGESTION_DELAY_MS: Number(
+      /const PATH_SUGGESTION_DELAY_MS = (\d+);/.exec(viewerSource)[1],
+    ),
+    AbortController,
+    Event: class {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+    JSON,
+    // The debounce is not what these checks are about, so it fires at once.
+    setTimeout: run => run(),
+    clearTimeout: () => {},
+    document: { activeElement: input },
+    request: (url, options) =>
+      new Promise((resolve, reject) => {
+        requests.push({ url, body: JSON.parse(options.body), signal: options.signal });
+        pending = { resolve, reject };
+      }),
+  });
+  vm.runInContext(
+    sourceBetween('function attachPathSuggestions(', '\nfunction pathField('),
+    context,
+  );
+  context.input = input;
+  context.complete = { host: () => 'raw', kind: 'directories', applies: text => text.startsWith('/') };
+  vm.runInContext('attachPathSuggestions(input, complete)', context);
+  const list = input.next;
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+
+  // Text that is not a path never reaches the controller.
+  input.value = 'owner/repo';
+  context.complete.applies = text => text.startsWith('/');
+  input.fire('input');
+  assert.equal(requests.length, 0, 'a non-path asked for suggestions');
+
+  // A second edit abandons the request the first one started.
+  input.value = '/wo';
+  input.fire('input');
+  assert.equal(requests.length, 1);
+  const first = requests[0];
+  assert.deepEqual(first.body, { target_id: 'raw', prefix: '/wo', kind: 'directories' });
+  const firstPending = pending;
+  input.value = '/work/re';
+  input.fire('input');
+  assert.ok(first.signal.aborted, 'the superseded request was not aborted');
+  assert.equal(requests.length, 2);
+
+  // The abandoned request's reply is not rendered, even if it arrives.
+  firstPending.resolve({ candidates: ['/wo1/', '/wo2/'], insert: null, truncated: false });
+  await flush();
+  assert.equal(list.children.length, 0, 'a stale reply was rendered');
+
+  // A reply for text the person has since changed is dropped too.
+  const second = pending;
+  input.value = '/work/rep';
+  second.resolve({ candidates: ['/work/recent/', '/work/repos/'], insert: null, truncated: false });
+  await flush();
+  assert.equal(list.children.length, 0, 'a reply for changed text was rendered');
+
+  // A reply that still answers the field is shown, and Enter accepts it.
+  input.value = '/work/re';
+  input.fire('input');
+  assert.equal(requests.length, 3);
+  pending.resolve({ candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: true });
+  await flush();
+  assert.equal(list.children.length, 3, 'the truncation notice is missing');
+  assert.equal(list.children[2].textContent, 'More matches — keep typing');
+  assert.equal(input.value, '/work/re', 'the typed text was rewritten');
+
+  input.fire('keydown', { key: 'ArrowDown' });
+  input.fire('keydown', { key: 'Enter' });
+  assert.equal(input.value, '/work/repos/');
+  // Accepting re-announces the edit, which is what updates the draft and
+  // asks for the accepted directory's children.
+  assert.equal(requests.length, 4);
+  assert.equal(requests[3].body.prefix, '/work/repos/');
+});

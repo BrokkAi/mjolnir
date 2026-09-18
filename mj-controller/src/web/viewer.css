@@ -1014,10 +1014,28 @@ details.block-fold > pre {
 }
 
 .field {
+  /* The suggestion list hangs off the field, so the field is its origin. */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
   margin: 12px 0;
+}
+
+/* Live path suggestions, drawn over whatever follows the field and sharing
+ * the command palette's rows. */
+.field-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
 }
 
 .field > span {

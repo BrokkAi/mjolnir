@@ -14,7 +14,7 @@ Before this change, completion existed only for the mount-source field of the ne
 - [x] (2026-09-18 15:00Z) Milestone 1: core completion primitives, shared host, one controller entry point. Committed as 05da4a5a.
 - [x] (2026-09-18 15:00Z) Milestone 2: `PathInput` completion state, `ControlKind::PathField`, popup rendering and form routing. Committed with milestone 1.
 - [x] (2026-09-18 15:40Z) Milestone 3: every terminal screen wired through one routing helper; generic dashboard job with its own cancellation slot.
-- [ ] Milestone 4: web endpoint and live suggestions in `pathField()`.
+- [x] (2026-09-18 16:10Z) Milestone 4: web endpoint and live suggestions in `pathField()`.
 - [ ] Full validation, commit, push.
 
 ## Surprises & Discoveries

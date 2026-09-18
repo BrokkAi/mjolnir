@@ -1338,6 +1338,11 @@ function renderNewForm() {
               newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
             },
+            {
+              host: () => newDraft.targetId,
+              kind: 'directories',
+              applies: () => true,
+            },
           ),
         );
       } else {
@@ -1359,7 +1364,19 @@ function renderNewForm() {
         };
         body.append(create);
         if (newDraft.showBundleSource || !snapshot.bundles.length) {
-          body.append(pathField('Repository source', 'new-bundle-source', newDraft.bundleSource, value => { newDraft.bundleSource = value; }));
+          body.append(
+            pathField(
+              'Repository source',
+              'new-bundle-source',
+              newDraft.bundleSource,
+              value => {
+                newDraft.bundleSource = value;
+              },
+              // A bundle source may be a URL or an `owner/repo` shorthand, and
+              // a path here belongs to the controller's own machine.
+              { host: () => null, kind: 'directories', applies: looksLikePath },
+            ),
+          );
           body.append(el('p', 'dim', 'Use a GitHub owner/repository or URL, or an existing repository path with a network remote. The isolated session starts from the remote default branch and excludes local unpublished changes.'));
           const save = el('button', '', newDraft.creatingBundle ? 'Creating bundle…' : 'Save bundle');
           save.type = 'button';
@@ -1502,17 +1519,140 @@ function textField(label, id, value, onInput) {
   return field;
 }
 
-/// Ask the daemon whether this combination would launch, and what to warn
-/// about, before the person commits to it.
-function pathField(label, id, value, onInput) {
+/// How long a path field waits after the last keystroke before it asks.
+/// Short enough to feel live, long enough that typing a path costs one
+/// request per pause rather than one per character.
+const PATH_SUGGESTION_DELAY_MS = 250;
+
+/// Whether text asks to be read as a filesystem path rather than a URL or an
+/// `owner/repo` shorthand. The controller applies the same predicate.
+const looksLikePath = text => /^[\/~.]/.test(text) || /^[A-Za-z]:[\\/]/.test(text);
+
+/// Live suggestions beneath one path field.
+///
+/// The list only ever suggests. It never rewrites text that is being typed,
+/// which is why the controller's shared-prefix `insert` is ignored here. A
+/// reply is shown only if it still answers what the field holds: a request
+/// that was superseded, a value that has changed, or a field that has lost
+/// focus all drop the answer instead of pushing it under the person.
+function attachPathSuggestions(input, complete) {
+  const list = el('div', 'field-suggestions hidden');
+  list.setAttribute('role', 'listbox');
+  input.after(list);
+  const state = { timer: null, controller: null, matches: [], selected: 0, rows: [], list };
+
+  const hide = () => {
+    state.matches = [];
+    state.rows = [];
+    state.selected = 0;
+    list.replaceChildren();
+    list.classList.add('hidden');
+  };
+
+  const accept = index => {
+    const candidate = state.matches[index];
+    if (candidate === undefined) return false;
+    hide();
+    input.value = candidate;
+    // A directory candidate ends in a separator, so re-dispatching the edit
+    // both updates the draft and asks for that directory's children.
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  };
+
+  const updateSelection = () => {
+    state.rows.forEach((row, index) =>
+      row.setAttribute('aria-selected', String(index === state.selected)),
+    );
+  };
+
+  const render = truncated => {
+    state.rows = state.matches.map((candidate, index) => {
+      const row = el('button', 'palette-row');
+      row.type = 'button';
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', String(index === state.selected));
+      row.dataset.insert = candidate;
+      row.append(el('span', 'palette-name', candidate));
+      // Pressing a row must not blur the field first, or the list would be
+      // gone before the click arrived.
+      row.addEventListener('mousedown', event => event.preventDefault());
+      row.addEventListener('click', () => accept(index));
+      return row;
+    });
+    const rows = [...state.rows];
+    if (truncated) rows.push(el('div', 'palette-row dim', 'More matches \u2014 keep typing'));
+    list.replaceChildren(...rows);
+    list.classList.remove('hidden');
+  };
+
+  const fetchSuggestions = async () => {
+    const prefix = input.value;
+    const controller = new AbortController();
+    state.controller = controller;
+    let answer;
+    try {
+      answer = await request('/api/paths/complete', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({ target_id: complete.host(), prefix, kind: complete.kind }),
+      });
+    } catch {
+      // An abort, a lost connection, and a host that cannot list the
+      // directory all mean the same thing to someone typing: no suggestions.
+      if (state.controller === controller) hide();
+      return;
+    }
+    if (controller.signal.aborted || input.value !== prefix || document.activeElement !== input) return;
+    state.matches = (answer && answer.candidates) || [];
+    state.selected = 0;
+    if (!state.matches.length) {
+      hide();
+      return;
+    }
+    render(Boolean(answer.truncated));
+  };
+
+  input.addEventListener('input', () => {
+    clearTimeout(state.timer);
+    if (state.controller) state.controller.abort();
+    state.controller = null;
+    hide();
+    const value = input.value;
+    if (!value || !complete.applies(value)) return;
+    state.timer = setTimeout(fetchSuggestions, PATH_SUGGESTION_DELAY_MS);
+  });
+
+  input.addEventListener('keydown', event => {
+    if (!state.matches.length) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      state.selected = (state.selected + delta + state.matches.length) % state.matches.length;
+      updateSelection();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      accept(state.selected);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      hide();
+    }
+  });
+
+  input.addEventListener('blur', hide);
+}
+function pathField(label, id, value, onInput, complete = null) {
   const field = textField(label, id, value, onInput);
   const input = field.querySelector('input');
   input.spellcheck = false;
   input.autocapitalize = 'none';
   input.setAttribute('aria-description', '~ expands on apply using the home directory on the selected machine.');
+  if (complete) attachPathSuggestions(input, complete);
   return field;
 }
 
+/// Ask the daemon whether this combination would launch, and what to warn
+/// about, before the person commits to it.
 async function preflightNew() {
   const draft = newDraft;
   if (pendingNewPreflight === draft) return false;

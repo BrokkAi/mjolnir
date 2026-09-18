@@ -975,6 +975,15 @@ pub async fn run_server(
                             );
                             continue;
                         }
+                        crate::server::PreflightRequest::CompletePath(request) => {
+                            spawn_path_completion(
+                                &mut preflight_jobs,
+                                &controller.config,
+                                request,
+                                &termination,
+                            );
+                            continue;
+                        }
                     };
                     // Reading a working tree's status or validating a project
                     // directory touches the disk, so it runs on its own task
