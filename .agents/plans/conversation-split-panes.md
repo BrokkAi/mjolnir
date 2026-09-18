@@ -15,7 +15,7 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 
 - [x] (2026-09-17) Design agreed with the user; plan written as this ExecPlan (M0).
 - [ ] M1: the layout tree in `mj-tui/src/tile_layout.rs`, with unit tests.
-- [ ] M2: the persisted per-workspace layout: type in `mj-core`, schema migration 38, database functions, daemon action, client method, generalized save coordinator in `mj-cli`.
+- [x] (2026-09-17) M2: the persisted per-workspace layout: type in `mj-core`, schema migration 38, database functions, daemon action, client method, generalized save coordinator in `mj-cli`.
 - [ ] M3: many warm chats in the terminal controller (`mj-cli`), keyed by session id, all pumped and acknowledged.
 - [ ] M4: rendering of several panes and the pane commands in `mj-tui`, reachable from the F2 palette and the session row `⋯` menu.
 - [ ] M5: prefix keybindings. Blocked until the prefix-key work from the `hel3` worktree merges into this branch.
@@ -23,7 +23,16 @@ To see it working after the whole plan lands: start `mj` with at least two sessi
 ## Surprises & Discoveries
 
 
-None recorded yet.
+- M2: nothing in `mj-controller/src/database/tests.rs` pins the schema revision
+  as a literal; every test uses the `SCHEMA_VERSION` constant, so bumping it to
+  38 needed no fixture edits.
+- M2: `workspace_pane_sizes` is created by `baseline.sql`, not by a migration,
+  so migration 38 followed the shape of migrations 34-37 (a `CREATE TABLE IF
+  NOT EXISTS` in one `BEGIN IMMEDIATE` batch) while copying the foreign key and
+  `STRICT` conventions from the baseline table.
+- M2: adding a daemon action does require a protocol bump. The pane-size commit
+  (98ff2c14) raised `PROTOCOL_VERSION` with it, so this change raised it from
+  25 to 26 in `mj-client/src/daemon.rs`.
 
 ## Decision Log
 
@@ -51,6 +60,23 @@ None recorded yet.
 - Decision: The layout persists per workspace in a new table, mirroring the existing per-workspace pane-size path end to end.
   Rationale: The pane-size path already solves ordered background saves, failure notices, and a bounded flush on quit. Reusing it keeps one persistence design.
   Date/Author: 2026-09-17, Fable.
+
+- Decision: M2 keeps the loaded layouts in `DashboardContext.workspace_layouts`
+  rather than caching them in `mj-tui`'s `DashboardState`.
+  Rationale: M1 is being written in a separate worktree and owns
+  `mj-tui/src/tile_layout.rs`. Keeping M2 out of `mj-tui` entirely avoids a
+  conflict; M4 moves the cache into `DashboardState` when it converts a
+  `ConversationLayout` into a `TileLayout`. `DashboardContext::set_workspace_layout`
+  is the seam M3 and M4 call, and carries an explicit `dead_code` allow until
+  they do.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: `mj-cli/src/dashboard/pane_sizes.rs` was renamed to
+  `workspace_settings.rs` when `PaneSizePersistence` became the generic
+  `WorkspaceSettingPersistence<T>`.
+  Rationale: The module no longer has anything to do with pane sizes in
+  particular, and the rename is a one-line change at the only use site.
+  Date/Author: 2026-09-17, Opus.
 
 - Decision: Pane ids are allocated per layout (a counter field), not from a process-wide atomic as in herdr.
   Rationale: Layouts are saved and restored with their ids; a per-layout counter restores deterministically and needs no global state.
@@ -234,7 +260,14 @@ Every milestone is additive until M3, which replaces the single-chat field; M3 a
 ## Artifacts and Notes
 
 
-To be added as milestones complete.
+M2 landed in: `mj-core/src/workspace.rs` (`SplitAxis`, `LayoutNode`,
+`ConversationLayout`), `mj-controller/src/database/schema.rs` (migration 38,
+compatible), `mj-controller/src/database/workspaces.rs` (the four layout
+functions), `mj-controller/src/daemon/actions.rs` and `mj-client/src/daemon.rs`
+(`SaveWorkspaceLayout`, protocol 26), `mj-cli/src/dashboard/workspace_settings.rs`
+(the generic coordinator, renamed from `pane_sizes.rs`), and the wiring in
+`mj-cli/src/dashboard.rs`, `dashboard/drains.rs`, `dashboard/io.rs`, and
+`dashboard/io/spawn.rs`.
 
 ## Interfaces and Dependencies
 

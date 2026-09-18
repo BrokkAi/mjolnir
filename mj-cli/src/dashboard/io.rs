@@ -60,6 +60,10 @@ pub(crate) enum DashboardIoUpdate {
     WorkspacePaneSizes {
         result: std::result::Result<BTreeMap<String, mj_core::workspace::PaneSizes>, String>,
     },
+    WorkspaceLayouts {
+        result:
+            std::result::Result<BTreeMap<String, mj_core::workspace::ConversationLayout>, String>,
+    },
     WorkerRecordPersistence {
         operation: WorkerRecordPersistence,
         result: std::result::Result<WorkerRecordPersistenceOutcome, String>,
@@ -409,6 +413,21 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not load workspace pane sizes: {error}")),
             },
+            DashboardIoUpdate::WorkspaceLayouts { result } => match result {
+                Ok(layouts) => {
+                    for (workspace_id, layout) in layouts {
+                        if !self.known_workspace_layouts.contains(&workspace_id) {
+                            continue;
+                        }
+                        self.workspace_layouts
+                            .insert(workspace_id.clone(), layout.clone());
+                        self.layout_persistence.remember(workspace_id, layout);
+                    }
+                }
+                Err(error) => self
+                    .dashboard
+                    .set_notice(format!("Could not load workspace layouts: {error}")),
+            },
             DashboardIoUpdate::WorkspaceManagement { generation, result } => match result {
                 Ok(result) => {
                     let WorkspaceManagementResult {
@@ -428,6 +447,8 @@ impl DashboardContext {
                         .collect();
                     if let Some(deleted_workspace_id) = deleted_workspace_id.as_ref() {
                         self.pane_size_persistence.forget(deleted_workspace_id);
+                        self.layout_persistence.forget(deleted_workspace_id);
+                        self.workspace_layouts.remove(deleted_workspace_id);
                         self.known_workspace_layouts.remove(deleted_workspace_id);
                     }
                     // The TUI owns the modal generation guard. It returns

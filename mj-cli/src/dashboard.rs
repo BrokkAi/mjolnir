@@ -14,7 +14,7 @@ pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
 pub(crate) mod io;
-mod pane_sizes;
+mod workspace_settings;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -41,6 +41,7 @@ use mj_controller::session_manager::{
 };
 use mj_controller::targets::DeploymentCapacityTarget;
 use mj_controller::worker_client::CredentialSyncCoordinator;
+use mj_core::workspace::{ConversationLayout, PaneSizes};
 use mj_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption,
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
@@ -221,8 +222,12 @@ pub(crate) struct DashboardContext {
     pub(crate) workspace_id: String,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
-    pane_size_persistence: pane_sizes::PaneSizePersistence,
+    pane_size_persistence: workspace_settings::WorkspaceSettingPersistence<PaneSizes>,
+    layout_persistence: workspace_settings::WorkspaceSettingPersistence<ConversationLayout>,
     known_workspace_layouts: BTreeSet<String>,
+    /// The conversation pane arrangement loaded for each workspace. M4 hands
+    /// these to the terminal UI; until then they are only stored and saved.
+    workspace_layouts: BTreeMap<String, ConversationLayout>,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::chat::Notices,
@@ -489,6 +494,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
             () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {}
+            () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {}
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
@@ -725,6 +731,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         tracing::warn!(%error, "workspace pane-size final flush failed");
         eprintln!("{error:#}");
     }
+    if let Err(error) = context.layout_persistence.finish().await {
+        tracing::warn!(%error, "workspace layout final flush failed");
+        eprintln!("{error:#}");
+    }
     if let Some(shutdown) = context.worker_shutdown.take() {
         shutdown
             .shutdown()
@@ -751,6 +761,19 @@ impl DashboardContext {
         if let Some((_, cancelled)) = self.session_preflight_cancel.take() {
             cancelled.store(true, Ordering::Release);
         }
+    }
+
+    /// Record a workspace's conversation pane arrangement and queue its save.
+    /// The persistence path lands ahead of the panes themselves; M3 and M4
+    /// call this whenever the user changes the layout.
+    #[allow(dead_code, reason = "called once the conversation panes land in M3/M4")]
+    pub(crate) fn set_workspace_layout(&mut self, workspace_id: &str, layout: ConversationLayout) {
+        if self.workspace_layouts.get(workspace_id) == Some(&layout) {
+            return;
+        }
+        self.workspace_layouts
+            .insert(workspace_id.to_owned(), layout.clone());
+        self.layout_persistence.update(workspace_id, layout);
     }
 
     pub(crate) fn request_shutdown(&mut self) {
@@ -930,6 +953,13 @@ impl DashboardContext {
                     .map(|sizes| (workspace.id.clone(), sizes))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let conversation_layouts = workspaces
+            .iter()
+            .map(|workspace| {
+                mj_controller::database::load_workspace_layout(&workspace.id)
+                    .map(|layout| (workspace.id.clone(), layout))
+            })
+            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
         let mut dashboard = DashboardState::new(
             controller.config.clone(),
             controller.state.clone(),
@@ -1008,7 +1038,14 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
         let known_workspace_layouts = layouts.keys().cloned().collect();
         let pane_size_persistence =
-            pane_sizes::PaneSizePersistence::start(layouts, notices.clone());
+            workspace_settings::WorkspaceSettingPersistence::start_pane_sizes(
+                layouts,
+                notices.clone(),
+            );
+        let layout_persistence = workspace_settings::WorkspaceSettingPersistence::start_layouts(
+            conversation_layouts.clone(),
+            notices.clone(),
+        );
 
         let mut context = Self {
             terminal,
@@ -1017,7 +1054,9 @@ impl DashboardContext {
             client_id: client_id.to_owned(),
             dashboard,
             pane_size_persistence,
+            layout_persistence,
             known_workspace_layouts,
+            workspace_layouts: conversation_layouts,
             notices,
             events: Some(event::EventStream::new()),
             active_chat: None,

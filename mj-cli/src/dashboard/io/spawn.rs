@@ -209,6 +209,28 @@ pub(crate) fn spawn_workspace_pane_sizes_load(
     )
 }
 
+/// Reads conversation layouts for workspace ids discovered after the dashboard
+/// opened, for the same reason pane sizes are read separately.
+pub(crate) fn spawn_workspace_layouts_load(
+    workspace_ids: Vec<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_io(
+        "load workspace layouts",
+        updates,
+        move || {
+            workspace_ids
+                .into_iter()
+                .map(|workspace_id| {
+                    let layout = mj_controller::database::load_workspace_layout(&workspace_id)?;
+                    Ok((workspace_id, layout))
+                })
+                .collect()
+        },
+        |result| DashboardIoUpdate::WorkspaceLayouts { result },
+    )
+}
+
 pub(crate) fn spawn_workspace_create(
     generation: u64,
     name: String,

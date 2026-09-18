@@ -381,6 +381,10 @@ pub enum DaemonAction {
         workspace_id: String,
         sizes: mj_core::workspace::PaneSizes,
     },
+    SaveWorkspaceLayout {
+        workspace_id: String,
+        layout: mj_core::workspace::ConversationLayout,
+    },
     PersistImportedSession {
         session: Box<SessionRecord>,
     },
@@ -1086,6 +1090,23 @@ impl DaemonClient {
         }
     }
 
+    pub async fn save_workspace_layout(
+        &mut self,
+        workspace_id: String,
+        layout: mj_core::workspace::ConversationLayout,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SaveWorkspaceLayout {
+                workspace_id,
+                layout,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected layout save reply {reply:?}"),
+        }
+    }
+
     pub async fn persist_imported_session(&mut self, session: SessionRecord) -> Result<()> {
         match self
             .request(DaemonAction::PersistImportedSession {
@@ -1643,7 +1664,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

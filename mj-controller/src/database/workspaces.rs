@@ -88,6 +88,57 @@ pub fn save_workspace_pane_sizes_to(
     Ok(())
 }
 
+pub fn load_workspace_layout(workspace_id: &str) -> Result<ConversationLayout> {
+    load_workspace_layout_from(&database_path(), workspace_id)
+}
+
+pub fn load_workspace_layout_from(path: &Path, workspace_id: &str) -> Result<ConversationLayout> {
+    let connection = open_reader(path)?;
+    let stored = connection
+        .query_row(
+            "SELECT l.layout
+             FROM workspaces w LEFT JOIN workspace_layouts l USING(workspace_id)
+             WHERE w.workspace_id = ?1",
+            [workspace_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .with_context(|| format!("unknown workspace {workspace_id:?}"))?;
+    let Some(stored) = stored else {
+        return Ok(ConversationLayout::default());
+    };
+    let layout: ConversationLayout = serde_json::from_str(&stored)
+        .with_context(|| format!("decode layout for workspace {workspace_id:?}"))?;
+    layout.validate()?;
+    Ok(layout)
+}
+
+pub fn save_workspace_layout(workspace_id: &str, layout: ConversationLayout) -> Result<()> {
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("save_workspace_layout", move |_| {
+        save_workspace_layout_to(&database_path(), &workspace_id, &layout)
+    })
+}
+
+pub fn save_workspace_layout_to(
+    path: &Path,
+    workspace_id: &str,
+    layout: &ConversationLayout,
+) -> Result<()> {
+    layout.validate()?;
+    let encoded = serde_json::to_string(layout)?;
+    let connection = open(path)?;
+    connection
+        .execute(
+            "INSERT INTO workspace_layouts(workspace_id, layout)
+         VALUES (?1, ?2)
+         ON CONFLICT(workspace_id) DO UPDATE SET layout = excluded.layout",
+            params![workspace_id, encoded],
+        )
+        .with_context(|| format!("save layout for workspace {workspace_id:?}"))?;
+    Ok(())
+}
+
 pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(

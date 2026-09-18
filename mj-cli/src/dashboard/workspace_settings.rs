@@ -1,4 +1,9 @@
-//! Ordered background saves of the workspaces' requested pane sizes.
+//! Ordered background saves of one per-workspace dashboard setting.
+//!
+//! The dashboard persists two of these: the support panes' sizes and the
+//! conversation area's pane layout. Both need the same behaviour, so the
+//! coordinator is generic over the stored value and carries a short setting
+//! name for its notices.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -6,47 +11,78 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use mj_chat::chat::Notices;
-use mj_core::workspace::PaneSizes;
+use mj_core::workspace::{ConversationLayout, PaneSizes};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LayoutSnapshot {
-    requested: BTreeMap<String, PaneSizes>,
-    baseline: BTreeMap<String, PaneSizes>,
+const PANE_SIZES: &str = "workspace pane sizes";
+const LAYOUT: &str = "workspace layout";
+
+#[derive(Clone, Debug, PartialEq)]
+struct SettingSnapshot<T> {
+    requested: BTreeMap<String, T>,
+    baseline: BTreeMap<String, T>,
 }
 
-pub(super) struct PaneSizePersistence {
-    requested: BTreeMap<String, PaneSizes>,
-    baseline: BTreeMap<String, PaneSizes>,
-    sender: Option<watch::Sender<LayoutSnapshot>>,
+pub(super) struct WorkspaceSettingPersistence<T> {
+    setting_name: &'static str,
+    requested: BTreeMap<String, T>,
+    baseline: BTreeMap<String, T>,
+    sender: Option<watch::Sender<SettingSnapshot<T>>>,
     task: Option<JoinHandle<Result<()>>>,
     failure: Option<String>,
     notices: Notices,
 }
 
-impl PaneSizePersistence {
-    pub(super) fn start(initial: BTreeMap<String, PaneSizes>, notices: Notices) -> Self {
-        Self::with_save(initial, notices, |workspace_id, sizes| async move {
-            crate::daemon::connect_existing()
-                .await?
-                .save_workspace_pane_sizes(workspace_id, sizes)
-                .await
-        })
+impl WorkspaceSettingPersistence<PaneSizes> {
+    pub(super) fn start_pane_sizes(initial: BTreeMap<String, PaneSizes>, notices: Notices) -> Self {
+        Self::with_save(
+            PANE_SIZES,
+            initial,
+            notices,
+            |workspace_id, sizes| async move {
+                crate::daemon::connect_existing()
+                    .await?
+                    .save_workspace_pane_sizes(workspace_id, sizes)
+                    .await
+            },
+        )
     }
+}
 
+impl WorkspaceSettingPersistence<ConversationLayout> {
+    pub(super) fn start_layouts(
+        initial: BTreeMap<String, ConversationLayout>,
+        notices: Notices,
+    ) -> Self {
+        Self::with_save(
+            LAYOUT,
+            initial,
+            notices,
+            |workspace_id, layout| async move {
+                crate::daemon::connect_existing()
+                    .await?
+                    .save_workspace_layout(workspace_id, layout)
+                    .await
+            },
+        )
+    }
+}
+
+impl<T: Clone + PartialEq + Default + Send + Sync + 'static> WorkspaceSettingPersistence<T> {
     fn with_save<F, Fut>(
-        initial: BTreeMap<String, PaneSizes>,
+        setting_name: &'static str,
+        initial: BTreeMap<String, T>,
         notices: Notices,
         mut save: F,
     ) -> Self
     where
-        F: FnMut(String, PaneSizes) -> Fut + Send + 'static,
+        F: FnMut(String, T) -> Fut + Send + 'static,
         Fut: Future<Output = Result<()>> + Send,
     {
-        let initial_snapshot = LayoutSnapshot {
+        let initial_snapshot = SettingSnapshot {
             requested: initial.clone(),
             baseline: initial,
         };
@@ -64,20 +100,20 @@ impl PaneSizePersistence {
                 // both retry and final-error reporting.
                 persisted.retain(|workspace_id, _| snapshot.requested.contains_key(workspace_id));
                 failures.retain(|workspace_id, _| snapshot.requested.contains_key(workspace_id));
-                for (workspace_id, sizes) in &snapshot.requested {
+                for (workspace_id, value) in &snapshot.requested {
                     let baseline = snapshot
                         .baseline
                         .get(workspace_id)
-                        .copied()
+                        .cloned()
                         .unwrap_or_default();
                     let previous = persisted.entry(workspace_id.clone()).or_insert(baseline);
                     let retrying = failures.contains_key(workspace_id);
-                    if *previous == *sizes && !retrying {
+                    if previous == value && !retrying {
                         continue;
                     }
-                    match save(workspace_id.clone(), *sizes).await {
+                    match save(workspace_id.clone(), value.clone()).await {
                         Ok(()) => {
-                            *previous = *sizes;
+                            *previous = value.clone();
                             failures.remove(workspace_id);
                         }
                         Err(error) => {
@@ -86,7 +122,7 @@ impl PaneSizePersistence {
                             // failure or make shutdown fail in that case.
                             if receiver.borrow().requested.contains_key(workspace_id) {
                                 let message = format!(
-                                    "Could not save workspace pane sizes for {workspace_id}: {error:#}"
+                                    "Could not save {setting_name} for {workspace_id}: {error:#}"
                                 );
                                 tracing::warn!(%message);
                                 reports.set_failure(&message);
@@ -104,6 +140,7 @@ impl PaneSizePersistence {
                 .map_or(Ok(()), |message| Err(anyhow!(message)))
         });
         Self {
+            setting_name,
             requested: initial_snapshot.requested,
             baseline: initial_snapshot.baseline,
             sender: Some(sender),
@@ -116,12 +153,12 @@ impl PaneSizePersistence {
     /// Add a layout loaded for a workspace without treating it as a user
     /// mutation. A duplicate remember is deliberately ignored so a late load
     /// cannot reset a layout the user already changed.
-    pub(super) fn remember(&mut self, workspace_id: String, sizes: PaneSizes) {
+    pub(super) fn remember(&mut self, workspace_id: String, value: T) {
         if self.requested.contains_key(&workspace_id) {
             return;
         }
-        self.requested.insert(workspace_id.clone(), sizes);
-        self.baseline.insert(workspace_id, sizes);
+        self.requested.insert(workspace_id.clone(), value.clone());
+        self.baseline.insert(workspace_id, value);
         self.publish();
     }
 
@@ -133,8 +170,8 @@ impl PaneSizePersistence {
         }
     }
 
-    pub(super) fn update(&mut self, workspace_id: &str, sizes: PaneSizes) {
-        if self.requested.get(workspace_id) == Some(&sizes) {
+    pub(super) fn update(&mut self, workspace_id: &str, value: T) {
+        if self.requested.get(workspace_id) == Some(&value) {
             return;
         }
         let workspace_id = workspace_id.to_owned();
@@ -142,7 +179,7 @@ impl PaneSizePersistence {
         // baseline keeps an unexpected early update deterministic and lets the
         // first non-default choice be persisted rather than discarded.
         self.baseline.entry(workspace_id.clone()).or_default();
-        self.requested.insert(workspace_id, sizes);
+        self.requested.insert(workspace_id, value);
         self.publish();
     }
 
@@ -150,13 +187,15 @@ impl PaneSizePersistence {
         let Some(sender) = &self.sender else {
             return;
         };
-        let snapshot = LayoutSnapshot {
+        let snapshot = SettingSnapshot {
             requested: self.requested.clone(),
             baseline: self.baseline.clone(),
         };
         if sender.send(snapshot).is_err() {
-            self.notices
-                .set_failure("Could not save workspace pane sizes: background saver stopped");
+            self.notices.set_failure(format!(
+                "Could not save {}: background saver stopped",
+                self.setting_name
+            ));
         }
     }
 
@@ -173,7 +212,7 @@ impl PaneSizePersistence {
         };
         let result = match task.await {
             Ok(result) => result,
-            Err(error) => Err(anyhow!("workspace pane-size save task failed: {error}")),
+            Err(error) => Err(anyhow!("{} save task failed: {error}", self.setting_name)),
         };
         self.task = None;
         self.failure = result.err().map(|error| format!("{error:#}"));
@@ -187,7 +226,7 @@ impl PaneSizePersistence {
     /// choices, drain every workspace's pending change, and bound the flush.
     pub(super) async fn finish(mut self) -> Result<()> {
         if let Some(sender) = self.sender.take() {
-            sender.send_replace(LayoutSnapshot {
+            sender.send_replace(SettingSnapshot {
                 requested: std::mem::take(&mut self.requested),
                 baseline: std::mem::take(&mut self.baseline),
             });
@@ -199,7 +238,8 @@ impl PaneSizePersistence {
                 .is_err()
         {
             return Err(anyhow!(
-                "Timed out saving workspace pane sizes after {} seconds; the latest layout may not have been saved",
+                "Timed out saving {} after {} seconds; the latest choice may not have been saved",
+                self.setting_name,
                 FLUSH_TIMEOUT.as_secs()
             ));
         }
@@ -209,7 +249,7 @@ impl PaneSizePersistence {
     }
 }
 
-impl Drop for PaneSizePersistence {
+impl<T> Drop for WorkspaceSettingPersistence<T> {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
             task.abort();
@@ -237,7 +277,8 @@ mod tests {
 
     #[tokio::test]
     async fn opening_and_closing_a_workspace_does_not_write_its_layout() {
-        let mut persistence = PaneSizePersistence::with_save(
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
             initial("workspace-a"),
             Notices::default(),
             |_, _| async { panic!("opening a workspace must not save its layout") },
@@ -249,7 +290,8 @@ mod tests {
     #[tokio::test]
     async fn rapid_changes_are_serialized_and_flush_the_latest_layout() {
         let (started, mut calls) = mpsc::unbounded_channel();
-        let mut persistence = PaneSizePersistence::with_save(
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
             initial("workspace-a"),
             Notices::default(),
             move |workspace_id, sizes| {
@@ -281,7 +323,8 @@ mod tests {
     #[tokio::test]
     async fn rapid_workspace_switches_retain_each_latest_layout() {
         let (started, mut calls) = mpsc::unbounded_channel();
-        let mut persistence = PaneSizePersistence::with_save(
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
             initial("workspace-a"),
             Notices::default(),
             move |workspace_id, sizes| {
@@ -322,7 +365,8 @@ mod tests {
         let saves = attempts.clone();
         let (failed, failure) = oneshot::channel();
         let mut failed = Some(failed);
-        let mut persistence = PaneSizePersistence::with_save(
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
             initial("workspace-a"),
             notices.clone(),
             move |workspace_id, sizes| {
@@ -357,7 +401,8 @@ mod tests {
         let (cancelled, cancellation) = oneshot::channel::<()>();
         let mut started = Some(started);
         let mut cancelled = Some(cancelled);
-        let mut persistence = PaneSizePersistence::with_save(
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
             initial("workspace-a"),
             Notices::default(),
             move |_, _| {
@@ -385,10 +430,12 @@ mod tests {
     #[tokio::test]
     async fn an_unsuccessful_final_save_is_returned_after_reporting_the_failure() {
         let notices = Notices::default();
-        let mut persistence =
-            PaneSizePersistence::with_save(initial("workspace-a"), notices.clone(), |_, _| async {
-                anyhow::bail!("workspace was deleted")
-            });
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
+            initial("workspace-a"),
+            notices.clone(),
+            |_, _| async { anyhow::bail!("workspace was deleted") },
+        );
         persistence.update("workspace-a", layout(PaneSize::Minimized));
         let error = persistence.finish().await.unwrap_err();
         assert!(error.to_string().contains("workspace was deleted"));
@@ -398,10 +445,12 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_save_is_supervised_and_reported_on_exit() {
         let notices = Notices::default();
-        let mut persistence =
-            PaneSizePersistence::with_save(initial("workspace-a"), notices.clone(), |_, _| async {
-                panic!("save panic")
-            });
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
+            initial("workspace-a"),
+            notices.clone(),
+            |_, _| async { panic!("save panic") },
+        );
         persistence.update("workspace-a", layout(PaneSize::Minimized));
         persistence.wait().await;
         assert!(!persistence.is_running());
@@ -416,8 +465,11 @@ mod tests {
         let (release, released) = oneshot::channel();
         let mut started = Some(started);
         let mut released = Some(released);
-        let mut persistence =
-            PaneSizePersistence::with_save(initial("workspace-a"), notices.clone(), move |_, _| {
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            PANE_SIZES,
+            initial("workspace-a"),
+            notices.clone(),
+            move |_, _| {
                 let started = started.take().unwrap();
                 let released = released.take().unwrap();
                 async move {
@@ -425,12 +477,39 @@ mod tests {
                     released.await.unwrap();
                     anyhow::bail!("workspace was deleted")
                 }
-            });
+            },
+        );
         persistence.update("workspace-a", layout(PaneSize::Minimized));
         began.await.unwrap();
         persistence.forget("workspace-a");
         release.send(()).unwrap();
         persistence.finish().await.unwrap();
         assert!(notices.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_changed_conversation_layout_is_saved_with_its_own_notice_text() {
+        let notices = Notices::default();
+        let mut persistence = WorkspaceSettingPersistence::with_save(
+            LAYOUT,
+            BTreeMap::from([("workspace-a".to_owned(), ConversationLayout::default())]),
+            notices.clone(),
+            |_, _| async { anyhow::bail!("database unavailable") },
+        );
+        let split = ConversationLayout {
+            root: mj_core::workspace::LayoutNode::Split {
+                axis: mj_core::workspace::SplitAxis::Horizontal,
+                ratio: 0.5,
+                first: Box::new(mj_core::workspace::LayoutNode::Pane { id: 1 }),
+                second: Box::new(mj_core::workspace::LayoutNode::Pane { id: 2 }),
+            },
+            focus: 2,
+            sessions: BTreeMap::from([(2, "session-b".to_owned())]),
+        };
+        persistence.update("workspace-a", split);
+        let error = persistence.finish().await.unwrap_err();
+        assert!(error.to_string().contains("database unavailable"));
+        let reported = notices.current().unwrap();
+        assert!(reported.contains("workspace layout"), "{reported}");
     }
 }

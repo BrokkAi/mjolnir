@@ -258,6 +258,8 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for id in removed_layouts {
             self.pane_size_persistence.forget(&id);
+            self.layout_persistence.forget(&id);
+            self.workspace_layouts.remove(&id);
             self.known_workspace_layouts.remove(&id);
         }
         let new_layouts = update
@@ -269,7 +271,8 @@ impl DashboardContext {
         if !new_layouts.is_empty() {
             self.known_workspace_layouts
                 .extend(new_layouts.iter().cloned());
-            io::spawn_workspace_pane_sizes_load(new_layouts, self.dashboard_io_tx.clone());
+            io::spawn_workspace_pane_sizes_load(new_layouts.clone(), self.dashboard_io_tx.clone());
+            io::spawn_workspace_layouts_load(new_layouts, self.dashboard_io_tx.clone());
         }
         let next_workspace = if self
             .dashboard

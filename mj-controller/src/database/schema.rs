@@ -303,6 +303,25 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Compatible: adds one table holding the dashboard's conversation pane
+    // arrangement per workspace. Older readers never select from it and older
+    // writers never touch it, so their updates leave its rows intact; a
+    // workspace deleted by an older build still removes them through the
+    // foreign key. Losing the table only means the conversation area opens as
+    // a single pane. The compatibility floor stays where it is.
+    if version < 38 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS workspace_layouts (
+                 workspace_id TEXT PRIMARY KEY REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+                 layout TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (38, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 38;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
