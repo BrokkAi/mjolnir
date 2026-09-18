@@ -147,14 +147,15 @@ when you need a stable multi-repository layout or a different primary
 repository. Isolated sessions always begin at the resolved fetch remote's
 default branch; `git_ref` is obsolete and is rejected with migration guidance.
 
-Bare targets work differently. A new `local-bare` or `ssh-bare` session selects
-an existing absolute Git project directory instead of a configured bundle.
+Bare runtimes work differently. A new bare session, on this machine or on an
+SSH machine, selects an existing absolute Git project directory instead of a
+configured bundle.
 When the selected path is a primary checkout, Mjolnir creates a session-specific
 linked worktree under the repository's `.mj/worktrees/` tree so the primary
 checkout is not used directly. Before it can do that, the primary checkout must
 be completely clean: no staged, unstaged, or untracked files. Selecting an
 existing linked worktree keeps that worktree. See
-[Targets](/targets/#bare-targets).
+[Targets](/targets/#bare-runtimes).
 
 ## GitHub repositories
 

@@ -14,10 +14,11 @@ After this change the configuration file and the Settings screen have two separa
 - [x] (2026-09-17) Milestone 2: shared cache host keyed by machine (`CacheHost::Local | Ssh`), `preview_build_cache` taking a machine, `resolve_machine_input_path`, the dashboard action payloads, and the controller's mbx tests.
 - [x] (2026-09-17) Milestone 3: Settings screen pages "Machines" and "Runtimes", machine choice on runtimes, build cache preview under machines, path resolution under machines, detection inserting runtimes on `local`, and TUI behavior tests.
 - [x] (2026-09-17) Milestone 4: documentation, the launch-template script, and the end-to-end fixtures write the new shape; full workspace validation.
+- [x] (2026-09-17) Follow-up documentation pass: the prose and tables in `security.md`, `profiles.md`, `cli-reference.md`, `install.md`, `overview.md`, `troubleshooting.md`, `workspaces-bundles.md`, `CONTRIBUTING.md`, `install.sh`, `docs/SSH.md`, `docs/AWS.md` and `apple-container.md` name machines and runtimes instead of the fused kinds. The plan is complete.
 
 Resolved transient state: between Milestone 1 and Milestone 3, four Settings-screen tests in `mj-tui` fail (`setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft`, `the_automatic_download_policy_shows_what_it_does_to_this_image`, `remote_path_apply_preserves_failed_and_newer_drafts`, `the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields`). The Settings draft is literally `serde_json::to_value(&Config)`, so the moment the stored shape changes the screen's schema is out of date, and the schema is Milestone 3's subject. Every other package was green at each milestone, and Milestone 3 restored the whole suite.
 
-Remaining: prose in `docs/src/content/docs/security.md`, `profiles.md`, `cli-reference.md`, `install.md`, `overview.md`, `troubleshooting.md`, and `workspaces-bundles.md` still names the old fused kinds. Those files hold no `[targets.` table and no `kind = "` line, so this plan's documentation step left them alone; they need a separate pass over their prose and tables.
+Nothing remains. The only places that still spell a fused kind are the ones that should: the "Files written before version 11" note in `docs/src/content/docs/configuration.md`, which tells a reader what the old names were, and `tests/e2e/session_move.py`, which asserts on the runtime `TargetLocator`'s own `kind` string. Historical plans under `.agents/` keep their original wording because they record what was true when they were written.
 
 ## Surprises & Discoveries
 
@@ -104,8 +105,23 @@ machines have to be matched by connection alone, four documentation pages are
 generated rather than written, and adding this machine to the Settings draft
 needed care so an untouched draft does not look edited.
 
-What remains: prose in seven documentation pages still names the old fused
-kinds, listed under Progress.
+A follow-up documentation pass then rewrote the prose and tables that the four
+milestones had left alone, because they carried no configuration example:
+`security.md`, `profiles.md`, `cli-reference.md`, `install.md`, `overview.md`,
+`troubleshooting.md`, `workspaces-bundles.md`, `apple-container.md`,
+`CONTRIBUTING.md`, `install.sh`, and the `docs/SSH.md` and `docs/AWS.md`
+sources. The security and overview tables are now keyed by runtime and
+machine rather than by a fused kind, and the one heading anchor that moved
+(`#bare-targets` to `#bare-runtimes`) was followed to its only link.
+
+Nothing about the split is outstanding. Two lessons are worth carrying
+forward. The first is that a serialized type reaches further than its own
+module: changing `Config`'s stored shape moved the Settings screen, the
+dashboard actions, the merge base in `save_setup_at`, an embedded
+documentation assertion in `mj doctor`, and four end-to-end fixtures, none of
+which the plan's file inventory predicted. The second is to check whether a
+documentation page is generated before editing it; four of them are, and the
+edits had to be redone at their sources.
 
 Milestone 1, for the record: `mj-core` now reads and writes `[machines.<id>]` and `[targets.<id>]` separately, migrates every pre-version-11 file on load, and refuses the old fused kinds in a version 11 file. Nothing outside `mj-core/src/config` changed shape: `TargetTemplate` still has its eight variants and every consumer still matches on it. Milestones 2 through 4 moved the cache host, the Settings screen, and the documentation onto the new shape.
 

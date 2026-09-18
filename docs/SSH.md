@@ -90,12 +90,14 @@ a host that refuses sharing falls back to one connection per command.
   remote host needs Podman 4.3 or newer and the same rootless
   user-namespace setup as a local Podman host.
 
-## Target configuration
+## Machine and runtime configuration
 
-Shared SSH connection keys (flattened into both target kinds):
+The SSH host is one `[machines.<id>]` entry, and every runtime on it names that
+machine. The machine's keys are:
 
 | Key | Required | Notes |
 | --- | --- | --- |
+| `kind` | yes | `ssh`. |
 | `host` | yes | SSH destination: hostname, IP, or an alias from your SSH config. |
 | `user` | no | SSH login user; omit to use your SSH config / default. |
 | `identity_file` | no | Path to the private key. |

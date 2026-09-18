@@ -564,7 +564,7 @@ for line in sys.stdin:
 """
         )
         bridge.chmod(0o700)
-        # The local-bare target now resolves the exact managed Codex harness
+        # The local bare runtime now resolves the exact managed Codex harness
         # before startup, so PATH alone cannot replace its bridge. Seed the
         # worker's isolated managed cache with the same manifest/entrypoint
         # shape the worker validates, while retaining this Python fake and no

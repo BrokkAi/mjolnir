@@ -245,7 +245,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |
 | `GROK_HOME` | Grok Build home used by setup discovery and native import. |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Muse configuration and external native session storage roots, respectively. |
-| `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except `local-bare`. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | GitHub token available for syncing into every live target except a bare runtime on this machine. |
 | `GIT_SSH_COMMAND` | SSH command used by checkpoint/archive Git operations. |
 | `RUST_LOG` | Controller logging filter. |
 

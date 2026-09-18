@@ -31,9 +31,10 @@ conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
 Kimi Code does not expose a guardian approval mode. Mjolnir warns before using
-it on a raw `local-bare` target or an `ssh-bare` target configured with
-`permissions = "guardian"`. Container and EC2 targets instead run every harness
-unconstrained inside the target's isolation boundary. See
+it on a `bare` runtime on this machine, or on a `bare` runtime on an SSH
+machine configured with `permissions = "guardian"`. Container runtimes and EC2
+machines instead run every harness unconstrained inside the isolation
+boundary. See
 [Targets](/targets/) and [Security boundaries](/security/).
 
 ## Codex with a custom provider
@@ -244,8 +245,9 @@ For the complete field and validation table, see the
 
 ### PATH discovery
 
-Mjolnir-owned workers and bridges use non-login shells. On local-bare, SSH, and
-EC2 targets, each worker performs one bounded login-shell probe and carries only
+Mjolnir-owned workers and bridges use non-login shells. On every bare runtime,
+whether on this machine, an SSH machine, or an EC2 machine, each worker
+performs one bounded login-shell probe and carries only
 the discovered `PATH` into the non-login runtime. An explicit
 `[profiles.<id>.environment]` `PATH` wins. Agent-requested `!` shell commands are
 different: they intentionally run through `bash -lc` in the session user's
@@ -261,7 +263,7 @@ For Muse, configure `kind = "muse"` and a home ending in `muse`, for example
 `home = "/home/me/.config/muse"` or `/home/me/accounts/work/muse`. Discovery
 uses `$XDG_CONFIG_HOME/muse` when set. Mjolnir gives each session a private
 configuration copy and stores native history under that copy's `.data/muse/`
-tree, including on local-bare targets. Do not override `XDG_CONFIG_HOME` or
+tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
 Run:

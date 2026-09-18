@@ -1,12 +1,12 @@
 # AWS EC2 machines
 
-This is the setup guide for a Mjolnir `aws-ec2` target: a disposable EC2 instance
+This is the setup guide for a Mjolnir `aws-ec2` machine: a disposable EC2 instance
 that Mjolnir launches for one session and terminates when the session closes.
 
 ## What Mjolnir does, and does not, manage
 
 Mjolnir provisions a session by shelling out to the `aws` CLI. Opening a session
-on an `aws-ec2` target runs:
+on an `aws-ec2` machine runs:
 
 ```console
 aws --profile <aws_profile> --region <region> ec2 run-instances \

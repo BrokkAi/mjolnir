@@ -26,10 +26,9 @@ Then:
    mj doctor --json --smoke
    ```
 
-`--smoke` goes beyond static prerequisite checks for local Podman, local Docker,
-Apple Container, and SSH Podman: it launches, executes in, and removes a
-disposable container. It does not smoke-test `local-bare`, `ssh-bare`, or
-`aws-ec2`. The Docker test also proves the writable OverlayFS attachment path
+`--smoke` goes beyond static prerequisite checks for Podman, Docker, and Apple
+Container, on this machine or over SSH: it launches, executes in, and removes a
+disposable container. It does not smoke-test a bare runtime on any machine. The Docker test also proves the writable OverlayFS attachment path
 and cleanup.
 
 For a self-contained handoff to another coding agent, generate the platform
@@ -62,8 +61,8 @@ hand.
 
 ## A bare session says the primary checkout is dirty
 
-When **Create managed worktree** is checked for a new `local-bare` or `ssh-bare`
-session, Mjolnir creates a linked worktree from the selected checkout’s `HEAD`.
+When **Create managed worktree** is checked for a new bare session, on this
+machine or on an SSH machine, Mjolnir creates a linked worktree from the selected checkout’s `HEAD`.
 It refuses to do that while source changes would be left behind, including staged,
 unstaged, and untracked files.
 
@@ -77,7 +76,7 @@ Commit the listed work, remove files you do not need, or stash everything with
 `git stash push --include-untracked`. Then retry the launch. This requirement
 applies when creating a managed worktree. To work directly in the selected
 directory with its current changes, uncheck **Create managed worktree** on the
-final review. See [Targets](/targets/#bare-targets)
+final review. See [Targets](/targets/#bare-runtimes)
 and [Workspaces and bundles](/workspaces-bundles/).
 
 ## A harness profile is not authenticated
