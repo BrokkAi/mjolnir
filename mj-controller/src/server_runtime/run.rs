@@ -590,7 +590,10 @@ pub async fn run_server(
                         let operational_state = snapshot.operational;
                         materialized_activity.insert(
                             update.session_id.clone(),
-                            materialized.last_activity_at_ms,
+                            crate::server_runtime::snapshot::MaterializedActivity {
+                                last_activity_at_ms: materialized.last_activity_at_ms,
+                                execution: materialized.execution,
+                            },
                         );
                         let queued = queued_prompt_projection(&materialized);
                         let pending = materialized.pending_elicitations.clone();

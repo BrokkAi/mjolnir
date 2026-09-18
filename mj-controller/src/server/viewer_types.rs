@@ -101,10 +101,17 @@ impl ViewerSnapshot {
                     configuration_issue: session.configuration_issue(config),
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
-                    // the local diagnostic to learn why.
-                    launch_error: (session.state == SessionState::Error)
-                        .then(|| session.last_error.clone())
-                        .flatten(),
+                    // the local diagnostic to learn why. A failed resume rolls
+                    // the record back to stopped and leaves its reason in the
+                    // same field, so that state reports it too; every
+                    // successful transition clears `last_error`, so this never
+                    // reports a failure the session has since recovered from.
+                    launch_error: matches!(
+                        session.state,
+                        SessionState::Error | SessionState::Stopped
+                    )
+                    .then(|| session.last_error.clone())
+                    .flatten(),
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -130,8 +137,11 @@ impl ViewerSnapshot {
                     activity: String::new(),
                     operation: None,
                     move_recovery: None,
+                    // Both are replaced for every session by the phone
+                    // projection, from the one shared activity state.
                     chat_phase: ViewerChatPhase::default(),
                     is_idle: false,
+                    activity_state: None,
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -347,6 +357,12 @@ pub struct ViewerSession {
     /// Missing operational state must not be presented as confirmed idle.
     #[serde(default)]
     pub is_idle: bool,
+    /// What this session is doing, in the shared vocabulary every part of
+    /// Mjolnir now uses. Richer than `chat_phase`, which has only four values
+    /// and must keep them: this can also say that the daemon cannot see the
+    /// worker and report what was last known about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_state: Option<mj_core::activity::ActivityState>,
     /// What this session is doing, in the words the dashboard row uses:
     /// `Turn 43m36s  Step 12s`, `BG 43m36s`, or `[idle]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]

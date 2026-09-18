@@ -513,6 +513,24 @@ pub(super) fn worker_launch_config(
         _ => Default::default(),
     };
     let mut target_environment = target_environment;
+    // The turn bounds are read by the worker process, which re-execs with a
+    // cleared environment, so a value set for the daemon cannot reach it by
+    // inheritance. Carry the two knobs explicitly when the daemon was started
+    // with them, so shortening a timeout for a test works on every target and
+    // not only on the container targets that can set it in configuration.
+    // `RUST_LOG` travels the same way and for the same reason: a worker that
+    // has gone quiet is diagnosed from its own log, and the log level cannot
+    // be raised after the fact on a worker that re-execs with a cleared
+    // environment.
+    for name in [
+        "MJ_TURN_STALL_TIMEOUT_MS",
+        "MJ_TURN_TOOL_STALL_TIMEOUT_MS",
+        "RUST_LOG",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            target_environment.insert(name.to_owned(), value);
+        }
+    }
     // The build cache reaches the harness, its terminals, and the reviewer
     // sidecar, all of which run Cargo through the mbx shim.
     if let Some(build_cache) = &session.build_cache {

@@ -1348,7 +1348,7 @@ fn codex_locator_uses_rollout_id_when_session_id_names_a_parent() {
     fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     fs::write(
             &rollout,
-            r#"{"type":"session_meta","payload":{"session_id":"019feb6c-5ffc-7c12-ad99-bdeaeb6be79d","id":"019feb6c-6b55-7111-a210-6d85ee0772cd"}}"#,
+            r#"{"type":"session_meta","payload":{"session_id":"019feb6c-5ffc-7c12-ad99-bdeaeb6be79d","id":"019feb6c-6b55-7111-a210-6d85ee0772cd","cwd":"/work/app"}}"#,
         )
         .unwrap();
 
@@ -2295,4 +2295,218 @@ fn a_changed_modified_time_reparses_the_claude_transcript() {
         ["Later title"]
     );
     assert_eq!(cache.parsed_files(), 2);
+}
+
+const NAMED_LOOKUP_ID: &str = "019feb6c-6b55-7111-a210-000000000001";
+
+/// A Codex rollout at the standard `sessions/<year>/<month>/<day>` depth.
+fn codex_named_rollout(home: &Path, session_id: &str, source: Value) -> PathBuf {
+    let day = home.join("sessions/2026/08/10");
+    fs::create_dir_all(&day).unwrap();
+    let rollout = day.join(format!("rollout-2026-08-10T00-00-00-{session_id}.jsonl"));
+    fs::write(
+        &rollout,
+        json!({
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": "/work/app", "source": source},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    rollout
+}
+
+#[test]
+fn codex_lookup_by_id_finds_a_session_the_picker_hides() {
+    let directory = tempfile::tempdir().unwrap();
+    // A structured source identifies a subagent rollout, which the resume
+    // picker hides. Naming it by id must still import it.
+    let rollout = codex_named_rollout(
+        directory.path(),
+        NAMED_LOOKUP_ID,
+        json!({"subagent": {"parent_thread_id": "019feb6c-6b55-7111-a210-000000000009"}}),
+    );
+
+    assert!(list_codex_sessions(directory.path()).unwrap().is_empty());
+    let located = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap();
+    assert_eq!(located.native_session_id, NAMED_LOOKUP_ID);
+    assert_eq!(located.jsonl_path, rollout);
+}
+
+#[test]
+fn codex_lookup_by_id_reports_a_symlinked_rollout() {
+    let directory = tempfile::tempdir().unwrap();
+    let stored = directory.path().join("stored.jsonl");
+    fs::write(
+        &stored,
+        json!({"type": "session_meta", "payload": {"id": NAMED_LOOKUP_ID, "cwd": "/work/app"}})
+            .to_string(),
+    )
+    .unwrap();
+    let day = directory.path().join("sessions/2026/08/10");
+    fs::create_dir_all(&day).unwrap();
+    std::os::unix::fs::symlink(
+        &stored,
+        day.join(format!(
+            "rollout-2026-08-10T00-00-00-{NAMED_LOOKUP_ID}.jsonl"
+        )),
+    )
+    .unwrap();
+
+    let error = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn codex_lookup_by_id_still_reports_a_missing_session_as_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("sessions")).unwrap();
+
+    let error = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = directory
+        .path()
+        .join("sessions/project")
+        .join(format!("session_{NAMED_LOOKUP_ID}"));
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("state.json"),
+        r#"{"workDir":"/work/app","title":"Unindexed","archived":true}"#,
+    )
+    .unwrap();
+    fs::write(directory.path().join("session_index.jsonl"), "").unwrap();
+
+    assert!(list_kimi_sessions(directory.path()).unwrap().is_empty());
+    let located = locate_kimi_session(
+        directory.path(),
+        &KimiSessionSelection::NativeSessionId(format!("session_{NAMED_LOOKUP_ID}")),
+    )
+    .unwrap();
+    assert_eq!(
+        located.native_session_id,
+        format!("session_{NAMED_LOOKUP_ID}")
+    );
+    assert_eq!(located.cwd, PathBuf::from("/work/app"));
+}
+
+#[test]
+fn kimi_lookup_by_id_reports_a_symlinked_session_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let stored = directory.path().join("stored");
+    fs::create_dir_all(&stored).unwrap();
+    fs::write(stored.join("state.json"), r#"{"workDir":"/work/app"}"#).unwrap();
+    let workspace = directory.path().join("sessions/project");
+    fs::create_dir_all(&workspace).unwrap();
+    std::os::unix::fs::symlink(
+        &stored,
+        workspace.join(format!("session_{NAMED_LOOKUP_ID}")),
+    )
+    .unwrap();
+
+    let error = locate_kimi_session(
+        directory.path(),
+        &KimiSessionSelection::NativeSessionId(format!("session_{NAMED_LOOKUP_ID}")),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn kimi_lookup_by_id_still_reports_a_missing_session_as_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("sessions/project")).unwrap();
+
+    let error = locate_kimi_session(
+        directory.path(),
+        &KimiSessionSelection::NativeSessionId(format!("session_{NAMED_LOOKUP_ID}")),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let stored = directory.path().join("stored");
+    fs::create_dir_all(&stored).unwrap();
+    fs::write(
+        stored.join("summary.json"),
+        json!({"info": {"cwd": "/work/app"}}).to_string(),
+    )
+    .unwrap();
+    let workspace = directory.path().join("sessions/%2Fwork%2Fapp");
+    fs::create_dir_all(&workspace).unwrap();
+    std::os::unix::fs::symlink(&stored, workspace.join(NAMED_LOOKUP_ID)).unwrap();
+
+    let error = locate_grok_session(
+        directory.path(),
+        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn grok_lookup_by_id_reports_a_session_without_a_cwd() {
+    let directory = tempfile::tempdir().unwrap();
+    // The hashed directory-name form keeps the real cwd in `.cwd`, which is
+    // missing here, and the summary records none either.
+    let session = directory
+        .path()
+        .join("sessions/app-0123456789abcdef")
+        .join(NAMED_LOOKUP_ID);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("summary.json"),
+        json!({"session_summary": "A session"}).to_string(),
+    )
+    .unwrap();
+
+    let error = locate_grok_session(
+        directory.path(),
+        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("has no cwd"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[test]
+fn grok_lookup_by_id_still_reports_a_missing_session_as_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir_all(directory.path().join("sessions/%2Fwork%2Fapp")).unwrap();
+
+    let error = locate_grok_session(
+        directory.path(),
+        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
 }

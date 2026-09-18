@@ -22,7 +22,7 @@ pub(super) struct PhoneSessionViews<'a> {
     /// Durable activity watermarks delivered with the materialized worker
     /// snapshots. Keeping this in the control-loop cache avoids a database
     /// read while rendering each viewer snapshot.
-    pub(super) materialized_activity: &'a std::collections::BTreeMap<String, Option<i64>>,
+    pub(super) materialized_activity: &'a std::collections::BTreeMap<String, MaterializedActivity>,
     pub(super) project_sources: &'a PhoneProjectSources,
     /// Lifecycle operations running now, keyed by session.
     pub(super) operations: &'a std::collections::BTreeMap<String, crate::server::ViewerOperation>,
@@ -469,7 +469,11 @@ pub(super) fn viewer_snapshot(
         {
             session.set_project_source(source);
         }
-        session.last_activity_at_ms = materialized_activity.get(&session.id).copied().flatten();
+        let durable_activity = materialized_activity
+            .get(&session.id)
+            .copied()
+            .unwrap_or_default();
+        session.last_activity_at_ms = durable_activity.last_activity_at_ms;
         session.queued_prompts = queued_prompts
             .get(&session.id)
             .into_iter()
@@ -521,6 +525,39 @@ pub(super) fn viewer_snapshot(
             session.transitioning = true;
         }
         let live = operational.get(&session.id);
+        // One answer for every session, whether or not the daemon can see its
+        // worker. A worker the daemon has lost is reported as what was last
+        // known about it, never as idle: a turn that outlives a daemon
+        // restart is still running, and calling it idle made automation treat
+        // it as finished (#1025).
+        let activity_state = match live {
+            Some(state) => state.activity_state(),
+            None => mj_core::activity::while_disconnected(
+                durable_activity.execution,
+                durable_activity.last_activity_at_ms,
+            ),
+        };
+        // A session the daemon can see reports the phase its own flag names,
+        // corrected for a turn that flag has not caught up with; one it cannot
+        // see reports what was last known.
+        let chat_phase = match live {
+            Some(state) => mj_core::activity::chat_phase(&state.facts()),
+            None => activity_state.chat_phase(),
+        };
+        session.chat_phase = match chat_phase {
+            mj_core::relay::RelayExecutionState::Idle => crate::server::ViewerChatPhase::Idle,
+            mj_core::relay::RelayExecutionState::Running => crate::server::ViewerChatPhase::Running,
+            mj_core::relay::RelayExecutionState::Closing => crate::server::ViewerChatPhase::Closing,
+            mj_core::relay::RelayExecutionState::Closed => crate::server::ViewerChatPhase::Closed,
+        };
+        session.is_idle = activity_state.is_idle()
+            && controller
+                .state
+                .sessions
+                .get(&session.id)
+                .is_some_and(|record| record.state == mj_core::state::SessionState::Running)
+            && session.operation.is_none();
+        session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
             mj_core::acp::AcpSessionFacts::from_operational(
                 controller
@@ -537,18 +574,6 @@ pub(super) fn viewer_snapshot(
         });
         if let Some(state) = live {
             session.latest_event_ordinal = state.latest_ordinal;
-            session.chat_phase = match state.execution {
-                mj_core::relay::RelayExecutionState::Idle => crate::server::ViewerChatPhase::Idle,
-                mj_core::relay::RelayExecutionState::Running => {
-                    crate::server::ViewerChatPhase::Running
-                }
-                mj_core::relay::RelayExecutionState::Closing => {
-                    crate::server::ViewerChatPhase::Closing
-                }
-                mj_core::relay::RelayExecutionState::Closed => {
-                    crate::server::ViewerChatPhase::Closed
-                }
-            };
             session.config_options = crate::server::viewer_config_options(
                 &state.config_options,
                 facts
@@ -570,13 +595,6 @@ pub(super) fn viewer_snapshot(
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
             session.activity_details = Some(viewer_activity_details(&activity_details));
-            session.is_idle = controller
-                .state
-                .sessions
-                .get(&session.id)
-                .is_some_and(|record| record.state == mj_core::state::SessionState::Running)
-                && session.operation.is_none()
-                && activity.is_idle(turn_started_at);
             session.activity = mj_client::usage_format::format_activity_columns(
                 now,
                 turn_started_at,
@@ -655,12 +673,25 @@ pub(super) fn viewer_activity_details(
     }
 }
 
+/// What the durable projection last recorded about a session's turn.
+///
+/// The daemon keeps this for every session, including ones it currently has
+/// no live connection to, because that is the only honest thing it can report
+/// about a worker it cannot see. Reporting the default value of an enum
+/// instead is what made a running turn look finished after a daemon restart
+/// (#1025).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct MaterializedActivity {
+    pub(super) last_activity_at_ms: Option<i64>,
+    pub(super) execution: mj_core::state::MaterializedExecutionState,
+}
+
 /// Seed the viewer's in-memory activity cache from the durable projection
 /// before publishing its first snapshot. Later worker snapshots update this
 /// cache without adding a database read to the render path.
 pub(super) async fn load_materialized_activity(
     controller: &Controller,
-) -> Result<std::collections::BTreeMap<String, Option<i64>>> {
+) -> Result<std::collections::BTreeMap<String, MaterializedActivity>> {
     let session_ids = controller
         .state
         .sessions
@@ -672,10 +703,13 @@ pub(super) async fn load_materialized_activity(
             .into_iter()
             .map(|session_id| {
                 crate::database::load_materialized_session_summary(&session_id).map(|summary| {
-                    (
-                        session_id,
-                        summary.and_then(|summary| summary.last_activity_at_ms),
-                    )
+                    let activity = summary
+                        .map(|summary| MaterializedActivity {
+                            last_activity_at_ms: summary.last_activity_at_ms,
+                            execution: summary.execution,
+                        })
+                        .unwrap_or_default();
+                    (session_id, activity)
                 })
             })
             .collect()

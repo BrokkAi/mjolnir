@@ -633,6 +633,146 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
         .is_empty()
     );
 }
+/// A close of a session wedged in provisioning has no relay to latch and no
+/// harness state to archive, so it tears the target down and settles instead
+/// of waiting forever (#1059).
+#[test]
+fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Provisioning;
+    session.checkpoint = None;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+
+    let deferred = controller
+        .close_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+        .unwrap();
+
+    assert!(!deferred, "a bare target needs no storage cleanup pass");
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    assert!(
+        !worker_root.exists(),
+        "the interrupted provision's worker root is removed"
+    );
+}
+
+/// The same close refuses a session that still has a workspace worth
+/// archiving, so it can never become a quiet force-destroy.
+#[test]
+fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: directory.path().join(session_id),
+    });
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+
+    let error = controller
+        .close_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("close it gracefully"),
+        "{error:#}"
+    );
+    assert_eq!(
+        controller.state.sessions[session_id].state,
+        SessionState::Running
+    );
+}
+
+/// An in-flight state with nobody to finish it becomes a failure the user can
+/// read, and a state that still has an owner is left alone (#1070).
+#[test]
+fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Provisioning;
+    session.target = None;
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+    let persisted = RefCell::new(Vec::new());
+    let persist = |record: &mj_core::state::SessionRecord| {
+        persisted
+            .borrow_mut()
+            .push((record.state, record.last_error.clone()));
+        Ok(())
+    };
+
+    assert!(
+        controller
+            .fail_interrupted_lifecycle_with(
+                session_id,
+                "the daemon stopped while provisioning",
+                persist,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        persisted.borrow().as_slice(),
+        &[(
+            SessionState::Error,
+            Some("the daemon stopped while provisioning".to_owned())
+        )],
+        "the cause reaches the store, not just memory"
+    );
+    let failed = &controller.state.sessions[session_id];
+    assert_eq!(failed.state, SessionState::Error);
+    assert_eq!(
+        failed.last_error.as_deref(),
+        Some("the daemon stopped while provisioning")
+    );
+
+    // A record that has already settled is not overwritten by a stale
+    // reconciliation decision.
+    assert!(
+        !controller
+            .fail_interrupted_lifecycle_with(session_id, "a later restart", persist)
+            .unwrap()
+    );
+    assert_eq!(
+        controller.state.sessions[session_id].last_error.as_deref(),
+        Some("the daemon stopped while provisioning")
+    );
+}
+
 #[test]
 fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     struct RecordingExecutor {

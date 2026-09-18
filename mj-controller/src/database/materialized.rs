@@ -221,26 +221,35 @@ pub(super) fn last_materialized_agent_message(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<(u64, String)>> {
-    last_materialized_agent_message_in(connection, session_id, 0)
+    last_materialized_agent_message_in(connection, session_id, 0, None)
 }
 
-/// The newest nonempty agent message strictly after `after_position`, flattened
-/// to text. Restricting by position is how one turn's final message is read.
-pub(super) fn last_materialized_agent_message_after(
+/// The newest nonempty agent message inside one turn, flattened to text.
+///
+/// The turn is a span, not a starting point. A harness can put an agent
+/// message in the transcript after the turn it answered has ended — a resume
+/// notice is one — and reading everything after the turn's start would return
+/// that notice as the turn's answer.
+pub(super) fn last_materialized_agent_message_within(
     connection: &Connection,
     session_id: &str,
     after_position: u64,
+    through_position: u64,
 ) -> Result<Option<String>> {
-    Ok(
-        last_materialized_agent_message_in(connection, session_id, after_position)?
-            .map(|(_, text)| text),
-    )
+    Ok(last_materialized_agent_message_in(
+        connection,
+        session_id,
+        after_position,
+        Some(through_position),
+    )?
+    .map(|(_, text)| text))
 }
 
 pub(super) fn last_materialized_agent_message_in(
     connection: &Connection,
     session_id: &str,
     after_position: u64,
+    through_position: Option<u64>,
 ) -> Result<Option<(u64, String)>> {
     let row = connection
         .query_row(
@@ -248,6 +257,7 @@ pub(super) fn last_materialized_agent_message_in(
              FROM materialized_transcript_items
              WHERE session_id = ?1
                AND position > ?2
+               AND (?3 IS NULL OR position <= ?3)
                AND latest_content_event_ordinal IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM json_each(
@@ -267,7 +277,7 @@ pub(super) fn last_materialized_agent_message_in(
                )
              ORDER BY position DESC, stable_id DESC
              LIMIT 1",
-            params![session_id, after_position],
+            params![session_id, after_position, through_position],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
@@ -312,18 +322,67 @@ pub(super) fn load_materialized_turn_outcome_from(
     )))
 }
 
-/// Summarize the turn that began at `turn_start_position`.
+/// The answer a session's last finished turn ended with.
+///
+/// This is what a finished child session reports back to the agent that
+/// delegated to it, so it has to be that turn's own last agent message. The
+/// session-wide last agent message is not the same thing: a harness records
+/// messages of its own outside any turn, and a resume notice arriving after
+/// the child finished would then stand in for the child's report.
+///
+/// `None` means the session has no projection row, or no finished turn whose
+/// span is recorded, and the caller decides what to show instead.
+pub fn load_materialized_finished_turn_message(session_id: &str) -> Result<Option<String>> {
+    load_materialized_finished_turn_message_from(&database_path(), session_id)
+}
+
+pub(super) fn load_materialized_finished_turn_message_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let connection = open_reader(path)?;
+    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+        return Ok(None);
+    };
+    let Some(turn) = fields.last_turn_outcome else {
+        return Ok(None);
+    };
+    let Some(start_position) = turn.turn_start_position else {
+        return Ok(None);
+    };
+    last_materialized_agent_message_within(
+        &connection,
+        session_id,
+        start_position,
+        turn.completed_ordinal,
+    )
+}
+
+/// Summarize the turn that ran from `turn_start_position` to
+/// `turn_completed_position`.
+///
+/// Both bounds come from the turn's own record: a transcript item's position
+/// and a completed turn's `completed_ordinal` are the same relay ordinal, so
+/// the completion ordinal is the last position the turn can own. Anything the
+/// session records afterwards belongs to no turn, or to the next one.
 pub fn load_materialized_turn_summary(
     session_id: &str,
     turn_start_position: u64,
+    turn_completed_position: u64,
 ) -> Result<TurnSummary> {
-    load_materialized_turn_summary_from(&database_path(), session_id, turn_start_position)
+    load_materialized_turn_summary_from(
+        &database_path(),
+        session_id,
+        turn_start_position,
+        turn_completed_position,
+    )
 }
 
 pub(super) fn load_materialized_turn_summary_from(
     path: &Path,
     session_id: &str,
     turn_start_position: u64,
+    turn_completed_position: u64,
 ) -> Result<TurnSummary> {
     let connection = open_reader(path)?;
     let turn_number = connection.query_row(
@@ -352,12 +411,16 @@ pub(super) fn load_materialized_turn_summary_from(
     let (turn_started_at_ms, last_changed_at_ms) = connection.query_row(
         "SELECT COALESCE(MIN(created_at_ms), 0), COALESCE(MAX(last_changed_at_ms), 0)
          FROM materialized_transcript_items
-         WHERE session_id = ?1 AND position >= ?2",
-        params![session_id, turn_start_position],
+         WHERE session_id = ?1 AND position >= ?2 AND position <= ?3",
+        params![session_id, turn_start_position, turn_completed_position],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )?;
-    let final_message =
-        last_materialized_agent_message_after(&connection, session_id, turn_start_position)?;
+    let final_message = last_materialized_agent_message_within(
+        &connection,
+        session_id,
+        turn_start_position,
+        turn_completed_position,
+    )?;
     Ok(TurnSummary {
         turn_number,
         turn_started_at_ms,

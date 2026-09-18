@@ -23,7 +23,10 @@ pub(crate) fn capacity_staleness(
     now_epoch_seconds: u64,
 ) -> Option<String> {
     if let Some(error) = &detail.probe_error {
-        return Some(format!("stale: {error}"));
+        // A probe that never produced a reading already shows "unavailable"
+        // in the capacity column; only say more when stale numbers are still
+        // on screen and could be mistaken for current.
+        return detail.usage.is_some().then(|| format!("stale: {error}"));
     }
     let sampled_at = detail.sampled_at_epoch_seconds?;
     (now_epoch_seconds.saturating_sub(sampled_at) > CAPACITY_SAMPLE_STALE_AFTER_SECONDS).then(

@@ -72,6 +72,55 @@ fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
     ));
 }
 
+/// After a restart, every in-flight lifecycle state is either owned by
+/// something that resumes it or reported to the user. Nothing stays in flight
+/// with nobody behind it (#1070).
+#[test]
+fn startup_reports_every_in_flight_state_that_no_operation_owns() {
+    let target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "a".repeat(64),
+        workspace_storage: Default::default(),
+    });
+    let mut state = mj_core::state::State::default();
+    for (id, session_state, session_target) in [
+        ("provisioning", SessionState::Provisioning, None),
+        ("closing-orphan", SessionState::Closing, None),
+        ("destroying-orphan", SessionState::Destroying, None),
+        ("closing-owned", SessionState::Closing, target.clone()),
+        ("destroying-owned", SessionState::Destroying, target.clone()),
+        ("running", SessionState::Running, target.clone()),
+        ("stopped", SessionState::Stopped, None),
+        ("moving", SessionState::Provisioning, None),
+    ] {
+        let mut session = runtime_test_session(id, "workspace", session_state);
+        session.target = session_target;
+        state.sessions.insert(id.into(), session);
+    }
+    let controller = Controller {
+        config: mj_core::config::Config::default(),
+        state,
+    };
+
+    // A durable move intent owns its session, so reconciliation leaves it be.
+    let owned = ["moving".to_owned()].into_iter().collect();
+    let reconciled = unowned_interrupted_lifecycles(&controller, &owned);
+    let ids = reconciled
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["closing-orphan", "destroying-orphan", "provisioning"]);
+    let provisioning_cause = &reconciled
+        .iter()
+        .find(|(id, _)| id == "provisioning")
+        .expect("the interrupted provision is reported")
+        .1;
+    assert!(
+        provisioning_cause.contains("provisioning") && provisioning_cause.contains("recover scan"),
+        "the cause tells the user what happened and where the container went: {provisioning_cause}"
+    );
+}
+
 #[test]
 fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     let target = Some(mj_core::state::TargetLocator::LocalPodman {
@@ -83,14 +132,45 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         let mut session = runtime_test_session("session", "workspace", state);
         session.target = target.clone();
         assert_eq!(close_route(Some(&session)), CloseRoute::RecoverInterrupted);
-        // Without a target there is nothing left for recovery to finish.
+        // Without a target there is nothing left for recovery to finish, and
+        // nothing to checkpoint either: the close settles instead of waiting
+        // on a relay that does not exist.
         session.target = None;
-        assert_eq!(close_route(Some(&session)), CloseRoute::Graceful);
+        assert_eq!(
+            close_route(Some(&session)),
+            CloseRoute::SettleWithoutCheckpoint
+        );
     }
 
-    let running = runtime_test_session("session", "workspace", SessionState::Running);
+    let mut running = runtime_test_session("session", "workspace", SessionState::Running);
+    running.target = target.clone();
     assert_eq!(close_route(Some(&running)), CloseRoute::Graceful);
     assert_eq!(close_route(None), CloseRoute::Graceful);
+
+    // A session wedged in provisioning has no harness state and no relay, with
+    // or without the container it managed to create (#1059).
+    let mut provisioning = runtime_test_session("session", "workspace", SessionState::Provisioning);
+    assert_eq!(
+        close_route(Some(&provisioning)),
+        CloseRoute::SettleWithoutCheckpoint
+    );
+    provisioning.target = target.clone();
+    assert_eq!(
+        close_route(Some(&provisioning)),
+        CloseRoute::SettleWithoutCheckpoint
+    );
+
+    // The same session once startup reconciliation has failed it (#1070).
+    let failed = runtime_test_session("session", "workspace", SessionState::Error);
+    assert_eq!(
+        close_route(Some(&failed)),
+        CloseRoute::SettleWithoutCheckpoint
+    );
+    // A failed session that still names its target keeps a workspace worth
+    // checkpointing, so it takes the graceful close.
+    let mut failed_with_target = failed.clone();
+    failed_with_target.target = target.clone();
+    assert_eq!(close_route(Some(&failed_with_target)), CloseRoute::Graceful);
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
     assert_eq!(close_route(Some(&stopped)), CloseRoute::Done);
@@ -2028,6 +2108,8 @@ fn ready_startup_view() -> ManagedSessionView {
         last_harness_turn_started_ordinal: None,
         background_commands: Vec::new(),
         background_work_known: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
     };
     ManagedSessionView {
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {

@@ -393,6 +393,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
         idle_since_ms: None,
         execution: None,
         harness_turn_started_at_ms: None,
+        state: None,
         foreground_tool_started_at_ms: None,
         background_commands: vec![mj_core::relay::BackgroundCommand {
             id: "test-background".into(),
@@ -417,6 +418,7 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
         foreground_tool_started_at_ms: Some(19_988_000),
+        background_commands: Vec::new(),
         ..previous_activity
     });
     assert_eq!(

@@ -465,6 +465,7 @@ for line in sys.stdin:
                 ..Default::default()
             }));
             let spec = LaunchSpec {
+                bridge_spec_path: None,
                 subagent_mcp_socket: None,
                 goal_recovery: context.clone(),
                 command: "python3".into(),
@@ -485,6 +486,8 @@ for line in sys.stdin:
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
+                tools_in_flight: Default::default(),
+                stall_policy: None,
             };
             let (tx, rx) = mpsc::channel(8);
             let (events, mut receive) = mpsc::channel(8);
@@ -626,6 +629,7 @@ for line in sys.stdin:
 "#).unwrap();
                 let context = Arc::new(Mutex::new(mj_core::goal::GoalRecoveryContext::default()));
                 let spec = LaunchSpec {
+                    bridge_spec_path: None,
                     subagent_mcp_socket: None,
                     goal_recovery: context.clone(),
                     command: "python3".into(),
@@ -645,6 +649,8 @@ for line in sys.stdin:
                     execution_policy: ExecutionPolicy::ConfiguredApprovals,
                     acp_activity: Default::default(),
                     step_clock: Default::default(),
+                    tools_in_flight: Default::default(),
+                    stall_policy: None,
                 };
                 let (tx, rx) = mpsc::channel(8);
                 let (events, mut receive) = mpsc::channel(2);

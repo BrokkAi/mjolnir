@@ -34,8 +34,17 @@ pub struct ApiSession {
     pub lifecycle: ViewerLifecycleCategory,
     pub chat_phase: crate::server::ViewerChatPhase,
     pub is_idle: bool,
+    /// What this session is doing, in more detail than `chat_phase`'s four
+    /// values allow: in particular it can say that the daemon cannot see the
+    /// worker and report what it last knew, rather than claiming idleness it
+    /// cannot prove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_state: Option<mj_core::activity::ActivityState>,
     pub has_error: bool,
-    /// Why a launch failed, for a session in the error state. Absent otherwise.
+    /// Why a launch failed, for a session in the error state. Absent
+    /// otherwise: raw runtime error text is deliberately not published for a
+    /// running session. Why a *turn* failed travels in `last_turn_diagnostic`,
+    /// which a single-session query fills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at: String,
@@ -68,6 +77,7 @@ impl From<&ViewerSession> for ApiSession {
             lifecycle: session.lifecycle,
             chat_phase: session.chat_phase,
             is_idle: session.is_idle,
+            activity_state: session.activity_state.clone(),
             has_error: session.has_error,
             error: session.launch_error.clone(),
             created_at: session.created_at.clone(),
@@ -110,6 +120,39 @@ pub struct StartSessionRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+}
+
+/// Resume a stopped, lost, or failed session. Every field is optional: the
+/// session's own record supplies what the caller does not name, which is what
+/// makes `POST .../resume` with no body the scriptable "continue this session"
+/// call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeSessionRequest {
+    /// Profile to resume on. Defaults to the one the session last ran.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// Target template to provision. Defaults to the session's own.
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// Workspace the resumed session belongs to. Defaults to its own.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Whether prompts queued when the session stopped are started or
+    /// discarded. Defaults to `start`, which is what the terminal's own resume
+    /// wizard defaults to.
+    #[serde(default)]
+    pub queue: Option<mj_core::state::ResumeQueueDisposition>,
+}
+
+/// What a resume was accepted as: the settings it will actually use, resolved
+/// from the request and the session's record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSessionResponse {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub target_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

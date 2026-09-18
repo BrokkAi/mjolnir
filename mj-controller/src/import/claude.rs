@@ -14,6 +14,12 @@ pub fn locate_claude_session(
             let mut matches = candidates
                 .into_iter()
                 .filter(|candidate| candidate.native_session_id == *native_session_id)
+                // A listed row can carry an empty cwd: `scan_claude_sessions`
+                // keeps a transcript it failed to parse in the picker rather
+                // than hiding it. Such a row cannot be imported, so the by-id
+                // lookup re-reads the file and reports the parse failure or
+                // the missing cwd by name.
+                .filter(|candidate| !candidate.cwd.as_os_str().is_empty())
                 .collect::<Vec<_>>();
             let mut rejected = Vec::new();
             if matches.is_empty() {
@@ -22,10 +28,9 @@ pub fn locate_claude_session(
                 rejected = unlisted.rejected;
             }
             match matches.len() {
-                0 if !rejected.is_empty() => bail!(
-                    "Claude session {native_session_id:?} cannot be imported: {}",
-                    rejected.join("; ")
-                ),
+                0 if !rejected.is_empty() => {
+                    Err(CLAUDE_STORE.cannot_import(native_session_id, &rejected))
+                }
                 0 => bail!(
                     "Claude session {native_session_id:?} was not found under {}",
                     projects.display()
@@ -75,42 +80,26 @@ pub(super) fn locate_unlisted_claude_sessions(
         let path = project_path.join(format!("{native_session_id}.jsonl"));
         if project_metadata.file_type().is_symlink() {
             if path.exists() {
-                rejected.push(format!(
-                    "{} is a symlinked project directory; Mjolnir imports only \
-                     transcripts stored directly in the Claude home",
-                    project_path.display()
-                ));
+                rejected.push(CLAUDE_STORE.symlinked_container(&project_path, "project directory"));
             }
             continue;
         }
         if !project_metadata.is_dir() {
             continue;
         }
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                rejected.push(format!("{} cannot be read: {error}", path.display()));
+        let metadata = match CLAUDE_STORE.file(&path) {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                rejected.push(reason);
                 continue;
             }
+            NamedEntry::Importable(metadata) => metadata,
         };
-        if metadata.file_type().is_symlink() {
-            rejected.push(format!(
-                "{} is a symlink; Mjolnir imports only transcripts stored \
-                 directly in the Claude home",
-                path.display()
-            ));
-            continue;
-        }
-        if !metadata.is_file() {
-            rejected.push(format!("{} is not a regular file", path.display()));
-            continue;
-        }
         let summary = claude_native_summary(&path)?;
         // A transcript that never records a cwd cannot be imported: the
         // archive is collected relative to the directory the session ran in.
         let Some(cwd) = summary.cwd else {
-            rejected.push(format!("Claude session {} has no cwd", path.display()));
+            rejected.push(CLAUDE_STORE.no_cwd(&path));
             continue;
         };
         matches.push(LocatedClaudeSession {
@@ -227,6 +216,11 @@ pub fn scan_claude_sessions(
                 });
                 continue;
             }
+            // A transcript Mjolnir cannot parse still belongs in the picker:
+            // dropping it is how a named session became invisible in the
+            // first place. The row carries an empty cwd, which the by-id
+            // lookup refuses, so it re-reads the file and reports the parse
+            // failure rather than importing a session with no directory.
             Err(_) => (session_id.clone(), PathBuf::new(), "HEAD".to_owned()),
         };
         let (title, cwd, git_branch) = metadata;

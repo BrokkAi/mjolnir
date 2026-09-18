@@ -96,6 +96,19 @@ mod tests {
             ),
             (
                 "a foreground tool is still in progress",
+                (|state| {
+                    state.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
+                        tool_call_id: "tool-1".into(),
+                        status: ToolCallStatus::InProgress,
+                        started_at_ms: 1,
+                    }];
+                    state.foreground_tool_started_at_ms = Some(1);
+                }),
+            ),
+            (
+                // A worker too old to list its open tool calls reports only
+                // the newest one's start, and that still means work.
+                "an older worker reports only a foreground tool start",
                 (|state| state.foreground_tool_started_at_ms = Some(1)),
             ),
             (
@@ -107,6 +120,17 @@ mod tests {
             let mut state = quiet.clone();
             make_busy(&mut state);
             assert!(!state.is_quiet(), "{reason}");
+            // A held barrier is the one reason `is_quiet` refuses that is not
+            // itself work: a caller already holding a barrier asks
+            // `has_work_in_flight` whether anything *else* is running.
+            if reason == "a checkpoint barrier is waiting" {
+                assert!(
+                    !state.has_work_in_flight(),
+                    "a held barrier is not work in flight"
+                );
+            } else {
+                assert!(state.has_work_in_flight(), "{reason}");
+            }
         }
     }
 

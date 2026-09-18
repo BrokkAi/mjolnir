@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use mj_controller::server::api::{
-    ExportKind, ExportRequest, RelayState, StartSessionRequest, WaitOutcome, WaitRequest,
-    WaitResponse,
+    ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest, WaitOutcome,
+    WaitRequest, WaitResponse,
 };
 
 use crate::api_client::{ApiClient, ExportResult};
@@ -341,6 +341,43 @@ pub(crate) struct CloseArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ResumeArgs {
+    /// Stopped, lost, or failed session to resume. It keeps its identity,
+    /// transcript, and work.
+    #[arg(long)]
+    session: String,
+    /// Profile to resume on. Defaults to the one the session last ran.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Target template to provision. Defaults to the session's own.
+    #[arg(long)]
+    target: Option<String>,
+    /// Workspace to resume into. Defaults to the session's own.
+    #[arg(long)]
+    workspace_id: Option<String>,
+    /// What to do with prompts queued when the session stopped.
+    #[arg(long, value_enum)]
+    queue: Option<ResumeQueueArg>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ResumeQueueArg {
+    Start,
+    Discard,
+}
+
+impl From<ResumeQueueArg> for mj_core::state::ResumeQueueDisposition {
+    fn from(queue: ResumeQueueArg) -> Self {
+        match queue {
+            ResumeQueueArg::Start => Self::Start,
+            ResumeQueueArg::Discard => Self::Discard,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ApiInfoArgs {
     #[arg(long)]
     json: bool,
@@ -432,54 +469,72 @@ fn report_wait(response: &WaitResponse, json: bool) -> Result<()> {
     if json {
         print_json(response)?;
     } else {
-        let mut line = outcome_name(response.outcome).to_owned();
-        if let Some(stop_reason) = &response.stop_reason {
-            line.push_str(&format!(" ({stop_reason})"));
-        }
-        if let Some(turn_number) = response.turn_number {
-            line.push_str(&format!(" turn {turn_number}"));
-        }
-        if let Some(elapsed_ms) = response.elapsed_ms {
-            line.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
-        }
-        println!("{line}");
-        if !response.pending_elicitations.is_empty() {
-            print_json(&response.pending_elicitations)?;
-        }
-        if let Some(message) = &response.message {
-            println!("{message}");
-        }
-        if let Some(retry) = &response.capacity_retry {
-            println!(
-                "a capacity retry is armed (attempt {}); do not send another prompt yet",
-                retry.attempt
-            );
-        }
-        // A turn that is still running and a worker the daemon cannot see look
-        // identical from a timeout alone, so name the relay when it is at
-        // fault.
-        if response.outcome == WaitOutcome::Timeout
-            && let Some(relay) = &response.relay
-            && relay.state != RelayState::Connected
-        {
-            let mut line = format!(
-                "the daemon's view of this session is {}",
-                relay_state_name(relay.state)
-            );
-            if let Some(detail) = &relay.detail {
-                line.push_str(&format!(": {detail}"));
-            }
+        for line in wait_report_lines(response) {
             println!("{line}");
         }
-        if let Some(final_message) = &response.final_message {
-            println!();
-            println!("{final_message}");
+        if !response.pending_elicitations.is_empty() {
+            print_json(&response.pending_elicitations)?;
         }
     }
     match response.outcome {
         WaitOutcome::Finished | WaitOutcome::InputRequired => Ok(()),
         outcome => bail!("the turn ended as {}", outcome_name(outcome)),
     }
+}
+
+/// What `mj wait` prints, one line per entry.
+///
+/// Separate from the printing so the content can be tested: a turn that failed
+/// used to print the bare word "error" and leave the reason in the transcript,
+/// where automation never saw it (#1020).
+fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut summary = outcome_name(response.outcome).to_owned();
+    if let Some(stop_reason) = &response.stop_reason {
+        summary.push_str(&format!(" ({stop_reason})"));
+    }
+    if let Some(turn_number) = response.turn_number {
+        summary.push_str(&format!(" turn {turn_number}"));
+    }
+    if let Some(elapsed_ms) = response.elapsed_ms {
+        summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
+    }
+    lines.push(summary);
+    if let Some(message) = &response.message {
+        lines.push(message.clone());
+    }
+    // Why the turn ended, when the worker recorded a reason.
+    if let Some(diagnostic) = &response.diagnostic
+        && response.outcome != WaitOutcome::Finished
+    {
+        lines.push(diagnostic.message.clone());
+    }
+    if let Some(retry) = &response.capacity_retry {
+        lines.push(format!(
+            "a capacity retry is armed (attempt {}); do not send another prompt yet",
+            retry.attempt
+        ));
+    }
+    // A turn that is still running and a worker the daemon cannot see look
+    // identical from a timeout alone, so name the relay when it is at fault.
+    if response.outcome == WaitOutcome::Timeout
+        && let Some(relay) = &response.relay
+        && relay.state != RelayState::Connected
+    {
+        let mut line = format!(
+            "the daemon's view of this session is {}",
+            relay_state_name(relay.state)
+        );
+        if let Some(detail) = &relay.detail {
+            line.push_str(&format!(": {detail}"));
+        }
+        lines.push(line);
+    }
+    if let Some(final_message) = &response.final_message {
+        lines.push(String::new());
+        lines.push(final_message.clone());
+    }
+    lines
 }
 
 fn relay_state_name(state: RelayState) -> &'static str {
@@ -641,6 +696,36 @@ pub(crate) async fn close(args: CloseArgs) -> Result<()> {
     }
 }
 
+/// Resume a stopped session from its checkpoint.
+///
+/// The API answers as soon as the daemon admits the resume, because restoring
+/// an archive onto a fresh target takes minutes. Follow it with
+/// `mj wait --session <id>`, which blocks while the resume runs and reports why
+/// it failed if it does.
+pub(crate) async fn resume(args: ResumeArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let response = client
+        .resume(
+            &args.session,
+            &ResumeSessionRequest {
+                profile_id: args.profile.clone(),
+                target_id: args.target.clone(),
+                workspace_id: args.workspace_id.clone(),
+                queue: args.queue.map(Into::into),
+            },
+        )
+        .await?;
+    if args.json {
+        return print_json(&response);
+    }
+    println!(
+        "resuming {} on profile {} and target {}",
+        response.session_id, response.profile_id, response.target_id
+    );
+    println!("watch it with `mj wait --session {}`", response.session_id);
+    Ok(())
+}
+
 pub(crate) async fn cancel_turn(args: SessionArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     client.cancel_turn(&args.session).await?;
@@ -794,6 +879,62 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    fn wait_response(outcome: &str, extra: serde_json::Value) -> WaitResponse {
+        let mut body = serde_json::json!({
+            "outcome": outcome,
+            "session": {
+                "id": "s1", "workspace_id": "w1", "title": "t",
+                "harness_kind": "codex", "profile_id": "p", "target_id": "t",
+                "bundle_id": "b", "state": "running", "lifecycle": "live",
+                "chat_phase": "idle", "is_idle": false, "has_error": false,
+                "created_at": "now", "updated_at": "now"
+            }
+        });
+        let object = body.as_object_mut().expect("wait response object");
+        for (key, value) in extra.as_object().expect("extra fields") {
+            object.insert(key.clone(), value.clone());
+        }
+        serde_json::from_value(body).expect("wait response")
+    }
+
+    /// A turn the worker failed for going quiet has to say why, where a script
+    /// waiting on it can see it. Before this the reason lived only in the
+    /// transcript and `mj wait` printed the bare word "error" (#1020).
+    #[test]
+    fn a_failed_turn_reports_the_reason_the_worker_recorded() {
+        let response = wait_response(
+            "error",
+            serde_json::json!({
+                "stop_reason": "harness_inactive",
+                "diagnostic": {
+                    "message": "The Muse turn stopped responding: the tool call job_output-7 ran for about 241 minute(s).",
+                    "code": "harness_inactive"
+                }
+            }),
+        );
+        let lines = wait_report_lines(&response);
+        assert_eq!(lines[0], "error (harness_inactive)");
+        assert!(
+            lines.iter().any(|line| line.contains("job_output-7")),
+            "the reason is printed: {lines:?}"
+        );
+
+        // A turn that finished normally is not annotated with a diagnostic it
+        // may still carry from an earlier attempt.
+        let finished = wait_response(
+            "finished",
+            serde_json::json!({
+                "diagnostic": {"message": "an older failure"}
+            }),
+        );
+        assert!(
+            !wait_report_lines(&finished)
+                .iter()
+                .any(|line| line.contains("an older failure")),
+            "a finished turn prints no failure reason"
+        );
+    }
 
     #[test]
     fn creating_a_session_parses_its_target_selection_and_first_prompt() {
@@ -971,8 +1112,42 @@ mod tests {
         };
         assert!(!args.force);
 
+        // Resume names the session and nothing else by default: the session's
+        // own record supplies the profile and target.
+        let cli = Cli::try_parse_from(["mj", "resume", "--session", "s1"]).unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.session, "s1");
+        assert_eq!(args.profile, None);
+        assert_eq!(args.target, None);
+        assert_eq!(args.queue, None);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "resume",
+            "--session",
+            "s1",
+            "--profile",
+            "deepseek",
+            "--target",
+            "localhost",
+            "--queue",
+            "discard",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.profile.as_deref(), Some("deepseek"));
+        assert_eq!(args.target.as_deref(), Some("localhost"));
+        assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
+        assert!(args.json);
+
         for (argv, matched) in [
             (vec!["mj", "diff", "--session", "s1"], "diff"),
+            (vec!["mj", "resume", "--session", "s1"], "resume"),
             (vec!["mj", "sessions", "--json"], "sessions"),
             (vec!["mj", "close", "--session", "s1"], "close"),
             (vec!["mj", "cancel-turn", "--session", "s1"], "cancel-turn"),

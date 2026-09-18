@@ -187,6 +187,8 @@ mod tests {
             capacity_retry: None,
             activity_turn_started_at_ms: None,
             idle_since_ms: None,
+            tools_in_flight: Vec::new(),
+            activity: None,
             session_id: "session-1".into(),
             execution,
             latest_ordinal: 0,

@@ -757,15 +757,14 @@ impl ReviewerRole {
 
         let session_environment = mj_core::login_environment::with_overrides(&environment).await?;
         // A Codex reviewer needs its recorded model at launch for the same
-        // reason the primary session does, so the environment must be final
-        // before the spec below is written. Read the accepted configuration
-        // once; the ACP runtime further down reuses this value.
+        // reason the primary session does. The ACP runtime further down pins
+        // it into the spec below before every bridge start; this value is what
+        // that runtime starts from.
         let accepted_config = {
             let relay = relay.lock().expect("reviewer relay lock poisoned");
             let state = relay.operational_state();
             acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
         };
-        super::pin_accepted_codex_model(config.harness, &mut environment, &accepted_config)?;
         let supervisor_path = root.join("acp-supervisor.json");
         AcpSupervisorSpec {
             command: managed_harness.as_ref().map_or_else(
@@ -800,6 +799,7 @@ impl ReviewerRole {
             native_session_may_have_history,
             acp_activity,
             step_clock,
+            tools_in_flight,
             accepted_config,
         ) = {
             let relay = relay.lock().expect("reviewer relay lock poisoned");
@@ -809,6 +809,7 @@ impl ReviewerRole {
                 relay.native_session_may_have_history(),
                 relay.acp_activity_clock(),
                 relay.step_clock(),
+                relay.tools_in_flight(),
                 Arc::new(Mutex::new(accepted_config)),
             )
         };
@@ -823,6 +824,7 @@ impl ReviewerRole {
                 supervisor_path.to_string_lossy().into_owned(),
             ],
             environment: session_environment,
+            bridge_spec_path: Some(supervisor_path.clone()),
             cwd: self.placement.cwd.clone(),
             additional_directories: self.placement.additional_directories.clone(),
             // A reviewer reads the workspace; it never syncs project memory,
@@ -837,6 +839,8 @@ impl ReviewerRole {
             execution_policy: config.execution_policy,
             acp_activity,
             step_clock,
+            tools_in_flight,
+            stall_policy: None,
         };
 
         let (commands_tx, commands_rx) = mpsc::channel(32);

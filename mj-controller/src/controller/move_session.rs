@@ -405,7 +405,8 @@ impl Controller {
                 source.state,
                 SessionState::Running | SessionState::Disconnected
             ) || retry,
-            "only active sessions can move; use Resume for a stopped or lost session"
+            "only active sessions can move; run `mj resume` (or POST /api/v1/sessions/{}/resume) for a stopped or lost session",
+            source.id
         );
         selection
             .profile_id

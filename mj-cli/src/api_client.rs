@@ -13,8 +13,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, ExportRequest, PromptRequest, PromptResponse,
-    PushedBranch, SessionListResponse, StartSessionRequest, StartSessionResponse,
-    TranscriptResponse, WaitRequest, WaitResponse,
+    PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
+    StartSessionRequest, StartSessionResponse, TranscriptResponse, WaitRequest, WaitResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -418,6 +418,21 @@ impl ApiClient {
             false => request,
         };
         self.send(request).await.map(|_| ())
+    }
+
+    /// Ask the daemon to resume a stopped session. It answers as soon as the
+    /// resume is admitted, so this does not wait for the session to come up.
+    pub(crate) async fn resume(
+        &self,
+        session_id: &str,
+        request: &ResumeSessionRequest,
+    ) -> Result<ResumeSessionResponse> {
+        self.post_json(
+            &format!("/sessions/{session_id}/resume"),
+            request,
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn cancel_turn(&self, session_id: &str) -> Result<()> {
