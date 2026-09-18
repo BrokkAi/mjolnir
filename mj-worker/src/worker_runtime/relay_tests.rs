@@ -1049,6 +1049,95 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
     )));
 }
 
+/// Kimi's ACP prompt response carries no usage, so a completed Kimi turn is
+/// only accounted for if the native wire records reach the durable relay
+/// (#1064).
+#[tokio::test]
+async fn kimi_turn_usage_is_recorded_from_native_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("kimi");
+    let session = home.join("sessions/workspace").join(SESSION_ID);
+    let wire = session.join("agents/main/wire.jsonl");
+    std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+    std::fs::write(
+        session.join("state.json"),
+        serde_json::json!({"id":SESSION_ID}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId":SESSION_ID,"sessionDir":session})
+        ),
+    )
+    .unwrap();
+    std::fs::write(&wire, "").unwrap();
+    let root = temp.path().join("relay");
+    let mut durable = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    durable.set_background_work_policy(BackgroundWorkPolicy::KimiTasks);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "usage-prompt", prompt("test"));
+    durable.claim_pending_commands(true).unwrap();
+    let started = durable
+        .operational_state()
+        .active_prompt
+        .unwrap()
+        .started_at_ms;
+    let relay = Arc::new(Mutex::new(durable));
+    let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
+    monitor
+        .as_mut()
+        .unwrap()
+        .attach(SESSION_ID.into(), &relay)
+        .await
+        .unwrap();
+    let records = [
+        serde_json::json!({"type":"turn.started","agentId":"main","turnId":1,"time":started}),
+        serde_json::json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":12504,"output":416,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn"}),
+        serde_json::json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":717,"output":25,"inputCacheRead":23552,"inputCacheCreation":0},"usageScope":"turn"}),
+        serde_json::json!({"type":"turn.ended","agentId":"main","turnId":1,"reason":"completed"}),
+    ];
+    std::fs::write(
+        &wire,
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let mut event = RuntimeEvent::PromptFinished {
+        request_id: "usage-prompt".into(),
+        stop_reason: "EndTurn".into(),
+        usage: None,
+        diagnostic: None,
+    };
+    unix::prepare_kimi_runtime_event(&mut monitor, &relay, &mut event)
+        .await
+        .unwrap();
+    unix::record_runtime_event(&relay, &mut BTreeMap::new(), event).unwrap();
+    drop(relay);
+    let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+    let events = reopened
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    let usage = events
+        .iter()
+        .find_map(|event| match &event.observation {
+            RelayObservation::CommandCompleted {
+                outcome: mj_core::relay::RelayCommandOutcome::Prompt { usage, .. },
+                ..
+            } => usage.clone(),
+            _ => None,
+        })
+        .expect("the completed Kimi prompt recorded no usage");
+    assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+    assert_eq!(usage.input_tokens, 12504 + 717 + 11264 + 23552);
+    assert_eq!(usage.output_tokens, 416 + 25);
+    assert_eq!(usage.cached_read_tokens, Some(11264 + 23552));
+}
+
 #[tokio::test]
 async fn kimi_native_task_level_blocks_replacement_until_termination() {
     let temp = tempfile::tempdir().unwrap();

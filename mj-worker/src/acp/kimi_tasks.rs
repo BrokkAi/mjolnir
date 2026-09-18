@@ -22,6 +22,7 @@ const STATE_FILE: &str = "state.json";
 const MAX_WIRE_LINE_BYTES: usize = 1024 * 1024;
 const FILE_ID_SAMPLE_BYTES: usize = 4096;
 
+const USAGE_RECORD: &str = "usage.record";
 const TASK_STARTED: &str = "task.started";
 const TASK_TERMINATED: &str = "task.terminated";
 const LEGACY_TASK_STARTED: &str = "background.task.started";
@@ -115,10 +116,38 @@ impl KimiWireFollower {
         &self,
         started_at_ms: i64,
     ) -> Option<mj_core::diagnostic::TurnDiagnostic> {
-        let turn = self.tracker.turn.as_ref()?;
-        (turn.started_at_ms >= started_at_ms)
-            .then(|| turn.diagnostic.clone())
-            .flatten()
+        self.turn_since(started_at_ms)
+            .and_then(|turn| turn.diagnostic.clone())
+    }
+
+    /// The token consumption Kimi journalled for the current main-agent turn.
+    ///
+    /// Kimi's ACP server never puts a `usage` on its prompt response, so the
+    /// durable wire records are the only place a turn's consumption is stated
+    /// (#1064).  One `usage.record` is written per model request; the ones
+    /// scoped to the turn are exactly what Kimi itself sums into its own
+    /// "current turn" figure.  Session-scoped records (compaction, title
+    /// generation) and work a detached background agent does in its own wire
+    /// stream belong to no turn and are left out.
+    pub fn turn_usage_since(&self, started_at_ms: i64) -> Option<mj_core::usage::TokenUsage> {
+        let turn = self.turn_since(started_at_ms)?;
+        (!turn.usage.is_empty()).then(|| turn_token_usage(&turn.usage, turn.usage_unreadable))
+    }
+
+    /// Whether Kimi has written the end of the current main-agent turn.
+    ///
+    /// `None` when no journalled turn belongs to a prompt started at or after
+    /// `started_at_ms`, so a caller can tell "not written yet" from "this wire
+    /// stream does not journal turns at all".
+    pub fn turn_settled_since(&self, started_at_ms: i64) -> Option<bool> {
+        self.turn_since(started_at_ms).map(|turn| turn.ended)
+    }
+
+    fn turn_since(&self, started_at_ms: i64) -> Option<&NativeTurn> {
+        self.tracker
+            .turn
+            .as_ref()
+            .filter(|turn| turn.started_at_ms >= started_at_ms)
     }
 
     /// Read complete appended lines, retaining a trailing partial line.
@@ -333,7 +362,95 @@ struct TaskTracker {
 struct NativeTurn {
     id: Value,
     started_at_ms: i64,
+    ended: bool,
     diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
+    /// Turn-scoped consumption per model, as Kimi journalled it.
+    usage: BTreeMap<String, NativeUsage>,
+    /// A usage record this build cannot read; the turn total is then a floor,
+    /// not a whole-turn report, and must not enter session totals.
+    usage_unreadable: bool,
+}
+
+/// One Kimi `usage.record` payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NativeUsage {
+    input_other: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+}
+
+impl NativeUsage {
+    fn add(&mut self, other: Self) {
+        self.input_other = self.input_other.saturating_add(other.input_other);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+    }
+
+    /// Kimi counts cache reads and cache writes outside `inputOther`; every
+    /// other harness reports one input figure that contains them.
+    fn token_usage(self) -> mj_core::usage::TokenUsage {
+        let input = self
+            .input_other
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_creation);
+        mj_core::usage::TokenUsage {
+            provider_details: None,
+            scope: mj_core::usage::UsageScope::Turn,
+            total_tokens: input.saturating_add(self.output),
+            input_tokens: input,
+            output_tokens: self.output,
+            // Kimi counts thinking inside its output tokens and reports no
+            // separate figure.
+            thought_tokens: None,
+            cached_read_tokens: Some(self.cache_read),
+            cached_write_tokens: Some(self.cache_creation),
+        }
+    }
+}
+
+fn turn_token_usage(
+    by_model: &BTreeMap<String, NativeUsage>,
+    unreadable: bool,
+) -> mj_core::usage::TokenUsage {
+    let mut total = NativeUsage::default();
+    let mut model_usage = BTreeMap::new();
+    for (model, usage) in by_model {
+        total.add(*usage);
+        model_usage.insert(model.clone(), usage.token_usage());
+    }
+    let mut usage = total.token_usage();
+    if unreadable {
+        usage.scope = mj_core::usage::UsageScope::Unspecified;
+        for model in model_usage.values_mut() {
+            model.scope = mj_core::usage::UsageScope::Unspecified;
+        }
+    }
+    usage.provider_details = Some(Box::new(mj_core::usage::ProviderTurnUsage {
+        model_usage,
+        ..Default::default()
+    }));
+    usage
+}
+
+/// Read one `usage.record` payload, or `None` when this build cannot read it.
+fn parse_usage_record(record: &Value) -> Option<(String, NativeUsage)> {
+    let model = record.get("model")?.as_str()?.to_owned();
+    let usage = record.get("usage")?.as_object()?;
+    let mut counters = NativeUsage::default();
+    for (field, counter) in [
+        ("inputOther", &mut counters.input_other),
+        ("output", &mut counters.output),
+        ("inputCacheRead", &mut counters.cache_read),
+        ("inputCacheCreation", &mut counters.cache_creation),
+    ] {
+        *counter = match usage.get(field) {
+            None | Some(Value::Null) => 0,
+            Some(value) => value.as_u64()?,
+        };
+    }
+    Some((model, counters))
 }
 
 impl TaskTracker {
@@ -568,9 +685,13 @@ fn parse_line(tracker: &mut TaskTracker, line: &[u8], line_number: u64, path: &P
                 .map(|time| NativeTurn {
                     id: id.clone(),
                     started_at_ms: time,
+                    ended: false,
                     diagnostic: None,
+                    usage: BTreeMap::new(),
+                    usage_unreadable: false,
                 });
         } else if let Some(turn) = tracker.turn.as_mut().filter(|turn| turn.id == *id) {
+            turn.ended = true;
             turn.diagnostic = if record.get("reason").and_then(Value::as_str) == Some("failed") {
                 record
                     .get("error")
@@ -578,6 +699,29 @@ fn parse_line(tracker: &mut TaskTracker, line: &[u8], line_number: u64, path: &P
             } else {
                 None
             };
+        }
+        return Ok(());
+    }
+    if event_type == USAGE_RECORD {
+        // The main agent's own stream; a record written for another agent, or
+        // one Kimi scoped to the session rather than the turn, is not this
+        // turn's consumption.
+        if record
+            .get("agentId")
+            .and_then(Value::as_str)
+            .is_some_and(|agent_id| agent_id != "main")
+            || record.get("usageScope").and_then(Value::as_str) != Some("turn")
+        {
+            return Ok(());
+        }
+        // A malformed counter must not fail the follower: background-task
+        // tracking blocks worker replacement, and losing that over an
+        // accounting field would be a worse outcome than an unreadable total.
+        if let Some(turn) = tracker.turn.as_mut().filter(|turn| !turn.ended) {
+            match parse_usage_record(&record) {
+                Some((model, usage)) => turn.usage.entry(model).or_default().add(usage),
+                None => turn.usage_unreadable = true,
+            }
         }
         return Ok(());
     }
@@ -779,6 +923,82 @@ mod tests {
             .into_bytes();
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
+    }
+
+    /// Records captured from a real Kimi session wire stream.
+    #[test]
+    fn turn_usage_sums_the_turn_scoped_records_kimi_journalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.jsonl");
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"turn.started","agentId":"main","turnId":0,"time":1787697600000i64}),
+                json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":12504,"output":416,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn","time":1787697646392i64}),
+                // A second model request in the same turn.
+                json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":717,"output":25,"inputCacheRead":23552,"inputCacheCreation":128},"usageScope":"turn","time":1787697675995i64}),
+                // Out-of-turn work Kimi does for itself is not this turn's spend.
+                json!({"type":"usage.record","model":"kimi-code/k2","usage":{"inputOther":900,"output":50,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"session","time":1787697675996i64}),
+                json!({"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed"}),
+            ],
+        );
+        let follower = KimiWireFollower::open(&path).unwrap();
+        assert_eq!(follower.turn_settled_since(1787697600000), Some(true));
+        let usage = follower.turn_usage_since(1787697600000).unwrap();
+        assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+        assert_eq!(usage.input_tokens, 12504 + 717 + 11264 + 23552 + 128);
+        assert_eq!(usage.output_tokens, 416 + 25);
+        assert_eq!(usage.cached_read_tokens, Some(11264 + 23552));
+        assert_eq!(usage.cached_write_tokens, Some(128));
+        assert_eq!(usage.thought_tokens, None);
+        assert_eq!(usage.total_tokens, usage.input_tokens + usage.output_tokens);
+        let details = usage.provider_details.as_ref().unwrap();
+        assert_eq!(
+            details.model_usage.keys().collect::<Vec<_>>(),
+            vec!["kimi-code/k3"]
+        );
+        assert_eq!(
+            details.model_usage["kimi-code/k3"].output_tokens,
+            usage.output_tokens
+        );
+        // A prompt that started after this turn did not spend these tokens.
+        assert!(follower.turn_usage_since(1787697700000).is_none());
+    }
+
+    #[test]
+    fn a_new_turn_starts_its_own_usage_and_an_unreadable_record_is_not_counted_as_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.jsonl");
+        append_jsonl(
+            &path,
+            &[
+                json!({"type":"turn.started","agentId":"main","turnId":0,"time":100}),
+                json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":10,"output":5,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":110}),
+                json!({"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed"}),
+                json!({"type":"turn.started","agentId":"main","turnId":1,"time":200}),
+                json!({"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":7,"output":3,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":210}),
+            ],
+        );
+        let mut follower = KimiWireFollower::open(&path).unwrap();
+        assert_eq!(follower.turn_settled_since(200), Some(false));
+        let usage = follower.turn_usage_since(200).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
+        assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
+
+        // A counter this build cannot read leaves a floor, never a total a
+        // session sum would trust.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"usage.record","model":"kimi-code/k3","usage":{"output":"lots"},"usageScope":"turn","time":220})
+        )
+        .unwrap();
+        follower.refresh().unwrap();
+        let usage = follower.turn_usage_since(200).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
+        assert_eq!(usage.scope, mj_core::usage::UsageScope::Unspecified);
     }
 
     #[test]

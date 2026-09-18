@@ -5,6 +5,11 @@ pub(crate) const KIMI_TASK_POLL_INTERVAL: std::time::Duration =
 
 pub(crate) const KIMI_TASK_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// Bounded wait for the wire record that closes a finished turn.
+pub(crate) const KIMI_TURN_END_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+pub(crate) const KIMI_TURN_END_POLLS: u32 = 5;
+
 pub(crate) struct KimiTaskMonitor {
     home: std::result::Result<PathBuf, String>,
     native_session_id: Option<String>,
@@ -24,6 +29,12 @@ impl KimiTaskMonitor {
             retry_at: tokio::time::Instant::now(),
             last_warning: None,
         }
+    }
+
+    /// Whether Kimi has closed the turn that belongs to a prompt started at
+    /// `started_at_ms`; `None` when no such turn is journalled.
+    fn turn_settled_since(&self, started_at_ms: i64) -> Option<bool> {
+        self.follower.as_ref()?.turn_settled_since(started_at_ms)
     }
 
     fn detach(&mut self) {
@@ -149,8 +160,8 @@ pub(crate) async fn prepare_kimi_runtime_event(
         RuntimeEvent::PromptFinished {
             request_id,
             stop_reason,
+            usage,
             diagnostic,
-            ..
         } => {
             let started = relay
                 .lock()
@@ -160,6 +171,27 @@ pub(crate) async fn prepare_kimi_runtime_event(
                 .filter(|prompt| prompt.command_id == *request_id)
                 .map(|prompt| prompt.started_at_ms);
             monitor.refresh(relay, true).await?;
+            // Kimi flushes its wire records asynchronously, so the last step's
+            // usage can still be in flight when the prompt response arrives.
+            // Wait, briefly and only while Kimi is journalling this turn, for
+            // the turn end that follows every record of the turn.
+            if let Some(started) = started {
+                for _ in 0..KIMI_TURN_END_POLLS {
+                    if monitor.turn_settled_since(started) != Some(false) {
+                        break;
+                    }
+                    tokio::time::sleep(KIMI_TURN_END_POLL_INTERVAL).await;
+                    monitor.refresh(relay, true).await?;
+                }
+            }
+            // The ACP prompt response carries no usage, so the native records
+            // are the only report of what the turn spent (#1064).
+            if usage.is_none()
+                && let Some(native) =
+                    started.and_then(|started| monitor.follower.as_ref()?.turn_usage_since(started))
+            {
+                *usage = Some(native);
+            }
             if let Some(native) = started
                 .and_then(|started| monitor.follower.as_ref()?.turn_diagnostic_since(started))
             {
