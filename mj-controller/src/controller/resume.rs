@@ -444,10 +444,6 @@ pub(super) enum WorkerRootReset {
     /// The environment is being kept and only the harness replaced. Stop the
     /// live daemon, clear relay state, unlink the installed worker files, and
     /// remove the previous per-session profile home. Runs on every locator.
-    #[allow(
-        dead_code,
-        reason = "constructed by the in-place move restore, which lands next"
-    )]
     InPlace {
         /// The profile home to delete, or `None` when the session ran straight
         /// out of the user's own profile directory.
@@ -2146,6 +2142,8 @@ async fn utility_handoff_while_cancellable(
         }
     }
 }
+
+mod in_place;
 
 #[cfg(test)]
 mod tests;

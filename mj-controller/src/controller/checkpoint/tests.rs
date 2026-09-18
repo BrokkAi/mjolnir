@@ -903,7 +903,7 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
         "Error: unsupported checkpoint export protocol version 3; worker supports 2\n"
     ));
 }
-const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
+pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
 const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
 #[cfg(unix)]
@@ -918,13 +918,13 @@ const RELEASE_TEST_CHILD: &str = "MJ_TEST_RELEASE_LATCH_CHILD";
 const LEGACY_RELEASE_TEST_CHILD: &str = "MJ_TEST_LEGACY_RELEASE_LATCH_CHILD";
 #[cfg(unix)]
 const REUSE_TEST_CHILD: &str = "MJ_TEST_REUSE_LATCH_CHILD";
-const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
+pub(crate) const LATCH_CHECKPOINT_ONLY: &str = "MJ_TEST_LATCH_CHECKPOINT_ONLY";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
-const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
+pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
 /// Whether the scripted relay understands the early checkpoint release.
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ReleaseSupport {
+pub(crate) enum ReleaseSupport {
     Supported,
     /// Answer a release exactly as a worker that predates the command does:
     /// its `RelayCommand` cannot deserialize the variant at all.
@@ -1121,7 +1121,7 @@ fn unparseable_request_response(
 /// A relay target served by this test binary over stdio. Each start of the
 /// server appends to `starts`, if given.
 #[cfg(unix)]
-fn latch_relay_target(
+pub(crate) fn latch_relay_target(
     relay_root: &Path,
     starts: Option<&Path>,
     release: ReleaseSupport,

@@ -55,6 +55,19 @@ pub fn restore_move_queue_hold(operation: &MoveOperation) {
     }
 }
 
+/// What a recovered, interrupted source stop tells the person.
+///
+/// An in-place move promised to keep the environment; a recovery that tears it
+/// down has broken that promise, so the message says so instead of leaving the
+/// person to infer it from an unchanged "retry" line.
+fn interrupted_source_stop_message(recovered: &str, in_place: bool) -> String {
+    if in_place {
+        format!("{recovered}; the in-place swap was interrupted; the environment was released")
+    } else {
+        recovered.to_owned()
+    }
+}
+
 pub struct MoveMutationGuard(String);
 
 impl MoveMutationGuard {
@@ -757,7 +770,10 @@ impl Controller {
                 if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                     self.cleanup_stopped_target(&id, &cleanup)?;
                 }
-                bail!("Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings");
+                bail!("{}", interrupted_source_stop_message(
+                    "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
+                    operation.in_place,
+                ));
             }
             match operation.phase {
                 MovePhase::Preparing => bail!("Move preparation was interrupted; source retained. Prepare Move again."),
@@ -779,7 +795,10 @@ impl Controller {
                 }
                 MovePhase::ResumingDestination => {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
-                    let error = self.rollback_failed_resume(&id, previous, false,
+                    // An in-place swap still owns the checkout the source was
+                    // using, so the rollback retires it exactly as a resume
+                    // that recreated one.
+                    let error = self.rollback_failed_resume(&id, previous, operation.in_place,
                         anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry"), executor)?;
                     Err(error)
                 }
@@ -791,7 +810,10 @@ impl Controller {
                     if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                         self.cleanup_stopped_target(&id, executor)?;
                     }
-                    bail!("source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings")
+                    bail!("{}", interrupted_source_stop_message(
+                        "source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings",
+                        operation.in_place,
+                    ))
                 }
                 _ => bail!("Move requires an explicit retry after the daemon restarted"),
             }
@@ -891,10 +913,14 @@ impl Controller {
                 operation.phase = MovePhase::ClosingSource;
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
-                // The in-place restore is not wired yet, so every move still
-                // tears its source down; `in_place` is recorded but not acted
-                // on until `restore_session_in_place` lands.
-                let disposition = SourceTargetDisposition::Destroy;
+                // An eligible move keeps its environment: the close stops at
+                // the sealed relay and the record keeps its target for
+                // `restore_session_in_place`.
+                let disposition = if operation.in_place {
+                    SourceTargetDisposition::RetainForInPlaceSwap
+                } else {
+                    SourceTargetDisposition::Destroy
+                };
                 self.close_session_for_move(
                     &id,
                     executor,
@@ -905,7 +931,10 @@ impl Controller {
                 )
                 .await?;
             }
-            if self.state.sessions[&id].state == SessionState::Stopped
+            // An in-place move never reaches `Stopped` with a target: its
+            // source stays `Closing` in the environment the destination reuses.
+            if !operation.in_place
+                && self.state.sessions[&id].state == SessionState::Stopped
                 && self.state.sessions[&id].target.is_some()
             {
                 executor.notify_notice("Cleaning up source");
@@ -929,25 +958,37 @@ impl Controller {
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
             executor.notify_notice("Preparing destination");
-            if operation.selection.clear_resource_allocation {
-                let session = self.state.sessions.get_mut(&id).unwrap();
-                session.resource_allocation = None;
-                session.container_cpus = None;
-                session.container_memory = None;
-                crate::database::save_session(session)?;
+            if operation.in_place {
+                // The environment is kept, so there is nothing to provision and
+                // no allocation to clear: eligibility already required the
+                // allocation to be unchanged.
+                self.restore_session_in_place(
+                    &id,
+                    operation.selection.profile_id.as_deref().unwrap(),
+                    executor,
+                )
+                .await?;
+            } else {
+                if operation.selection.clear_resource_allocation {
+                    let session = self.state.sessions.get_mut(&id).unwrap();
+                    session.resource_allocation = None;
+                    session.container_cpus = None;
+                    session.container_memory = None;
+                    crate::database::save_session(session)?;
+                }
+                self.resume_session_controlled(
+                    &id,
+                    operation.selection.profile_id.as_deref().unwrap(),
+                    operation.selection.target_template_id.as_deref().unwrap(),
+                    SessionResumeOptions {
+                        additional_mounts: operation.selection.additional_mounts.clone(),
+                        resource_allocation: operation.selection.resource_allocation.clone(),
+                        discard_queue: true,
+                    },
+                    executor,
+                )
+                .await?;
             }
-            self.resume_session_controlled(
-                &id,
-                operation.selection.profile_id.as_deref().unwrap(),
-                operation.selection.target_template_id.as_deref().unwrap(),
-                SessionResumeOptions {
-                    additional_mounts: operation.selection.additional_mounts.clone(),
-                    resource_allocation: operation.selection.resource_allocation.clone(),
-                    discard_queue: true,
-                },
-                executor,
-            )
-            .await?;
             let destination = &self.state.sessions[&id];
             operation.destination_target = destination.target.clone();
             operation.destination_native_session_id = destination.native_session_id.clone();
@@ -1034,12 +1075,32 @@ impl Controller {
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
-        relay.submit(format!("{}-notice", operation.operation_id), RelayCommand::RecordNotice {
-            text: format!("Moved from {} / {} to {} / {} in a fresh environment. {} The interrupted prompt was not replayed.",
-                operation.source_profile_id, operation.source_target_template_id,
-                operation.selection.profile_id.as_deref().unwrap(), operation.selection.target_template_id.as_deref().unwrap(),
-                if operation.queue == ResumeQueueDisposition::Discard { "Queued work was discarded; ready and idle." } else { "Queued work was accepted." }),
-        }).await?;
+        let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
+            "Queued work was discarded; ready and idle."
+        } else {
+            "Queued work was accepted."
+        };
+        let source_profile = &operation.source_profile_id;
+        let source_target = &operation.source_target_template_id;
+        let destination_profile = operation.selection.profile_id.as_deref().unwrap();
+        let destination_target = operation.selection.target_template_id.as_deref().unwrap();
+        // The two moves are different events for the person reading the
+        // conversation: one rebuilt the environment, the other kept it.
+        let text = if operation.in_place {
+            format!(
+                "Switched from {source_profile} / {source_target} to {destination_profile} / {destination_target} in place; the workspace and environment were kept. {queue_sentence} The interrupted prompt was not replayed."
+            )
+        } else {
+            format!(
+                "Moved from {source_profile} / {source_target} to {destination_profile} / {destination_target} in a fresh environment. {queue_sentence} The interrupted prompt was not replayed."
+            )
+        };
+        relay
+            .submit(
+                format!("{}-notice", operation.operation_id),
+                RelayCommand::RecordNotice { text },
+            )
+            .await?;
         Ok(())
     }
 

@@ -97,4 +97,4 @@ mod staging;
 pub(super) use staging::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

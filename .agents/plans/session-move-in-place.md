@@ -16,10 +16,10 @@ A move that changes the target keeps today's behaviour. Failure or a daemon rest
 - [x] (2026-09-17 15:10Z) Milestone 2: `SourceTargetDisposition` through `close_session_for_move`; test that Retain leaves `Closing` + target + checkpoint and issues no cleanup command. As committed, `execute_move` still passes `Destroy` and still cleans the source for every move; the branch on `operation.in_place` is wired in Milestone 5, because with the retained close and no in-place restore an eligible profile-only move would fail at `resume_session_controlled` ("session is not stopped, lost, or retryable"). See `Idempotence and Recovery`.
 - [x] (2026-09-17 14:40Z) Milestone 3: resume tail extraction (`verify_resume_checkpoint`, `restore_into_target`), pure refactor, existing tests green (`cargo test -p brokk-mj-controller`: 1337 passed, 0 failed).
 - [x] (2026-09-17 14:55Z) Milestone 4: `targets::in_place_worker_reset_plan` and `removable_profile_root` + tests.
-- [ ] Milestone 5: `restore_session_in_place` for same-harness moves, `execute_move` branch, rollback, notice text, controller tests.
-- [ ] Milestone 6: cross-harness in place (joined handoff lane) + test.
-- [ ] Milestone 7: recovery arms and the two restart tests.
-- [ ] Milestone 8: TUI/CLI/web wording, docs, e2e assertions, live Podman timing check.
+- [x] (2026-09-17 18:40Z) Milestone 5: `restore_session_in_place` (`mj-controller/src/controller/resume/in_place.rs`), the `operation.in_place` branch in `execute_move` (retained close, skipped source cleanup, in-place resume), the "in place" notice in `admit_move_queue`, and four controller tests driving whole moves through `execute_move` on a LocalBare target.
+- [x] (2026-09-17 18:40Z) Milestone 6: cross-harness in place. The handoff runs as one awaited step before `restore_into_target` rather than as a joined lane (see the Decision Log), proved by `in_place_cross_harness_move_installs_the_handoff_without_provisioning`.
+- [x] (2026-09-17 18:40Z) Milestone 7: recovery arms (`operation.in_place` as `recreated_managed_worktree` in the `ResumingDestination` arm, the released-environment sentence on both recovered-source-stop bails) and two restart tests.
+- [~] (2026-09-17) Milestone 8: TUI/CLI/web in-place wording (with a TUI rendering test covering both wordings), docs in `docs/src/content/docs/{durability,sessions,web-viewer}.md`, and the `tests/e2e/session_move.py` in-place assertions are done. The live Podman timing check is still outstanding; it needs a Podman host, which the lab does not have.
 
 ## Surprises & Discoveries
 
@@ -33,6 +33,14 @@ A move that changes the target keeps today's behaviour. Failure or a daemon rest
   Evidence: `mj-controller/src/controller.rs`, `target_profile_home`; `cargo test -p brokk-mj-controller` stayed at 1337 passing.
 - Observation: the cheapest live-relay fixture for a sealed close is the checkpoint latch harness in `mj-controller/src/controller/checkpoint/tests.rs` (`latch_relay_target` plus `latch_relay_child_serves_stdio`). In checkpoint-only mode it advances `Close` itself through `dispatch_checkpoint_only`, and `CheckpointExportPolicy::ReuseUnchangedArchive` on an already-archived session issues no command at all, which is exactly what a "no teardown happened" assertion needs.
   Evidence: `mj-worker/src/relay/commands.rs:564-624`; the existing `a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content` asserts `executor.purposes().is_empty()`.
+- Observation: a whole in-place move can be driven end to end in a unit test on a LocalBare target, including the live relay, because `reconnect_plan` spawns `<worker_root>/hel worker proxy` per connection. The stand-in `hel` is the checked-in fake dispatcher, whose behaviour lives in `<worker_root>/hel.script`; the in-place reset unlinks `hel` but not `hel.script`, so one script serves the source and the destination harness. The source relay has to journal *outside* the worker root: the session manager keeps syncing its connection every 150ms, and a source relay journaling inside the worker root would rewrite the state the reset had just removed.
+  Evidence: `mj-controller/src/controller/move_session/tests.rs`, `install_in_place_worker_script` and `run_in_place_move`; `mj-controller/src/session_manager.rs`, `SESSION_SYNC_INTERVAL`.
+- Observation: `stage_profile` copies an allowlist of names per harness kind, so a test that wants to see a profile arrive in the target has to name its marker file one of them (`settings.json` for Claude, `auth.json` for Codex). A file that is *not* in the allowlist is the sharper instrument: nothing copies or overwrites it, so its disappearance proves the previous profile home was removed rather than copied over.
+  Evidence: `mj-controller/src/controller/worker_binary/harness.rs`, `stage_profile`; the `source-only.txt` assertion in `in_place_move_reinstalls_the_harness_without_removing_the_worker_root`.
+- Observation: destructuring the test fixture with `..` drops its `TempDir` there and then, which deletes the whole environment under test. The symptom was a close that suddenly exported a fresh archive ("run <worker_root>/hel for export target checkpoint: No such file or directory") because the installed archive could no longer be verified for reuse. Binding `_directory` explicitly fixes it.
+  Evidence: the `_directory` field bound in every in-place test's `let InPlaceFixture { .. }`.
+- Observation: clippy's `await_holding_lock` cannot be silenced on the `let` that takes the guard; the allow has to sit on the enclosing `async fn`.
+  Evidence: `mj-controller/src/controller/resume/in_place.rs`, the attribute on `restore_session_in_place`.
 - Observation: `validate_move_checkpoint` re-reads the configuration with `Config::load()` and compares its fingerprint, so any controller test that reaches it must persist its config (and set `MJ_CONFIG_DIR`), not just hold it in memory.
   Evidence: `mj-controller/src/controller/move_session.rs`, `validate_move_checkpoint`.
 
@@ -65,10 +73,43 @@ A move that changes the target keeps today's behaviour. Failure or a daemon rest
 - Decision: skip `install_attached_resources` in the in-place restore.
   Rationale: it is EC2-only and eligibility requires unchanged mounts, so the resources are already on the instance.
   Date/Author: 2026-09-17, Fable.
+- Decision: the cross-harness handoff is one awaited step inside `restore_session_in_place`, before `restore_into_target`, instead of a lane joined with the worker-files and upload lanes.
+  Rationale: this is the smaller change the plan asked for. There is no provisioning to overlap with in place, and the lanes that remain cannot start until the reset inside `restore_into_target` has stopped the old daemon and removed its files; splitting them back out would duplicate `restore_into_target`. Cancellation is unaffected: `utility_handoff_while_cancellable` polls `executor.cancellation_requested()` on its own timer, so a fresh `CancellationToken` is enough.
+  Date/Author: 2026-09-17, implementation.
+- Decision: `restore_session_in_place` carries a function-scoped `#[allow(clippy::await_holding_lock, reason = ...)]` for the target gate it holds across `restore_into_target`.
+  Rationale: holding the gate across the whole restore is the design (Decision above), and the lint has no narrower silencer: an allow on the `let` that takes the guard is ignored. A move runs on its own runtime through `block_on` and every other holder of that gate takes it in synchronous code, so the guard cannot be parked on an unscheduled task.
+  Date/Author: 2026-09-17, implementation.
+- Decision: the in-place move tests drive `Controller::execute_move` end to end on a LocalBare target with a real command executor, rather than calling `restore_session_in_place` directly.
+  Rationale: the assertions that matter are about what a move did *not* do to a live environment, and about the persisted operation (`in_place`, `destination_target`), which only `execute_move` writes. Driving the whole method also covers the retained close, the skipped source cleanup, the in-place branch, and the notice in one test.
+  Date/Author: 2026-09-17, implementation.
+- Decision: the "restart before the swap" recovery test seals a real source through `close_session_for_move` and then recovers it in a second session-manager lifetime, instead of hand-building a `Closing` record.
+  Rationale: the state an interrupted in-place move leaves is a sealed relay plus a retained target, and only a real close produces a relay that answers `Closed`. Two manager lifetimes against one journal is what a daemon restart looks like from the controller's side.
+  Date/Author: 2026-09-17, implementation.
 
 ## Outcomes & Retrospective
 
-Milestones 1 to 4 are implemented and validated; Milestones 5 to 8 remain.
+Milestones 1 to 7 are implemented and validated. Milestone 8's surfaces, docs,
+and e2e assertions are done; only its live Podman timing check remains, and it
+needs a Podman host the lab does not have.
+
+A profile-only move on an unchanged target now replaces only the harness. The
+proof is `in_place_move_reinstalls_the_harness_without_removing_the_worker_root`,
+which runs a whole move through `execute_move` on a LocalBare target and shows
+that no teardown, container, or provisioning command ran, that exactly one reset
+command ran, that the worker root's own files and an untracked file beside the
+project survived, that the previous profile home is gone and the destination's
+is staged in its place with `ownership.json` naming it, and that the session
+ends `Running` on the new profile in the same target with the "in place" notice
+in its conversation. Cross-harness in place installs the handoff with no
+provisioning; a failure releases the environment and leaves `Stopped` with the
+verified checkpoint; and a restart on either side of the swap recovers to
+`Stopped` and says the environment was released.
+
+Validation: `cargo test` (whole workspace) and
+`cargo clippy --all-targets -- -D warnings` both pass; `mj-controller` is at
+1347 passing tests, up from 1341 after Milestone 4.
+
+### After Milestones 1 to 4 (kept for the record)
 
 What exists now that did not before: a move records durably whether it can keep
 its environment (`in_place` on `MovePreparation` and `MoveOperation`, decided by
@@ -310,7 +351,9 @@ and the session is left `Closing` with a verified checkpoint and a live worker
 daemon; `recover_interrupted_close_managed` takes it to `Stopped` from there.
 Milestones 2 and 5 should therefore be released together, or Milestone 2 committed
 with `execute_move` still passing `Destroy`. This ExecPlan previously claimed the
-whole sequence was additive until Milestone 5, which was wrong. If the swap fails at any point, `rollback_failed_resume` tears the target down and the session is `Stopped` with its verified checkpoint; `mj resume` or "Retry move" then use the existing fresh path. A daemon restart during the swap resolves the same way through `recover_move_managed_controlled`.
+whole sequence was additive until Milestone 5, which was wrong. That gap is now
+closed: `execute_move` passes `RetainForInPlaceSwap` and calls
+`restore_session_in_place` in the same commit. If the swap fails at any point, `rollback_failed_resume` tears the target down and the session is `Stopped` with its verified checkpoint; `mj resume` or "Retry move" then use the existing fresh path. A daemon restart during the swap resolves the same way through `recover_move_managed_controlled`.
 
 ## Artifacts and Notes
 
@@ -342,8 +385,57 @@ New test names, by file:
         in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_home
         removable_profile_root_names_only_per_session_profile_directories
 
+After Milestones 5 to 7:
+
+    cargo test -p brokk-mj-controller -- move_session
+    test result: ok. 19 passed; 0 failed; 0 ignored; 1335 filtered out
+
+    cargo test            # whole workspace, outside the sandbox, dev profile
+    test result: ok. 1347 passed; 0 failed; 7 ignored     # mj-controller
+    (every other package: ok, 0 failed)
+
+    cargo clippy --all-targets -- -D warnings
+    (no output)
+
+The key test discriminates: setting its operation's `in_place` to false fails it
+at the first "an in-place move must not rebuild anything" assertion, because the
+fresh path tears the source target down.
+
+New test names, all in `mj-controller/src/controller/move_session/tests.rs`:
+
+    in_place_move_reinstalls_the_harness_without_removing_the_worker_root
+    in_place_move_never_removes_a_shared_local_profile_home
+    in_place_cross_harness_move_installs_the_handoff_without_provisioning
+    in_place_move_failure_tears_down_and_leaves_stopped_with_checkpoint
+    in_place_move_recovery_after_restart_during_swap_rolls_back_to_stopped
+    in_place_move_recovery_after_restart_before_swap_finishes_the_close
+
+and `move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode`
+now runs its table for an in-place operation as well as a fresh-environment one.
+
+Shared test machinery these added: `in_place_fixture` and `run_in_place_move` in
+that file; `write_checkpoint_gate_archive_for_harness` in
+`mj-controller/src/controller/test_support.rs` (an archive whose harness kind is
+not Codex, which is what decides native continuity); and `pub(crate)` on the
+checkpoint suite's relay fixtures (`LATCH_RELAY_SESSION`, `LATCH_RELAY_ROOT`,
+`LATCH_CHECKPOINT_ONLY`, `ReleaseSupport`, `latch_relay_target`) so the move
+tests can borrow the live relay instead of growing a second copy of it.
+
 ## Interfaces and Dependencies
 
 No new crates. New or changed signatures are listed in the milestones: `SourceTargetDisposition` (lifecycle.rs), `in_place_move_eligible` (move_session.rs), `verify_resume_checkpoint`, `restore_into_target`, `RestoreIntoTarget`, `WorkerRootReset` (resume.rs), `restore_session_in_place` (resume/in_place.rs), `in_place_worker_reset_plan` (targets/worker_daemon.rs), `removable_profile_root` (controller.rs), and the `in_place` fields in `mj-core/src/state/session_move.rs`.
 
 Revision (2026-09-17, Fable): Milestones 1 to 4 are committed with `execute_move` unchanged in behaviour (`Destroy`, unconditional source cleanup) so that no commit on the branch breaks a profile-only move; Milestone 5 wires the `in_place` branch together with `restore_session_in_place`. The `Started` dashboard notice for image downloads in the sibling plan was likewise limited to hosts with no copy of the image.
+
+Revision (2026-09-17, implementation): Milestones 5, 6, and 7 are implemented,
+so the Progress list, `Surprises & Discoveries`, `Decision Log`, `Outcomes &
+Retrospective`, and `Artifacts and Notes` now describe a working in-place move
+rather than a planned one. Two deviations from the milestone text are recorded in
+the Decision Log with their reasons: the cross-harness handoff runs as one
+awaited step before `restore_into_target` instead of as a joined lane, because in
+place there is nothing left to overlap it with; and the Milestone 7 "restart
+before the swap" test seals a real source through `close_session_for_move` and
+recovers it in a second session-manager lifetime, because only a real close
+leaves a relay that answers `Closed`. `restore_session_in_place` also carries a
+function-scoped clippy allow for the target gate it deliberately holds across the
+restore.
