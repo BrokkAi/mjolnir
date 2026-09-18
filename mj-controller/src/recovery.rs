@@ -93,7 +93,6 @@ impl RecoveryCoordinator {
                             let completed_tx = completed_tx.clone();
                             let session_manager = session_manager.clone();
                             let cancelled = copy_cancelled.clone();
-                            let handle = tokio::runtime::Handle::current();
                             let task_session_id = session_id.clone();
                             tokio::spawn(async move {
                                 let joined = tokio::task::spawn_blocking(move || {
@@ -108,15 +107,15 @@ impl RecoveryCoordinator {
                                     };
                                     let executor = CancellableProcessExecutor::new(cancelled)
                                         .with_deadline(RECOVERY_CHECKPOINT_TIMEOUT);
-                                    handle
-                                        .block_on(
-                                            controller
-                                                .create_recovery_checkpoint_managed_controlled(
-                                                    &task_session_id,
-                                                    &session_manager,
-                                                    &executor,
-                                                ),
-                                        )
+                                    mj_core::runtime::block_on(
+                                        controller
+                                            .create_recovery_checkpoint_managed_controlled(
+                                                &task_session_id,
+                                                &session_manager,
+                                                &executor,
+                                            ),
+                                    )
+                                    .and_then(|result| result)
                                         // The deferral marker lives on the
                                         // error, so read it before the error
                                         // becomes a string.

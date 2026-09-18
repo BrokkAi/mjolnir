@@ -140,7 +140,6 @@ impl WorkerUpgradeCoordinator {
                         let completed_tx = completed_tx.clone();
                         let session_manager = session_manager.clone();
                         let task_cancelled = upgrade_cancelled.clone();
-                        let handle = tokio::runtime::Handle::current();
                         let task_session_id = session_id.clone();
                         tokio::spawn(async move {
                             let joined = tokio::task::spawn_blocking(move || {
@@ -154,13 +153,13 @@ impl WorkerUpgradeCoordinator {
                                 };
                                 let executor = CancellableProcessExecutor::new(task_cancelled)
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
-                                handle
-                                    .block_on(controller.upgrade_session_worker(
-                                        &task_session_id,
-                                        &executor,
-                                        &session_manager,
-                                        observation.worker_build.as_deref(),
-                                    ))
+                                mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                    &task_session_id,
+                                    &executor,
+                                    &session_manager,
+                                    observation.worker_build.as_deref(),
+                                ))
+                                .and_then(|result| result)
                                     .map_err(|error| format!("{error:#}"))
                             })
                             .await;

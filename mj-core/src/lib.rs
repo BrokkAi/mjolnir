@@ -28,6 +28,7 @@ pub mod refusal;
 pub mod relay;
 pub mod remote_git;
 pub mod review;
+pub mod runtime;
 pub mod second_opinion;
 pub mod skills;
 pub mod state;

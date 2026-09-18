@@ -1283,7 +1283,6 @@ pub async fn run_server(
                         action_sessions.insert(action_id, session_id.clone());
                     }
                     action_replies.accept(action_id, &action, reply);
-                    let runtime = tokio::runtime::Handle::current();
                     tokio::spawn(async move {
                         let joined = tokio::task::spawn_blocking(move || {
                             let result = (|| -> Result<()> {
@@ -1293,7 +1292,7 @@ pub async fn run_server(
                                 let mut operation_controller = Controller::load()?;
                                 let executor =
                                     CancellableProcessExecutor::new(control.cancelled.clone());
-                                runtime.block_on(apply_phone_action(
+                                mj_core::runtime::block_on(apply_phone_action(
                                     &mut operation_controller,
                                     PhoneActionServices {
                                         sessions: &session_control,
@@ -1304,7 +1303,7 @@ pub async fn run_server(
                                     action_id,
                                     &started,
                                     &control,
-                                ))
+                                ))?
                             })();
                             result.map_err(|error| PhoneActionFailure::of(&error))
                         })

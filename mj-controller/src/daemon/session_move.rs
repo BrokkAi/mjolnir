@@ -64,11 +64,11 @@ impl RuntimeState {
         } else {
             None
         };
-        let runtime = tokio::runtime::Handle::current();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
-            runtime
-                .block_on(controller.prepare_move_session_controlled(selection, &ProcessExecutor))
+            mj_core::runtime::block_on(
+                controller.prepare_move_session_controlled(selection, &ProcessExecutor),
+            )?
         })
         .await?;
         preparation.source_unavailable = source_active
@@ -102,7 +102,6 @@ impl RuntimeState {
             None,
             Some(key),
             move |state, session_id, cancelled| async move {
-                let runtime = tokio::runtime::Handle::current();
                 blocking(move || {
                     let _reservation = reserve_recovery_or_cancel(
                         &state.recovery_observer,
@@ -115,11 +114,12 @@ impl RuntimeState {
                         state.clone(),
                         session_id,
                     );
-                    let outcome = runtime.block_on(controller.move_session_managed_controlled(
-                        request,
-                        &executor,
-                        &state.session_manager,
-                    ))?;
+                    let outcome =
+                        mj_core::runtime::block_on(controller.move_session_managed_controlled(
+                            request,
+                            &executor,
+                            &state.session_manager,
+                        ))??;
                     Ok(DaemonLifecycleResult::Move(outcome))
                 })
                 .await
@@ -176,7 +176,6 @@ impl RuntimeState {
                 None,
                 Some(key),
                 move |state, session_id, cancelled| async move {
-                    let runtime = tokio::runtime::Handle::current();
                     blocking(move || {
                         let _reservation = reserve_recovery_or_cancel(
                             &state.recovery_observer,
@@ -189,13 +188,12 @@ impl RuntimeState {
                             state.clone(),
                             session_id,
                         );
-                        runtime
-                            .block_on(controller.recover_move_managed_controlled(
-                                operation,
-                                &executor,
-                                &state.session_manager,
-                            ))
-                            .map(DaemonLifecycleResult::Move)
+                        mj_core::runtime::block_on(controller.recover_move_managed_controlled(
+                            operation,
+                            &executor,
+                            &state.session_manager,
+                        ))?
+                        .map(DaemonLifecycleResult::Move)
                     })
                     .await
                 },

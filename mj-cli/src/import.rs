@@ -278,14 +278,13 @@ fn confirm_import_safety(
 
 pub(crate) fn persist_imported_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
-    tokio::runtime::Handle::try_current()
-        .context(IMPORT_RUNTIME_CONTEXT)?
-        .block_on(async {
-            crate::daemon::connect_or_start()
-                .await?
-                .persist_imported_session(session)
-                .await
-        })
+    tokio::runtime::Handle::try_current().context(IMPORT_RUNTIME_CONTEXT)?;
+    mj_core::runtime::block_on(async {
+        crate::daemon::connect_or_start()
+            .await?
+            .persist_imported_session(session)
+            .await
+    })?
 }
 
 #[derive(Clone)]

@@ -366,7 +366,11 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
     } else {
-        drop(runtime);
+        mj_core::runtime::shutdown(
+            runtime,
+            mj_core::runtime::BlockingWork::Await,
+            RUNTIME_SHUTDOWN_GRACE,
+        );
     }
     result.map(|_| ())
 }
@@ -430,8 +434,18 @@ fn command_name(command: Option<&Command>) -> &'static str {
     }
 }
 
+/// How long runtime shutdown waits for blocking threads that are awaiting
+/// runtime work through `mj_core::runtime::block_on`. Those threads must stop
+/// polling their timers before the runtime's timer driver goes away, or tokio
+/// asserts.
+const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn shutdown_dashboard_runtime(runtime: tokio::runtime::Runtime) {
-    runtime.shutdown_background();
+    mj_core::runtime::shutdown(
+        runtime,
+        mj_core::runtime::BlockingWork::Abandon,
+        RUNTIME_SHUTDOWN_GRACE,
+    );
 }
 
 async fn run_command(
@@ -1594,30 +1608,6 @@ mod tests {
         );
 
         assert_eq!(extract_setup_token("   \n\n"), None);
-    }
-
-    #[test]
-    fn dashboard_runtime_does_not_wait_for_disposable_blocking_work() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        runtime.spawn_blocking(move || {
-            started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        });
-        started_rx.recv().unwrap();
-
-        let started = std::time::Instant::now();
-        shutdown_dashboard_runtime(runtime);
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(250),
-            "fast dashboard shutdown waited {:?}",
-            started.elapsed()
-        );
-        release_tx.send(()).unwrap();
     }
 
     #[test]

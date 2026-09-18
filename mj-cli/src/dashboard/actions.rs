@@ -492,7 +492,6 @@ pub(crate) async fn apply_dashboard_action(
                 action,
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
-                tokio::runtime::Handle::current(),
                 context.critical_operations.clone(),
             );
         }
@@ -833,12 +832,11 @@ pub(crate) async fn apply_dashboard_action(
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Resuming);
             context.dashboard.set_notice("Restarting session…");
-            let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, cancelled| {
-                    runtime.block_on(async {
+                    mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         if session.state.is_active() {
                             daemon.close_session(session_id.clone()).await?;
@@ -859,7 +857,7 @@ pub(crate) async fn apply_dashboard_action(
                                 repository_preflight: None,
                             })
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id: session.last_profile,
                         target_id: session.target_template_id,
@@ -909,12 +907,11 @@ pub(crate) async fn apply_dashboard_action(
                 .set_notice(format!("Moving {}…", short_id(&session_id)));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
-            let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, cancelled| {
-                    runtime.block_on(async {
+                    mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         let operation = daemon.move_session(MoveSessionRequest {
                             preparation,
@@ -952,7 +949,7 @@ pub(crate) async fn apply_dashboard_action(
                             );
                         }
                         Ok(LifecycleSuccess::Moved(outcome))
-                    })
+                    })?
                 },
             );
         }
@@ -975,7 +972,6 @@ pub(crate) async fn apply_dashboard_action(
                 .set_notice(format!("Retrying move for {}…", short_id(&session_id)));
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Moving);
-            let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
@@ -984,7 +980,7 @@ pub(crate) async fn apply_dashboard_action(
                     let queue = Some(operation.queue);
                     let operation_id = operation.operation_id.clone();
                     let session_id = session_id.clone();
-                    runtime.block_on(async move {
+                    mj_core::runtime::block_on(async move {
                         let mut daemon = daemon::connect_or_start().await?;
                         let preparation = daemon.prepare_move_session(selection).await?;
                         let request = MoveSessionRequest {
@@ -1024,7 +1020,7 @@ pub(crate) async fn apply_dashboard_action(
                             );
                         }
                         Ok(LifecycleSuccess::Moved(outcome))
-                    })
+                    })?
                 },
             );
         }
@@ -1053,17 +1049,16 @@ pub(crate) async fn apply_dashboard_action(
             let request =
                 context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
-            let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, _cancelled| {
-                    runtime.block_on(async {
+                    mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
                             .close_session(session_id)
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::Closed)
                 },
             );
@@ -1087,12 +1082,12 @@ pub(crate) async fn apply_dashboard_action(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, _cancelled| {
-                    tokio::runtime::Handle::current().block_on(async {
+                    mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
                             .force_stop_session(session_id)
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::ForceStopped)
                 },
             );
@@ -1108,12 +1103,12 @@ pub(crate) async fn apply_dashboard_action(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, _cancelled| {
-                    tokio::runtime::Handle::current().block_on(async {
+                    mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
                             .destroy_stopped_session(session_id, delete_branch)
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::DestroyedStopped)
                 },
             );
@@ -1129,12 +1124,12 @@ pub(crate) async fn apply_dashboard_action(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, _cancelled| {
-                    tokio::runtime::Handle::current().block_on(async {
+                    mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
                             .force_destroy_session(session_id, delete_branch)
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::ForceDestroyed)
                 },
             );
@@ -1433,7 +1428,6 @@ fn start_session_launch_with_repository_preflight(
                 go_save,
                 context.dashboard_io_tx.clone(),
                 context.lifecycle_updates_tx.clone(),
-                tokio::runtime::Handle::current(),
                 context.critical_operations.clone(),
             );
         }
@@ -1460,12 +1454,11 @@ fn start_session_launch_with_repository_preflight(
                 profile_id.clone(),
                 target_template_id.clone(),
             );
-            let runtime = tokio::runtime::Handle::current();
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
                 move |_controller, _cancelled| {
-                    runtime.block_on(async {
+                    mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
                             .resume_session(daemon::ResumeSessionRequest {
@@ -1479,7 +1472,7 @@ fn start_session_launch_with_repository_preflight(
                                 repository_preflight,
                             })
                             .await
-                    })?;
+                    })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id,
                         target_id: target_template_id,

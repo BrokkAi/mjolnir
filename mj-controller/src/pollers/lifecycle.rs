@@ -122,7 +122,6 @@ pub fn spawn_interrupted_close_recovery(
             cancelled.clone(),
         )
     });
-    let runtime = tokio::runtime::Handle::current();
     tokio::spawn(async move {
         let operation_session_id = session_id.clone();
         let joined = tokio::task::spawn_blocking(move || {
@@ -134,11 +133,11 @@ pub fn spawn_interrupted_close_recovery(
                 )?;
                 let mut controller = Controller::load()?;
                 let executor = CancellableProcessExecutor::new(cancelled);
-                runtime.block_on(controller.recover_interrupted_close_managed(
+                mj_core::runtime::block_on(controller.recover_interrupted_close_managed(
                     &operation_session_id,
                     &executor,
                     &session_manager,
-                ))
+                ))?
             })()
             .map_err(|error| format!("{error:#}"))
         })

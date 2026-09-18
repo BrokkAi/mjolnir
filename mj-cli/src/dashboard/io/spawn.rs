@@ -938,7 +938,6 @@ pub(crate) fn spawn_dashboard_container_settings(
     tracker: CriticalOperationTracker,
 ) {
     let session_id = request.session_id.clone();
-    let runtime = tokio::runtime::Handle::current();
     spawn_critical_io(
         tracker,
         format!("saving container settings for {}", short_id(&session_id)),
@@ -953,7 +952,7 @@ pub(crate) fn spawn_dashboard_container_settings(
                 workspace_id,
                 client_id,
             } = request;
-            runtime.block_on(async {
+            mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
                     .await?
                     .set_session_container_settings(
@@ -964,7 +963,7 @@ pub(crate) fn spawn_dashboard_container_settings(
                         mount_history,
                     )
                     .await
-            })?;
+            })??;
             // Return a fresh durable snapshot so the dashboard can update its
             // state without synchronously reloading the database while it is
             // applying the worker result.
@@ -1189,7 +1188,6 @@ pub(crate) fn spawn_dashboard_create_session(
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<LifecycleUpdate>,
-    runtime: tokio::runtime::Handle,
     tracker: CriticalOperationTracker,
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1259,7 +1257,7 @@ pub(crate) fn spawn_dashboard_create_session(
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| bundle_id.clone())
             );
-            let registered = runtime.block_on(async {
+            let registered = mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
@@ -1279,7 +1277,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         session_title_override: None,
                     })
                     .await
-            })?;
+            })??;
             Ok(Some(RegisteredDashboardSession {
                 retry_launch: retry_launch.clone(),
                 session: registered.session,
@@ -1313,13 +1311,13 @@ pub(crate) fn spawn_dashboard_create_session(
                 Box::new(registered),
             ))),
         );
-        let result = runtime
-            .block_on(async {
-                let mut daemon = daemon::connect_or_start().await?;
-                daemon.wait_create_session(session_id.clone()).await?;
-                Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-            })
-            .map_err(|error| format!("{error:#}"));
+        let result = mj_core::runtime::block_on(async {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.wait_create_session(session_id.clone()).await?;
+            Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
+        })
+        .and_then(|result| result)
+        .map_err(|error| format!("{error:#}"));
         report(
             "creating session",
             &lifecycle_updates,
@@ -1444,18 +1442,18 @@ pub(crate) fn spawn_dashboard_restore_session(
     retry_launch: DashboardAction,
     updates: UnboundedSender<DashboardIoUpdate>,
     lifecycle_updates: UnboundedSender<LifecycleUpdate>,
-    runtime: tokio::runtime::Handle,
     tracker: CriticalOperationTracker,
 ) {
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = tracker.begin_cancellable("restoring archived session", cancelled.clone());
     tokio::task::spawn_blocking(move || {
-        let registered = runtime.block_on(async {
+        let registered = mj_core::runtime::block_on(async {
             daemon::connect_or_start()
                 .await?
                 .wiki_restore(request)
                 .await
-        });
+        })
+        .and_then(|result| result);
         let registered = match registered {
             Ok(registered) => registered,
             Err(error) => {
@@ -1486,13 +1484,13 @@ pub(crate) fn spawn_dashboard_restore_session(
                 }),
             ))),
         );
-        let result = runtime
-            .block_on(async {
-                let mut daemon = daemon::connect_or_start().await?;
-                daemon.wait_create_session(session_id.clone()).await?;
-                Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-            })
-            .map_err(|error| format!("{error:#}"));
+        let result = mj_core::runtime::block_on(async {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.wait_create_session(session_id.clone()).await?;
+            Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
+        })
+        .and_then(|result| result)
+        .map_err(|error| format!("{error:#}"));
         report(
             "restoring archived session",
             &lifecycle_updates,
