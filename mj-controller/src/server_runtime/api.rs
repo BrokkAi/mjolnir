@@ -1009,6 +1009,35 @@ async fn export_layout(session_id: String) -> Result<SessionExportLayout, Export
     .await
 }
 
+/// Checkpoint a session in a task that owns the work to the end.
+///
+/// A checkpoint marks the session `Checkpointing` in the database before it
+/// starts and holds a barrier on the worker while it runs. Awaiting it inline
+/// in an HTTP handler meant a client that gave up part-way dropped the handler
+/// future and abandoned the capture there, leaving the session marked busy
+/// with nothing left to finish or fail it, so every retry was refused for
+/// minutes (#1010). The spawned task keeps running whether or not anyone is
+/// still waiting for its answer, and the guard it holds is released when it
+/// ends. The outer task reports a failure no requester is left to receive.
+async fn supervised_checkpoint(
+    exports: Arc<dyn ExportRuntime>,
+    session_id: String,
+) -> Result<mj_core::state::CheckpointMetadata> {
+    let checkpoint = tokio::spawn(async move { exports.checkpoint_now(session_id).await });
+    tokio::spawn(async move {
+        let result = match checkpoint.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow!("the session checkpoint task failed: {error}")),
+        };
+        if let Err(error) = &result {
+            tracing::warn!(?error, "API bundle export checkpoint failed");
+        }
+        result
+    })
+    .await
+    .unwrap_or_else(|error| Err(anyhow!("the session checkpoint task failed: {error}")))
+}
+
 /// The directory on the target the session's agent runs in.
 ///
 /// It is the primary repository's directory for every target kind: a bundle
@@ -1636,7 +1665,9 @@ impl SubagentBackend for ApiBackend {
             // checkpointed, so take a fresh checkpoint; a stopped session's
             // last checkpoint already holds everything it did.
             let archive_path = match record.target {
-                Some(_) => match self.exports.checkpoint_now(session_id.clone()).await {
+                Some(_) => match supervised_checkpoint(self.exports.clone(), session_id.clone())
+                    .await
+                {
                     Ok(checkpoint) => checkpoint.archive_path,
                     // The session has its own lifecycle operation in flight
                     // (resume/close/move); a fresh checkpoint would fight it, so
@@ -1651,8 +1682,7 @@ impl SubagentBackend for ApiBackend {
                             .checkpoint
                             .ok_or_else(|| {
                                 ExportError::Refused(format!(
-                                    "session {session_id} is busy with a lifecycle operation and \
-                                     has no earlier checkpoint to export a bundle from"
+                                    "{error}, and has no earlier checkpoint to export a bundle from"
                                 ))
                             })?
                             .archive_path

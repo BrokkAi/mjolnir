@@ -3,34 +3,46 @@ use super::*;
 /// A session has its own lifecycle operation in flight, so a fresh checkpoint
 /// would fight it. Callers that only need archived state (bundle export) fall
 /// back to the last durable checkpoint instead of failing (#1010).
-#[derive(Debug)]
+///
+/// It names the operation and how long it has been running, because "something
+/// is busy" left people retrying an export with nothing to act on (#1010).
+#[derive(Debug, Clone)]
 pub(crate) struct SessionLifecycleBusy {
     pub session_id: String,
+    pub operation: &'static str,
+    pub age_seconds: u64,
 }
 
 impl std::fmt::Display for SessionLifecycleBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "session {} has a lifecycle operation in flight; its checkpoint cannot run now",
-            self.session_id
+            "session {} is busy with a {} that started {}s ago",
+            self.session_id, self.operation, self.age_seconds
         )
     }
 }
 
 impl std::error::Error for SessionLifecycleBusy {}
 
+/// Name a running operation and how long it has been running. A clock that has
+/// gone backwards must not print a nonsensical age, so it saturates at zero.
+pub(super) fn describe_lifecycle_busy(
+    session_id: &str,
+    active: &ActiveLifecycle,
+) -> SessionLifecycleBusy {
+    SessionLifecycleBusy {
+        session_id: session_id.to_owned(),
+        operation: active.kind.label(),
+        age_seconds: epoch_seconds().saturating_sub(active.started_at_epoch_seconds),
+    }
+}
+
 pub(super) fn ensure_no_active_lifecycle(state: &RuntimeState) -> Result<()> {
-    ensure!(
-        !state
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .any(|active| active.result.borrow().is_none()),
-        "cannot rename configuration while a session lifecycle operation is active"
-    );
-    Ok(())
+    match state.any_lifecycle_busy() {
+        Some(busy) => bail!("cannot rename configuration while {busy}"),
+        None => Ok(()),
+    }
 }
 
 /// The workspace's active session ids, oldest first, so force deletion

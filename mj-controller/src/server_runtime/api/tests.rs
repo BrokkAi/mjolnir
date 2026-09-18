@@ -806,6 +806,65 @@ async fn prompt_reports_a_session_the_manager_does_not_hold() {
     );
 }
 
+/// A checkpoint that finishes only after its requester has given up, so a
+/// dropped request can be told apart from a cancelled checkpoint.
+struct SlowCheckpoint {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ExportRuntime for SlowCheckpoint {
+    fn session_record(&self, _session_id: &str) -> Option<SessionRecord> {
+        None
+    }
+    fn checkpoint_now(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        use std::sync::atomic::Ordering;
+        Box::pin(async move {
+            self.started.store(true, Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.finished.store(true, Ordering::Release);
+            bail!("the archive is not built in this test")
+        })
+    }
+}
+
+/// A client that times out drops the request future. The checkpoint behind a
+/// bundle export must run to its end anyway: it has already marked the session
+/// `Checkpointing` and holds a barrier on the worker, so abandoning it midway
+/// left the session busy with nothing to finish or fail it, and every retry
+/// refused for minutes (#1010).
+#[tokio::test]
+async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
+    use std::sync::atomic::Ordering;
+
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exports = Arc::new(SlowCheckpoint {
+        started: started.clone(),
+        finished: finished.clone(),
+    });
+
+    let request = supervised_checkpoint(exports, "session-1".into());
+    // Let the checkpoint start, then abandon the request the way a timed-out
+    // client does.
+    let abandoned = tokio::time::timeout(Duration::from_millis(5), request).await;
+    assert!(abandoned.is_err(), "the checkpoint should still be running");
+    assert!(started.load(Ordering::Acquire), "the checkpoint started");
+    assert!(
+        !finished.load(Ordering::Acquire),
+        "the checkpoint was still running when the request was dropped"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        finished.load(Ordering::Acquire),
+        "the supervised checkpoint ran to its end without its requester"
+    );
+}
+
 /// A relative export path resolves against the directory the agent runs in,
 /// not the workspace root above it. For a bare project session those differ by
 /// one level, which is why a file the agent had just written was refused as

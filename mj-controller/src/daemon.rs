@@ -213,6 +213,24 @@ enum LifecycleKind {
     Cleanup,
 }
 
+impl LifecycleKind {
+    /// What a refusal calls this operation, so a person told that a session is
+    /// busy learns which operation is holding it (#1010).
+    fn label(self) -> &'static str {
+        match self {
+            LifecycleKind::Create => "create",
+            LifecycleKind::Close => "close",
+            LifecycleKind::Resume => "resume",
+            LifecycleKind::Move => "move",
+            LifecycleKind::ForceStop => "force stop",
+            LifecycleKind::DestroyStopped => "destroy",
+            LifecycleKind::ArchiveStopped => "archive",
+            LifecycleKind::ForceDestroy => "force destroy",
+            LifecycleKind::Cleanup => "cleanup",
+        }
+    }
+}
+
 /// Whether a lifecycle has exclusive ownership of the worker target, so the
 /// session manager must stop polling it. A graceful close needs the manager's
 /// relay lease through checkpointing and sealing; once the durable state says

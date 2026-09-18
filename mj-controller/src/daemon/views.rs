@@ -217,10 +217,8 @@ impl RuntimeState {
         &self,
         session_id: &str,
     ) -> Result<mj_core::state::CheckpointMetadata> {
-        if self.session_lifecycle_active(session_id) {
-            return Err(anyhow::Error::new(SessionLifecycleBusy {
-                session_id: session_id.to_owned(),
-            }));
+        if let Some(busy) = self.session_lifecycle_busy(session_id) {
+            return Err(anyhow::Error::new(busy));
         }
         let mut controller = blocking(Controller::load).await?;
         let checkpoint = controller.checkpoint_session(session_id).await?;
@@ -228,15 +226,32 @@ impl RuntimeState {
         Ok(checkpoint)
     }
 
-    /// Whether this specific session has a lifecycle operation still running.
-    /// A checkpoint conflicts only with its own session's operations, never
-    /// with another session's (#1010).
-    pub(super) fn session_lifecycle_active(&self, session_id: &str) -> bool {
+    /// The lifecycle operation this specific session is running, if any, named
+    /// along with its age. A checkpoint conflicts only with its own session's
+    /// operations, never with another session's (#1010).
+    pub(super) fn session_lifecycle_busy(&self, session_id: &str) -> Option<SessionLifecycleBusy> {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let active = lifecycle.get(session_id)?;
+        active
+            .result
+            .borrow()
+            .is_none()
+            .then(|| describe_lifecycle_busy(session_id, active))
+    }
+
+    /// Any session's running lifecycle operation, named the same way. The
+    /// config-rename guard reports this, so its refusal says which operation
+    /// stands in the way rather than only that one does (#1010).
+    pub(super) fn any_lifecycle_busy(&self) -> Option<SessionLifecycleBusy> {
         self.lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(session_id)
-            .is_some_and(|active| active.result.borrow().is_none())
+            .iter()
+            .find(|(_, active)| active.result.borrow().is_none())
+            .map(|(session_id, active)| describe_lifecycle_busy(session_id, active))
     }
 
     /// In-memory records and ownership sampled with the same lock order as
