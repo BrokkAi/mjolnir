@@ -249,7 +249,8 @@ class PtyClient:
 
     def quit(self) -> float:
         started = time.monotonic()
-        self.send(b"\x1bq")
+        # Detach is the prefix chord: ctrl+b arms, then q quits.
+        self.send(b"\x02q")
         try:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired as error:

@@ -224,7 +224,9 @@ class TmuxController:
         failure: ScenarioFailure | None = None
         try:
             if self.has_session():
-                self.send_key("M-q")
+                # Detach is the prefix chord: ctrl+b arms, then q quits.
+                self.send_key("C-b")
+                self.send_key("q")
                 self.wait_until(lambda: not self.has_session(), "tmux dashboard to detach")
         except ScenarioFailure as error:
             failure = error

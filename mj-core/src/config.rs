@@ -420,7 +420,7 @@ struct StoredConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum TargetEntry {
-    Stored(StoredTarget),
+    Stored(Box<StoredTarget>),
     Raw(serde_json::Value),
 }
 
@@ -514,7 +514,7 @@ impl TryFrom<StoredConfig> for Config {
         let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
         for (id, entry) in targets {
             let runtime = match entry {
-                TargetEntry::Stored(target) => target,
+                TargetEntry::Stored(target) => *target,
                 TargetEntry::Raw(value) => match interpret_target(&id, &value, version)? {
                     InterpretedTarget::Stored(target) => target,
                     // Migration and saving are the same operation, so an old
@@ -563,7 +563,7 @@ impl From<Config> for StoredConfig {
         let mut targets = BTreeMap::new();
         for (id, target) in &config.targets {
             let runtime = stored_target(id, target, &mut machines);
-            targets.insert(id.clone(), TargetEntry::Stored(runtime));
+            targets.insert(id.clone(), TargetEntry::Stored(Box::new(runtime)));
         }
         // This machine is implied, so a file only names it when it carries
         // settings of its own.
