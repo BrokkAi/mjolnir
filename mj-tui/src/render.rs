@@ -207,7 +207,15 @@ fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("✦ MJOLNIR", theme::title(true)),
-            Span::styled(format!("  /  {workspace_name}"), theme::muted()),
+            // The first-run screen has no workspace pane to carry the build
+            // number, so the brand line names it here instead.
+            Span::styled(
+                format!(
+                    concat!("  v", env!("CARGO_PKG_VERSION"), "  /  {}"),
+                    workspace_name
+                ),
+                theme::muted(),
+            ),
         ]))
         .alignment(Alignment::Center),
         area,

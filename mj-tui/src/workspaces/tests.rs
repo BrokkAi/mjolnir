@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    buffer_lines, cell_column, chord, dashboard_with_session, running_session,
+    buffer_lines, cell_column, chord, dashboard_with_session, drawn, running_session,
 };
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mj_core::workspace::WorkspaceRecord;
@@ -574,4 +574,22 @@ fn manager_load_finishes_behind_help_and_is_restored_when_help_closes() {
         Mode::WorkspaceManager(manager)
             if !manager.loading && manager.entries[0].workspace.id == "workspace-a"
     ));
+}
+
+/// The build has to be readable from the dashboard itself. A sidebar too
+/// narrow for both titles drops the version instead of overwriting the pane's
+/// own title.
+#[test]
+fn workspace_pane_names_the_running_version_until_the_sidebar_is_too_narrow() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+    let wide = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(wide.contains("Workspaces"), "{wide}");
+    assert!(wide.contains(&version), "{wide}");
+
+    dashboard.set_pane_size(crate::SupportPane::Sessions, crate::PaneSize::Minimized);
+    let narrow = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(narrow.contains("Workspac"), "{narrow}");
+    assert!(!narrow.contains(&version), "{narrow}");
 }
