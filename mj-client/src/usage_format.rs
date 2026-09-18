@@ -151,6 +151,14 @@ impl SessionActivity {
             .or_else(|| self.harness_turn_since())
             .or_else(|| self.activity_turn_started_at_ms.and_then(epoch_seconds));
         if detailed {
+            // How long the harness has been quiet, shown only once it is worth
+            // saying. It is a fact next to the other clocks, not a warning:
+            // Mjolnir does not end a turn for silence, so a reader seeing "Q
+            // 11m" decides for themselves whether to keep waiting.
+            let quiet = self
+                .quiet_since(now_epoch_seconds)
+                .map(|quiet| format!(" {}", elapsed_label("Q", now_epoch_seconds, Some(quiet))))
+                .unwrap_or_default();
             return match kind {
                 SessionActivityKind::Turn => {
                     let step = current_step_started_at_ms
@@ -158,14 +166,15 @@ impl SessionActivity {
                         .or(turn)
                         .map(|step| turn.map_or(step, |turn| step.max(turn)));
                     format!(
-                        "{} {}",
+                        "{} {}{quiet}",
                         elapsed_label("T", now_epoch_seconds, turn),
                         elapsed_label("S", now_epoch_seconds, step)
                     )
                 }
-                SessionActivityKind::Step => {
+                SessionActivityKind::Step => format!(
+                    "{}{quiet}",
                     elapsed_label("S", now_epoch_seconds, self.foreground_tool_since())
-                }
+                ),
                 SessionActivityKind::Background => {
                     elapsed_label("BG", now_epoch_seconds, self.background_since())
                 }
@@ -254,8 +263,30 @@ impl SessionActivity {
                 .then_some(self.idle_since_ms)
                 .flatten()
                 .filter(|timestamp| *timestamp >= 0),
+            last_activity_at_ms: self
+                .state()
+                .last_activity_at_ms()
+                .filter(|timestamp| *timestamp >= 0),
             label,
         }
+    }
+
+    /// When the current quiet period began, in epoch seconds, once it has
+    /// lasted long enough to be worth reporting.
+    ///
+    /// `None` when nothing is running, when the worker is too old to report
+    /// the ACP clock, or when the session has been quiet for less than
+    /// `mj_core::activity::SILENCE_WORTH_REPORTING`. The threshold lives in
+    /// `mj_core::activity` so every surface agrees on when a turn reads as
+    /// quiet.
+    #[must_use]
+    fn quiet_since(&self, now_epoch_seconds: u64) -> Option<u64> {
+        let now_ms = i64::try_from(now_epoch_seconds.saturating_mul(1_000)).ok()?;
+        let last = self.state().last_activity_at_ms()?;
+        let silent_ms = u64::try_from(now_ms.checked_sub(last)?).ok()?;
+        (silent_ms >= mj_core::activity::SILENCE_WORTH_REPORTING.as_millis() as u64)
+            .then(|| epoch_seconds(last))
+            .flatten()
     }
 
     /// What this session is doing: the worker's own answer when the snapshot
@@ -377,6 +408,9 @@ pub struct SessionActivityDetails {
     pub step_started_at_ms: Option<i64>,
     pub background_started_at_ms: Option<i64>,
     pub idle_since_ms: Option<i64>,
+    /// When the harness last sent anything, while work is in flight. See
+    /// `mj_core::activity::ActivityState::silent_for_ms`.
+    pub last_activity_at_ms: Option<i64>,
     pub label: Option<String>,
 }
 

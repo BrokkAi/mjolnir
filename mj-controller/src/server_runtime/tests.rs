@@ -408,7 +408,8 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
             .as_ref()
             .map(mj_core::activity::ActivityState::last_known),
         Some(&mj_core::activity::ActivityState::Turn {
-            started_at_ms: Some(1_000)
+            started_at_ms: Some(1_000),
+            last_activity_at_ms: None,
         }),
         "the summary says what was last known, and that it is no longer live"
     );
@@ -537,6 +538,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             step_started_at_ms: None,
             background_started_at_ms: None,
             idle_since_ms: None,
+            last_activity_at_ms: None,
             label: None,
         })
     );

@@ -86,6 +86,11 @@ const login = document.querySelector('#login'),
   voiceStatus = document.querySelector('#voice-status'),
   voiceCancel = document.querySelector('#voice-cancel');
 
+/// Below this, silence is ordinary and saying so is noise rather than news.
+/// The same threshold as `mj_core::activity::SILENCE_WORTH_REPORTING`, so a
+/// turn does not read as quiet here and ordinary in `mj sessions`.
+const SILENCE_WORTH_REPORTING_SECONDS = 60;
+
 /// Every page, by the route name that shows it.
 const PAGES = {
   dashboard: document.querySelector('#dashboard'),
@@ -912,8 +917,16 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   const stepStarted = epochMs(details.step_started_at_ms);
   const backgroundStarted = epochMs(details.background_started_at_ms);
   const idleStarted = epochMs(details.idle_since_ms);
+  // How long the harness has been quiet, while something is running. Shown as
+  // a fact beside the other clocks: Mjolnir never ends a turn for silence, so
+  // the reader decides whether a quiet turn is worth cancelling.
+  const lastActivity = epochMs(details.last_activity_at_ms);
+  const quietFor = lastActivity == null ? null : Math.max(0, now - lastActivity);
+  const quiet = quietFor != null && quietFor >= SILENCE_WORTH_REPORTING_SECONDS
+    ? ` · Quiet ${formatClock(quietFor)}`
+    : '';
   if (kind === 'step') {
-    return `Step${stepStarted == null ? '' : ` ${formatClock(now - stepStarted)}`}`;
+    return `Step${stepStarted == null ? '' : ` ${formatClock(now - stepStarted)}`}${quiet}`;
   }
   if (kind === 'turn') {
     const turn = turnStarted == null ? null : formatClock(now - turnStarted);
@@ -925,7 +938,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
       ? stepBaseElapsed
       : Math.min(stepBaseElapsed, Math.max(0, now - turnStarted));
     const step = clampedStep == null ? null : formatClock(clampedStep);
-    return `Turn${turn ? ` ${turn}` : ''} · Step${step ? ` ${step}` : ''}`;
+    return `Turn${turn ? ` ${turn}` : ''} · Step${step ? ` ${step}` : ''}${quiet}`;
   }
   if (kind === 'background') {
     return `${details.label || 'Background'}${backgroundStarted == null ? '' : ` ${formatClock(now - backgroundStarted)}`}`;

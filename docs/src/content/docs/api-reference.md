@@ -719,6 +719,16 @@ Idle uses the existing UI classification: no foreground or background work.
 Elapsed silence does not produce a separate stalled state. Pending input and
 capacity retries remain separate facts.
 
+While a turn or a tool call is in flight, `details.last_activity_at_ms` reports
+when anything last arrived from the harness. Subtract it from the current time
+to get the silence age. Mjolnir publishes this and does not act on it: a turn
+waiting on a long build is silent and healthy, and ending a turn on a guess
+destroys real work. `mj wait` includes the silence age in its `timeout`
+message, and `mj sessions --session` prints it, so an orchestrator can decide
+whether to keep waiting or call `mj cancel-turn`. The field is absent for an
+idle session, for a session the daemon currently cannot see, and from workers
+too old to report the ACP clock.
+
 History survives session stop and daemon restart and is deleted when its session
 is forgotten. Recording begins with this version; old transitions are not
 backfilled. Consumers should save the last processed ID and deduplicate replayed

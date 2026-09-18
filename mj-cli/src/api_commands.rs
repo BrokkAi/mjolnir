@@ -695,6 +695,14 @@ pub(crate) async fn sessions(
             return print_json(&session);
         }
         println!("{}  {}  {}", session.id, session.state, session.title);
+        // Silence is reported, never acted on. A turn waiting on a long build
+        // is quiet and healthy, so this says what is true and leaves the
+        // decision — keep waiting, or `mj cancel-turn` — to the reader.
+        if let Some(note) = session.activity_state.as_ref().and_then(|state| {
+            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
+        }) {
+            println!("running, {note}");
+        }
         if let Some(error) = &session.error {
             println!("error: {error}");
         }
