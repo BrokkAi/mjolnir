@@ -483,6 +483,19 @@ impl DashboardState {
         }
     }
 
+    /// Selects the workspace in slot `index`, counting from zero, or does
+    /// nothing when there is no tab there. This is the numbered-key sibling of
+    /// [`DashboardState::select_adjacent_workspace`].
+    pub fn select_workspace_index(&self, index: usize) -> DashboardAction {
+        let ids = self.workspace_ids();
+        match ids.get(index) {
+            Some(workspace_id) => DashboardAction::SelectWorkspace {
+                workspace_id: workspace_id.clone(),
+            },
+            None => DashboardAction::None,
+        }
+    }
+
     /// Opens the manager and requests its first snapshot off the UI loop.
     pub fn begin_workspace_manager(&mut self) -> DashboardAction {
         self.workspace_management_generation = self.workspace_management_generation.wrapping_add(1);

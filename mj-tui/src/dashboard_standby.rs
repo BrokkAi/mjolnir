@@ -177,7 +177,7 @@ impl DashboardState {
         let session_id = self.standby_prompt_session()?.to_owned();
         // Chords the dashboard answers from every surface — the palette, the
         // pane keys, canceling an operation — still belong to it.
-        if crate::actions::spec_for_key(key, self.focus).is_some() {
+        if crate::actions::pane_command_for_key(key, self.focus).is_some() {
             return None;
         }
         // On macOS the dashboard's primary accelerator is represented by

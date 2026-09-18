@@ -446,8 +446,8 @@ fn an_elicitation_is_bounded_to_the_chat_content_area() {
     assert!(sentinel_top < popup_top);
     // The footer remains outside the question even when width fitting
     // drops composer hints to make room for the host's function keys.
-    assert_eq!(row_of("F1 help"), lines.len() - 1);
-    assert!(row_of("F1 help") > popup_top);
+    assert_eq!(row_of("? keys"), lines.len() - 1);
+    assert!(row_of("? keys") > popup_top);
 }
 
 #[test]
@@ -1510,11 +1510,11 @@ fn a_notice_set_through_a_shared_handle_shows_in_the_chat_footer_in_yellow() {
     );
 }
 
-/// The composer's own row is where a user typing in it learns the keys,
-/// so it carries the same three groups the dashboard's row does: the
-/// composer's own keys, the chords, then the function keys.
+/// The composer's own row is where a user typing in it learns the keys, so it
+/// carries the same groups the dashboard's row does: the composer's own keys,
+/// then the host's prefix chords.
 #[test]
-fn chat_footer_advertises_alt_keys_and_f1() {
+fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let mut terminal = Terminal::new(TestBackend::new(200, 24)).expect("terminal");
     let footer_of = |terminal: &Terminal<TestBackend>| {
@@ -1531,12 +1531,13 @@ fn chat_footer_advertises_alt_keys_and_f1() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "Alt-T rendering",
-        "│ Alt-G panes · Alt-Q detach │",
-        "F2 palette · F4 web · F5 refresh · F7 settings · F1 help",
+        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
+    // Transcript rendering is a registry command now, so the composer's own
+    // row no longer names a key for it.
+    assert!(!footer.contains("rendering"), "{footer:?}");
     assert!(!footer.contains("Ctrl-G"), "{footer:?}");
 
     assert!(!footer.contains("Ctrl-T"), "{footer:?}");
@@ -1550,8 +1551,7 @@ fn chat_footer_advertises_alt_keys_and_f1() {
     let footer = footer_of(&terminal);
     for hint in [
         "Ctrl-R history",
-        "│ Alt-G panes · Alt-Q detach │",
-        "F2 palette · F4 web · F5 refresh · F7 settings · F1 help",
+        "│ ctrl+b then: b panes · q detach · : palette · ? keys",
     ] {
         assert!(footer.contains(hint), "{footer:?} omits {hint}");
     }
@@ -1560,7 +1560,7 @@ fn chat_footer_advertises_alt_keys_and_f1() {
 #[test]
 fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
     let chat = ChatState::new(&snapshot(), &[]);
-    for width in [7, 20, 32, 40, 80] {
+    for width in [6, 20, 32, 40, 80] {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
         terminal
             .draw(|frame| {
@@ -1575,12 +1575,12 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.trim_end().ends_with("F1 help"), "{width}: {text:?}");
+        assert!(text.trim_end().ends_with("? keys"), "{width}: {text:?}");
         if width >= 20 {
-            assert!(text.contains("F2 palette"), "{width}: {text:?}");
+            assert!(text.contains(": palette"), "{width}: {text:?}");
         }
         if width == 32 {
-            assert_eq!(text.trim_end(), "F2 palette · F4 web · F1 help");
+            assert_eq!(text.trim_end(), ": palette · ? keys");
         }
     }
 }

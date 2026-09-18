@@ -23,7 +23,7 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 
 - [x] (2026-09-17) M0: plan committed at `.agents/plans/prefix-keybindings.md`.
 - [x] (2026-09-17) M1: `mj-core` key-string parser, `KeysConfig`, `Keybinds`, defaults, validation, unit tests; `Config.keys` wired; Settings modal hides the section.
-- [ ] M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated.
+- [x] (2026-09-17) M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated with `\x02q`.
 - [ ] M3: `Alt-T` and `Alt-V` leave the composer and become the `ToggleTranscriptRendering` and `ToggleDictation` commands.
 - [ ] M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
 - [ ] M5: user docs, hint strings, README, troubleshooting, config reference, regenerated screenshots.
@@ -43,6 +43,27 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
   Evidence: the field is declared after `build_cache` and before `profiles`; `keys_section_is_omitted_from_serialized_defaults` round-trips a non-default `[keys]` through `save_to`/`load_from`.
 - Observation: on macOS the test helper `ctrl_key` produces `SUPER`, and the dashboard remaps `SUPER` to `CONTROL` for accelerators.
   Evidence: `mj-tui/src/test_support.rs:85-96`, `mj-tui/src/lib.rs:894-916`. Consequence: the prefix is matched as literal `CONTROL` on every platform and tests build it with a dedicated helper.
+
+- Observation: `ChatFooter` is `Copy`, and two call sites in `render_in` read `regions.footer`, so an owned `banner: Option<Line<'static>>` would not compile without dropping `Copy` from `ChatFooter` and `ChatRegions`.
+  Evidence: `mj-chat/src/chat/active/render.rs:128` and `:255` both destructure `regions.footer`. Consequence: the field is `Option<&'a Line<'static>>`; `mj-tui/src/combined.rs` owns the line in a local and passes `banner.as_ref()`.
+
+- Observation: the old three-group footer fitter dropped whole groups in order and protected hints by matching the literal text `"F1 "`/`"F2 "`, which no longer works once every chord lives in one group.
+  Evidence: `mj-chat/src/theme.rs:270-289` before the change. Consequence: `fit_footer_items` now removes the right-most unprotected hint of the left-most non-empty group, and falls back to the left-most protected hint only when nothing unprotected is left, so palette survives to about 20 columns and the help key to 6.
+
+- Observation: the footer's `ctrl+b then: ` heading rides on the chord group's first hint, so at the narrowest widths — where only palette and help remain — the row reads `: palette · ? keys` with no prefix in sight.
+  Evidence: `footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest` asserts exactly that at width 20. Consequence: accepted; the banner and the help overlay both name the prefix, and re-adding it after fitting would need a second fitting pass.
+
+- Observation: running a command through the router bypasses `handle_key_at`, which is the only place that cleared `modal_click_transition`/`suppress_modal_release`; without that a command run from a chord left the next mouse click suppressed.
+  Evidence: `footer_help_scrolls_and_closes_without_leaking_to_background_commands` failed with the help overlay still open after clicking its `×`. Consequence: `route_bound_key` clears both on a `Press`.
+
+- Observation: `DashboardState::key_labels` wants pane keys first (`n / N / ctrl+b c` reads best in the help overlay), but prose such as "press … to create a session" is read from the composer as often as from a pane, where a bare `n` is text.
+  Evidence: `the_empty_prompt_distinguishes_no_session_from_no_conversation` rendered "Press n to create a session". Consequence: a separate `first_key_label` puts the configured binding first and falls back to a pane key.
+
+- Observation: the help overlay grew past 60 rows, so the `Composer` section fell off the bottom of the test's terminal.
+  Evidence: `help_overlay_lists_every_registry_command_with_its_primary_key` failed on `rendered.contains("Composer")` at 200x60. Consequence: the test draws at 200x100; the overlay itself scrolls.
+
+- Observation: `cargo check --workspace` fails in this checkout because `mj-desktop` needs GTK/WebKit system libraries. The default workspace members exclude it.
+  Evidence: `Cargo.toml:7` lists ten default members without `mj-desktop`; `cargo check --workspace` fails in `pango-sys`, `cairo-sys-rs`, `javascriptcore-rs-sys`. Consequence: validation uses plain `cargo test` and `cargo clippy --all-targets`, which honour `default-members`.
 
 ## Decision Log
 
@@ -66,9 +87,9 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
   Rationale: the dashboard and composer treat them as cancel and paste before any command runs; a direct binding on them would be silently shadowed.
   Date/Author: 2026-09-17, Fable.
 
-- Decision: the letter map. mj's session plays the role of herdr's tab (`prefix+c` create, `prefix+shift+t` rename). mj's workspace plays the role of herdr's workspace (`prefix+w` focus the workspace strip, `prefix+shift+n` open the workspace manager, `prefix+n`/`prefix+p`/`prefix+1..9` move between workspaces, since mj has no tabs to give those keys to). mj's support panes play the role of herdr's panes (`prefix+tab`/`prefix+shift+tab` and `prefix+j`/`prefix+k` cycle focus down and up the vertical stack, `prefix+z` pane size, `prefix+b` pane preset). Global keys copy herdr exactly: `?` help, `s` settings, `q` detach, `shift+r` refresh. mj-only commands take letters herdr leaves free: `g` resume picker (herdr's "goto" navigator is the nearest idea), `:` command palette (tmux's command prompt), `x` cancel the in-flight operation, `a` mark all read, `u` web viewer, `t` toggle transcript rendering, `v` dictation. Stop, restart, move, delete session, container settings, manage profiles, manage targets, change fast-start setup and spinner style stay unbound by default but are bindable.
-  Rationale: where the concept exists in herdr the key is identical; elsewhere the key is tmux's or a free mnemonic, and none collides with a herdr default a user might hit by habit and get a destructive result. `prefix+x` cancels a launch or resume in flight (non-destructive); stopping a session stays keyless because a mis-hit must not act on a live session.
-  Date/Author: 2026-09-17, Fable.
+- Decision: the letter map. mj's session plays the role of herdr's tab (`prefix+c` create, `prefix+shift+t` rename). mj's workspace plays the role of herdr's workspace (`prefix+w` focus the workspace strip, `prefix+shift+n` open the workspace manager, `prefix+n`/`prefix+p`/`prefix+1..9` move between workspaces, since mj has no tabs to give those keys to). mj's support panes play the role of herdr's panes: `prefix+tab` and `prefix+shift+tab` cycle focus down and up the vertical stack, exactly as herdr does, and `prefix+z` and `prefix+b` are pane size and pane preset. Global keys copy herdr exactly: `?` help, `s` settings, `q` detach, `shift+r` refresh. mj-only commands take letters herdr leaves free: `g` resume picker (herdr's "goto" navigator is the nearest idea), `:` command palette (tmux's command prompt), `shift+c` cancel the in-flight operation (the shifted form of create, and non-destructive), `a` mark all read, `u` web viewer, `t` toggle transcript rendering, `m` dictation (microphone). Stop, restart, move, delete session, container settings, manage profiles, manage targets, change fast-start setup and spinner style stay unbound by default but are bindable. `v`, `x`, `h`, `j`, `k`, `l`, `shift+h`/`shift+j`/`shift+k`/`shift+l`, `minus` and `r` are deliberately left free for planned herdr-style split panes, where herdr uses `v` to split vertically, `x` to close a pane and `h`/`j`/`k`/`l` to move between them.
+  Rationale: where the concept exists in herdr the key is identical; elsewhere the key is tmux's or a free mnemonic, and none collides with a herdr default a user might hit by habit and get a destructive result. `prefix+shift+c` cancels a launch or resume in flight (non-destructive); stopping a session stays keyless because a mis-hit must not act on a live session. Reserving the split-pane letters now costs nothing and avoids moving a published default later.
+  Date/Author: 2026-09-17, Fable with the user.
 
 - Decision: `Ctrl-PageUp`/`Ctrl-PageDown` workspace switching is removed from the defaults.
   Rationale: the user asked for no direct chords by default. A user who wants them writes `next_workspace = ["prefix+n", "ctrl+pagedown"]`.
@@ -85,6 +106,22 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 - Decision: bump `CONFIG_VERSION` from 10 to 11 when adding the `keys` section.
   Rationale: follows the repository's precedent that each new top-level section bumps the version; an older binary would reject a file containing `[keys]` anyway because every section denies unknown fields.
   Date/Author: 2026-09-17, Fable.
+
+- Decision: the footer word for help is `keys`, not `help`, so the row ends `? keys` and the `PREFIX` banner can use the same words.
+  Rationale: the plan's own target footer string and banner both write `? keys`; one word in both places means the banner is not teaching a second vocabulary.
+  Date/Author: 2026-09-17, Opus implementing M2.
+
+- Decision: `FooterGroup` keeps three slots in `theme::fit_footer_items` even though the dashboard now has two groups, with the third passed empty.
+  Rationale: the chat crate shares the helper and has its own idea of groups; changing the arity would touch the chat footer for no behavioural gain.
+  Date/Author: 2026-09-17, Opus implementing M2.
+
+- Decision: the chat footer protects the last two host hints by index rather than by text.
+  Rationale: the chat is handed `&[&str]` and cannot know which hint is the palette; the host already ranks palette and help last, so "the last two" is exactly the same set without the chat learning the dashboard's vocabulary.
+  Date/Author: 2026-09-17, Opus implementing M2.
+
+- Decision: `ToggleTranscriptRendering` and `ToggleDictation` are `Scope::Global` and always available, and mj-cli answers them with the notice "No conversation is open." until M3 wires the chat calls.
+  Rationale: the plan asked for exactly this placeholder; a `Hidden` availability would have kept them out of the footer and the help overlay, which is where their new keys have to be advertised from the start.
+  Date/Author: 2026-09-17, Opus implementing M2.
 
 ## Outcomes & Retrospective
 
@@ -288,6 +325,119 @@ M1, `cargo test -p brokk-mj-core` (dev profile, outside the sandbox):
 M1 validation error text for the conflicting-bindings example (`help` and `pane_preset` both `"prefix+space"`):
 
     keys.pane_preset = "prefix+space": already bound by keys.help
+
+M2 dashboard footer, full width, Sessions focus, nothing in flight:
+
+    Enter open · Tab pane │ ctrl+b then: c create · g resume · a read · z size · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+
+With a launch in flight the cancel hint takes its rank between panes and detach:
+
+    … · b panes · shift+c cancel launch · q detach · …
+
+M2 footer while the prefix is pending, at every focus:
+
+     PREFIX  esc cancel · ctrl+b send · ? keys
+
+M2 help overlay with the default bindings (the rows, without the frame):
+
+    prefix: ctrl+b   (edit [keys] in config.toml)
+
+    Sessions pane
+      Enter                   Open session
+      n / N / ctrl+b c        Create session
+      ctrl+b a                Mark all read
+      Space                   Fold project
+
+    Selected session
+      —                       Restart session
+      ctrl+b shift+t          Rename session
+      —                       Container settings
+      —                       Stop session
+      —                       Move session…
+      —                       Delete session
+
+    Targets pane
+      Enter / e               Target actions
+
+    Quota pane
+      Enter / e               Rename profile
+
+    Panes
+      Tab / ctrl+b tab        Next pane
+      ctrl+b shift+tab        Previous pane
+      ctrl+b z                Pane size
+      ctrl+b b                Pane preset
+
+    Settings
+      —                       Change fast-start setup
+      —                       Manage agent profiles
+      —                       Manage machines and runtimes
+      ctrl+b s                Open settings
+      —                       Next spinner style
+
+    Anywhere
+      ctrl+b g                Resume a session
+      ctrl+b shift+c          Cancel operation
+      ctrl+b shift+n          Workspaces
+      ctrl+b w                Focus the workspace strip
+      ctrl+b p                Previous workspace
+      ctrl+b n                Next workspace
+      ctrl+b 1-9              Switch to workspace by number
+      ctrl+b u                Web viewer
+      ctrl+b shift+r          Refresh targets and quotas
+      ctrl+b q                Detach from this terminal
+      ctrl+b t                Toggle transcript rendering
+      ctrl+b m                Dictation
+      ctrl+b :                Command palette
+      ? / ctrl+b ?            Help
+
+    Composer
+      Enter                     send the prompt, or queue it while a turn is running
+      Shift-Enter / Alt-Enter   start a new line
+      Tab                       accept a completion, or move to the next pane
+      Esc                       cancel the running turn or shell command
+      PgUp / PgDn               scroll the transcript
+      Up / Down                 walk prompt history, or move within the prompt
+      Ctrl-R                    search prompt history
+      Ctrl-V                    paste from the system clipboard
+      Ctrl-A / Ctrl-E           start or end of the line
+      Ctrl-B / Ctrl-F           back or forward one character
+      Alt-B / Alt-F             back or forward one word
+      Ctrl-H / Ctrl-D           delete before or after the cursor
+      Alt-D                     delete the word after the cursor
+      Ctrl-W                    delete the word before the cursor
+      Ctrl-U / Ctrl-K           kill to the start or end of the line
+      Ctrl-Y                    yank what was killed
+      Ctrl-C                    stash the prompt into history and clear it
+      Ctrl-P / Ctrl-N           previous or next line, or history
+      ctrl+b ctrl+b             send a literal Ctrl-B to the composer (backward one character)
+
+    ↑↓ scroll · Esc closes
+
+Each row's description follows its label on the same line; it is left out above
+so the key column stays readable.
+
+M2, `cargo test` (dev profile, outside the sandbox), the crates this milestone
+touched:
+
+    mj_chat       test result: ok. 527 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.62s
+    mj_core       test result: ok. 372 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+    mj_tui        test result: ok. 505 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.47s
+    mj            test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+    mj_controller test result: ok. 1347 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 63.84s
+    mj_worker     test result: ok. 462 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 80.81s
+
+M2, the PTY termination suite with the new `\x02q` quit sequence and `\x02c`
+create sequence:
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.46s
+
+`cargo clippy --all-targets -- -D warnings` exits 0.
+
+One caution about running the whole suite: `mj-cli/tests/termination_pty.rs`
+starts real daemons, so two concurrent `cargo test` runs in the same checkout
+make `fixture_teardown_before_the_dashboard_is_ready_removes_its_storage` fail
+with "another Mjolnir controller is already using …". Run the suite alone.
 
 Record here, as the work proceeds: the final footer string at full width, the help overlay text with defaults, a `cargo test` summary line per milestone, and the validation error text produced by the conflicting-bindings example.
 

@@ -113,8 +113,8 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
 /// The pane group the palette lists after the selected session's.
 ///
 /// The composer is not a pane, but every Sessions-pane command answers from it
-/// as a chord (`Alt-N`, `Alt-A`), so typing in a conversation lists the
-/// Sessions pane's group rather than none at all.
+/// after the prefix, so typing in a conversation lists the Sessions pane's
+/// group rather than none at all.
 fn pane_scope(focus: Focus) -> Scope {
     match focus {
         Focus::Workspaces => Scope::Global,
@@ -440,12 +440,7 @@ pub(crate) fn render_palette(
                 enabled.push(palette.entries[*index].availability == Availability::Ready);
                 let entry = &palette.entries[*index];
                 let spec = spec(entry.id);
-                let keys = spec
-                    .keys
-                    .iter()
-                    .map(|hint| hint.label)
-                    .collect::<Vec<_>>()
-                    .join(" / ");
+                let keys = dashboard.key_labels(entry.id).join(" / ");
                 let reason = match entry.availability {
                     Availability::Blocked(reason) => format!("  ({reason})"),
                     Availability::Ready | Availability::Hidden => String::new(),
@@ -546,7 +541,7 @@ mod tests {
     use crate::SessionOperationKind;
     use crate::render::render;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, drawn, key, operation, running_session,
+        buffer_lines, dashboard_with_session, drawn, key, open_palette, operation, running_session,
         stopped_session,
     };
     use ratatui::Terminal;
@@ -590,7 +585,7 @@ mod tests {
     fn f2_palette_lists_the_selected_sessions_commands_before_workspace_ones() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
 
         let lines = drawn(&mut dashboard, 120, 44);
@@ -625,7 +620,7 @@ mod tests {
     fn palette_shows_the_selected_row_and_scrolls_the_list_on_a_short_terminal() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
 
         // Focus the list and select its final command before drawing the
         // constrained viewport. The shared list renderer must reveal it and
@@ -639,7 +634,7 @@ mod tests {
 
         let lines = buffer_lines(terminal.backend().buffer());
         let Mode::Palette(palette) = &dashboard.mode else {
-            panic!("F2 should leave the palette open")
+            panic!("the palette chord should leave the palette open")
         };
         assert_eq!(
             palette.selected,
@@ -660,7 +655,7 @@ mod tests {
     fn palette_searches_and_activates_setup() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         type_query(&mut dashboard, "open settings");
 
         let lines = drawn(&mut dashboard, 120, 30);
@@ -675,19 +670,16 @@ mod tests {
     /// From the composer the selection is the conversation on screen, so the
     /// palette still leads with that session's commands.
     #[test]
-    fn f2_from_the_composer_lists_the_open_sessions_commands() {
+    fn the_palette_chord_from_the_composer_lists_the_open_sessions_commands() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         // Enter opens the conversation and hands the keyboard to the composer.
         dashboard.handle_key(key(KeyCode::Enter));
         assert_eq!(dashboard.focus, Focus::Prompt);
 
-        // With the composer focused the real controller never routes a key
-        // to the dashboard, so F2 has to be a global chord to arrive at all.
-        let chord = crate::global_chord(&key(KeyCode::F(2))).expect("F2 is a global chord");
-        assert_eq!(chord, CommandId::Palette);
-        assert!(dashboard.global_chord_allowed(chord));
-        dashboard.dispatch_command(chord);
+        // With the composer focused the real controller never routes a key to
+        // the dashboard, so the palette has to arrive through the prefix.
+        open_palette(&mut dashboard);
 
         let lines = drawn(&mut dashboard, 120, 44);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
@@ -701,18 +693,13 @@ mod tests {
     fn palette_exposes_both_focus_cycle_directions() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
 
         let lines = drawn(&mut dashboard, 120, 44);
         let next = row_of(&lines, "Next pane").expect("Next pane command");
-        assert!(lines[next].contains("F6 / Shift-F6"), "{lines:#?}");
-        assert!(
-            spec(CommandId::CycleFocus)
-                .description
-                .contains("Shift-Tab or Shift-F6"),
-            "{}",
-            spec(CommandId::CycleFocus).description
-        );
+        assert!(lines[next].contains("Tab / ctrl+b tab"), "{lines:#?}");
+        let previous = row_of(&lines, "Previous pane").expect("Previous pane command");
+        assert!(lines[previous].contains("ctrl+b shift+tab"), "{lines:#?}");
     }
 
     /// `e` used to open the session edit dialog. The palette replaced it, and
@@ -766,7 +753,7 @@ mod tests {
     fn palette_enter_on_rename_opens_the_rename_editor() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         type_query(&mut dashboard, "rename");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
@@ -783,7 +770,7 @@ mod tests {
     fn palette_stops_without_opening_another_modal() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         type_query(&mut dashboard, "stop");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
@@ -816,7 +803,7 @@ mod tests {
                 .any(|entry| entry.id == CommandId::ContainerSettings)
         );
 
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         let lines = drawn(&mut dashboard, 120, 44);
         assert!(row_of(&lines, "Container settings").is_none(), "{lines:#?}");
     }
@@ -841,7 +828,7 @@ mod tests {
             vec![Availability::Blocked("a session transition is in progress")]
         );
 
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         type_query(&mut dashboard, "rename");
         let lines = drawn(&mut dashboard, 120, 44).join("\n");
         assert!(
@@ -868,7 +855,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         let before = dashboard.selected_session().cloned();
-        dashboard.handle_key(key(KeyCode::F(2)));
+        open_palette(&mut dashboard);
         type_query(&mut dashboard, "stop");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Esc)),

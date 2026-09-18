@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::{
-    buffer_lines, cell_column, config, dashboard_with_session, drawn, key, point, running_session,
-    stopped_session,
+    buffer_lines, cell_column, chord, config, dashboard_with_session, drawn, key, point,
+    running_session, stopped_session,
 };
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
@@ -82,7 +82,7 @@ fn activate(dashboard: &mut DashboardState, control: SetupControl) {
 }
 
 fn choose_light_theme(dashboard: &mut DashboardState) {
-    dashboard.handle_key(key(KeyCode::F(7)));
+    chord(dashboard, crate::CommandId::OpenConfig);
     choose(dashboard, "interface");
     choose(dashboard, "theme");
     dashboard.handle_key(key(KeyCode::Down));

@@ -21,7 +21,7 @@ fn unchanged_config_after_a_save_preserves_a_new_palette_and_its_query() {
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
     let saved_config = dashboard.config.clone();
-    dashboard.handle_key(key(KeyCode::F(2)));
+    open_palette(&mut dashboard);
     dashboard.handle_paste("container");
     dashboard.set_config(saved_config);
     assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
@@ -36,7 +36,7 @@ fn changed_config_preserves_a_new_palette_and_its_query() {
     let mut dashboard = dashboard_with_session(running_session());
     let mut saved_config = dashboard.config.clone();
     saved_config.advanced.show_stopped_sessions = !saved_config.advanced.show_stopped_sessions;
-    dashboard.handle_key(key(KeyCode::F(2)));
+    open_palette(&mut dashboard);
     dashboard.handle_paste("rename");
     dashboard.set_config(saved_config.clone());
     assert_eq!(dashboard.config, saved_config);

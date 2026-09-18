@@ -378,18 +378,18 @@ key_actions! {
     NextWorkspace / next_workspace = "prefix+n",
     PreviousWorkspace / previous_workspace = "prefix+p",
     SwitchWorkspace / switch_workspace = "prefix+1..9",
-    NextPane / next_pane = ["prefix+tab", "prefix+j"],
-    PreviousPane / previous_pane = ["prefix+shift+tab", "prefix+k"],
+    NextPane / next_pane = "prefix+tab",
+    PreviousPane / previous_pane = "prefix+shift+tab",
     PaneSize / pane_size = "prefix+z",
     PanePreset / pane_preset = "prefix+b",
     Refresh / refresh = "prefix+shift+r",
     Palette / palette = "prefix+:",
-    CancelOperation / cancel_operation = "prefix+x",
+    CancelOperation / cancel_operation = "prefix+shift+c",
     MarkAllRead / mark_all_read = "prefix+a",
     WebViewer / web_viewer = "prefix+u",
     RenameSession / rename_session = "prefix+shift+t",
     ToggleTranscriptRendering / toggle_transcript_rendering = "prefix+t",
-    ToggleDictation / toggle_dictation = "prefix+v",
+    ToggleDictation / toggle_dictation = "prefix+m",
     StopSession / stop_session = "",
     RestartSession / restart_session = "",
     MoveSession / move_session = "",
@@ -622,6 +622,13 @@ fn check_combo(
 ) -> Result<()> {
     let label = format_key_combo(combo);
     if trigger == Trigger::Direct {
+        if combo == prefix {
+            return Err(key_error(
+                field,
+                raw,
+                "the prefix key cannot also be a direct binding",
+            ));
+        }
         if is_unmodified_printable(combo) {
             return Err(key_error(
                 field,
@@ -746,7 +753,7 @@ mod tests {
         );
         assert_eq!(
             keybinds.prefix_rhs_labels(KeyAction::NextPane),
-            vec!["tab".to_owned(), "j".to_owned()]
+            vec!["tab".to_owned()]
         );
         assert!(keybinds.bindings(KeyAction::StopSession).is_empty());
 
@@ -859,6 +866,28 @@ mod tests {
             .to_string();
         assert!(error.contains("keys.help = \"prefix+ctrl+b\""), "{error}");
         assert!(error.contains("literal prefix"), "{error}");
+    }
+
+    #[test]
+    fn the_prefix_key_cannot_be_a_direct_binding() {
+        let keys = keys_with(|keys| keys.refresh = "ctrl+b".into());
+        let error = keys
+            .resolve()
+            .expect_err("the prefix key is not a direct binding")
+            .to_string();
+        assert!(error.contains("keys.refresh = \"ctrl+b\""), "{error}");
+        assert!(
+            error.contains("the prefix key cannot also be a direct binding"),
+            "{error}"
+        );
+
+        // Moving the prefix frees the old key for a direct binding.
+        keys_with(|keys| {
+            keys.prefix = "ctrl+space".to_owned();
+            keys.refresh = "ctrl+b".into();
+        })
+        .resolve()
+        .expect("ctrl+b is bindable once it is no longer the prefix");
     }
 
     #[test]

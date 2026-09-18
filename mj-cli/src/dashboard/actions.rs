@@ -40,6 +40,13 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        // M3 gives these the chat calls themselves; for now they report when
+        // there is nothing on screen to apply them to.
+        DashboardAction::ToggleTranscriptRendering | DashboardAction::ToggleDictation => {
+            if context.visible_chat().is_none() {
+                context.dashboard.set_notice("No conversation is open.");
+            }
+        }
         DashboardAction::GoPrepareProject { target_id: _ } => {
             if let Some(go) = context.dashboard.go_mode() {
                 spawn_create_bundle(

@@ -42,7 +42,7 @@ use mj_controller::session_manager::{
 use mj_controller::targets::DeploymentCapacityTarget;
 use mj_controller::worker_client::CredentialSyncCoordinator;
 use mj_tui::{
-    CommandId, DashboardAction, DashboardState, ImportProfileOption,
+    CommandId, DashboardAction, DashboardState, ImportProfileOption, KeyRoute,
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
@@ -521,26 +521,42 @@ pub(crate) async fn run_dashboard_for_workspace(
                         context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
                         break;
                     }
-                    let (consumed, batched) = if let Some(command) =
-                        global_chord_event(&context.dashboard, &event).filter(|command| {
-                            !context.visible_chat().is_some_and(|chat| chat.component_modal_open())
-                                || matches!(command, CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh)
-                        })
-                    {
+                    // The prefix router runs here and nowhere else: this loop
+                    // forwards the literal doubled prefix into the panes and
+                    // the composer, and a second pass down there would arm the
+                    // prefix again on that very key.
+                    let route = context.dashboard.route_bound_key_event(&event);
+                    let route = match route {
+                        KeyRoute::Command { id, .. }
+                            if !context.dashboard.command_allowed_now(id)
+                                || (context
+                                    .visible_chat()
+                                    .is_some_and(|chat| chat.component_modal_open())
+                                    && !mj_tui::survives_chat_modal(id)) =>
+                        {
+                            KeyRoute::Consumed
+                        }
+                        route => route,
+                    };
+                    let (consumed, batched) = if let KeyRoute::Command { id, index } = route {
                         context.dashboard.cancel_component_pointer();
                         if let Some(chat) = context.visible_chat() { chat.cancel_component_pointer(); }
                         // Detaching from an open conversation has to save the
                         // draft and the read cursor, which is the chat's own
                         // bookkeeping rather than the dashboard's.
-                        if command == CommandId::QuitDetach
+                        if id == CommandId::QuitDetach
                             && let Some(chat) = context.visible_chat()
                         {
                             chat_outcome = chat.detach();
-                        } else if apply_global_focus_cycle(&mut context.dashboard, &event, command) {
-                            action = DashboardAction::None;
+                        } else if id == CommandId::SwitchWorkspace {
+                            action = index
+                                .map(|index| context.dashboard.select_workspace_index(index))
+                                .unwrap_or(DashboardAction::None);
                         } else {
-                            action = context.dashboard.dispatch_command(command);
+                            action = context.dashboard.dispatch_command(id);
                         }
+                        (true, false)
+                    } else if route == KeyRoute::Consumed {
                         (true, false)
                     } else {
                         // Selection sees mouse and Esc first: a drag inside a
@@ -1419,43 +1435,6 @@ fn dashboard_event_action(dashboard: &mut DashboardState, event: Event) -> Dashb
         .handle_event_result(event)
         .action
         .unwrap_or(DashboardAction::None)
-}
-
-/// The global chord this event runs, if any.
-///
-/// A handful of commands answer from every surface, including while the
-/// composer owns the keyboard, so they are caught here before the event is
-/// routed to a pane or to the chat. Which chords survive an open dialog is
-/// [`DashboardState::global_chord_allowed`]'s question, not this one's.
-fn global_chord_event(dashboard: &DashboardState, event: &Event) -> Option<CommandId> {
-    let Event::Key(key) = event else {
-        return None;
-    };
-    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-        return None;
-    }
-    let id = mj_tui::global_chord(key)?;
-    dashboard.global_chord_allowed(id).then_some(id)
-}
-
-/// Applies the one global command whose direction depends on the pressed
-/// event. Keeping this branch shared with the event loop makes Shift-F6 test
-/// the same reverse path as the live dashboard, rather than only testing key
-/// registration in `mj-tui`.
-fn apply_global_focus_cycle(
-    dashboard: &mut DashboardState,
-    event: &Event,
-    command: CommandId,
-) -> bool {
-    if command != CommandId::CycleFocus {
-        return false;
-    }
-    let reverse = matches!(
-        event,
-        Event::Key(key) if key.modifiers.contains(KeyModifiers::SHIFT)
-    );
-    dashboard.cycle_focus(reverse);
-    true
 }
 
 pub(crate) fn resume_progress_notice(

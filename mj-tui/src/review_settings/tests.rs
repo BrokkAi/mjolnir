@@ -1,6 +1,8 @@
 use super::*;
 use crate::actions::CommandId;
-use crate::test_support::{buffer_lines, config, dashboard_with_session, key, running_session};
+use crate::test_support::{
+    buffer_lines, config, dashboard_with_session, key, open_palette, running_session,
+};
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -145,9 +147,9 @@ fn review_settings_is_available_through_setup_without_a_selected_session() {
         mj_core::state::State::default(),
         Default::default(),
     );
-    dashboard.handle_key(key(KeyCode::F(2)));
+    open_palette(&mut dashboard);
     let Mode::Palette(palette) = &dashboard.mode else {
-        panic!("F2 should open the command palette")
+        panic!("the palette chord should open the command palette")
     };
     assert!(
         palette

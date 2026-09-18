@@ -1,8 +1,9 @@
-//! The `F1` help overlay: every key the terminal surface answers, in one
-//! scrollable list built from the action registry in [`crate::actions`].
+//! The help overlay: every key the terminal surface answers, in one scrollable
+//! list built from the action registry in [`crate::actions`] and the bindings
+//! in force.
 //!
 //! The overlay is a mode like any other dialog, but it is unusual in one way:
-//! it can open over another mode. Pressing `F1` inside the new-session wizard
+//! it can open over another mode. Opening help inside the new-session wizard
 //! must not throw the wizard away, so [`DashboardState::begin_help`] moves the
 //! mode it opened over into the overlay and puts it straight back when the
 //! overlay closes. That is why closing help does not go through
@@ -56,8 +57,6 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
         "walk prompt history, or move within the prompt",
     ),
     ("Ctrl-R", "search prompt history"),
-    ("Alt-T", "toggle transcript rendering"),
-    ("Alt-V", "start or stop dictation"),
     ("Ctrl-V", "paste from the system clipboard"),
     ("Ctrl-A / Ctrl-E", "start or end of the line"),
     ("Ctrl-B / Ctrl-F", "back or forward one character"),
@@ -69,21 +68,16 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ("Ctrl-Y", "yank what was killed"),
     ("Ctrl-C", "stash the prompt into history and clear it"),
     ("Ctrl-P / Ctrl-N", "previous or next line, or history"),
-    ("Alt-N", "new session"),
-    ("Alt-S", "resume a session"),
-    ("Alt-A", "mark all read"),
-    ("Alt-G", "pane layout"),
-    ("Alt-Q", "detach"),
-    ("F2", "command palette"),
-    ("F4", "web viewer"),
-    ("Alt-W", "new session with options"),
-    ("F5", "refresh targets and quotas"),
-    ("F7", "settings"),
+    (
+        "ctrl+b ctrl+b",
+        "send a literal Ctrl-B to the composer (backward one character)",
+    ),
 ];
 
 impl DashboardState {
     /// Opens the help overlay over whatever is on screen. Opening it twice is
-    /// a no-op, so a repeated `F1` cannot bury a wizard behind two overlays.
+    /// a no-op, so a repeated help key cannot bury a wizard behind two
+    /// overlays.
     pub(crate) fn begin_help(&mut self) {
         if matches!(self.mode, Mode::Help(_)) {
             return;
@@ -139,7 +133,7 @@ impl DashboardState {
             unreachable!("help input requires the help overlay");
         };
         match key.code {
-            KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
                 self.mode = *overlay.return_to;
                 return DashboardAction::None;
             }
@@ -174,7 +168,15 @@ impl DashboardState {
 /// where there is one: a help screen that hid what is unavailable would leave
 /// the reader wondering whether the key exists at all.
 pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("prefix: {}", dashboard.keybinds().prefix_label()),
+            Style::default()
+                .fg(theme::palette().secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   (edit [keys] in config.toml)".to_owned(), theme::muted()),
+    ])];
     for scope in SCOPE_ORDER {
         let group = COMMANDS
             .iter()
@@ -183,9 +185,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
         if group.is_empty() {
             continue;
         }
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             scope.heading().to_owned(),
             Style::default()
@@ -193,12 +193,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ));
         for spec in group {
-            let keys = spec
-                .keys
-                .iter()
-                .map(|hint| hint.label)
-                .collect::<Vec<_>>()
-                .join(" / ");
+            let keys = dashboard.key_labels(spec.id).join(" / ");
             let availability = (spec.available)(dashboard);
             let suffix = match availability {
                 Availability::Ready => String::new(),
@@ -220,7 +215,7 @@ pub(crate) fn help_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
             };
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {keys:<12}  "),
+                    format!("  {keys:<22}  "),
                     Style::default().fg(if ready {
                         theme::palette().secondary
                     } else {
@@ -272,10 +267,11 @@ pub(crate) fn render_help(
     );
     let paragraph = Paragraph::new(lines)
         .scroll((overlay.scroll as u16, 0))
-        .block(theme::modal().title(title).title_bottom(Line::styled(
-            " ↑↓ scroll · Esc or F1 closes ",
-            theme::muted(),
-        )));
+        .block(
+            theme::modal()
+                .title(title)
+                .title_bottom(Line::styled(" ↑↓ scroll · Esc closes ", theme::muted())),
+        );
     frame.render_widget(paragraph, popup);
     overlay.area.set(popup);
     form.end_frame(());
@@ -287,7 +283,10 @@ mod tests {
     use crate::Focus;
     use crate::actions::COMMANDS;
 
-    use crate::test_support::{alt_key, dashboard_with_session, drawn, key, running_session};
+    use crate::test_support::{
+        chord, dashboard_with_session, drawn, key, open_new_session_wizard, prefix_key, route,
+        running_session,
+    };
 
     /// The overlay is the reference for the whole surface, so nothing in the
     /// registry may be missing from it — including commands that cannot run
@@ -296,28 +295,61 @@ mod tests {
     fn help_overlay_lists_every_registry_command_with_its_primary_key() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::F(1)));
+        chord(&mut dashboard, crate::CommandId::Help);
 
-        let rendered = drawn(&mut dashboard, 200, 60).join("\n");
+        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
         for spec in COMMANDS {
             assert!(rendered.contains(spec.label), "missing {}", spec.label);
-            if let Some(hint) = spec.keys.first() {
+            if let Some(label) = dashboard.key_labels(spec.id).first() {
                 assert!(
-                    rendered.contains(hint.label),
-                    "missing key {} for {}",
-                    hint.label,
+                    rendered.contains(label),
+                    "missing key {label} for {}",
                     spec.label
                 );
             }
         }
+        // The overlay leads with the prefix, because every chord below it is
+        // meaningless to a reader who does not know which key starts one.
+        assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
+        assert!(
+            rendered.contains("(edit [keys] in config.toml)"),
+            "{rendered}"
+        );
         // The palette is a command like any other, so the reference names it
-        // and its key: a user who cannot find F1 can still find F2 from here,
-        // and the other way round.
+        // and its key.
         assert!(rendered.contains("Command palette"), "{rendered}");
-        assert!(rendered.contains("F2"), "{rendered}");
+        assert!(rendered.contains("ctrl+b :"), "{rendered}");
         assert!(rendered.contains("Composer"), "{rendered}");
-        assert!(rendered.contains("F6 / Shift-F6"), "{rendered}");
-        assert!(rendered.contains("Shift-Tab or Shift-F6"), "{rendered}");
+        // The one key the prefix took away is still reachable, and says so.
+        assert!(rendered.contains("ctrl+b ctrl+b"), "{rendered}");
+    }
+
+    /// The overlay reads the bindings in force, not the defaults: a rebound
+    /// key must appear where the default one used to, and a command a user
+    /// unbound must say so rather than naming a key that does nothing.
+    #[test]
+    fn help_lists_user_bindings_and_marks_unbound_commands() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = crate::test_support::config();
+        config.keys.prefix = "ctrl+a".to_owned();
+        config.keys.refresh = ["prefix+shift+r", "f5"].into();
+        config.keys.web_viewer = "".into();
+        dashboard.set_config(config);
+        dashboard.focus_sessions();
+        chord(&mut dashboard, crate::CommandId::Help);
+
+        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
+        assert!(rendered.contains("prefix: ctrl+a"), "{rendered}");
+        assert!(rendered.contains("ctrl+a shift+r / f5"), "{rendered}");
+        assert_eq!(
+            dashboard.key_labels(crate::CommandId::WebViewer),
+            Vec::<String>::new()
+        );
+        let web = rendered
+            .lines()
+            .find(|line| line.contains("Web viewer"))
+            .expect("the web viewer row");
+        assert!(web.contains('—'), "{web}");
     }
 
     /// Help opens over whatever is on screen, so a half-filled wizard has to
@@ -326,15 +358,13 @@ mod tests {
     fn help_overlay_returns_to_the_wizard_it_opened_over() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        dashboard.handle_key(alt_key('w'));
+        open_new_session_wizard(&mut dashboard);
         let wizard = dashboard.mode.clone();
         assert!(matches!(wizard, Mode::New(_)), "{wizard:?}");
 
-        // F1 is a global chord: over an open wizard the controller's
-        // pre-filter answers it, so this drives that path.
-        let help = crate::global_chord(&key(KeyCode::F(1))).expect("F1 is a global chord");
-        assert!(dashboard.global_chord_allowed(help));
-        dashboard.dispatch_command(help);
+        // The help chord answers over an open wizard, which is the path the
+        // event loop takes rather than the wizard's own key handling.
+        route(&mut dashboard, &[prefix_key(), key(KeyCode::Char('?'))]);
         assert!(matches!(dashboard.mode, Mode::Help(_)));
         assert!(dashboard.modal_open());
 

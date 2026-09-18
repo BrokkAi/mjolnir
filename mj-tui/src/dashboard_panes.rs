@@ -69,7 +69,7 @@ impl DashboardState {
     /// not resizable, so it explains how to choose a pane instead.
     pub fn cycle_focused_pane_size(&mut self) {
         let Some(pane) = self.focus.support_pane() else {
-            self.set_notice("Select Sessions, Targets, or Quota before pressing Alt-Z.");
+            self.set_notice("Select Sessions, Targets, or Quota before cycling the pane size.");
             return;
         };
         let mut next = self.pane_size(pane).cycled();
@@ -79,7 +79,7 @@ impl DashboardState {
         self.set_pane_size(pane, next);
     }
 
-    /// Alt-G's stable global preset: restore any custom arrangement to all
+    /// The pane preset's stable global arrangement: restore any custom layout to all
     /// Standard; from all Standard, minimize every support pane for the conversation.
     pub fn toggle_pane_preset(&mut self) {
         if self.pane_sizes.all_standard() {

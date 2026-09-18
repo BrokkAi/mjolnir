@@ -1,6 +1,10 @@
 use super::*;
 
 /// Registry commands shared by pane and composer footers, retaining their identities.
+///
+/// The chord group's first hint carries the prefix itself — `ctrl+b then: c
+/// create` — so the reader always sees which key starts the chord before the
+/// letters that follow it.
 pub(crate) fn footer_commands(
     dashboard: &DashboardState,
     group: crate::actions::FooterGroup,
@@ -13,12 +17,38 @@ pub(crate) fn footer_commands(
                 return None;
             }
             let word = (spec.footer)(dashboard)?;
-            let hint = spec.keys.first()?;
-            Some((spec.footer_rank, id, format!("{} {word}", hint.label)))
+            let key = dashboard.footer_key(id)?;
+            Some((spec.footer_rank, id, format!("{key} {word}")))
         })
         .collect::<Vec<_>>();
     hints.sort_by_key(|(rank, _, _)| *rank);
-    hints.into_iter().map(|(_, id, text)| (id, text)).collect()
+    let mut hints = hints
+        .into_iter()
+        .map(|(_, id, text)| (id, text))
+        .collect::<Vec<_>>();
+    if group == crate::actions::FooterGroup::Chord
+        && let Some((_, text)) = hints.first_mut()
+    {
+        *text = format!("{} then: {text}", dashboard.keybinds().prefix_label());
+    }
+    hints
+}
+
+/// The footer hints that survive longest when the row runs out of width: a
+/// narrow terminal must still say how to reach everything it left out.
+fn protected_hint((id, _): &(crate::CommandId, String)) -> bool {
+    matches!(id, crate::CommandId::Palette | crate::CommandId::Help)
+}
+
+/// The two groups the dashboard footer draws. The third slot exists because
+/// the shared fitting helper takes three groups; the dashboard has no separate
+/// function-key group any more.
+fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>; 3] {
+    [
+        footer_commands(dashboard, crate::actions::FooterGroup::Pane),
+        footer_commands(dashboard, crate::actions::FooterGroup::Chord),
+        Vec::new(),
+    ]
 }
 
 /// The hotkey hints for whatever applies right now.
@@ -27,29 +57,29 @@ pub(crate) fn footer_commands(
 /// as a string per pane, so a hint can never name a key the surface does not
 /// answer, and a command can never be added without the footer knowing.
 ///
-/// The row is three groups separated by a vertical bar, always in this order:
-/// what the focused pane answers, the `Alt` chords that answer from anywhere,
-/// and the function keys. The reader therefore always looks in the same place
-/// for a given kind of key, and the row does not reshuffle itself as the pane
-/// changes. Each group's order comes from `footer_group` and `footer_rank` on
-/// the spec, not from where the command sits in the table.
+/// The row is two groups separated by a vertical bar, always in this order:
+/// what the focused pane answers, then the prefix chords that answer from
+/// anywhere. The reader therefore always looks in the same place for a given
+/// kind of key, and the row does not reshuffle itself as the pane changes.
+/// Each group's order comes from `footer_group` and `footer_rank` on the spec,
+/// not from where the command sits in the table.
 ///
 /// `width` is the row's width in cells. When the hints do not fit, whole
 /// segments are dropped from the right — never truncated mid-word, because
 /// half a hint names a key that does not exist — first from the pane group,
-/// then from the chords. Function keys give way last, with palette and help
-/// retained longest so the user can find everything the narrow row leaves out.
+/// then from the chords, with palette and help retained longest so the user
+/// can find everything the narrow row leaves out.
 ///
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
-    let groups = [
-        footer_commands(dashboard, crate::actions::FooterGroup::Pane),
-        footer_commands(dashboard, crate::actions::FooterGroup::Chord),
-        footer_commands(dashboard, crate::actions::FooterGroup::Function),
-    ];
-    let groups = theme::fit_footer_items(groups, width, |(_, text)| text.as_str());
+    let groups = theme::fit_footer_items(
+        footer_groups(dashboard),
+        width,
+        |(_, text)| text.as_str(),
+        protected_hint,
+    );
     theme::footer_items_text(&groups, |(_, text)| text.as_str())
 }
 
@@ -59,13 +89,23 @@ pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> St
 /// composer's own footer works, so the two are interchangeable and the row
 /// costs one line whichever surface drew it.
 pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
+    // A half-typed chord owns the row: what the reader needs there is the way
+    // out of it, not the hints they are already part-way through.
+    if dashboard.prefix_pending() {
+        frame.render_widget(
+            Paragraph::new(prefix_banner_line(dashboard))
+                .style(theme::muted().bg(theme::palette().surface)),
+            area,
+        );
+        return;
+    }
     let notice = dashboard.notices.current();
-    let groups = [
-        footer_commands(dashboard, crate::actions::FooterGroup::Pane),
-        footer_commands(dashboard, crate::actions::FooterGroup::Chord),
-        footer_commands(dashboard, crate::actions::FooterGroup::Function),
-    ];
-    let groups = theme::fit_footer_items(groups, area.width, |(_, text)| text.as_str());
+    let groups = theme::fit_footer_items(
+        footer_groups(dashboard),
+        area.width,
+        |(_, text)| text.as_str(),
+        protected_hint,
+    );
     let line = match notice.as_deref() {
         Some(notice) => Line::styled(
             notice.to_owned(),
@@ -107,6 +147,16 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
             }
         }
     }
+}
+
+/// The `PREFIX` banner with this dashboard's live prefix and help key.
+pub(crate) fn prefix_banner_line(dashboard: &DashboardState) -> Line<'static> {
+    theme::prefix_banner(
+        &dashboard.keybinds().prefix_label(),
+        &dashboard
+            .footer_key(crate::CommandId::Help)
+            .unwrap_or_else(|| "?".to_owned()),
+    )
 }
 
 pub(crate) fn refresh_age(now: u64, refreshed: u64) -> String {

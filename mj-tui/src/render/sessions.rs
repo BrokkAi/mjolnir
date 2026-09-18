@@ -268,7 +268,14 @@ pub(crate) fn drawn_session_rows_with_options(
                         Style::default().fg(theme::palette().session_error),
                     ));
                     if expanded && !options.summary_only {
-                        lines.push(Line::from("  Enter for repair details · F7 settings"));
+                        lines.push(Line::from(
+                            match dashboard.first_key_label(crate::CommandId::OpenConfig) {
+                                Some(key) => {
+                                    format!("  Enter for repair details · {key} settings")
+                                }
+                                None => "  Enter for repair details".to_owned(),
+                            },
+                        ));
                     }
                     rows.push(DrawnSessionRow {
                         session: Some(index),

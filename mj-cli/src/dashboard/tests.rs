@@ -35,15 +35,18 @@ fn escape_cancels_opening_without_stealing_modal_or_quit_keys() {
     assert!(opening_cancel_event(&escape(), true, false));
     assert!(!opening_cancel_event(&escape(), true, true));
     assert!(!opening_cancel_event(&escape(), false, false));
-    let quit = Event::Key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('q'),
-        KeyModifiers::ALT,
-    ));
+    let quit = Event::Key(plain_key(KeyCode::Char('q')));
     assert!(!opening_cancel_event(&quit, true, false));
-    let dashboard = populated_dashboard();
+    let mut dashboard = populated_dashboard();
     assert_eq!(
-        global_chord_event(&dashboard, &quit),
-        Some(CommandId::QuitDetach)
+        route(
+            &mut dashboard,
+            &[prefix_key(), plain_key(KeyCode::Char('q'))]
+        ),
+        KeyRoute::Command {
+            id: CommandId::QuitDetach,
+            index: None
+        }
     );
 }
 
@@ -721,35 +724,61 @@ fn only_events_that_ask_for_work_end_an_input_batch() {
         dashboard_event_action(&mut dashboard, Event::Resize(80, 24)),
         DashboardAction::None
     ));
-    // Escape no longer quits the combined surface, so refresh stands in
-    // for an event that asks the controller to do work.
+    // Escape no longer quits the combined surface, so a paste stands in for
+    // an event that asks the controller to do work.
     assert!(matches!(
         dashboard_event_action(
             &mut dashboard,
             Event::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::F(5),
-                crossterm::event::KeyModifiers::NONE,
+                crossterm::event::KeyCode::Char('v'),
+                crossterm::event::KeyModifiers::CONTROL,
             )),
         ),
-        DashboardAction::RefreshAll
+        DashboardAction::PasteFromClipboard
     ));
 }
 
-/// The global chords the controller answers before anything else sees
-/// the key. These drive the same two calls the batching loop makes.
-fn chord(dashboard: &DashboardState, key: crossterm::event::KeyEvent) -> Option<CommandId> {
-    global_chord_event(dashboard, &Event::Key(key))
-}
-
-fn alt(character: char) -> crossterm::event::KeyEvent {
+/// The default prefix key exactly as a terminal delivers it.
+fn prefix_key() -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char(character),
-        crossterm::event::KeyModifiers::ALT,
+        crossterm::event::KeyCode::Char('b'),
+        crossterm::event::KeyModifiers::CONTROL,
     )
 }
 
-fn function_key(number: u8) -> crossterm::event::KeyEvent {
-    plain_key(crossterm::event::KeyCode::F(number))
+/// Drives the prefix router the way the event loop does and reports what it
+/// decided about the last key. A command that cannot run right now becomes
+/// `Consumed`, exactly as the loop drops it.
+fn route(dashboard: &mut DashboardState, keys: &[crossterm::event::KeyEvent]) -> KeyRoute {
+    let mut route = KeyRoute::Forward;
+    for key in keys {
+        route = match dashboard.route_bound_key(key) {
+            KeyRoute::Command { id, .. } if !dashboard.command_allowed_now(id) => {
+                KeyRoute::Consumed
+            }
+            decided => decided,
+        };
+    }
+    route
+}
+
+/// The prefix chord whose second key is `character`.
+fn chord(character: char) -> [crossterm::event::KeyEvent; 2] {
+    [
+        prefix_key(),
+        plain_key(crossterm::event::KeyCode::Char(character)),
+    ]
+}
+
+/// What a chord runs, or `None` when the router swallowed or forwarded it.
+fn chord_command(
+    dashboard: &mut DashboardState,
+    keys: &[crossterm::event::KeyEvent],
+) -> Option<CommandId> {
+    match route(dashboard, keys) {
+        KeyRoute::Command { id, .. } => Some(id),
+        _ => None,
+    }
 }
 
 fn plain_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
@@ -772,25 +801,60 @@ fn focus_on(dashboard: &mut DashboardState, wanted: mj_tui::Focus) {
 /// The point of the chord: the user does not have to leave the composer
 /// to start a session.
 #[test]
-fn alt_n_opens_the_wizard_while_the_composer_has_focus() {
+fn the_create_chord_opens_the_wizard_while_the_composer_has_focus() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_prompt();
 
-    let command = chord(&dashboard, alt('n')).expect("Alt-N is a global chord");
+    let command = chord_command(&mut dashboard, &chord('c')).expect("the create chord is bound");
     assert_eq!(command, CommandId::NewSessionWizard);
     assert_eq!(dashboard.dispatch_command(command), DashboardAction::None);
     assert!(dashboard.modal_open(), "New opens the creation wizard");
+}
+
+/// tmux's rule, and the one thing the prefix takes away: pressing `ctrl+b`
+/// twice forwards the literal key, so the composer still moves the cursor
+/// back one character.
+#[test]
+fn the_literal_prefix_reaches_the_composer_as_backward_char() {
+    let mut dashboard = populated_dashboard();
+    dashboard.focus_prompt();
+    assert_eq!(route(&mut dashboard, &[prefix_key()]), KeyRoute::Consumed);
+    assert!(dashboard.prefix_pending());
+    assert_eq!(route(&mut dashboard, &[prefix_key()]), KeyRoute::Forward);
+    assert!(!dashboard.prefix_pending());
+}
+
+/// A conversation's own modal owns the keyboard, except for the handful of
+/// commands that cannot disturb it.
+#[test]
+fn a_bound_key_is_dropped_while_a_chat_modal_is_open_unless_it_survives_modals() {
+    for id in [
+        CommandId::Help,
+        CommandId::QuitDetach,
+        CommandId::TogglePanePreset,
+        CommandId::Refresh,
+    ] {
+        assert!(mj_tui::survives_chat_modal(id), "{id:?}");
+    }
+    for id in [
+        CommandId::NewSessionWizard,
+        CommandId::ResumeDialog,
+        CommandId::WebViewer,
+        CommandId::OpenConfig,
+    ] {
+        assert!(!mj_tui::survives_chat_modal(id), "{id:?}");
+    }
 }
 
 /// One key refreshes both support panes, from wherever the keyboard is —
 /// including the composer, and including over an open dialog, because
 /// asking for fresh figures cannot disturb what is on screen.
 #[test]
-fn f5_refreshes_targets_and_quotas_from_the_composer() {
+fn the_refresh_chord_refreshes_targets_and_quotas_from_the_composer() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_prompt();
 
-    let command = chord(&dashboard, function_key(5)).expect("F5 is a global chord");
+    let command = chord_command(&mut dashboard, &chord('R')).expect("the refresh chord is bound");
     assert_eq!(command, CommandId::Refresh);
     assert!(matches!(
         dashboard.dispatch_command(command),
@@ -800,40 +864,38 @@ fn f5_refreshes_targets_and_quotas_from_the_composer() {
     dashboard.dispatch_command(CommandId::Help);
     assert!(dashboard.modal_open());
     assert_eq!(
-        chord(&dashboard, function_key(5)),
+        chord_command(&mut dashboard, &chord('R')),
         Some(CommandId::Refresh),
         "refreshing is allowed over a modal"
     );
 }
 
 #[test]
-fn f6_global_path_cycles_forward_and_shift_f6_reverses_it() {
+fn the_pane_chords_cycle_focus_forward_and_backward() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_sessions();
-    let forward = Event::Key(function_key(6));
-    let command = global_chord_event(&dashboard, &forward).expect("F6 is global");
+    let forward = [prefix_key(), plain_key(crossterm::event::KeyCode::Tab)];
+    let command = chord_command(&mut dashboard, &forward).expect("the next-pane chord is bound");
     assert_eq!(command, CommandId::CycleFocus);
-    assert!(apply_global_focus_cycle(&mut dashboard, &forward, command));
+    dashboard.dispatch_command(command);
     assert_eq!(dashboard.focus(), mj_tui::Focus::Prompt);
 
-    let reverse = Event::Key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::F(6),
-        crossterm::event::KeyModifiers::SHIFT,
-    ));
-    let command = global_chord_event(&dashboard, &reverse).expect("Shift-F6 is global");
-    assert_eq!(command, CommandId::CycleFocus);
-    assert!(apply_global_focus_cycle(&mut dashboard, &reverse, command));
+    let reverse = [prefix_key(), plain_key(crossterm::event::KeyCode::BackTab)];
+    let command =
+        chord_command(&mut dashboard, &reverse).expect("the previous-pane chord is bound");
+    assert_eq!(command, CommandId::CycleFocusReverse);
+    dashboard.dispatch_command(command);
     assert_eq!(dashboard.focus(), mj_tui::Focus::Sessions);
 }
 
 /// Resume is a chord like new session: the pane letter it used to answer
 /// is gone, so this is the only way in from the composer.
 #[test]
-fn alt_s_opens_the_resume_dialog_from_the_composer() {
+fn the_resume_chord_opens_the_resume_dialog_from_the_composer() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_prompt();
 
-    let command = chord(&dashboard, alt('s')).expect("Alt-S is a global chord");
+    let command = chord_command(&mut dashboard, &chord('g')).expect("the resume chord is bound");
     assert_eq!(command, CommandId::ResumeDialog);
     assert!(matches!(
         dashboard.dispatch_command(command),
@@ -841,23 +903,23 @@ fn alt_s_opens_the_resume_dialog_from_the_composer() {
     ));
     assert_eq!(dashboard.focus(), mj_tui::Focus::Prompt);
 
-    // Like Alt-N, it waits for an open dialog to close.
+    // Like the create chord, it waits for an open dialog to close.
     dashboard.show_resume_dialog(1, Vec::new());
     assert!(dashboard.modal_open());
-    assert_eq!(chord(&dashboard, alt('s')), None);
+    assert_eq!(chord_command(&mut dashboard, &chord('g')), None);
 }
 
 /// A chord that would act on a surface the user cannot see waits for the
 /// dialog to close.
 #[test]
-fn alt_n_is_ignored_while_a_modal_is_open() {
+fn the_create_chord_is_ignored_while_a_modal_is_open() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_prompt();
-    assert!(chord(&dashboard, alt('n')).is_some());
+    assert!(chord_command(&mut dashboard, &chord('c')).is_some());
     dashboard.dispatch_command(CommandId::NewSessionWizard);
     assert!(dashboard.modal_open());
 
-    assert_eq!(chord(&dashboard, alt('n')), None);
+    assert_eq!(chord_command(&mut dashboard, &chord('c')), None);
 }
 
 #[tokio::test]
@@ -893,19 +955,20 @@ async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane()
         let footer = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
             .collect::<String>();
-        assert!(footer.contains("F4 web"), "{focus:?}: {footer}");
-        assert!(footer.contains("F7 settings"), "{focus:?}: {footer}");
+        assert!(footer.contains("u web"), "{focus:?}: {footer}");
+        assert!(footer.contains("s settings"), "{focus:?}: {footer}");
 
-        let web = chord(&dashboard, function_key(4)).expect("F4 is global");
+        let web = chord_command(&mut dashboard, &chord('u')).expect("the web chord is bound");
         assert_eq!(
             dashboard.dispatch_command(web),
             DashboardAction::LoadWebAccess
         );
         assert!(dashboard.modal_open());
-        assert_eq!(chord(&dashboard, function_key(7)), None);
+        assert_eq!(chord_command(&mut dashboard, &chord('s')), None);
         dashboard.cancel_modal();
 
-        let setup = chord(&dashboard, function_key(7)).expect("F7 is global");
+        let setup =
+            chord_command(&mut dashboard, &chord('s')).expect("the settings chord is bound");
         assert_eq!(dashboard.dispatch_command(setup), DashboardAction::None);
         assert!(dashboard.modal_open());
         terminal
@@ -920,7 +983,7 @@ async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane()
             .collect::<String>();
         assert!(screen.contains("Settings"), "{focus:?}: {screen}");
         assert!(screen.contains("Save and Close"), "{focus:?}: {screen}");
-        assert_eq!(chord(&dashboard, function_key(4)), None);
+        assert_eq!(chord_command(&mut dashboard, &chord('u')), None);
     }
 }
 
@@ -933,8 +996,9 @@ fn workspace_tab_chords_reach_the_local_filter_from_the_composer() {
         ("other".into(), "Other".into()),
     ]));
     dashboard.focus_prompt();
-    let key = crossterm::event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL);
-    let command = chord(&dashboard, key).expect("workspace tab shortcut reaches dashboard");
+    let keys = chord('n');
+    let command =
+        chord_command(&mut dashboard, &keys).expect("workspace tab shortcut reaches dashboard");
     assert!(
         matches!(dashboard.dispatch_command(command), DashboardAction::SelectWorkspace { workspace_id } if workspace_id == "other")
     );
@@ -945,13 +1009,15 @@ fn workspace_tab_chords_reach_the_local_filter_from_the_composer() {
     );
     dashboard.begin_workspace_manager();
     assert!(
-        chord(&dashboard, key).is_none(),
+        chord_command(&mut dashboard, &keys).is_none(),
         "tab shortcuts do not escape the modal"
     );
 }
 
+/// Every function key and every Alt letter left the defaults with the prefix,
+/// so none of them may still run a command.
 #[test]
-fn f3_is_no_longer_a_workspace_shortcut() {
+fn function_keys_and_alt_letters_are_no_longer_bound() {
     for focus in [
         mj_tui::Focus::Sessions,
         mj_tui::Focus::Prompt,
@@ -960,16 +1026,38 @@ fn f3_is_no_longer_a_workspace_shortcut() {
     ] {
         let mut dashboard = populated_dashboard();
         focus_on(&mut dashboard, focus);
-        assert_eq!(chord(&dashboard, function_key(3)), None, "{focus:?}");
+        for number in 1..=12 {
+            assert_eq!(
+                route(
+                    &mut dashboard,
+                    &[plain_key(crossterm::event::KeyCode::F(number))]
+                ),
+                KeyRoute::Forward,
+                "{focus:?}: F{number}"
+            );
+        }
+        for character in ['n', 's', 'a', 'g', 'q', 'w', 'x', 'z'] {
+            assert_eq!(
+                route(
+                    &mut dashboard,
+                    &[crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char(character),
+                        crossterm::event::KeyModifiers::ALT
+                    )]
+                ),
+                KeyRoute::Forward,
+                "{focus:?}: Alt-{character}"
+            );
+        }
     }
 }
 
 #[test]
-fn alt_a_marks_all_read_from_the_targets_pane() {
+fn the_read_chord_marks_all_read_from_the_targets_pane() {
     let mut dashboard = populated_dashboard();
     focus_on(&mut dashboard, mj_tui::Focus::Targets);
 
-    let command = chord(&dashboard, alt('a')).expect("Alt-A is a global chord");
+    let command = chord_command(&mut dashboard, &chord('a')).expect("the read chord is bound");
     assert_eq!(command, CommandId::MarkAllRead);
     dashboard.dispatch_command(command);
     // Nothing here is unread, and saying so is how the command reports it
@@ -978,7 +1066,7 @@ fn alt_a_marks_all_read_from_the_targets_pane() {
 }
 
 #[test]
-fn alt_x_cancels_the_selected_sessions_launch_from_the_composer() {
+fn the_cancel_chord_cancels_the_selected_sessions_launch_from_the_composer() {
     let mut dashboard = populated_dashboard();
     dashboard.focus_sessions();
     let session_id = dashboard
@@ -988,7 +1076,7 @@ fn alt_x_cancels_the_selected_sessions_launch_from_the_composer() {
     dashboard.begin_session_operation(session_id.clone(), SessionOperationKind::Launching, None);
     dashboard.focus_prompt();
 
-    let command = chord(&dashboard, alt('x')).expect("Alt-X is a global chord");
+    let command = chord_command(&mut dashboard, &chord('C')).expect("the cancel chord is bound");
     assert_eq!(command, CommandId::CancelOperation);
     assert_eq!(
         dashboard.dispatch_command(command),
@@ -999,10 +1087,10 @@ fn alt_x_cancels_the_selected_sessions_launch_from_the_composer() {
     );
 }
 
-/// Inside the target-actions dialog Alt-X belongs to the test that dialog
-/// is running, so the pre-filter must leave the key alone.
+/// Inside the target-actions dialog the cancel key belongs to the test that
+/// dialog is running, so the router must leave it alone.
 #[test]
-fn alt_x_inside_the_target_dialog_cancels_the_running_test() {
+fn the_cancel_key_inside_the_target_dialog_cancels_the_running_test() {
     let mut dashboard = populated_dashboard();
     focus_on(&mut dashboard, mj_tui::Focus::Targets);
     assert!(matches!(
@@ -1019,12 +1107,15 @@ fn alt_x_inside_the_target_dialog_cancels_the_running_test() {
     ));
 
     assert_eq!(
-        chord(&dashboard, alt('x')),
+        chord_command(&mut dashboard, &chord('C')),
         None,
         "the dialog keeps the key"
     );
     assert!(matches!(
-        dashboard.handle_key(alt('x')),
+        dashboard.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::ALT
+        )),
         DashboardAction::CancelTargetTest
     ));
 }
@@ -1040,7 +1131,7 @@ fn plain_x_no_longer_cancels_anything() {
     dashboard.begin_session_operation(session_id, SessionOperationKind::Launching, None);
 
     let plain_x = plain_key(crossterm::event::KeyCode::Char('x'));
-    assert_eq!(chord(&dashboard, plain_x), None);
+    assert_eq!(chord_command(&mut dashboard, &[plain_x]), None);
     assert!(matches!(
         dashboard.handle_key(plain_x),
         DashboardAction::None
