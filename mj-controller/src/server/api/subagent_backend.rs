@@ -57,6 +57,28 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, std::result::Result<Vec<u8>, ExportError>> {
         self.read_file(session_id, path)
     }
+    /// The workspaces the store holds, in the order the terminal's tabs and the
+    /// viewer's list show them.
+    fn list_workspaces(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async { tokio::task::spawn_blocking(crate::database::list_workspaces).await? })
+    }
+    /// The workspace with this name, creating it when the store holds none.
+    ///
+    /// This is the daemon's own `CreateWorkspace` operation: create-or-get, so
+    /// two callers that both saw an empty list attach to the same normalized
+    /// name instead of one of them meeting a SQLite conflict. The daemon
+    /// overrides it to republish the list afterwards.
+    fn create_workspace(
+        &self,
+        name: String,
+    ) -> BoxFuture<'_, AnyResult<mj_core::workspace::WorkspaceRecord>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::create_or_get_workspace(&name))
+                .await?
+        })
+    }
     fn set_config(
         &self,
         session_id: String,

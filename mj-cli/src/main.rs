@@ -72,8 +72,9 @@ struct Cli {
 enum Command {
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
-    /// Open the workspace selector even when Mjolnir could auto-attach.
-    Workspaces,
+    /// Open the workspace selector even when Mjolnir could auto-attach, or
+    /// list and create workspaces without a terminal.
+    Workspaces(WorkspacesArgs),
     /// Open the web viewer in a native desktop window.
     App,
     /// Mint the private launch document consumed by `mj-desktop`.
@@ -134,6 +135,22 @@ enum Command {
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
+}
+
+/// `mj workspaces` on its own opens the workspace manager in the dashboard, as
+/// it always has. The subcommands are the non-interactive form a script uses.
+#[derive(Debug, Args)]
+struct WorkspacesArgs {
+    #[command(subcommand)]
+    command: Option<WorkspacesCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspacesCommand {
+    /// List the workspaces sessions can be created in.
+    List(api_commands::WorkspacesListArgs),
+    /// Create a workspace, or select the one that already has the name.
+    Create(api_commands::WorkspaceCreateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -324,7 +341,10 @@ fn run(cli: Cli) -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
-    if matches!(cli.command, None | Some(Command::Workspaces)) {
+    if matches!(
+        cli.command,
+        None | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+    ) {
         // Interactive dashboard startup is the one place an update may be
         // checked, prompted for, and applied on every launch. The whole flow
         // finishes before daemon startup and the TUI takes over the terminal; a
@@ -364,9 +384,10 @@ fn install_panic_logging() {
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
         Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
-        None | Some(Command::Go(_)) | Some(Command::Workspaces) | Some(Command::App) => {
-            logging::ProcessKind::Tui
-        }
+        None
+        | Some(Command::Go(_))
+        | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+        | Some(Command::App) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
     }
 }
@@ -375,7 +396,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
         Some(Command::Go(_)) => "go",
-        Some(Command::Workspaces) => "workspaces",
+        Some(Command::Workspaces(_)) => "workspaces",
         Some(Command::App) => "app",
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
@@ -429,9 +450,15 @@ async fn run_command(
                 .context("prepare fast start")??;
             run_workspace_dashboard(None, false, Some((mode, setup))).await
         }
-        Some(Command::Workspaces) => {
-            run_workspace_dashboard(requested_workspace.as_deref(), true, None).await
-        }
+        Some(Command::Workspaces(args)) => match args.command {
+            None => run_workspace_dashboard(requested_workspace.as_deref(), true, None).await,
+            Some(WorkspacesCommand::List(args)) => api_commands::workspaces_list(args)
+                .await
+                .map(|()| DashboardExit::Normal),
+            Some(WorkspacesCommand::Create(args)) => api_commands::workspaces_create(args)
+                .await
+                .map(|()| DashboardExit::Normal),
+        },
         Some(Command::App) => desktop::run_desktop_app()
             .await
             .map(|()| DashboardExit::Normal),

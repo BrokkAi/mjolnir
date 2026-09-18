@@ -294,11 +294,40 @@ async fn event_stream_rejects_bad_cursors_and_requires_authentication() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The workspaces the fake store holds.
+///
+/// It holds one by default, because the interesting case is the other one: an
+/// instance with no workspace at all, which is what a fresh `mj -i <name>` is.
+struct FakeWorkspaces(Mutex<Vec<mj_core::workspace::WorkspaceRecord>>);
+
+impl FakeWorkspaces {
+    fn empty() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn record(name: &str) -> mj_core::workspace::WorkspaceRecord {
+        mj_core::workspace::WorkspaceRecord {
+            id: format!("id-of-{name}"),
+            name: name.to_owned(),
+            created_at: "now".into(),
+            last_opened_at: "now".into(),
+            session_count: 0,
+        }
+    }
+}
+
+impl Default for FakeWorkspaces {
+    fn default() -> Self {
+        Self(Mutex::new(vec![Self::record("existing")]))
+    }
+}
+
 /// A hand-written backend. Mocking the trait would only re-state its
 /// signature; this returns the exact observations each test needs and
 /// records what the handlers asked for.
 #[derive(Default)]
 struct FakeBackend {
+    workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
     turn_states: Mutex<Vec<Option<TurnState>>>,
@@ -495,6 +524,28 @@ impl SubagentBackend for FakeBackend {
                 .clone()
                 .map(|pushed| PushedBranch { branch, ..pushed })
                 .ok_or_else(|| ExportError::Refused("this session is running a turn".into()))
+        })
+    }
+    fn list_workspaces(
+        &self,
+    ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
+    }
+    fn create_workspace(
+        &self,
+        name: String,
+    ) -> BoxFuture<'_, AnyResult<mj_core::workspace::WorkspaceRecord>> {
+        Box::pin(async move {
+            let mut workspaces = self.workspaces.0.lock().unwrap();
+            if let Some(existing) = workspaces
+                .iter()
+                .find(|workspace| workspace.name.eq_ignore_ascii_case(&name))
+            {
+                return Ok(existing.clone());
+            }
+            let created = FakeWorkspaces::record(&name);
+            workspaces.push(created.clone());
+            Ok(created)
         })
     }
     fn bundle(&self, _session_id: String) -> BoxFuture<'_, Result<BundleExport, ExportError>> {
@@ -846,6 +897,122 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         Some("add a README line"),
         "the first prompt is the backend's to submit once the harness is ready"
     );
+}
+
+/// A fresh instance has no workspace, and until #1080 the only way to make one
+/// was to open the terminal dashboard, so a scripted first session was refused
+/// with nothing the script could do about it. Starting one now adopts the
+/// store's `default` workspace instead.
+#[tokio::test]
+async fn a_first_session_on_an_instance_with_no_workspace_creates_the_default_one() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { workspace_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(workspace_id, "id-of-default");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        backend.workspaces.0.lock().unwrap().len(),
+        1,
+        "the default workspace is created once and then reused"
+    );
+}
+
+/// Naming a workspace, or having one already, still leaves the choice where it
+/// was: the caller's id travels unchanged, and an instance that already holds
+/// workspaces sends an empty id so the controller selects.
+#[tokio::test]
+async fn a_named_workspace_travels_unchanged_and_an_existing_one_is_left_to_the_controller() {
+    for (extra, expected) in [
+        (r#","workspace_id":"workspace-7""#, "workspace-7"),
+        ("", ""),
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+        let response = tokio::spawn(app.oneshot(start_request(start_body(extra))));
+        let request = actions.recv().await.unwrap();
+        let ControllerAction::New { workspace_id, .. } = &request.action else {
+            panic!("expected a New action");
+        };
+        assert_eq!(workspace_id, expected);
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: Some("session-2".into()),
+            })
+            .unwrap();
+        response.await.unwrap().unwrap();
+        assert_eq!(
+            backend.workspaces.0.lock().unwrap().len(),
+            1,
+            "nothing is created when the instance already has a workspace"
+        );
+    }
+}
+
+/// The routes a script drives a fresh instance with: create by name, which is
+/// idempotent because the name is the identity, and list what exists.
+#[tokio::test]
+async fn workspaces_are_created_by_name_idempotently_and_listed() {
+    let backend = Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces::empty(),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let create = |name: &str| {
+        bearer(Request::post("/api/v1/workspaces"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(r#"{{"name":"{name}"}}"#)))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(create("Release work")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = json_body(response).await;
+    assert_eq!(first["workspace"]["name"], "Release work");
+
+    // The same name twice is the same workspace, so a script may create before
+    // every run without checking first.
+    let response = app.clone().oneshot(create("release WORK")).await.unwrap();
+    assert_eq!(
+        json_body(response).await["workspace"]["id"],
+        first["workspace"]["id"]
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get("/api/v1/workspaces"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = json_body(response).await;
+    assert_eq!(listed["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["workspaces"][0]["name"], "Release work");
+
+    // An unusable name is refused by the caller's own request, not recorded.
+    let response = app.clone().oneshot(create("   ")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(backend.workspaces.0.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

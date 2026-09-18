@@ -383,6 +383,60 @@ pub(crate) struct ApiInfoArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct WorkspacesListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceCreateArgs {
+    /// Workspace name, 1-64 characters. Naming one that already exists selects
+    /// it instead of failing, so this is safe to run before every session.
+    name: String,
+    #[arg(long)]
+    json: bool,
+}
+
+/// List the workspaces sessions can be created in.
+pub(crate) async fn workspaces_list(args: WorkspacesListArgs) -> Result<()> {
+    let list = ApiClient::connect().await?.workspaces().await?;
+    if args.json {
+        return print_json(&list);
+    }
+    let id_width = list
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.chars().count())
+        .chain(std::iter::once(2))
+        .max()
+        .unwrap_or(2);
+    println!("{:id_width$}  SESSIONS  NAME", "ID");
+    for workspace in &list.workspaces {
+        println!(
+            "{:id_width$}  {:8}  {}",
+            workspace.id, workspace.session_count, workspace.name
+        );
+    }
+    Ok(())
+}
+
+/// Create a workspace, or select the one that already carries the name.
+pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
+    let created = ApiClient::connect()
+        .await?
+        .create_workspace(args.name)
+        .await?;
+    if args.json {
+        return print_json(&created);
+    }
+    println!(
+        "workspace {}  {}",
+        created.workspace.id, created.workspace.name
+    );
+    Ok(())
+}
+
 /// Create a session and, when a prompt was given, hand it over as the first
 /// turn.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
@@ -1158,6 +1212,40 @@ mod tests {
             });
             assert_eq!(crate::command_name(cli.command.as_ref()), matched);
         }
+    }
+
+    /// `mj workspaces` keeps opening the manager, and the two subcommands are
+    /// the non-interactive form a script uses to get a workspace before its
+    /// first session (#1080).
+    #[test]
+    fn workspaces_keeps_its_interactive_form_and_gains_list_and_create() {
+        let cli = Cli::try_parse_from(["mj", "workspaces"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        assert!(args.command.is_none(), "the bare form opens the manager");
+
+        let cli = Cli::try_parse_from(["mj", "workspaces", "list", "--json"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        let Some(crate::WorkspacesCommand::List(list)) = args.command else {
+            panic!("expected list");
+        };
+        assert!(list.json);
+
+        let cli = Cli::try_parse_from(["mj", "workspaces", "create", "Release work"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        let Some(crate::WorkspacesCommand::Create(create)) = args.command else {
+            panic!("expected create");
+        };
+        assert_eq!(create.name, "Release work");
+        assert!(!create.json);
+
+        // The name is required: an empty create would otherwise reach the API.
+        assert!(Cli::try_parse_from(["mj", "workspaces", "create"]).is_err());
     }
 
     #[test]

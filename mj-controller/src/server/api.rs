@@ -88,6 +88,8 @@ mod files;
 pub use files::*;
 mod wait;
 use wait::*;
+mod workspaces;
+use workspaces::*;
 
 #[cfg(test)]
 mod tests;

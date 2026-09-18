@@ -506,7 +506,10 @@ impl RuntimeState {
             })?
     }
 
-    pub(super) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
+    /// Hand a changed workspace list to the terminal clients and the web
+    /// viewer. The daemon's workspace actions call it, and so does the API's
+    /// create route through `ExportRuntime::republish_workspaces`.
+    pub(crate) fn publish_workspaces(&self, workspaces: Vec<WorkspaceRecord>) {
         self.workspaces_tx.send_replace(workspaces);
         self.publish_revision();
     }

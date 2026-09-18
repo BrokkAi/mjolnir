@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mj_controller::server::api::{
-    API_VERSION, API_VERSION_HEADER, ApiSession, ExportRequest, PromptRequest, PromptResponse,
-    PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
-    StartSessionRequest, StartSessionResponse, TranscriptResponse, WaitRequest, WaitResponse,
+    API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
+    ExportRequest, PromptRequest, PromptResponse, PushedBranch, ResumeSessionRequest,
+    ResumeSessionResponse, SessionListResponse, StartSessionRequest, StartSessionResponse,
+    TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -145,6 +146,21 @@ impl ApiClient {
             .send(self.http.post(self.url(path)).timeout(timeout).json(body))
             .await?;
         decode(response).await
+    }
+
+    pub(crate) async fn workspaces(&self) -> Result<WorkspaceListResponse> {
+        self.get_json("/workspaces").await
+    }
+
+    /// Create the named workspace, or get the one that already carries the
+    /// name. The route is idempotent, so a script may call it every run.
+    pub(crate) async fn create_workspace(&self, name: String) -> Result<CreateWorkspaceResponse> {
+        self.post_json(
+            "/workspaces",
+            &CreateWorkspaceRequest { name },
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn sessions_in_workspace(
