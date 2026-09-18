@@ -1355,7 +1355,138 @@ fn empty_archive_after_days_renders_as_never() {
             &serde_json::json!({"phone": {"tls_cert": null}}),
             None,
         ),
-        "Automatic / default"
+        "None (HTTP only)"
+    );
+}
+
+#[test]
+fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    // One target of every kind and one blank repository, so every optional
+    // field in the schema takes part in the walk below.
+    for kind in [
+        "local-bare",
+        "local-podman",
+        "local-docker",
+        "apple-container",
+        "ssh-bare",
+        "ssh-podman",
+        "ssh-docker",
+        "aws-ec2",
+    ] {
+        dialog.draft["targets"]
+            .as_object_mut()
+            .unwrap()
+            .insert(format!("every-{kind}"), json!({"kind": kind}));
+    }
+    for bundle in dialog.draft["bundles"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        bundle["repositories"]
+            .as_array_mut()
+            .unwrap()
+            .push(schema::repository_default());
+    }
+    schema::expand(&mut dialog.draft, &mut Vec::new());
+    let draft = dialog.draft.clone();
+
+    fn walk(path: &[String], value: &Value, draft: &Value, rows: &mut Vec<(String, String)>) {
+        let children: Vec<(String, &Value)> = match value {
+            Value::Object(entries) => entries
+                .iter()
+                .map(|(key, child)| (key.clone(), child))
+                .collect(),
+            Value::Array(entries) => entries
+                .iter()
+                .enumerate()
+                .map(|(index, child)| (index.to_string(), child))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for (key, child) in children {
+            let mut child_path = path.to_vec();
+            child_path.push(key.clone());
+            rows.push((
+                child_path.join("."),
+                value_summary(path, &key, child, draft, None),
+            ));
+            walk(&child_path, child, draft, rows);
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&[], &draft, &draft, &mut rows);
+    assert!(rows.len() > 40, "the walk missed the draft: {rows:?}");
+
+    // Labels that legitimately carry the word: a named AWS template version,
+    // an engine's or OpenSSH's own choice, and a reviewer profile's settings.
+    let names_a_real_default = |summary: &str| {
+        [
+            "$Default",
+            "Engine default",
+            "AWS CLI default profile",
+            "OpenSSH default keys",
+        ]
+        .iter()
+        .any(|label| summary.contains(label))
+            || summary.contains("'s default")
+    };
+    for (path, summary) in &rows {
+        let lowered = summary.to_lowercase();
+        assert!(
+            !lowered.contains("automatic"),
+            "{path} still shows a placeholder: {summary:?}"
+        );
+        assert!(
+            !lowered.contains("default") || names_a_real_default(summary),
+            "{path} still shows a placeholder: {summary:?}"
+        );
+    }
+    // Spot-check the values behind the blanks rather than only their shape.
+    let summary = |wanted: &str| {
+        rows.iter()
+            .find(|(path, _)| path == wanted)
+            .unwrap_or_else(|| panic!("missing {wanted} in {rows:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(summary("targets.every-ssh-podman.cpus"), "No limit");
+    assert_eq!(
+        summary("targets.every-aws-ec2.launch_template_version"),
+        "$Default"
+    );
+    assert_eq!(summary("review.model"), "Not set");
+    assert_eq!(
+        summary("targets.every-ssh-podman.identity_file"),
+        "OpenSSH default keys"
+    );
+    assert_eq!(
+        summary("targets.every-local-podman.platform"),
+        format!("Engine default ({})", std::env::consts::ARCH)
+    );
+    assert!(
+        summary("profiles.codex-1.context_window_bytes").starts_with("262144"),
+        "the context budget shows the number it defaults to"
+    );
+    assert_eq!(
+        summary("profiles.codex-1.guardian_review_model"),
+        "newest-flash"
+    );
+    // With a reviewer chosen, model and effort name whose defaults they follow.
+    let mut with_reviewer = draft.clone();
+    with_reviewer["review"]["profile"] = json!("codex-1");
+    assert_eq!(
+        value_summary(
+            &["review".to_owned()],
+            "effort",
+            &Value::Null,
+            &with_reviewer,
+            None,
+        ),
+        "codex-1's default"
     );
 }
 

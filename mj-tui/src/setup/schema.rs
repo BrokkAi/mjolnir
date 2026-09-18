@@ -169,21 +169,62 @@ pub(super) fn label(key: &str) -> String {
     .to_owned()
 }
 
-/// What an empty (JSON null) value means for this setting. Optional fields
-/// whose default the runtime decides keep "Automatic / default"; fields with a
-/// known, fixed effect say what that effect is.
-pub(super) fn null_label(path: &[String]) -> &'static str {
-    match path.last().map(String::as_str).unwrap_or("") {
+/// What an empty (JSON null) value means for this setting: the effect the
+/// value actually has, never a placeholder. A value the runtime resolves from
+/// the host is filled in by the caller through `value_summary`'s `automatic`
+/// argument instead, because only the dialog can measure it.
+pub(super) fn null_label(path: &[String], draft: &Value) -> String {
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
         // An empty archive window never archives; there is no hidden number.
-        "archive_after_days" => "Never",
-        _ => "Automatic / default",
+        ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
+        // The backend emits no CPU or memory flag, so the container competes
+        // for the whole machine.
+        ["targets", _, "cpus" | "memory"] => "No limit".to_owned(),
+        ["targets", target, "platform"] => {
+            let kind = draft["targets"][target]["kind"].as_str().unwrap_or("");
+            // A local engine runs this machine's architecture; a remote one
+            // runs whatever its own host is, which setup cannot know.
+            if matches!(kind, "local-podman" | "local-docker" | "apple-container") {
+                format!("Engine default ({})", std::env::consts::ARCH)
+            } else {
+                "Engine default".to_owned()
+            }
+        }
+        ["targets", _, "user"] => "From ~/.ssh/config, else current user".to_owned(),
+        ["targets", _, "identity_file"] => "OpenSSH default keys".to_owned(),
+        ["targets", _, "aws_profile"] => "AWS CLI default profile".to_owned(),
+        ["targets", _, "launch_template_version"] => "$Default".to_owned(),
+        // Until the target's host has been inspected, all the screen can say
+        // is where the value comes from.
+        ["targets", _, "build_cache", _] => "From the target host's mbx setup".to_owned(),
+        ["phone", "tls_cert" | "tls_key"] => "None (HTTP only)".to_owned(),
+        // A repository needs exactly one of these two, so a blank one is not
+        // a default but a choice not yet made.
+        ["bundles", _, "repositories", _, "github" | "local"] => "Not set".to_owned(),
+        ["profiles", _, "context_window_bytes"] => format!(
+            "{} ({} KiB)",
+            mj_core::config::DEFAULT_CONTEXT_BYTES,
+            mj_core::config::DEFAULT_CONTEXT_BYTES / 1024
+        ),
+        ["profiles", _, "guardian_review_model"] => {
+            mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
+        }
+        // Review needs a named reviewer profile; there is no fallback to a
+        // first enabled profile (`ReviewConfig::reviewer_profile`).
+        ["review", "profile"] => "No reviewer; reviews cannot run".to_owned(),
+        ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
+            Some(profile) => format!("{profile}'s default"),
+            None => "Not set".to_owned(),
+        },
+        _ => "Not set".to_owned(),
     }
 }
 
-pub(super) fn choice_label(path: &[String], value: &Value) -> String {
+pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     let Some(value) = value.as_str() else {
         return if value.is_null() {
-            null_label(path).into()
+            null_label(path, draft)
         } else {
             value.to_string()
         };
@@ -192,6 +233,13 @@ pub(super) fn choice_label(path: &[String], value: &Value) -> String {
         serde_json::from_value::<mj_core::config::UiTheme>(Value::String(value.into()))
     {
         return theme.label().into();
+    }
+    // An agent kind is named once, by the harness itself.
+    if path.first().is_some_and(|key| key == "profiles")
+        && let Ok(kind) =
+            serde_json::from_value::<mj_core::config::HarnessKind>(Value::String(value.into()))
+    {
+        return kind.display_name().to_owned();
     }
     match value {
         "local-bare" => "Local worktree",
@@ -202,8 +250,6 @@ pub(super) fn choice_label(path: &[String], value: &Value) -> String {
         "ssh-podman" => "Remote SSH + Podman",
         "ssh-docker" => "Remote SSH + Docker",
         "aws-ec2" => "Amazon EC2",
-        "codex" => "Codex",
-        "claude" => "Claude",
         "guardian" => "Ask for approvals",
         "yolo" => "Allow all actions",
         "left" => "Left",
@@ -213,6 +259,10 @@ pub(super) fn choice_label(path: &[String], value: &Value) -> String {
         "host-helper" => "Custom storage helper",
         "quick" => "Quick",
         "extended" => "Extended",
+        "public-dns" => "Public DNS name",
+        "public-ip" => "Public IP address",
+        "private-dns" => "Private DNS name",
+        "private-ip" => "Private IP address",
         _ => value,
     }
     .to_owned()

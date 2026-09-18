@@ -275,12 +275,12 @@ fn value_summary(
             if *value { "☑" } else { "☐" }.to_owned()
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
-        Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path).to_owned()),
+        Value::Null => automatic.unwrap_or_else(|| schema::null_label(&child_path, draft)),
         // The archive window's live estimate carries the value itself, so it
         // replaces the number as well as the "Never" placeholder.
         _ => match automatic.filter(|_| key == "archive_after_days") {
             Some(label) => label,
-            None => schema::choice_label(&child_path, value),
+            None => schema::choice_label(&child_path, value, draft),
         },
     };
     if !value.is_object()
@@ -2004,13 +2004,13 @@ pub(crate) fn render_setup(
         let rows = editor
             .choices
             .iter()
-            .map(|value| Line::raw(schema::choice_label(&editor.path, value)))
+            .map(|value| Line::raw(schema::choice_label(&editor.path, value, &dialog.draft)))
             .collect::<Vec<_>>();
         let selected = editor.combo.selection(Choices, editor.selected);
         let value = editor
             .choices
             .get(selected)
-            .map(|value| schema::choice_label(&editor.path, value))
+            .map(|value| schema::choice_label(&editor.path, value, &dialog.draft))
             .unwrap_or_default();
         ComboBox::render(
             frame,
