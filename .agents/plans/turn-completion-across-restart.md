@@ -205,10 +205,20 @@ instead of looking like ordinary work for hours.
 - [x] (2026-09-18 01:05Z) Maintainer decision: do not add a silence bound for Codex
       and Claude. Publish the silence age instead, and make the automatic ending
       opt-in for every harness. Plan revised; see the `Decision Log`.
-- [ ] Milestone 1: publish the silence age (`mj-core/src/activity.rs`, the session
-      summary, `mj wait`, the terminal and web rows).
-- [ ] Milestone 2: both stall bounds opt-in, no harness special case, docs.
-- [ ] Live validation of both milestones.
+- [x] (2026-09-18 02:10Z) Milestone 1: publish the silence age
+      (`mj-core/src/activity.rs`, the session summary, `mj wait`, the API details,
+      the terminal rows and the web viewer). Commit `0e40e2bd`, with `1eab18e3`
+      moving the quiet clock into the always-shown row columns after the first
+      attempt put it only in the detailed clock, which is off by default.
+- [x] (2026-09-18 02:15Z) Milestone 2: both stall bounds opt-in, no harness
+      special case, docs. Commit `1f064ef9`.
+- [x] (2026-09-18 02:40Z) Live validation in instance `fix1017`, all four checks
+      below. Evidence in `Artifacts and Notes`.
+- [x] (2026-09-18 02:45Z) `cargo test` 3618 passed, 0 failed, and
+      `cargo clippy --all-targets -- -D warnings` clean, both on the dev profile
+      outside the sandbox.
+- [ ] Remaining: the Muse behavior change is argued rather than demonstrated end
+      to end; see the limitation recorded in `Outcomes & Retrospective`.
 
 ## Surprises & Discoveries
 
@@ -332,16 +342,39 @@ instead of looking like ordinary work for hours.
 
 ## Outcomes & Retrospective
 
-Not complete. To be written when both milestones have landed and been validated
-live.
+Both milestones landed and were validated live on 2026-09-18 in instance
+`fix1017` (commits `0e40e2bd`, `1f064ef9`, `1eab18e3`). `cargo test` reports
+3618 passed and 0 failed, and `cargo clippy --all-targets -- -D warnings` is
+clean, both on the dev profile outside the sandbox.
 
-What this work will have achieved, measured against the original purpose: the
+The four live checks all passed, and the transcripts are in `Artifacts and
+Notes`: a quiet Codex turn reports its silence in `mj sessions --session` and in
+`mj wait`'s timeout message; that turn stays cancellable; with
+`MJ_TURN_STALL_TIMEOUT_MS=30000` the same suspension fails the turn with
+`harness_inactive` at 30011 ms, on a Codex session that the old build would never
+have armed a watchdog for at all; and a healthy seventy-second turn on a worker
+with no knob set survives a daemon `SIGKILL` and comes back `finished` with its
+final message, so the new reporting ends nothing.
+
+**One limitation, stated plainly.** The behavior change for Muse, Kimi and Grok —
+a ten-minute silence no longer failing a turn when the knob is unset — was not
+demonstrated end to end against a real Muse container. Doing so needs the
+`morannon-podman` target and ten minutes of wall clock per build, and the
+harness was not available in this environment. It is instead argued from two
+things: `turn_stall_policy` no longer takes a harness at all, so every harness
+now follows the one code path that the live Codex runs exercised in both
+directions (unset, quiet for over seven minutes, not failed; set to 30 s, failed
+at 30 s); and `a_stall_bound_is_off_unless_a_positive_timeout_is_configured`
+pins the unset case to `None`. No build-time constant was shortened to fake the
+ten-minute wait. Someone with a Muse lane should confirm it once.
+
+What this work achieved, measured against the original purpose: the
 turn described in #1017 is still not recoverable — that is settled and is not a
 gap to close later — but it stops being invisible. A session whose harness has
 gone quiet says so within a minute, in the three places someone looks, and an
 orchestrator that times out gets the fact it needs to decide whether to cancel.
 
-What it will have given up: the automatic ending Muse, Kimi and Grok had by
+What it gave up: the automatic ending Muse, Kimi and Grok had by
 default. A turn whose relay dies without the process dying (#1029) will now stay
 running and quiet until someone ends it. That is the accepted cost of not
 guessing, and the mitigation is the visibility this plan adds plus the opt-in
@@ -875,6 +908,89 @@ fully suspended bridge and then completed normally once the processes were resum
 
 which is itself a useful result: the relay reattaches cleanly after a long harness
 freeze and does not lose the turn.
+
+## Artifacts from the implementation's live validation
+
+Instance `fix1017`, Codex profile `deepseek`, `local-bare` target, worker proven
+current by digest rather than assumption:
+
+    $ sha256sum target/debug/mj-worker .../instances/fix1017/workers/<session>/hel
+    3ec5396087506d72763eb5c7cde4ba89149c75b8342feb00f49ad1e11a8b1c70  target/debug/mj-worker
+    3ec5396087506d72763eb5c7cde4ba89149c75b8342feb00f49ad1e11a8b1c70  .../workers/<session>/hel
+
+**Check 1 - a quiet turn reports itself.** The ACP bridge was suspended with
+`kill -STOP` before the prompt was sent, so no tool call could open and the
+session was silent from send time. After about ninety seconds:
+
+    $ mj -i fix1017 sessions --session cc4d7b97...
+    cc4d7b97cd68b35944bf296f0ab56351  running  fix1017a
+    running, no harness activity for about 1 minute(s)
+
+    $ mj -i fix1017 wait --session cc4d7b97... --turn 8 --timeout 20
+    timeout
+    the turn was still running after 20 seconds, with no harness activity for about 1 minute(s)
+    Error: the turn ended as timeout
+
+Neither line exists on the build before this work: `strings` on the previously
+installed `mj` finds no occurrence of "no harness activity for", and both new
+`mj-core` tests fail to compile against that build because `silent_for_ms` and
+`silence_note` do not exist.
+
+The published state carries the timestamp the surfaces render from, and it
+survives a daemon restart, which also exercises the reconnect path:
+
+    $ mj -i fix1017 sessions --session cc4d7b97... --json
+    activity_state {'state': 'turn', 'started_at_ms': 1789696596195,
+                    'last_activity_at_ms': 1789696596202}
+
+    $ mj -i fix1017 daemon restart && mj -i fix1017 sessions --session cc4d7b97...
+    Mjolnir daemon restarted as PID 1120766.
+    cc4d7b97cd68b35944bf296f0ab56351  running  fix1017a
+    running, no harness activity for about 5 minute(s)
+
+**Check 2 - a quiet turn stays cancellable.** This is why reporting rather than
+acting is enough. After resuming the bridge:
+
+    $ mj -i fix1017 cancel-turn --session cc4d7b97...
+    cancelling the turn on cc4d7b97cd68b35944bf296f0ab56351
+    $ mj -i fix1017 wait --session cc4d7b97... --turn 8 --timeout 30
+    cancelled (Cancelled) turn 1 in 457.1s
+
+**Check 3 - the opt-in bound still ends a turn, on a Codex session.** The daemon
+was restarted with `MJ_TURN_STALL_TIMEOUT_MS=30000`, which it carries to the
+workers it starts; the worker's own environment was read back to confirm it
+arrived rather than assumed:
+
+    $ tr '\0' '\n' < /proc/<worker pid>/environ | grep MJ_TURN_STALL
+    MJ_TURN_STALL_TIMEOUT_MS=30000
+
+A new session was suspended and prompted the same way:
+
+    $ mj -i fix1017 wait --session b354b9c1... --turn 8 --timeout 90 --json
+    "outcome": "error",
+    "stop_reason": "harness_inactive",
+    "elapsed_ms": 30011,
+    "message": "The Codex turn stopped responding: mj received no activity from
+                the harness for 30 second(s) while a turn was running and no tool
+                call was open, so it failed the turn. ..."
+
+Thirty seconds differs from every former default, so the value proves itself.
+This is also the fail-before evidence for the other half of Milestone 2: on the
+old build a Codex session's stall policy was nulled out, so no bound could be
+armed for it at any setting.
+
+**Check 4 - nothing healthy was ended.** On the worker with no knob set, a
+seventy-second turn was started, the daemon was `SIGKILL`ed twenty-five seconds
+in, the worker kept journaling with no daemon alive, and after the daemon came
+back:
+
+    $ mj -i fix1017 wait --session cc4d7b97... --turn 38 --timeout 60 --json
+    "outcome": "finished",
+    "stop_reason": "EndTurn",
+    "final_message": "FINALF",
+
+The same worker had already sat quiet for more than seven minutes during check 1
+without being failed, which is the unset-knob behavior every harness now shares.
 
 ## Interfaces and Dependencies
 
