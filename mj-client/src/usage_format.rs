@@ -280,7 +280,7 @@ impl SessionActivity {
     /// `mj_core::activity` so every surface agrees on when a turn reads as
     /// quiet.
     #[must_use]
-    fn quiet_since(&self, now_epoch_seconds: u64) -> Option<u64> {
+    pub(crate) fn quiet_since(&self, now_epoch_seconds: u64) -> Option<u64> {
         let now_ms = i64::try_from(now_epoch_seconds.saturating_mul(1_000)).ok()?;
         let last = self.state().last_activity_at_ms()?;
         let silent_ms = u64::try_from(now_ms.checked_sub(last)?).ok()?;
@@ -448,6 +448,13 @@ pub fn format_activity_columns(
             retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
         ];
     }
+    // A third column only when the harness has gone quiet for long enough to
+    // be worth saying. It is a fact beside the other clocks, not a warning:
+    // Mjolnir does not end a turn for silence, so the reader decides whether a
+    // quiet turn is worth cancelling.
+    let quiet = activity
+        .quiet_since(now_epoch_seconds)
+        .map(|quiet| elapsed_label("Quiet", now_epoch_seconds, Some(quiet)));
     match activity.kind(current_turn_started_at) {
         SessionActivityKind::Turn => {
             let turn_started = current_turn_started_at.or_else(|| activity.harness_turn_since());
@@ -456,18 +463,22 @@ pub fn format_activity_columns(
                 .or(turn_started)
                 .zip(turn_started)
                 .map(|(step, turn)| step.max(turn));
-            vec![
+            [
                 elapsed_label("Turn", now_epoch_seconds, turn_started),
                 elapsed_label("Step", now_epoch_seconds, step_started),
             ]
+            .into_iter()
+            .chain(quiet)
+            .collect()
         }
-        SessionActivityKind::Step => {
-            vec![elapsed_label(
-                "Step",
-                now_epoch_seconds,
-                activity.foreground_tool_since(),
-            )]
-        }
+        SessionActivityKind::Step => [elapsed_label(
+            "Step",
+            now_epoch_seconds,
+            activity.foreground_tool_since(),
+        )]
+        .into_iter()
+        .chain(quiet)
+        .collect(),
         SessionActivityKind::Background => {
             // The two leading spaces hold the width `Turn` takes, so the
             // clocks stay in one column whichever state a row is in.
@@ -816,6 +827,64 @@ mod tests {
             vec!["  BG".to_owned()]
         );
         assert_eq!(format_activity_clock(20_000, None, &background), "[BG]");
+    }
+
+    /// A running session's row shows how long the harness has been quiet, and
+    /// only once that is worth saying.
+    ///
+    /// This is a report, not a warning. Mjolnir does not end a turn for
+    /// silence (#1017), so the row's job is to let a person see "nothing for
+    /// eleven minutes" and decide for themselves whether to cancel.
+    #[test]
+    fn a_quiet_running_session_gains_a_quiet_column() {
+        let quiet = SessionActivity {
+            prompt_in_flight: true,
+            execution: Some(mj_core::relay::RelayExecutionState::Running),
+            state: Some(mj_core::activity::ActivityState::Turn {
+                started_at_ms: Some(19_000_000),
+                last_activity_at_ms: Some(19_340_000),
+            }),
+            ..SessionActivity::default()
+        };
+        assert_eq!(
+            format_activity_columns(20_000, Some(19_000), None, &quiet),
+            vec![
+                "Turn 16m40s".to_owned(),
+                "Step 16m40s".to_owned(),
+                "Quiet 11m00s".to_owned()
+            ]
+        );
+        assert!(
+            quiet
+                .display_clock(20_000, Some(19_000), None, true)
+                .ends_with("Q 11m00s"),
+            "the detailed clock carries it too: {}",
+            quiet.display_clock(20_000, Some(19_000), None, true)
+        );
+
+        // A session that spoke a second ago is not quiet, and neither is an
+        // idle one however long ago it last said anything.
+        let talking = SessionActivity {
+            state: Some(mj_core::activity::ActivityState::Turn {
+                started_at_ms: Some(19_000_000),
+                last_activity_at_ms: Some(19_999_000),
+            }),
+            ..quiet.clone()
+        };
+        assert_eq!(
+            format_activity_columns(20_000, Some(19_000), None, &talking),
+            vec!["Turn 16m40s".to_owned(), "Step 16m40s".to_owned()]
+        );
+
+        let idle = SessionActivity {
+            prompt_in_flight: false,
+            execution: Some(mj_core::relay::RelayExecutionState::Idle),
+            state: Some(mj_core::activity::ActivityState::Idle {
+                since_ms: Some(19_340_000),
+            }),
+            ..SessionActivity::default()
+        };
+        assert_eq!(idle.quiet_since(20_000), None);
     }
 
     #[test]
