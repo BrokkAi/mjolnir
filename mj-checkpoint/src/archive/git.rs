@@ -310,10 +310,20 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
     Ok(!refs.is_empty())
 }
 
-/// Ref that keeps the objects of the most recent review capture reachable, so
-/// a `git gc` between two reviews cannot collect the tree a baseline names.
-pub const REVIEW_CAPTURE_REF: &str = "refs/hel/review-capture";
 /// Ref pointing at the tree a completed review advanced its baseline to.
+///
+/// This is the one ref Mjolnir writes into a user's repository, and it earns
+/// its place. A baseline is HEAD's tree plus one blob for each file the
+/// checkout was already dirty with; HEAD's own objects are reachable from the
+/// branch, but those few blobs are reachable from nothing else. A session can
+/// run for days between reviews, so without this ref an ordinary `git gc`
+/// would eventually collect them, `tree_exists` would then find no usable
+/// baseline, and that repository's next review would report no coverage
+/// instead of the turn's work.
+///
+/// A capture taken during a review is deliberately not pinned. It is consumed
+/// inside that review, and if the review completes it is pinned here as the
+/// new baseline.
 pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
 
 /// What a capture starts from before the changed paths are staged on top.
@@ -434,7 +444,6 @@ pub fn capture_paths(
     let _ = std::fs::remove_file(&index_path);
     let tree = tree?;
     ensure!(!tree.is_empty(), "git write-tree produced no tree id");
-    pin_review_tree(runner, repository, REVIEW_CAPTURE_REF, &tree)?;
     Ok(tree)
 }
 
@@ -532,7 +541,6 @@ pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -
     let _ = std::fs::remove_file(&index_path);
     let tree = tree?;
     ensure!(!tree.is_empty(), "git write-tree produced no tree id");
-    pin_review_tree(runner, repository, REVIEW_CAPTURE_REF, &tree)?;
     Ok(tree)
 }
 
