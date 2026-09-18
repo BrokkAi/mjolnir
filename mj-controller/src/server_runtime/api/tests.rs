@@ -922,4 +922,47 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
         managed_worktree: None,
     };
     assert_eq!(agent_working_directory(&bundle).unwrap(), "/workspace/app");
+
+    // What the target is actually asked to read: a path relative to the
+    // workspace root, resolved as the agent's directory would resolve it.
+    assert_eq!(
+        workspace_relative_path(&bare, Path::new("secret.txt")).unwrap(),
+        "project/secret.txt"
+    );
+    assert_eq!(
+        workspace_relative_path(&bundle, Path::new("src/main.rs")).unwrap(),
+        "app/src/main.rs"
+    );
+
+    // A secondary repository sits beside the primary one under the workspace
+    // root, so `..` reaches it. Before paths resolved in the agent's directory
+    // this was `lib/README.md`; it must not have become unreachable (#1079).
+    assert_eq!(
+        workspace_relative_path(&bundle, Path::new("../lib/README.md")).unwrap(),
+        "lib/README.md"
+    );
+    assert_eq!(
+        workspace_relative_path(&bundle, Path::new("./src/../src/main.rs")).unwrap(),
+        "app/src/main.rs"
+    );
+
+    // Above the workspace root is refused, and the refusal names both the
+    // boundary and the directory the path was resolved in.
+    for escape in ["../../etc/passwd", "../.."] {
+        let ExportError::Refused(message) =
+            workspace_relative_path(&bundle, Path::new(escape)).unwrap_err()
+        else {
+            panic!("{escape} must be refused, not attempted");
+        };
+        assert!(
+            message.contains("/workspace") && message.contains("/workspace/app"),
+            "the refusal names the boundary and the directory searched: {message}"
+        );
+    }
+
+    // The workspace root itself is not a file in the workspace.
+    assert!(matches!(
+        workspace_relative_path(&bundle, Path::new("..")),
+        Err(ExportError::Refused(_))
+    ));
 }

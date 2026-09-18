@@ -2297,7 +2297,30 @@ async fn the_file_route_returns_bytes_and_refuses_a_path_that_leaves_the_workspa
         [PathBuf::from("app/README.md")]
     );
 
-    for path in ["../etc/passwd", "/etc/passwd"] {
+    // A `..` names a sibling repository in a multi-repo bundle now that a path
+    // resolves in the agent's directory. Only the daemon knows how far it may
+    // climb, so it reaches the backend rather than being refused here (#1079).
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/files?path=../lib/README.md",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        backend.file_paths.lock().unwrap().as_slice(),
+        [
+            PathBuf::from("app/README.md"),
+            PathBuf::from("../lib/README.md")
+        ]
+    );
+
+    for path in ["/etc/passwd", ""] {
         let response = app
             .clone()
             .oneshot(
@@ -2312,12 +2335,12 @@ async fn the_file_route_returns_bytes_and_refuses_a_path_that_leaves_the_workspa
         assert_eq!(
             response.status(),
             StatusCode::BAD_REQUEST,
-            "{path} must never reach the target"
+            "{path:?} must never reach the target"
         );
     }
     assert_eq!(
         backend.file_paths.lock().unwrap().len(),
-        1,
+        2,
         "a rejected path is not sent to the backend"
     );
 }
@@ -2456,7 +2479,9 @@ async fn file_upload_accepts_large_binary_bodies_and_rejects_unsafe_paths_and_li
         backend.file_writes.lock().unwrap()[0],
         (PathBuf::from("input/data.bin"), payload, true)
     );
-    for path in ["../outside", "/absolute", "nested/../../outside"] {
+    // As with reads, how far `..` may climb depends on the session's layout, so
+    // only an absolute or empty path is refused here (#1079).
+    for path in ["/absolute", ""] {
         let response = app
             .clone()
             .oneshot(

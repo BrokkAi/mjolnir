@@ -1046,7 +1046,16 @@ async fn supervised_checkpoint(
 /// parent is the layout's workspace root. A relative export path resolves
 /// here so it means what it meant to the agent that wrote the file (#1079).
 fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, ExportError> {
-    let repository = layout
+    Ok(target_join(
+        &layout.workspace_root,
+        &primary_repository(layout)?.relative_destination,
+    ))
+}
+
+fn primary_repository(
+    layout: &SessionExportLayout,
+) -> Result<&mj_checkpoint::checkpoint::CheckpointRepositorySpec, ExportError> {
+    layout
         .repositories
         .iter()
         .find(|repository| repository.id == layout.primary_repository)
@@ -1055,11 +1064,73 @@ fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, Expor
                 "session workspace has no repository {:?}",
                 layout.primary_repository
             ))
-        })?;
-    Ok(target_join(
-        &layout.workspace_root,
-        &repository.relative_destination,
-    ))
+        })
+}
+
+/// Rewrite a caller's export path as one relative to the layout's workspace
+/// root, so the target-side read resolves it where the agent would.
+///
+/// A plain `secret.txt` means the file the agent wrote, because it resolves in
+/// the directory the agent runs in (#1079). `..` is honoured as far as the
+/// workspace root, so a multi-repo bundle still reaches a sibling repository as
+/// `../other/file`, the way `other/file` did when paths were resolved at the
+/// workspace root. Climbing above the workspace root is refused here, naming
+/// the directory that was searched.
+///
+/// The result carries no `..` of its own, so the target-side read keeps both
+/// its own refusal of a path that tries to leave the root it is handed and its
+/// canonicalizing check against symlinks out of the workspace.
+fn workspace_relative_path(
+    layout: &SessionExportLayout,
+    relative: &Path,
+) -> Result<String, ExportError> {
+    let agent_directory = || {
+        target_join(
+            &layout.workspace_root,
+            &primary_repository(layout)
+                .map(|repository| repository.relative_destination.clone())
+                .unwrap_or_default(),
+        )
+    };
+    let mut resolved: Vec<String> = primary_repository(layout)?
+        .relative_destination
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => resolved.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return Err(ExportError::Refused(format!(
+                        "{} climbs above the session workspace {}; it was resolved in {}",
+                        relative.display(),
+                        layout.workspace_root,
+                        agent_directory()
+                    )));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(ExportError::Refused(format!(
+                    "{} must be relative to {}",
+                    relative.display(),
+                    agent_directory()
+                )));
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return Err(ExportError::Refused(format!(
+            "{} names the session workspace {}, not a file in it",
+            relative.display(),
+            layout.workspace_root
+        )));
+    }
+    Ok(resolved.join("/"))
 }
 
 /// Join a relative path onto a target-side root.
@@ -1094,9 +1165,9 @@ async fn write_workspace_file(
         .await
         .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let layout = export_layout(session_id.clone()).await?;
-    // An upload lands where a read of the same relative path finds it, which is
-    // the directory the agent runs in (#1079).
-    let root = agent_working_directory(&layout)?;
+    // An upload lands where a read of the same relative path finds it: resolved
+    // in the directory the agent runs in, bounded by the workspace root (#1079).
+    let relative = workspace_relative_path(&layout, &path)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -1119,9 +1190,9 @@ async fn write_workspace_file(
             "--length".into(),
             bytes.len().to_string(),
             "--root".into(),
-            root,
+            layout.workspace_root,
             "--path".into(),
-            target_join("", &path).trim_start_matches('/').into(),
+            relative,
         ];
         if overwrite {
             argv.push("--overwrite".into());
@@ -1547,13 +1618,16 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let root = agent_working_directory(&layout)?;
+            // The path resolves in the agent's directory; the workspace root
+            // bounds how far `..` may reach, so a sibling repository in a
+            // multi-repo bundle stays reachable (#1079).
+            let relative = workspace_relative_path(&layout, &path)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
-                root,
+                layout.workspace_root.clone(),
                 "--path".to_owned(),
-                target_join("", &path).trim_start_matches('/').to_owned(),
+                relative,
             ];
             worker_command(layout, session_id, arguments, "session file read").await
         })
