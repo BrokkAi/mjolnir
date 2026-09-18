@@ -639,6 +639,9 @@ fn wiki_row(id: &str, archived: bool) -> WikiRow {
         native_id: None,
         snippet: None,
         hel_session_id: None,
+        target: None,
+        profile: None,
+        harness: None,
     }
 }
 
@@ -802,6 +805,137 @@ fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
     };
     assert_eq!(wizard.source, crate::wizards::ResumeSource::Archive);
     assert_eq!(wizard.session_id, "gone");
+}
+
+/// A configuration with a bare target beside the container one, so the two
+/// halves of the target-naming rule can both be seen.
+fn config_with_bare_target() -> Config {
+    let mut config = config();
+    config
+        .targets
+        .insert(
+            "localhost".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+    config
+}
+
+/// A Mjolnir session the index carries metadata for: the sync stored its
+/// target, profile and harness as tags, and the row is built from them.
+fn tagged_wiki_row(id: &str, target: &str, profile: &str) -> WikiRow {
+    WikiRow {
+        target: Some(target.into()),
+        profile: Some(profile.into()),
+        harness: Some("codex".into()),
+        ..wiki_row(id, true)
+    }
+}
+
+/// An archived row names the profile and target the index carries, instead of
+/// guessing `mjolnir` and a local origin. A bare target is named with the
+/// project it opened; a container target names itself; a target the
+/// configuration no longer holds is shown verbatim.
+#[test]
+fn archived_row_shows_indexed_target_and_profile() {
+    let config = config_with_bare_target();
+    let state = state_with(Vec::new());
+
+    let archived = |hit: WikiRow| {
+        merged_resume_rows(&config, &state, &[], &[hit])
+            .into_iter()
+            .find(|row| matches!(row.key, ResumeRowKey::Archive(_)))
+            .expect("the indexed session becomes an archived row")
+    };
+
+    let bare = archived(tagged_wiki_row("bare", "localhost", "codex-2"));
+    assert_eq!(bare.profile_id, "codex-2", "the indexed profile, not the tool");
+    assert_eq!(bare.origin, "localhost/project");
+
+    let container = archived(tagged_wiki_row("container", "podman", "codex-2"));
+    assert_eq!(container.origin, "podman");
+
+    let retired = archived(tagged_wiki_row("retired", "was-a-target", "codex-2"));
+    assert_eq!(
+        retired.origin, "was-a-target",
+        "a target the configuration lost is shown as it was recorded"
+    );
+
+    // A row the index carries nothing for keeps what it always showed.
+    let untagged = archived(wiki_row("untagged", true));
+    assert_eq!(untagged.profile_id, "mjolnir");
+    assert_eq!(untagged.origin, "local/project");
+}
+
+/// Put the dialog on the Archived tab with its one row selected, which is
+/// where the arrow keys leave it. The test that follows is about what Enter
+/// does, not about reaching the tab.
+fn select_the_archived_row(dashboard: &mut DashboardState) {
+    dashboard.switch_resume_tab(ResumeTab::Archive);
+    if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+        dialog.form.get_mut().focus(ResumeFocus::Sessions);
+    }
+    dashboard.select_resume_row(0);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.selected,
+        Some(ResumeRowKey::Archive("gone".into())),
+        "the archived row is selected"
+    );
+}
+
+/// Enter on an archived row opens the restore wizard already pointed at the
+/// profile and target the session ran under.
+#[test]
+fn enter_on_archived_row_preseeds_wizard_profile_and_target() {
+    let mut dashboard = DashboardState::new(
+        config_with_bare_target(),
+        state_with(Vec::new()),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
+    dashboard.apply_wiki_search(
+        request_id,
+        ready_page(vec![tagged_wiki_row("gone", "podman", "codex-2")]),
+    );
+
+    select_the_archived_row(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected the resume wizard, got {:?}", dashboard.mode);
+    };
+    // `config_with_bare_target` lists claude-1, codex-1, codex-2 in that
+    // order, and localhost, podman in that order.
+    assert_eq!(wizard.profile, 2, "the wizard opens on codex-2");
+    assert_eq!(wizard.target, 1, "the wizard opens on podman");
+}
+
+/// An id the configuration no longer has leaves the wizard on its first
+/// choice; there is nothing better to offer.
+#[test]
+fn an_unknown_indexed_profile_leaves_the_restore_wizard_on_its_first_choice() {
+    let mut dashboard = DashboardState::new(
+        config_with_bare_target(),
+        state_with(Vec::new()),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
+    dashboard.apply_wiki_search(
+        request_id,
+        ready_page(vec![tagged_wiki_row("gone", "was-a-target", "was-a-profile")]),
+    );
+    select_the_archived_row(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("expected the resume wizard, got {:?}", dashboard.mode);
+    };
+    assert_eq!(wizard.profile, 0);
+    assert_eq!(wizard.target, 0);
 }
 
 /// Typing asks the daemon for a new search, and an answer to an older

@@ -304,6 +304,20 @@ sessionwiki search "flaky migration test"
 sessionwiki list --tool mjolnir
 ```
 
+### Session metadata in the index
+
+Mjolnir tags each of its own indexed sessions with the target template it ran
+on, the harness profile it last used, and the harness kind, as
+`mj-target:<target>`, `mj-profile:<profile>` and `mj-harness:<harness>`. The
+tags are written on every sync and replaced when a session moves or changes
+profile, and `sessionwiki list` and `sessionwiki tags` show them like any other
+tag. They exist because the archive job destroys Mjolnir's own record of a
+session, so without them nothing would be left to say where an archived session
+ran. The Archived tab reads them for its PROFILE and TARGET columns, and Restore
+opens on the same profile and target. A target that has since been removed from
+`config.toml` is shown exactly as it was recorded, and Restore falls back to the
+first profile and target.
+
 ### Searching Resume
 
 The Resume search box searches the index and nothing else. With the box empty,

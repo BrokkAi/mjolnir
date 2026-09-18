@@ -484,6 +484,39 @@ fn project_target_adds_the_raw_project_name_only_for_bare_targets() {
     );
 }
 
+/// The same rule, reached without a session record: this is what the Resume
+/// dialog's archived rows use, where the record is gone and only the target id
+/// and the project path survive in the index.
+#[test]
+fn target_label_names_the_project_for_bare_targets() {
+    let mut config = sample_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let project = PathBuf::from("/mnt/optane/bifrost-fird");
+
+    assert_eq!(
+        target_label(&config, "localhost", Some(&project)),
+        "localhost/bifrost-fird",
+        "a bare target is named with the project it opens"
+    );
+    assert_eq!(
+        target_label(&config, "localhost", None),
+        "localhost",
+        "with no project there is nothing to add"
+    );
+    assert_eq!(
+        target_label(&config, "podman", Some(&project)),
+        "podman",
+        "a workspace target already identifies itself"
+    );
+    assert_eq!(
+        target_label(&config, "retired-target", Some(&project)),
+        "retired-target",
+        "a target the configuration no longer holds is shown verbatim"
+    );
+}
+
 #[test]
 fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinations() {
     let config = sample_config();

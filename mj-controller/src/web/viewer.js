@@ -2041,7 +2041,12 @@ function wikiRowNode(row) {
   const title = row.title || row.id;
   node.querySelector('.resume-session-title').textContent = title;
   node.setAttribute('aria-label', `Restore ${title}`);
+  // The profile and target come from the index's own tags, so only a Mjolnir
+  // row has them. They say where the session actually ran, which the tool name
+  // alone cannot.
   node.querySelector('.resume-session-meta').textContent = [
+    row.profile,
+    row.target,
     row.tool,
     row.project,
     `${row.msgs} message${row.msgs === 1 ? '' : 's'}`,
@@ -2067,12 +2072,24 @@ function renderWikiSections() {
   reconcileChildren(resumeArchivedRows, rows.map(wikiRowNode));
 }
 
+/// The restore form's state for one archived session.
+///
+/// It starts on the profile and target the index says the session ran under,
+/// when the configuration still has them, so a restore repeats where it was
+/// rather than asking from scratch. Failing that it falls back to the only
+/// choice there is, or to nothing.
 function wikiDraft(wikiId) {
   let draft = wikiState.drafts.get(wikiId);
   if (!draft) {
+    const row = wikiState.rows.find(item => item.id === wikiId);
+    const held = (list, id) => (list || []).some(item => item.id === id);
     draft = {
-      profileId: snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : '',
-      targetId: snapshot?.targets?.length === 1 ? snapshot.targets[0].id : '',
+      profileId: held(snapshot?.profiles, row?.profile)
+        ? row.profile
+        : (snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : ''),
+      targetId: held(snapshot?.targets, row?.target)
+        ? row.target
+        : (snapshot?.targets?.length === 1 ? snapshot.targets[0].id : ''),
       error: '',
     };
     wikiState.drafts.set(wikiId, draft);
@@ -2114,6 +2131,8 @@ function renderWikiDetail(wikiId) {
   card.dataset.wikiId = wikiId;
   card.append(el('h3', '', row?.title || wikiId));
   card.append(el('p', 'dim', [
+    row?.profile,
+    row?.target,
     row?.tool,
     row?.project,
     row ? `${row.msgs} message${row.msgs === 1 ? '' : 's'}` : '',

@@ -75,6 +75,21 @@ pub struct WikiRow {
     pub snippet: Option<String>,
     /// The live Mjolnir session this row describes, when this daemon has it.
     pub hel_session_id: Option<String>,
+    /// The Mjolnir target template the session ran under, when the index
+    /// carries it. Only Mjolnir's own rows have one: the daemon writes it into
+    /// the index as an `mj-target:` tag while the session is still known, so an
+    /// archived row can still say where it ran.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The Mjolnir harness profile the session last ran under, from the index's
+    /// `mj-profile:` tag. Only Mjolnir's own rows have one.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// The harness kind the session ran (`codex`, `claude`, `kimi`, `grok`,
+    /// `muse`), from the index's `mj-harness:` tag. It stays meaningful after
+    /// the profile id has been removed from the configuration.
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 /// How far along the daemon's SessionWiki index is when a search answers.
