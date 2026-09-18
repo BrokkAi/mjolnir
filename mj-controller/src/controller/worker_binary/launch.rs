@@ -62,13 +62,12 @@ impl Controller {
         }
         .write(&ownership_path)?;
         let profile_stage = staging.path().join("profile");
-        if !matches!(backend, targets::TargetLocator::LocalBare { .. })
-            || matches!(
-                profile.kind,
-                mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Muse
-            )
-            || crate::controller::requires_private_profile_home(profile)
-        {
+        // Files are staged only into a home the session owns. The alternative
+        // is `target_profile_home` being the user's own harness home, where
+        // installing the stage would overwrite their configuration with the
+        // daemon's copy and leave it there. The private-home decision is read
+        // from the one place that makes it rather than restated here.
+        if crate::controller::session_owns_profile_home(backend, session_id, profile) {
             let started = Instant::now();
             let result = stage_profile(profile, &profile_stage);
             tracing::debug!(
@@ -304,6 +303,22 @@ impl Controller {
         )?;
         launch.subagent_tools =
             subagent_tools_enabled(session, self.config.subagents.enabled, subagent.is_some());
+        // Claude reads Mjolnir's delegation server from a configuration file in
+        // its harness home, never over ACP, so a session running out of the
+        // user's own home has no way to be given one. Leaving the flag set
+        // would take Claude's own Agent and Task tools away without putting
+        // anything in their place.
+        if launch.subagent_tools
+            && profile.kind == mj_core::config::HarnessKind::Claude
+            && !crate::controller::session_owns_profile_home(backend, session_id, profile)
+        {
+            tracing::info!(
+                session_id,
+                "Mjolnir sub-agents need a harness home of their own; this Claude session runs \
+                 out of the user's own home and keeps Claude's Agent and Task tools instead"
+            );
+            launch.subagent_tools = false;
+        }
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
         // configuration names a reviewer, and that is not a child. A child

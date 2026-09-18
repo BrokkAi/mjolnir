@@ -429,20 +429,21 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
                     "Profile is disabled; home and authentication checks were skipped.",
                 );
             }
-            if let Some(default_home) = unscopable_home_is_ignored(profile) {
+            if let Some(default_home) = unscopable_home_is_ignored(config, profile) {
                 return DoctorCheck::fixable(
                     format!("harness.{id}"),
                     title,
                     format!(
-                        "{} is ignored on macOS: {} reads {} whatever {} says",
+                        "{} is ignored by a session on this machine: {} on macOS reads {} \
+                         whatever {} says",
                         profile.home.display(),
                         profile.kind.display_name(),
                         default_home.display(),
                         profile.kind.home_env(),
                     ),
                     format!(
-                        "Set this profile's home to {}, or run it on a container or SSH target, \
-                         where the home can still be scoped.",
+                        "Set this profile's home to {}, or use it only on container and SSH \
+                         targets, where the home is still scoped.",
                         default_home.display()
                     ),
                 );
@@ -488,10 +489,20 @@ fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> V
 /// `CLAUDE_CONFIG_DIR` there, so a profile pointing anywhere but Claude's own
 /// home would be silently unused. Saying so is better than letting the session
 /// run against a home nobody configured.
-fn unscopable_home_is_ignored(profile: &HarnessProfile) -> Option<PathBuf> {
+fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Option<PathBuf> {
     if profile
         .kind
         .scopes_home_with_environment(HarnessHost::current())
+    {
+        return None;
+    }
+    // The variable still scopes a home on a container or SSH target, so a
+    // profile that can only run there is configured correctly and must not be
+    // told to collapse the separation its sessions rely on.
+    if !config
+        .targets
+        .values()
+        .any(|target| matches!(target, TargetTemplate::LocalBare))
     {
         return None;
     }

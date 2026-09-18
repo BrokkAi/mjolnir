@@ -3358,6 +3358,52 @@ fn removable_profile_root_names_only_per_session_profile_directories() {
     }
 }
 
+/// Installing a staged profile copies it over `target_profile_home`, so a
+/// session that does not own that home must not stage anything into it: the
+/// files would land on the user's own harness configuration, and teardown,
+/// which removes only what `removable_profile_root` names, would leave them
+/// there. The two decisions are one function so they cannot drift apart.
+#[test]
+fn a_session_owns_a_profile_home_exactly_when_it_is_not_the_user_s_own() {
+    use crate::controller::{session_owns_profile_home, target_profile_home_for_test};
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    let profile = |kind: HarnessKind, home: &str| HarnessProfile {
+        enabled: true,
+        kind,
+        home: std::path::PathBuf::from(home),
+        environment: Default::default(),
+        context_window_bytes: None,
+        guardian_review_model: None,
+    };
+    let local = TargetLocator::LocalBare {
+        worker_root: format!("/var/lib/hel/workers/{SESSION}"),
+    };
+    let container = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: resource_name(SESSION).unwrap(),
+        workspace_storage: Default::default(),
+    };
+
+    for locator in [&local, &container] {
+        for (kind, home) in [
+            (HarnessKind::Claude, "/home/dev/.claude"),
+            (HarnessKind::Codex, "/home/dev/.codex"),
+            (HarnessKind::Muse, "/home/dev/.config/muse"),
+        ] {
+            let profile = profile(kind, home);
+            let owns = session_owns_profile_home(locator, SESSION, &profile);
+            let target = target_profile_home_for_test(locator, SESSION, &profile);
+            assert_eq!(
+                owns,
+                target != home,
+                "{kind:?} on {}: owns={owns} but target home is {target}",
+                locator.kind_name()
+            );
+        }
+    }
+}
+
 #[test]
 fn podman_cleanup_ignores_an_already_absent_container() {
     let name = resource_name(SESSION).unwrap();

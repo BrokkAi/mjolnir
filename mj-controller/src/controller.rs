@@ -1185,6 +1185,21 @@ pub(crate) fn requires_private_profile_home(profile: &mj_core::config::HarnessPr
     profile.codex_provider().ok().flatten().is_some()
 }
 
+/// Whether this session's harness home belongs to the session rather than to
+/// the profile.
+///
+/// Only such a session has anywhere to stage files into. Staging when this is
+/// false would copy the daemon's staged profile straight over the user's own
+/// harness configuration, and nothing would ever remove it again: teardown
+/// removes what [`removable_profile_root`] names, which is nothing here.
+pub(crate) fn session_owns_profile_home(
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+) -> bool {
+    removable_profile_root(locator, session_id, profile).is_some()
+}
+
 /// Whether a Claude session on a local bare target runs from a private staged
 /// home. It can only do so where `CLAUDE_CONFIG_DIR` is what points Claude at
 /// that home; on macOS the variable scopes nothing, so a private copy would be
@@ -1206,6 +1221,15 @@ fn claude_takes_a_private_home(
 /// profile that runs straight out of the user's own home has no per-session root
 /// and uses that home. Muse keeps its state in a `muse` subdirectory of the
 /// root, because its ACP adapter owns the directory it is given.
+#[cfg(test)]
+pub(crate) fn target_profile_home_for_test(
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+) -> String {
+    target_profile_home(locator, session_id, profile)
+}
+
 fn target_profile_home(
     locator: &targets::TargetLocator,
     session_id: &str,

@@ -92,6 +92,15 @@ async fn query_cli_with(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // A report that parses is the answer. Classifying first would let the
+    // free-form sections below the windows decide the result: a skill or MCP
+    // server whose name happens to contain "unauthorized" is not a login
+    // failure.
+    if output.status == 0
+        && let Some(report) = parse_cli_usage(&text)
+    {
+        return Ok(report);
+    }
     if is_authentication_error(&text) {
         return Err(ClaudeUsageError::NotSignedIn);
     }
@@ -101,7 +110,7 @@ async fn query_cli_with(
             output.status
         )));
     }
-    parse_cli_usage(&text).ok_or(ClaudeUsageError::Parse)
+    Err(ClaudeUsageError::Parse)
 }
 
 async fn query_with(
