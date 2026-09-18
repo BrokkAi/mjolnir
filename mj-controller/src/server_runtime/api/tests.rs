@@ -805,3 +805,62 @@ async fn prompt_reports_a_session_the_manager_does_not_hold() {
         "unexpected error: {error:#}"
     );
 }
+
+/// A relative export path resolves against the directory the agent runs in,
+/// not the workspace root above it. For a bare project session those differ by
+/// one level, which is why a file the agent had just written was refused as
+/// "not in the session workspace" (#1079).
+#[test]
+fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
+    use mj_checkpoint::checkpoint::{CheckpointRepositoryCapture, CheckpointRepositorySpec};
+
+    // The shape `session_export_layout` builds for a bare project session whose
+    // agent is launched in `/home/dev/project`.
+    let bare = SessionExportLayout {
+        backend: targets::TargetLocator::LocalBare {
+            worker_root: "/home/dev/.local/share/hel/workers/session".into(),
+        },
+        workspace_root: "/home/dev".into(),
+        primary_repository: "project".into(),
+        repositories: vec![CheckpointRepositorySpec {
+            id: "project".into(),
+            relative_destination: PathBuf::from("project"),
+            capture: CheckpointRepositoryCapture::MetadataOnly,
+            origin_override: None,
+        }],
+        managed_worktree: None,
+    };
+    assert_eq!(
+        agent_working_directory(&bare).unwrap(),
+        "/home/dev/project",
+        "the workspace root is the project's parent, not where the agent runs"
+    );
+
+    // The shape it builds for a bundle session, whose agent is launched in the
+    // primary repository under the target's workspace directory.
+    let bundle = SessionExportLayout {
+        backend: targets::TargetLocator::LocalPodman {
+            container_id: "hel-session".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        },
+        workspace_root: "/workspace".into(),
+        primary_repository: "app".into(),
+        repositories: vec![
+            CheckpointRepositorySpec {
+                id: "app".into(),
+                relative_destination: PathBuf::from("app"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+            CheckpointRepositorySpec {
+                id: "lib".into(),
+                relative_destination: PathBuf::from("lib"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+        ],
+        managed_worktree: None,
+    };
+    assert_eq!(agent_working_directory(&bundle).unwrap(), "/workspace/app");
+}

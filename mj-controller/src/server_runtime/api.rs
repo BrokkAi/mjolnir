@@ -1009,8 +1009,14 @@ async fn export_layout(session_id: String) -> Result<SessionExportLayout, Export
     .await
 }
 
-/// The directory on the target holding the session's primary repository.
-fn primary_repository_path(layout: &SessionExportLayout) -> Result<String, ExportError> {
+/// The directory on the target the session's agent runs in.
+///
+/// It is the primary repository's directory for every target kind: a bundle
+/// session's harness is launched in `<workspace root>/<primary destination>`,
+/// and a bare project session's in its selected project directory, whose
+/// parent is the layout's workspace root. A relative export path resolves
+/// here so it means what it meant to the agent that wrote the file (#1079).
+fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, ExportError> {
     let repository = layout
         .repositories
         .iter()
@@ -1059,6 +1065,9 @@ async fn write_workspace_file(
         .await
         .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let layout = export_layout(session_id.clone()).await?;
+    // An upload lands where a read of the same relative path finds it, which is
+    // the directory the agent runs in (#1079).
+    let root = agent_working_directory(&layout)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -1081,7 +1090,7 @@ async fn write_workspace_file(
             "--length".into(),
             bytes.len().to_string(),
             "--root".into(),
-            layout.workspace_root,
+            root,
             "--path".into(),
             target_join("", &path).trim_start_matches('/').into(),
         ];
@@ -1478,7 +1487,7 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = primary_repository_path(&layout)?;
+            let repository = agent_working_directory(&layout)?;
             let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
             if let Some(worktree) = &layout.managed_worktree {
                 match &worktree.base_commit {
@@ -1509,10 +1518,11 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
+            let root = agent_working_directory(&layout)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
-                layout.workspace_root.clone(),
+                root,
                 "--path".to_owned(),
                 target_join("", &path).trim_start_matches('/').to_owned(),
             ];
@@ -1528,7 +1538,7 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let root = primary_repository_path(&layout)?;
+            let root = agent_working_directory(&layout)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
@@ -1590,7 +1600,7 @@ impl SubagentBackend for ApiBackend {
             self.require_live_target(&session_id)?;
             self.require_idle_turn(&session_id).await?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = primary_repository_path(&layout)?;
+            let repository = agent_working_directory(&layout)?;
             let arguments = vec![
                 "push-branch".to_owned(),
                 "--root".to_owned(),

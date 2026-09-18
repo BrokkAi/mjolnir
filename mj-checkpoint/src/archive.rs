@@ -1696,13 +1696,16 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
     let refuse = |reason: String| SessionExportError::Refused(reason);
     mj_core::config::validate_relative_destination(relative)
         .map_err(|error| refuse(format!("{error:#}")))?;
+    // The directory that was searched, as the caller spelled it, so a refusal
+    // names somewhere the person can look (#1079).
+    let searched = root.display().to_string();
     let root = root
         .canonicalize()
         .with_context(|| format!("resolve session workspace {}", root.display()))?;
     let path = root.join(relative).canonicalize().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             refuse(format!(
-                "{} is not in the session workspace",
+                "{} is not in the session workspace {searched}",
                 relative.display()
             ))
         } else {
@@ -1714,7 +1717,7 @@ pub fn read_session_file(root: &Path, relative: &Path) -> Result<Vec<u8>, Sessio
     })?;
     if !path.starts_with(&root) {
         return Err(refuse(format!(
-            "{} leaves the session workspace",
+            "{} leaves the session workspace {searched}",
             relative.display()
         )));
     }
