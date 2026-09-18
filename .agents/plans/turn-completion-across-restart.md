@@ -1,14 +1,17 @@
-# Bound a turn whose harness reply never arrives (#1017)
+# Report how long a turn has been quiet, and stop guessing from it (#1017)
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`,
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 It must be maintained in accordance with `.agents/PLANS.md` at the repository root.
 
-This plan was written as a look at issue #1017, not as an ambitious design. The
-maintainer's stated position is that the reported loss may not be fixable without
-worse tradeoffs. The most important part of this document is therefore the finding
-below, which says what is already guaranteed, what is still broken, and which losses
-cannot be recovered on our side at all. The proposed change is deliberately small.
+This plan began as a look at issue #1017, not as an ambitious design. The most
+important part of it is still the finding below, which says what is already
+guaranteed, what is still broken, and which losses cannot be recovered on our
+side at all. Its first version then recommended a new silence bound for the two
+harnesses that had none; the maintainer rejected that, on the ground that a
+silence bound is a heuristic, and the design that replaces it publishes the
+silence as a fact and makes every automatic ending opt-in. See `Revision notes`
+at the end and the `Decision Log`.
 
 ## The finding, first
 
@@ -161,19 +164,29 @@ was fixed by `52aba5d1` and the shared mechanism in `88fbe7af`
 
 ## Purpose / Big Picture
 
-After this change, a Codex or Claude session whose harness stops answering can no
-longer sit in `running` forever. The turn ends with the stop reason
-`harness_inactive`, `mj wait` returns instead of blocking until its own timeout, the
-transcript carries a warning line naming what happened and where to look, and the
-session becomes idle so it can be closed, checkpointed, exported or re-prompted.
-The user still loses the turn — the final message the harness wrote is genuinely not
-recoverable through Mjolnir — but they learn that within a bounded time instead of
-discovering it hours later, and the message tells them to read the harness's own
-session files in the workspace.
+After this change, a running turn tells you how long the harness has been quiet,
+and Mjolnir stops pretending it can tell a dead turn from a slow one.
 
-This is a visibility fix, not a recovery fix. It is deliberately the smallest change
-that removes the unbounded case, and it reuses the watchdog, the stop reason and the
-diagnostic that already exist for Muse, Kimi and Grok.
+`mj sessions --session <id>` prints `running, no harness activity for about 11
+minute(s)`. `mj wait` says the same in its timeout message, so an orchestrator
+that times out has the one fact that bears on what to do next and can decide to
+call `mj cancel-turn`. The terminal and web session rows show a `Quiet` clock
+beside the turn and step clocks. None of this ends a turn.
+
+Mjolnir ends a turn on its own only when something deterministic says it cannot
+finish: the harness bridge process exited, its connection closed, or the worker
+restarted. Those were already correct and are unchanged. The automatic ending
+for silence becomes opt-in for every harness, through
+`MJ_TURN_STALL_TIMEOUT_MS` and `MJ_TURN_TOOL_STALL_TIMEOUT_MS`, and is off
+unless set. That is a behavior change for Muse, Kimi and Grok, which had a
+ten-minute silence default; it is deliberate, and the reason is below.
+
+What the user still loses is the turn in the original report: an adapter that
+wrote its final message and made its commit and then failed to send the
+`session/prompt` reply. That work exists in the workspace and in the harness's
+own session files, and Mjolnir has no durable copy of the reply to replay. It
+cannot be recovered. What changes is that the session says so within a minute
+instead of looking like ordinary work for hours.
 
 ## Progress
 
@@ -188,11 +201,14 @@ diagnostic that already exist for Muse, Kimi and Grok.
       for a completed turn, so the `marks_own_turn_end` exemption has no basis.
 - [x] (2026-09-18 00:38Z) Live: a Codex turn with a suspended bridge, no tool call
       open and total ACP silence was still `running` after ten minutes and thirty-one
-      seconds — past the bound every non-self-marking harness runs under. This is the
-      still-broken behavior the plan fixes.
-- [ ] Maintainer decision on the open questions below.
-- [ ] Milestone 1: arm the bounds for self-marking harnesses.
-- [ ] Milestone 2: name the loss in the transcript warning.
+      seconds — past the bound every non-self-marking harness ran under.
+- [x] (2026-09-18 01:05Z) Maintainer decision: do not add a silence bound for Codex
+      and Claude. Publish the silence age instead, and make the automatic ending
+      opt-in for every harness. Plan revised; see the `Decision Log`.
+- [ ] Milestone 1: publish the silence age (`mj-core/src/activity.rs`, the session
+      summary, `mj wait`, the terminal and web rows).
+- [ ] Milestone 2: both stall bounds opt-in, no harness special case, docs.
+- [ ] Live validation of both milestones.
 
 ## Surprises & Discoveries
 
@@ -262,20 +278,78 @@ diagnostic that already exist for Muse, Kimi and Grok.
   stall. Adding a second reason would split the same signal in two.
   Date/Author: 2026-09-18, plan author.
 
-- Decision: give self-marking harnesses a longer silence bound than the ten minutes
-  Muse uses, rather than the same one.
-  Rationale: a Codex or Claude turn can legitimately spend a long time in a single
-  model call with no tool card open, and #1020 was caused by a bound that was too
-  aggressive. A bound that is too long only delays a failure the user can already end
-  with `mj cancel-turn`; a bound that is too short destroys real work.
+- Decision: **superseded.** The first version of this plan recommended giving
+  Codex and Claude a silence bound of their own, thirty minutes rather than the
+  ten Muse used. The maintainer rejected it. See the next entry, which replaces
+  it; the reasoning is kept here because the rest of the document was written
+  around it.
+  Date/Author: 2026-09-18, plan author.
+
+- Decision: do not add a silence bound for Codex and Claude. Publish the silence
+  age as a fact, and make the automatic ending opt-in for every harness, which
+  turns the existing ten-minute default off for Muse, Kimi and Grok too.
+  Rationale (the maintainer's): a silence bound is a heuristic. It cannot tell a
+  turn that has stopped from a turn that is merely slow, because the evidence
+  for both is identical — nothing arriving. Adding a heuristic to two more
+  harnesses spreads a guess rather than fixing anything, and this plan's own
+  finding argues against it: #1020 was a healthy turn destroyed by exactly this
+  bound. What Mjolnir can do honestly is report what it knows. It already knows
+  when the harness last spoke; it simply never said so. Publishing that turns an
+  unanswerable question ("is this turn dead?") into an answerable one ("has
+  anything arrived lately?") and leaves the irreversible act — ending the turn —
+  with the person or the orchestrator who has context Mjolnir does not. An
+  operator who wants the old automatic behavior keeps it by setting one
+  environment variable, and it then applies uniformly.
+  Date/Author: 2026-09-18, maintainer, recorded by the plan author.
+
+- Decision: turning the ten-minute default off for Muse, Kimi and Grok is a
+  deliberate behavior change, not collateral damage.
+  Rationale: the alternative is a default that ends turns on a guess for three
+  harnesses and not the other two, which is the inconsistency this ticket
+  started from. Uniformly off is defensible and explainable; uniformly on is the
+  #1020 failure by default; split is what we had. The loss is real and is stated
+  in `Outcomes & Retrospective`: a Muse session whose relay dies mid-turn
+  (#1029) will now sit visibly quiet instead of failing after ten minutes.
+  Visibly quiet is the honest report, and #1029 remains open.
+  Date/Author: 2026-09-18, plan author, following the maintainer's decision.
+
+- Decision: report the silence age only once it exceeds one minute, and only
+  while something is running.
+  Rationale: every surface has to agree on when a turn "reads as quiet", or the
+  terminal and `mj sessions` will disagree about the same session. One shared
+  constant, `mj_core::activity::SILENCE_WORTH_REPORTING`, with the web viewer
+  carrying a matching constant because it cannot read the Rust one. Below a
+  minute, quiet is ordinary and reporting it is noise. For an idle session
+  silence means nothing at all, so there is nothing to report.
+  Date/Author: 2026-09-18, plan author.
+
+- Decision: `while_disconnected` reports no silence age.
+  Rationale: the daemon losing sight of a worker is not harness silence. Filling
+  the field from the projection would make every daemon restart look like a
+  stalled harness and send readers to cancel healthy turns — the same class of
+  mistake as #1025, where a missing fact was filled in with a default.
   Date/Author: 2026-09-18, plan author.
 
 ## Outcomes & Retrospective
 
-Not started. To be written when Milestone 1 lands. The success test is the live test
-in `Validation and Acceptance`: on the build before the change the suspended-bridge
-Codex session stays `running` indefinitely; on the build after it, the turn ends with
-`harness_inactive` within the configured bound.
+Not complete. To be written when both milestones have landed and been validated
+live.
+
+What this work will have achieved, measured against the original purpose: the
+turn described in #1017 is still not recoverable — that is settled and is not a
+gap to close later — but it stops being invisible. A session whose harness has
+gone quiet says so within a minute, in the three places someone looks, and an
+orchestrator that times out gets the fact it needs to decide whether to cancel.
+
+What it will have given up: the automatic ending Muse, Kimi and Grok had by
+default. A turn whose relay dies without the process dying (#1029) will now stay
+running and quiet until someone ends it. That is the accepted cost of not
+guessing, and the mitigation is the visibility this plan adds plus the opt-in
+knob for an operator who wants the old behavior back.
+
+What remains open regardless: #1029, which is a different failure — the Muse
+harness continuing to execute prompts invisibly after a restart — and is not
+touched here.
 
 ## Context and Orientation
 
@@ -295,22 +369,27 @@ writes a **projection** of it into a SQLite database. The projection is what
 
 The relevant files:
 
-* `mj-core/src/config/harness.rs` — `HarnessKind` and its per-harness facts,
-  including `marks_own_turn_end` at line 465.
+* `mj-core/src/config/harness.rs` — `HarnessKind` and its per-harness facts.
+  Before this work it also held `marks_own_turn_end`, the flag that decided
+  which harnesses got a stall watchdog; this plan deletes it.
 * `mj-core/src/relay/snapshot.rs` — `RelayObservation`, the event type stored in the
   journal, including `CommandCompleted` and `HarnessTurnSettled`.
 * `mj-core/src/relay/snapshot/apply.rs` — the state machine that folds an observation
   into the relay snapshot. This is where a turn is decided to be over.
 * `mj-core/src/activity.rs` — the single activity model added on 2026-09-17 by the
-  `unified-session-activity.md` plan. It holds `StallPolicy`, `stall_verdict` and
-  `StallVerdict`.
+  `unified-session-activity.md` plan. It holds `ActivityFacts`, `classify`,
+  `ActivityState`, `StallPolicy`, `stall_verdict` and `StallVerdict`, and this
+  plan adds the silence reporting to it. "Facts in, one classified state out,
+  one function per question" is the rule; do not add a predicate that
+  re-derives an answer somewhere else.
 * `mj-worker/src/acp/session.rs` — the loop that sends one `session/prompt` and waits
   for its reply. The stall watchdog is the `verdict = async { ... }` arm of the
   `tokio::select!` near line 625.
-* `mj-worker/src/acp/drive.rs` — `turn_ends_only_on_prompt_reply`,
-  `turn_stall_policy`, `turn_stall_timeout`, `DEFAULT_TURN_STALL_TIMEOUT_MS`
-  (600000, ten minutes), `DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS` (four hours),
-  `TURN_STALLED_STOP_REASON` (`"harness_inactive"`), and `turn_stall_message`.
+* `mj-worker/src/acp/drive.rs` — `turn_stall_policy`, `turn_stall_timeout`,
+  `TURN_STALLED_STOP_REASON` (`"harness_inactive"`) and `turn_stall_message`.
+  Before this work it also held the two default bounds (ten minutes of silence,
+  four hours for one tool call) and `turn_ends_only_on_prompt_reply`; this plan
+  deletes all three.
 * `mj-worker/src/relay/journal.rs` — the durable journal: append with `sync_data`,
   attach, acknowledge, garbage collection, and restart recovery of non-terminal
   commands.
@@ -323,190 +402,216 @@ durable outcome is stored as `last_turn_outcome` on the projected session and is
 
 ## Plan of Work
 
-### Milestone 1 — arm the bounds for Codex and Claude
+Two milestones, in this order. The first is the whole user-visible gain and is
+additive: nothing behaves differently, a running session simply says more about
+itself. The second changes behavior, and doing it second means the first can be
+validated on its own.
 
-**Scope.** Remove the blanket exemption in `mj-worker/src/acp/session.rs` so that
-every harness runs under a stall policy, and give self-marking harnesses their own,
-longer silence default. Nothing else changes: the same watchdog code, the same
-`harness_inactive` stop reason, the same diagnostic, the same environment overrides.
+### Milestone 1 — publish how long the harness has been quiet
 
-**What exists at the end that did not before.** A Codex or Claude session whose
-bridge stops answering ends its turn within a bounded time with a stated reason,
-instead of staying `Running` forever.
+**Scope.** The worker already knows when anything last arrived over ACP, and
+already sends it: `RelayOperationalState.last_acp_activity_at_ms`
+(`mj-core/src/relay/snapshot.rs`). Nothing surfaces it. This milestone carries
+it through the one shared activity mechanism to the places a person or an
+orchestrator reads, and adds no new predicate and no new decision.
+
+**What exists at the end that did not before.** A running session reports its
+silence age in `mj sessions --session`, in `mj wait`'s timeout message, in the
+API's `activity_details`, and as a `Quiet` clock in the terminal and web rows.
 
 The edits:
 
-1. In `mj-core/src/config/harness.rs`, replace `marks_own_turn_end` with a function
-   that returns the silence bound the harness should run under, because that is the
-   only decision the flag was ever used for and its name asserts something that is
-   not true of the Codex adapter. Suggested shape:
+1. `mj-core/src/activity.rs` — add `last_activity_at_ms: Option<i64>` to the
+   `ActivityState::Turn` and `ActivityState::Tool` variants, filled by
+   `classify` from `ActivityFacts::last_acp_activity_at_ms`. Both fields are
+   `#[serde(default, skip_serializing_if = "Option::is_none")]`, so the
+   published state stays readable by an older controller and a newer controller
+   stays readable by an older worker.
 
-       /// How long a turn of this harness may go completely silent — no ACP
-       /// traffic at all and no tool call open — before the worker gives up on
-       /// it and records the turn as `harness_inactive`.
-       ///
-       /// Every harness needs one. The turn Mjolnir reports ends only when the
-       /// `session/prompt` reply arrives (see
-       /// `mj-core/src/relay/snapshot/apply.rs`), so a lost reply hangs any
-       /// harness, including the ones that publish a turn-end marker of their
-       /// own. Codex and Claude get a longer bound because they can spend a long
-       /// time inside one model call with no tool card open; ten minutes there
-       /// would fail healthy turns, which is what #1020 was.
-       pub const fn turn_silence_bound(self) -> Duration {
-           match self {
-               Self::Codex | Self::Claude => Duration::from_secs(30 * 60),
-               Self::Kimi | Self::Grok | Self::Muse => Duration::from_secs(10 * 60),
-           }
-       }
+   `while_disconnected` leaves it `None` on purpose. The daemon losing sight of
+   a worker says nothing about whether the harness is talking, and presenting a
+   disconnection as harness silence would send a reader to cancel a healthy
+   turn.
 
-   Delete `marks_own_turn_end` and `turn_ends_only_on_prompt_reply`
-   (`mj-worker/src/acp/drive.rs:976`), and update the test
-   `the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply`
-   (`mj-worker/src/acp/tests.rs:4234`) to assert the new per-harness bounds instead.
+2. `mj-core/src/activity.rs` — four small public items beside them:
+   `ActivityState::last_activity_at_ms`, `ActivityState::silent_for_ms(now_ms)`,
+   the free `silent_for_ms(facts, now_ms)` for a caller that holds facts, and
+   `silence_note(state, now_ms)`, which is the one phrase every surface prints.
+   `describe_duration` moves here from `mj-worker/src/acp/drive.rs`, where it
+   was `stall_duration`, so the worker's stall message and the new note agree on
+   wording. `SILENCE_WORTH_REPORTING` is the shared one-minute threshold below
+   which quiet is ordinary and saying so is noise.
 
-2. In `mj-worker/src/acp/drive.rs`, make `turn_stall_policy` take the harness and use
-   `harness.turn_silence_bound()` as the default that `MJ_TURN_STALL_TIMEOUT_MS`
-   overrides. Keep `timeout_from_environment`'s existing rule that `0` removes the
-   bound, so an operator can still opt out per session through the target's container
-   environment. Keep the four-hour `MJ_TURN_TOOL_STALL_TIMEOUT_MS` default unchanged
-   and now apply it to every harness.
+3. Carry the timestamp to the surfaces. `SessionActivityDetails`
+   (`mj-client/src/usage_format.rs`) and `ApiActivityDetails`
+   (`mj-core/src/storage.rs`) each gain `last_activity_at_ms`, and
+   `viewer_activity_details` (`mj-controller/src/server_runtime/snapshot.rs`)
+   copies it across. The API field is optional and skipped when absent.
 
-3. In `mj-worker/src/acp/session.rs:472-479`, delete the `if`/`else` and always take
-   `spec.stall_policy.unwrap_or_else(|| turn_stall_policy(spec.harness))`. The
-   watchdog arm's `stall_policy.enabled()` guard stays as it is, so setting both
-   variables to `0` still disables the watchdog completely.
+4. Render it.
+   - `mj sessions --session <id>` (`mj-cli/src/api_commands.rs`) prints
+     `running, no harness activity for about N minute(s)` under the header line.
+   - `mj wait`'s timeout branch (`mj-controller/src/server/api/wait.rs`) appends
+     `, with no harness activity for ...` to its message. This is the whole of
+     the coordinator's point 4: an orchestrator that times out can now decide
+     whether to cancel.
+   - `SessionActivity::display_clock(detailed = true)`
+     (`mj-client/src/usage_format.rs`) appends ` Q <clock>`, which reaches the
+     terminal session rows and the chat pane.
+   - `mj-controller/src/web/viewer.js` appends ` . Quiet <clock>` to the turn
+     and step labels, using a `SILENCE_WORTH_REPORTING_SECONDS` constant that
+     matches the Rust threshold.
 
-4. In `mj-worker/src/acp/drive.rs`, extend `turn_stall_message` so the text for a
-   silence verdict tells the reader that the harness may have finished work that
-   Mjolnir did not see, and where to look. The message already travels with the
-   outcome as a `TurnDiagnostic`, so `mj wait --json` and the session summary both
-   carry it. Proposed text for the silence case:
+**Tests.** `mj-core/src/activity/tests.rs` gains two behavior tests driven
+directly from facts, with no relay and no worker:
+`a_running_session_reports_how_long_the_harness_has_been_quiet` covers a quiet
+turn, a quiet tool call, a session that just spoke, an idle session, and a
+worker too old to report the clock; `a_disconnected_session_reports_no_silence_age`
+covers the `Unknown` case. Neither duplicates an implementation list.
 
-       the harness sent nothing for 30m and the turn was recorded as
-       harness_inactive; if it had already finished, its own session files in the
-       workspace hold the final message and any commit it made
+### Milestone 2 — both stall bounds opt-in, for every harness
 
-**Tests.** Add behavior tests next to the code, not lists that mirror it:
+**Scope.** Make the automatic ending something an operator asks for, and delete
+the harness special case that decided who got one.
 
-* In `mj-worker/src/acp/tests.rs`, a test that `turn_stall_policy(HarnessKind::Codex)`
-  and `turn_stall_policy(HarnessKind::Claude)` are `enabled()` and carry a silence
-  bound, and that `MJ_TURN_STALL_TIMEOUT_MS=0` disables it. This is the test that
-  fails on the unfixed build: today the Codex policy is `{silence: None, tool_call:
-  None}`.
-* In `mj-core/src/activity.rs` tests, `stall_verdict` already has coverage; add one
-  case only if the per-harness bound introduces a new path, which it should not.
-* A worker-level behavior test that a Codex session whose bridge goes silent loses
-  its turn. `mj-worker/src/acp/tests.rs` already has the Muse version of exactly this
-  — `silent_bridge_spec` (line 2512, which hard-codes `HarnessKind::Muse` with the
-  comment "Muse marks no turn end of its own, so the watchdog covers it") feeding
-  `a_tool_call_that_outlives_its_bound_ends_the_turn` (line 2605) and the silence
-  test after it. Give `silent_bridge_spec` a harness parameter, keep the existing
-  Muse callers, and add a Codex case that asserts `PromptFinished` with
-  `stop_reason == TURN_STALLED_STOP_REASON`. Injecting the short policy through
-  `LaunchSpec::stall_policy` is enough to make this fail on the unfixed build,
-  because today the `else` branch at `mj-worker/src/acp/session.rs:475-478` throws
-  the injected policy away for a self-marking harness and substitutes
-  `{silence: None, tool_call: None}`. After the change the injected policy is used
-  and the turn ends.
+The edits:
 
-**Commit.** One commit. Message states that the turn Mjolnir reports ends only on the
-prompt reply, that the Codex adapter emits no end marker of its own, and that the
-exemption therefore left Codex and Claude turns unbounded. Reference #1017.
+1. `mj-worker/src/acp/drive.rs` — delete `DEFAULT_TURN_STALL_TIMEOUT_MS` and
+   `DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS`. Replace the environment reader with a
+   pure `parse_stall_timeout(value: Option<&str>) -> Option<Duration>` in which
+   unset, empty, `0` and anything unparseable all mean "no bound" and only a
+   positive number of milliseconds arms one. `turn_stall_policy` then returns
+   `{silence: None, tool_call: None}` unless the operator set something. Add
+   `TURN_STALL_TIMEOUT_VARIABLE` beside the existing
+   `TOOL_CALL_STALL_TIMEOUT_VARIABLE` so both names live in one place.
 
-### Milestone 2 — make the remaining loss legible (optional, small)
+   The permissive parse is deliberate. A typo must not silently arm a watchdog
+   that ends turns; the safe direction for a misconfigured value is off.
 
-**Scope.** The turn now ends, but the session summary does not say "this turn's
-result may exist in the workspace and not in Mjolnir". Milestone 1 puts that in the
-diagnostic; this milestone puts it where a person scanning `mj sessions` will see it.
+2. `mj-worker/src/acp/drive.rs` — delete `turn_ends_only_on_prompt_reply`, and
+   `mj-core/src/config/harness.rs` — delete `HarnessKind::marks_own_turn_end`.
+   With the defaults off there is nothing left to special-case, and the fact the
+   flag asserted was not true of the Codex adapter anyway.
 
-**The edit.** `mj-transcript/src/projection/observation.rs` already projects
-`RelayObservation::Warning` as a system transcript line. Nothing new is needed there.
-The only addition is in the session summary that `mj sessions --json` returns: when
-`last_turn_outcome` is a completion whose stop reason is `harness_inactive`, surface
-a short `last_turn_diagnostic` note rather than leaving the caller to parse the stop
-reason. #1032's closing comment says `last_turn_diagnostic` already exists, so this
-is a presentation change in `mj-controller/src/server/api` and the viewer, not new
-state.
+3. `mj-worker/src/acp/session.rs` — the policy selection becomes
+   `spec.stall_policy.unwrap_or_else(turn_stall_policy)`, with no `if`. The
+   watchdog arm keeps its `stall_policy.enabled()` guard, so an unset knob
+   leaves the arm unarmed and costs nothing. When a knob *is* set, the
+   `harness_inactive` path from #1020 runs exactly as it does today, for every
+   harness.
 
-**Whether to do it at all** is open question Q4 below. It is genuinely optional: the
-information is already in `mj wait --json` after Milestone 1.
+4. Documentation. `.agents/docs/internal-environment-variables.md` states both
+   knobs are off by default, gives the parsing rule, and records why the
+   ten-minute default and the Codex/Claude exemption are both gone.
+   `docs/src/content/docs/configuration.md` lists both knobs in its environment
+   table. `docs/src/content/docs/api-reference.md` documents
+   `details.last_activity_at_ms` and says plainly that Mjolnir publishes it and
+   does not act on it. `docs/src/content/docs/sessions.md` gains a "When a turn
+   goes quiet" section that tells a user what Mjolnir will and will not end, what
+   the quiet clock means, and how to opt in to an automatic ending.
+
+**Tests.** `a_stall_bound_is_off_unless_a_positive_timeout_is_configured` drives
+`parse_stall_timeout` over unset, empty, blank, `0`, `off` and a negative value,
+and over one positive value. It is pure, so it does not race other tests over
+process-wide environment variables. `the_daemon_carries_both_stall_knobs_to_its_workers`
+replaces the old default-values test: a worker re-execs with a cleared
+environment, so if the daemon's carry list stops naming a knob there is no way
+to arm the opt-in bound on any target. The two existing watchdog behavior tests
+in `mj-worker/src/acp/tests.rs` keep working unchanged, because they inject a
+policy through `LaunchSpec::stall_policy` and that path still arms the arm.
 
 ## Alternatives considered, and why they are rejected
 
-**Do nothing.** Serious, and cheaper than anything else. The argument for it: #1017's
-headline scenario is fixed, #1007 is fixed, #1025 is fixed, and the remaining case
-requires a harness adapter to lose a reply, which is rare. The argument against it:
-when it does happen there is no bound at all, the session sits in `running` for
-hours, an evaluation lane's observer blocks until its own timeout, and the operator
-finds out by hand. The Muse-class harnesses already have this bound; the Codex class
-has it withheld on a premise that the live journal disproves. Cost of the fix is
-roughly eighty lines and one new default constant. Recommend fixing.
+**Add a silence bound for Codex and Claude.** This was the first version of this
+plan's recommendation, and it is the option the maintainer rejected. The
+argument for it was that the exemption rested on a fact the live Codex journal
+disproves, so the two harnesses were left with nothing at all bounding a turn.
+The argument against it, which wins: a silence bound is a heuristic, and it
+cannot distinguish the case it is meant to catch from the case it destroys.
+Nothing arriving is exactly what a finished-but-unreported turn and a slow
+model call both look like. #1020 is the record of what a wrong guess costs, and
+extending the guess to two more harnesses adds failure modes rather than
+removing one. Rejected.
 
-**Complete the prompt when `HarnessTurnSettled` arrives with `prompt_in_flight`, after
-a grace period.** This is the most principled-looking option: use the harness's own
-turn-end marker instead of a timeout. It is rejected because the marker is not there.
+**Keep the ten-minute default for Muse, Kimi and Grok and only publish the
+silence age.** Tempting, because it changes nothing for anyone and adds the new
+visibility on top. Rejected because it keeps the split that made this ticket
+confusing: the same silence ends a turn on three harnesses and not on the other
+two, for a reason — "these mark their own turn ends" — that is not true of the
+turn Mjolnir actually reports. A default that fires on a guess is not made
+better by being inconsistent as well. The mitigation for the harnesses that lose
+it is the visibility this plan adds and a one-variable opt-in.
+
+**Complete the prompt when `HarnessTurnSettled` arrives with `prompt_in_flight`,
+after a grace period.** The most principled-looking option: use the harness's own
+turn-end marker instead of a timeout. Rejected because the marker is not there.
 The live Codex journal has zero `harness_turn_settled` records across two turns,
 including one that completed normally, and the settle is appended only when
 `snapshot.harness_turn.is_some()`, which `CommandCompleted` has usually cleared
 first. It would work for Claude, whose marker comes from a usage update's `_meta`
-origin, but a fix that covers one of the two exempt harnesses and not the one in the
-ticket is not worth its own mechanism. It also adds a new way to end a turn early if
-an adapter settles mid-turn, which Codex's own comment in
-`mj-transcript/src/projection/observation.rs:546` warns about ("Codex reports native
-execution starts for ordinary replies too").
+origin, but a mechanism that covers one harness and not the one in the ticket is
+not worth its own code. It also adds a new way to end a turn early if an adapter
+settles mid-turn, which Codex's own comment in
+`mj-transcript/src/projection/observation.rs:546` warns about ("Codex reports
+native execution starts for ordinary replies too").
 
 **Reconcile against the harness's native session file after a restart.** Read
-`~/.codex/sessions/*.jsonl` or Muse's `session.jsonl` and recover the final message
-and the turn's fate from there. What it would guarantee: the final message text is
-recovered in the cases the ticket's reporter recovered by hand. What gets worse:
-a per-harness, per-adapter-version parser for an undocumented file format, which is
-exactly the dependency that `mj-checkpoint` already carries and that #1009 showed
-breaking on an adapter point release; reading it requires executing inside the
-container for container targets, on a path that must not block the event loop; there
-is no field in those files that maps a native record onto an mj turn id, so the
-reconciliation has to guess, and a wrong guess writes a fabricated completion into
-the durable projection; and the recovered text cannot carry the turn's token usage or
-its transcript span. It is a large amount of code for a partial answer that can be
-wrong. Reject.
+`~/.codex/sessions/*.jsonl` or Muse's `session.jsonl` and recover the final
+message and the turn's fate from there. What it would guarantee: the final
+message text is recovered in the cases the ticket's reporter recovered by hand.
+What gets worse: a per-harness, per-adapter-version parser for an undocumented
+file format, which is exactly the dependency that `mj-checkpoint` already
+carries and that #1009 showed breaking on an adapter point release; reading it
+requires executing inside the container for container targets, on a path that
+must not block the event loop; there is no field in those files that maps a
+native record onto an mj turn id, so the reconciliation has to guess, and a
+wrong guess writes a fabricated completion into the durable projection; and the
+recovered text cannot carry the turn's token usage or its transcript span. A
+large amount of code for a partial answer that can be wrong. Rejected.
 
-**Have the worker hold completions until acknowledged; replay from the controller's
-last acknowledged ordinal.** Already implemented, and proven live. See "(b)" in the
-classification above. No work.
+**Have the worker hold completions until acknowledged; replay from the
+controller's last acknowledged ordinal.** Already implemented, and proven live.
+See "(b)" in the classification above. No work.
 
-**Make the loss visible instead of fixing it.** This is what Milestone 1 actually is.
-The naming matters: a bound plus a stated reason is the visibility option, not a
-lesser version of a recovery option. There is no recovery option that does not read
-harness files.
+**Do nothing at all.** Serious, and the cheapest option. #1017's headline
+scenario is fixed, #1007 is fixed, #1025 is fixed, and the remaining case needs
+an adapter to lose a reply, which is rare. Rejected because the cost of the
+remaining case is paid entirely by the user: the session looks like ordinary
+work for hours, an evaluation lane's observer blocks until its own timeout, and
+the only way to find out is by hand. Publishing a timestamp the worker already
+sends is a small change that removes that, without Mjolnir deciding anything it
+is not entitled to decide.
 
 ## Open questions for the maintainer
 
-**Q1. Should Codex and Claude turns get a silence bound at all?** The evidence says
-the exemption rests on a fact that is not true of the shipped Codex adapter, and that
-the turn machinery does not depend on that fact anyway. The risk is failing a healthy
-long model call. Note what the change does *not* touch: the watchdog arm is guarded
-by `prompt_running`, so a turn the harness started on its own — Claude's autonomous
-work outside a user prompt — is unaffected either way. *Recommendation: yes.*
+All five questions from the first version of this plan have been answered. They
+are kept, with their answers, because the answers are the design.
 
-**Q2. What silence bound for Codex and Claude?** Ten minutes matches Muse but is what
-caused #1020. *Recommendation: thirty minutes, overridable with the existing
-`MJ_TURN_STALL_TIMEOUT_MS`, and `0` still disables it.*
+**Q1. Should Codex and Claude turns get a silence bound at all?**
+*Answered: no.* A silence bound is a heuristic; see the `Decision Log`. Publish
+the silence age instead and leave the decision to end a turn with the person or
+the orchestrator.
 
-**Q3. Should the four-hour tool-call bound also apply to Codex and Claude?** It exists
-to catch a bridge that leaves a tool card open without the process dying. A bridge
-process that exits is already detected at once by the `child.wait()` arm in
-`mj-worker/src/acp.rs`, which the live test confirmed takes about fifteen seconds.
-*Recommendation: yes — it is free once the policy is no longer nulled out, and four
-hours cannot plausibly fail healthy work.*
+**Q2. What silence bound for Codex and Claude?**
+*Answered: none, and none for anyone else either by default.* Both bounds become
+opt-in through `MJ_TURN_STALL_TIMEOUT_MS` and `MJ_TURN_TOOL_STALL_TIMEOUT_MS`,
+and a set knob applies to every harness.
 
-**Q4. Is Milestone 2 worth doing?** After Milestone 1 the reason is in
-`mj wait --json` and in the transcript. Milestone 2 only moves it into the session
-summary. *Recommendation: skip it for now; reopen if an operator reports missing it.*
+**Q3. Should the four-hour tool-call bound also apply to Codex and Claude?**
+*Answered: the question dissolves.* With no default there is no bound to extend
+and no exemption to justify. When an operator sets the tool knob it applies to
+every harness.
 
-**Q5. What should happen to #1017 itself?** Its headline claim is disproved on
-master and two of its three symptoms were separate, since-fixed bugs. *Recommendation:
-comment with the live evidence, retitle it to the unbounded-Codex-turn problem, and
-close it when Milestone 1 lands. Leave #1029 open; it is a different failure and this
-plan does not touch it.*
+**Q4. Is the extra session-summary visibility worth doing?**
+*Answered: yes, and it became the main milestone rather than an optional one.*
+It is the only thing here that helps the user in the case Mjolnir cannot fix.
+
+**Q5. What should happen to #1017 itself?**
+*Recommendation unchanged, and still the plan author's rather than a decision:*
+comment with the live evidence that the daemon-restart claim does not reproduce,
+retitle it to the unreported-completion problem, and close it when both
+milestones land. Leave #1029 open; it is a different failure and this plan does
+not touch it.
 
 ## Concrete Steps
 
@@ -537,127 +642,130 @@ example:
 
 ### Unit level
 
-`cargo test` must pass.
+`cargo test` and `cargo clippy --all-targets -- -D warnings`, both on the dev
+profile and both outside the restricted sandbox. The suite exercises loopback
+TCP and Unix sockets; a sandboxed run fails with `EPERM` or hangs and is not a
+result. A known flaky test (#1036, `codex_usage`, "Text file busy") can fail when
+other agents build in parallel; rerun it alone before treating it as yours.
 
-The fail-before/pass-after pair is the worker-level behavior test, not the policy
-test. The policy test cannot fail on the unfixed build, because `turn_stall_policy`
-does not take a harness there and the test would not compile; it is a guard against
-regression, not a demonstration. The behavior test can be written against today's
-API: build a `LaunchSpec` with `harness: HarnessKind::Codex` and
-`stall_policy: Some(StallPolicy { silence: Some(200ms), tool_call: Some(1h) })`,
-drive it with the existing `silent_after_prompt_bridge`, and assert a
-`RuntimeEvent::PromptFinished` with `stop_reason == TURN_STALLED_STOP_REASON`
-arrives. Write it first and watch it hang, then make the change and watch it pass.
+Three tests carry the behavior, and each fails on the build before its
+milestone:
+
+* `a_running_session_reports_how_long_the_harness_has_been_quiet`
+  (`mj-core/src/activity/tests.rs`) — fails to compile before Milestone 1,
+  because `silent_for_ms` and `silence_note` do not exist.
+* `a_disconnected_session_reports_no_silence_age` (same file) — the same.
+* `a_stall_bound_is_off_unless_a_positive_timeout_is_configured`
+  (`mj-worker/src/acp/tests.rs`) — before Milestone 2 the equivalent assertion
+  is false: an unset variable yields a ten-minute silence bound and a four-hour
+  tool bound, not `None`.
+
+The two existing watchdog tests, `a_tool_call_that_outlives_its_bound_ends_the_turn`
+and `a_silent_harness_fails_the_turn_with_a_reason`, must keep passing
+unchanged. They prove the `harness_inactive` path from #1020 still works when an
+operator opts in, which is the half of the old behavior this plan keeps.
 
 ### Live test
 
-This is the test that proves the change, and it fails on the unfixed build. It uses a
-private instance so it cannot touch anything else. Use instance name `plan1017`,
-tmux session `plan1017` and port 4117, or your own equivalents.
+Two scenarios and one regression, in a private instance. Instance name
+`fix1017`, tmux session `fix1017`, port 4117. The instance configuration is
+prepared in advance at `~/.config/mjolnir/instances/fix1017/config.toml` with a
+`localhost` `local-bare` target; do not open, print or grep that file — it holds
+an API key. Use `mj -i fix1017 profiles` and `mj -i fix1017 targets` if you need
+to know what is in it.
 
-Set up:
+Before anything else, deal with the stale-worker trap: a `local-bare` session
+runs `target/debug/mj-worker`, which neither `cargo build --bin mj` nor
+`cargo test` rebuilds. Run a full `cargo build`, point `MJ_WORKER_BINARY` at the
+worktree's `target/debug/mj-worker`, and prove the running worker is the new one
+rather than assuming it:
 
-    mkdir -p ~/.config/mjolnir/instances/plan1017
-    cp ~/.config/mjolnir/instances/campaign0916/config.toml \
-       ~/.config/mjolnir/instances/plan1017/config.toml
+    strings ~/.local/share/mjolnir/instances/fix1017/workers/<session>/hel \
+      | grep 'no harness activity for'
 
-Edit that copy: set `[phone] bind` to `127.0.0.1:4117` and append
+A fresh instance has no workspace and `mj new` then fails with a generic 500
+(#1080), so run `mj -i fix1017 go` once in tmux to create one.
 
-    [targets.localhost]
-    kind = "local-bare"
+**Scenario A — a silent Codex turn is visible and cancellable.** Suspend the ACP
+bridge *before* sending the prompt, so the prompt never reaches the harness, no
+tool call can open, and the silence clock starts at send time where
+`mj-worker/src/acp/session.rs` marks it. This ordering matters: `stall_verdict`
+(`mj-core/src/activity.rs`) returns early while a tool call is open, so a test
+that suspends the bridge mid-build measures nothing about silence.
 
-The copied file contains an API key. Never print, paste or commit it.
-
-In a tmux session, with `MJ_WORKER_BINARY` pointing at your freshly built
-`target/debug/mj-worker`, run `mj -i plan1017 go` once from a small git repository to
-create a workspace (a fresh instance has none and `mj new` then fails with a generic
-500, which is #1080). Then create a session:
-
-    mj -i plan1017 new --profile deepseek --target localhost --workspace proj \
-       --project-directory /path/to/small/repo --title plan1017a
-
-Two details matter, and getting either wrong makes the test prove nothing.
-
-First, **no tool call may be open when the bridge goes silent.** `stall_verdict`
-(`mj-core/src/activity.rs:515-538`) returns early when `tools_in_flight` is
-non-empty and then judges only against the four-hour tool bound; the silence bound
-applies only when nothing is in flight. That is the #1020 fix and it is correct. It
-also matches the #1017 shape, where the harness had finished its tools, written its
-final message and made its commit before the reply went missing. So the prompt for
-this test must be one the harness answers without running a tool, for example
-"Reply with exactly the text FINALD and nothing else. Do not run any command."
-
-Second, **set the bound short so the test finishes.** `MJ_TURN_STALL_TIMEOUT_MS` is
-read by the worker at prompt time, so put it in the session's environment before the
-session is created — for a `local-bare` target, export it in the shell that starts
-the daemon; for a container target, use the target's `[targets.<id>.container]
-environment`. `60000` (one minute) is a good value and differs from every default.
-
-The reliable way to arrange both conditions is to suspend the bridge **before**
-sending the prompt. The prompt then never reaches the harness, no tool call can open,
-and the silence clock starts at send time, which is where
-`mj-worker/src/acp/session.rs:469` marks it. Find the ACP bridge — it is the `node`
-child of the worker's `acp-supervisor` process — and suspend the whole chain:
-
-    pstree -p <acp-supervisor pid>
+    pstree -p <acp-supervisor pid>          # the bridge is the node child
     kill -STOP <node pid> <node child pid> <codex pid>
-    mj -i plan1017 prompt --session <id> --json \
+    mj -i fix1017 prompt --session <id> --json \
        "Reply with exactly the text FINALD and nothing else. Do not run any command."
 
-**On the unfixed build**, the session stays `running` indefinitely. After the bound
-has long passed:
+After a minute or more of silence:
 
-    $ mj -i plan1017 sessions --session <id> --json
-    "state": "running", "chat_phase": "running", "is_idle": false
+    $ mj -i fix1017 sessions --session <id>
+    <id>  running  <title>
+    running, no harness activity for about N minute(s)
 
-    $ mj -i plan1017 wait --session <id> --turn <n> --timeout 20
+    $ mj -i fix1017 wait --session <id> --turn <n> --timeout 20
     timeout
-    the turn was still running after 20 seconds
-    Error: the turn ended as timeout
+    the turn was still running after 20 seconds, with no harness activity for about N minute(s)
 
-and it answers that at every later attempt, for as long as the bridge stays silent.
+On the unfixed build both lines lack the silence, and the session row shows only
+`Turn ... · Step ...`. Then prove the turn is still cancellable, which is the
+whole point of reporting rather than acting: resume the bridge with `kill -CONT`
+and run `mj -i fix1017 cancel-turn --session <id>`, and the turn must end.
 
-**On the fixed build**, within the bound the turn ends:
+**Scenario B — the opt-in bound still ends a turn.** Restart the `fix1017`
+daemon with `MJ_TURN_STALL_TIMEOUT_MS=30000` exported, which the daemon carries
+to the workers it starts. Thirty seconds differs from every former default, so
+the value proves itself. Repeat scenario A's suspension; within about thirty
+seconds:
 
-    $ mj -i plan1017 wait --session <id> --turn <n> --timeout 30 --json
+    $ mj -i fix1017 wait --session <id> --turn <n> --timeout 60 --json
     "outcome": "error",
     "stop_reason": "harness_inactive",
-    "message": "the harness sent nothing for 1m and the turn was recorded as
-                harness_inactive; ..."
 
-and `mj sessions --session <id> --json` reports `chat_phase idle`, `is_idle true`.
+**Regression — a healthy long turn is not ended.** With the knob unset, the
+daemon-kill test from `Artifacts and Notes` must still come back `finished` with
+its final message. This is the check that the new `Quiet` clock is a report and
+nothing more.
 
-Afterwards, resume the suspended processes (`kill -CONT`) or let teardown remove
-them, then clean up completely:
+**The Muse difference.** The behavior change for Muse, Kimi and Grok is that a
+ten-minute silence no longer fails the turn with the knob unset. Demonstrating
+it end to end against a real Muse container costs ten minutes of wall clock per
+build and needs the `morannon-podman` target. If that is impractical, say so
+explicitly in the report and demonstrate the same difference the cheap way: on
+the unfixed build `turn_stall_policy()` with no environment set returns a
+ten-minute silence bound for `HarnessKind::Muse` and the watchdog arms; on the
+fixed build it returns `None` and the arm stays unarmed. Do not shorten a
+build-time constant to fake the ten-minute wait without saying that is what was
+done.
 
-    mj -i plan1017 daemon stop
-    pgrep -af instances/plan1017     # terminate any survivor first
-    rm -rf ~/.config/mjolnir/instances/plan1017
-    rm -rf ~/.local/share/mjolnir/instances/plan1017
-
-Do not run another `mj -i plan1017` command after `daemon stop`; it starts the daemon
-again.
-
-### Regression test to keep
-
-Re-run the daemon-kill test from `Artifacts and Notes` after the change, to prove the
-new bound does not fire on a healthy turn that outlives its daemon. The turn must
-still come back as `finished` with its final message.
+Clean up completely afterwards: close or destroy the sessions, stop the
+`fix1017` daemon, confirm with `pgrep -af instances/fix1017` that no worker
+survived and terminate any that did, kill the tmux session, and remove
+`~/.config/mjolnir/instances/fix1017` and
+`~/.local/share/mjolnir/instances/fix1017`. Do not run another `mj -i fix1017`
+command after `daemon stop`; it starts the daemon again.
 
 ## Idempotence and Recovery
 
-Every step is repeatable. The code change is additive and local to the worker; there
-is no schema change, no relay protocol change, and no launch-config field, so
-`PROTOCOL_VERSION` in `mj-client/src/daemon.rs` does not move and no migration needs
-classifying. Rolling back is deleting the commit; a worker built from the previous
-commit and a daemon built from this one interoperate, because nothing on the wire
-changed.
+Every step is repeatable. There is no schema change, because nothing here is
+stored, and no migration to classify. There is no relay protocol change either,
+so `PROTOCOL_VERSION` in `mj-client/src/daemon.rs` does not move: the two new
+`ActivityState` fields carry serde defaults and are skipped when empty, so an
+older controller ignores them and a newer controller reading an older worker
+sees `None` and reports no silence age. A mixed fleet needs no upgrade
+ordering. Rolling back is deleting the commits.
 
-The live test creates only the `plan1017` instance directories and one session. The
-cleanup block above removes all of it. If the daemon is stopped while a worker
-survives, terminate the worker by pid before removing the directories: deleting a
-running process's working files is never a substitute for stopping it, and a
-surviving writer recreates whatever was removed under it.
+Milestone 2 is the one that changes behavior, and its rollback is a
+configuration change rather than a code change: an operator who wants the former
+ten-minute default back sets `MJ_TURN_STALL_TIMEOUT_MS=600000` on the daemon,
+which carries it to the workers it starts.
+
+The live test creates only the `fix1017` instance directories and its sessions.
+The cleanup block above removes all of it. If the daemon is stopped while a
+worker survives, terminate the worker by pid before removing the directories:
+deleting a running process's working files is never a substitute for stopping
+it, and a surviving writer recreates whatever was removed under it.
 
 ## Artifacts and Notes
 
@@ -770,39 +878,93 @@ freeze and does not lose the turn.
 
 ## Interfaces and Dependencies
 
-In `mj-core/src/config/harness.rs`, replacing `marks_own_turn_end`:
+In `mj-core/src/activity.rs`, two variants gain a field and four items appear
+beside them:
 
-    impl HarnessKind {
-        pub const fn turn_silence_bound(self) -> std::time::Duration;
+    pub enum ActivityState {
+        Turn {
+            started_at_ms: Option<i64>,
+            last_activity_at_ms: Option<i64>,
+        },
+        Tool {
+            tool_call_id: String,
+            started_at_ms: i64,
+            last_activity_at_ms: Option<i64>,
+        },
+        // ... unchanged variants
     }
 
-In `mj-worker/src/acp/drive.rs`, `turn_stall_policy` gains the harness:
+    impl ActivityState {
+        pub fn last_activity_at_ms(&self) -> Option<i64>;
+        pub fn silent_for_ms(&self, now_ms: i64) -> Option<u64>;
+    }
 
-    pub(super) fn turn_stall_policy(
-        harness: mj_core::config::HarnessKind,
-    ) -> mj_core::activity::StallPolicy;
+    pub fn silent_for_ms(facts: &ActivityFacts, now_ms: i64) -> Option<u64>;
+    pub fn silence_note(state: &ActivityState, now_ms: i64) -> Option<String>;
+    pub fn describe_duration(millis: u64) -> String;
+    pub const SILENCE_WORTH_REPORTING: std::time::Duration;
 
-and `turn_ends_only_on_prompt_reply` is deleted.
+In `mj-core/src/storage.rs` and `mj-client/src/usage_format.rs`, the two details
+structs each gain `pub last_activity_at_ms: Option<i64>`, optional and skipped
+when absent on the wire.
 
-In `mj-worker/src/acp/session.rs`, the policy selection becomes unconditional:
+In `mj-worker/src/acp/drive.rs`:
 
-    let stall_policy = spec
-        .stall_policy
-        .unwrap_or_else(|| turn_stall_policy(spec.harness));
+    pub(super) const TURN_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_STALL_TIMEOUT_MS";
+    pub(super) fn parse_stall_timeout(value: Option<&str>) -> Option<Duration>;
 
-Nothing else changes. `mj_core::activity::StallPolicy`,
-`mj_core::activity::stall_verdict`, `TURN_STALLED_STOP_REASON` and the
-`RelayObservation`/`RelayCommandOutcome` wire types are used exactly as they are
-today, so there is no relay protocol change and `PROTOCOL_VERSION` in
-`mj-client/src/daemon.rs` does not move.
+and `DEFAULT_TURN_STALL_TIMEOUT_MS`, `DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS`,
+`stall_duration` and `turn_ends_only_on_prompt_reply` are gone.
+`HarnessKind::marks_own_turn_end` is gone from `mj-core/src/config/harness.rs`.
 
-## Revision note
+Nothing else changes. `mj_core::activity::StallPolicy`, `stall_verdict`,
+`TURN_STALLED_STOP_REASON` and the `RelayObservation`/`RelayCommandOutcome` wire
+types are used exactly as they are today.
 
-2026-09-18, first version. Written as an investigation of #1017 rather than as a
-design for its literal claim, because the literal claim does not reproduce on master:
-the daemon-restart recovery path the ticket asks for already exists and was proven
-live under `SIGKILL`. The plan therefore leads with what is still broken — that
-`HarnessKind::marks_own_turn_end` withholds every turn bound from Codex and Claude on
-a premise the live Codex journal disproves — and proposes the smallest change that
-removes the unbounded case, while stating plainly that the lost turn itself is not
-recoverable on our side.
+**Compatibility.** No database migration: nothing here is stored. No relay
+protocol change, so `PROTOCOL_VERSION` in `mj-client/src/daemon.rs` does not
+move; the two new `ActivityState` fields are optional with serde defaults and
+skipped when empty, so an older controller reading a newer worker's published
+state ignores them and a newer controller reading an older worker's state sees
+`None` and reports no silence age, which is the correct answer for a worker that
+cannot measure it. The new API field on `activity_details` is additive and
+optional. A mixed fleet therefore needs no upgrade ordering.
+
+## Revision notes
+
+**2026-09-18, first version.** Written as an investigation of #1017 rather than
+a design for its literal claim, because the literal claim does not reproduce on
+master: the daemon-restart recovery path the ticket asks for already exists and
+was proven live under `SIGKILL`. The plan led with what is still broken — that
+`HarnessKind::marks_own_turn_end` withheld every turn bound from Codex and
+Claude on a premise the live Codex journal disproves — and recommended giving
+those two harnesses a thirty-minute silence bound.
+
+**2026-09-18, second version.** The maintainer rejected that recommendation: a
+silence bound is a heuristic, and it cannot tell a turn that has stopped from a
+turn that is merely slow, because the evidence is identical in both cases.
+Adding it to two more harnesses would spread a guess that this plan's own
+finding already argued against (#1020 was a healthy turn destroyed by exactly
+that bound).
+
+The design that replaces it keeps the finding and inverts the response. The
+deterministic endings — bridge process exit, transport closed, worker restarted
+— stay exactly as they are, because they are facts rather than guesses. The
+silence age, which the worker already measures and already sends and which
+nothing surfaced, is published through the shared activity mechanism to
+`mj wait`, `mj sessions --session`, the API's `activity_details`, and the
+terminal and web session rows. The automatic ending for silence becomes opt-in
+for every harness through `MJ_TURN_STALL_TIMEOUT_MS` and
+`MJ_TURN_TOOL_STALL_TIMEOUT_MS`, both off unless set, which also turns off the
+ten-minute default Muse, Kimi and Grok had. With no defaults there is nothing
+left to special-case, so `marks_own_turn_end` and `turn_ends_only_on_prompt_reply`
+are deleted rather than corrected.
+
+Sections rewritten for this: `Purpose / Big Picture`, `Progress`,
+`Plan of Work`, `Alternatives considered`, `Open questions` (all five now
+answered), `Validation and Acceptance`, `Interfaces and Dependencies`, and new
+`Decision Log` and `Outcomes & Retrospective` entries recording the decision,
+its rationale, and what is deliberately given up. `The finding, first`,
+`Which losses are recoverable and which are not`, `Surprises & Discoveries`,
+`Context and Orientation` and `Artifacts and Notes` are unchanged: the evidence
+did not change, only what to do about it.
