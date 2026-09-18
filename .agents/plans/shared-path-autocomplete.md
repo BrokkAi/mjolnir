@@ -15,7 +15,7 @@ Before this change, completion existed only for the mount-source field of the ne
 - [x] (2026-09-18 15:00Z) Milestone 2: `PathInput` completion state, `ControlKind::PathField`, popup rendering and form routing. Committed with milestone 1.
 - [x] (2026-09-18 15:40Z) Milestone 3: every terminal screen wired through one routing helper; generic dashboard job with its own cancellation slot.
 - [x] (2026-09-18 16:10Z) Milestone 4: web endpoint and live suggestions in `pathField()`.
-- [ ] Full validation, commit, push.
+- [x] (2026-09-18 16:40Z) Full validation passed; plan committed; pushed to origin/master.
 
 ## Surprises & Discoveries
 
@@ -54,7 +54,11 @@ Before this change, completion existed only for the mount-source field of the ne
 
 ## Outcomes & Retrospective
 
-Pending.
+Every path input now completes on the host that owns it. The terminal has one popup widget, one form control kind, one routing helper, and one dashboard job for all eight fields; the mount wizard's private completion code is gone. The controller has one `complete_path` entry point over one host abstraction with one cached home probe, replacing a mount-only method and two duplicated `$HOME` probes. The web has one endpoint and one suggestion list attached through the existing `pathField()` helper, so the desktop application inherits it.
+
+Left out by decision: container-internal destinations and the chat composer's `/attach` argument. Known limitation: a remote `ls` configured to quote names is filtered out rather than parsed, and a symlinked remote home that `ls` canonicalises surfaces as an error instead of silently dropping candidates.
+
+Lessons: the form-level `Tab` handling moves focus before reporting a dismissal, so any popup-bearing field must enforce "only the focused field keeps a popup" rather than trusting the dismissal event. A popup drawn mid-form must be drawn after the rows beneath it. Running two implementation agents in one working tree works when their crates are disjoint, but `cargo fmt --all` from either touches the other's files, and a shared `cargo test` compile of a crate one agent is mid-edit on fails for the other.
 
 ## Context and Orientation
 
@@ -139,7 +143,23 @@ All changes are source edits and can be re-applied. If a milestone's tests fail,
 
 ## Artifacts and Notes
 
-Pending.
+Commits on `hel2`: 05da4a5a (milestones 1 and 2), d85bcc76 (milestone 3), 1e5014fb (milestone 4), preceded by c9183f3d (rustfmt of four files an earlier commit left unformatted).
+
+Final validation transcript, dev profile, outside the sandbox:
+
+    cargo fmt --all -- --check              clean
+    cargo clippy <default members> --all-targets -- -D warnings
+                                            Finished `dev` profile, no warnings
+    cargo test                              all packages ok; the sole failure in the
+                                            first full run, mj-worker's
+                                            a_slow_tool_call_does_not_block_a_later_one
+                                            (a crate this change does not touch),
+                                            passed three isolated reruns and a rerun of
+                                            its whole package
+        brokk-mj-chat        542 passed     brokk-mj-controller  1435 passed
+        brokk-mj-core        402 passed     brokk-mj-tui          579 passed
+        brokk-mj-worker      476 passed     brokk-mjolnir         130 passed + integration
+    cd tests/e2e/web && npm test            unit: 38 passed; Playwright deterministic: 75 passed, 3 skipped (lab-only)
 
 ## Interfaces and Dependencies
 
