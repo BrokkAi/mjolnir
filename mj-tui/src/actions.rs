@@ -637,7 +637,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::MarkAllRead,
         label: "Mark all read",
-        description: "Clear the unread marker on every session at once; questions, failures, and unreachable sessions stay flagged.",
+        description: "Clear the unread marker on every session in this workspace at once; questions, failures, and unreachable sessions stay flagged.",
         scope: Scope::Sessions,
         pane_keys: &[],
         action: Some(KeyAction::MarkAllRead),

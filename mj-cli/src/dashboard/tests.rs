@@ -1151,7 +1151,10 @@ fn the_read_chord_marks_all_read_from_the_targets_pane() {
     dashboard.dispatch_command(command);
     // Nothing here is unread, and saying so is how the command reports it
     // ran from a pane that has no `a` of its own.
-    assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("No unread sessions in this workspace.")
+    );
 }
 
 #[test]
