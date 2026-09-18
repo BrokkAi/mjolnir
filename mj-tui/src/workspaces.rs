@@ -870,6 +870,10 @@ pub(crate) fn workspace_tab_click(
         .then_some(DashboardAction::SelectWorkspace { workspace_id })
 }
 
+const WORKSPACES_TITLE: &str = " Workspaces ";
+/// The two rounded corners a bordered title row cannot draw into.
+const BORDER_CORNER_CELLS: usize = 2;
+
 /// Draws the bordered workspace list and records its hitboxes for the next
 /// mouse event. The selected tab is kept visible when the list is wider than
 /// the pane, and every visible label retains one cell of padding on either
@@ -881,7 +885,19 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
-    let block = theme::panel(focused).title(" Workspaces ");
+    let mut block = theme::panel(focused).title(WORKSPACES_TITLE);
+    // The pane sits at the top of every dashboard, so its border is where the
+    // build number costs nothing and is always in view. A sidebar too narrow
+    // to hold both drops it rather than overlap the pane's own title.
+    let version = format!(" {} ", dashboard.version_label);
+    if usize::from(area.width)
+        >= Line::raw(WORKSPACES_TITLE).width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
+    {
+        // The pane's own title style is bold; a build number is a stamp, not a
+        // heading, so it drops back out of bold here.
+        let style = theme::muted().remove_modifier(Modifier::BOLD);
+        block = block.title(Line::styled(version, style).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {

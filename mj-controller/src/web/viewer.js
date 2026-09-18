@@ -25,6 +25,7 @@ const login = document.querySelector('#login'),
   backButton = document.querySelector('#back'),
   menuButton = document.querySelector('#menu-button'),
   menu = document.querySelector('#menu'),
+  menuVersion = document.querySelector('#menu-version'),
   announcer = document.querySelector('#announcer'),
   workspaceStrip = document.querySelector('#workspaces'),
   sessions = document.querySelector('#sessions'),
@@ -3031,6 +3032,7 @@ async function refresh() {
     snapshot = await request('/api/snapshot');
     snapshotReceivedAtMs = Date.now();
     seedDashboardOrders(snapshot);
+    renderMenuVersion();
     login.classList.add('hidden');
     app.classList.remove('hidden');
     menuButton.classList.remove('hidden');
@@ -5260,6 +5262,15 @@ document.querySelector('#login-form').onsubmit = async e => {
 function closeMenu() {
   menu.classList.add('hidden');
   menuButton.setAttribute('aria-expanded', 'false');
+}
+
+/// Names the controller build this viewer is talking to, under the menu's
+/// actions. A controller too old to publish its version leaves the label as
+/// the product name rather than showing a blank or a guess.
+function renderMenuVersion() {
+  menuVersion.textContent = snapshot?.server_version
+    ? `Mjolnir v${snapshot.server_version}`
+    : 'Mjolnir';
 }
 
 menuButton.onclick = () => {
