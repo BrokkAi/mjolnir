@@ -14,7 +14,15 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 const DEV_RESTART_STALE_DAEMON_ENV: &str = "MJ_DEV_RESTART_STALE_DAEMON";
-const START_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a launched daemon may take to publish its endpoint before the
+/// client says out loud that startup is still running. Startup opens the store,
+/// applies migrations, pins worker sources and reconciles interrupted sessions
+/// before it can answer anything, so a busy machine or a large instance can
+/// pass this point and still be healthy.
+const START_NOTICE_DELAY: Duration = Duration::from_secs(8);
+/// The hard upper bound on waiting for a launched daemon, so the command
+/// cannot hang forever behind a wedged startup.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 struct DaemonStartGuard(fs::File);
 
@@ -135,41 +143,90 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     .await
     .context("spawn daemon task failed")??;
 
-    let deadline = Instant::now() + START_TIMEOUT;
-    let mut last_error = None;
-    while Instant::now() < deadline {
-        match connect_existing().await {
-            Ok(mut client) => match client.request(DaemonAction::Ping).await {
-                Ok(DaemonReply::Pong) => return Ok(client),
-                Ok(reply) => last_error = Some(anyhow!("unexpected startup reply {reply:?}")),
-                Err(error) => last_error = Some(error),
-            },
-            Err(error) => last_error = Some(error),
-        }
+    let outcome = wait_for_ready_daemon(
+        || process_is_alive(launched.pid),
+        || async {
+            let mut client = connect_existing().await?;
+            match client.request(DaemonAction::Ping).await? {
+                DaemonReply::Pong => Ok(client),
+                reply => Err(anyhow!("unexpected startup reply {reply:?}")),
+            }
+        },
+        |waited| {
+            eprintln!(
+                "Mjolnir daemon {} has been starting for {}s; still waiting.",
+                launched.pid,
+                waited.as_secs()
+            );
+        },
+    )
+    .await;
+    let reason = match outcome {
+        StartupOutcome::Ready(client) => return Ok(client),
         // A daemon that fails to initialize explains itself in its log and
-        // exits without ever publishing an endpoint. Report that explanation
-        // now instead of dialing the missing endpoint until the deadline.
-        if !process_is_alive(launched.pid) {
-            let output = launched.output_since_launch(&log_path).await;
-            return Err(launched.failure(
-                format!("Mjolnir daemon {} exited before it was ready", launched.pid),
-                output,
-                &log_path,
-            ));
+        // exits without ever publishing an endpoint. That explanation is the
+        // answer; the client's own failure to reach the absent endpoint is not.
+        StartupOutcome::Exited => {
+            format!("Mjolnir daemon {} exited before it was ready", launched.pid)
         }
-        tokio::time::sleep(RETRY_DELAY).await;
-    }
-    let output = launched.output_since_launch(&log_path).await;
-    let last_error = last_error.unwrap_or_else(|| anyhow!("Mjolnir daemon did not become ready"));
-    Err(launched.failure(
-        format!(
+        StartupOutcome::StillStarting { last_error } => format!(
             "Mjolnir daemon {} is still starting after {}s and has not accepted a request (last attempt: {last_error:#})",
             launched.pid,
             START_TIMEOUT.as_secs()
         ),
-        output,
-        &log_path,
-    ))
+    };
+    let output = launched.output_since_launch(&log_path).await;
+    Err(launched.failure(reason, output, &log_path))
+}
+
+/// Why waiting for a launched daemon stopped.
+enum StartupOutcome<T> {
+    /// It answered a request.
+    Ready(T),
+    /// The launched process is gone.
+    Exited,
+    /// It is still alive but has not answered within [`START_TIMEOUT`].
+    StillStarting { last_error: anyhow::Error },
+}
+
+/// Wait for a launched daemon to answer a request.
+///
+/// A daemon that is still alive is still starting: initialization runs before
+/// it publishes its endpoint, so a slow start is not a failure and the wait
+/// continues. Only the process leaving, or the hard [`START_TIMEOUT`] bound,
+/// ends the wait without a client. The clock is Tokio's, so tests can drive it.
+async fn wait_for_ready_daemon<T, Probe, Waiting, Notice>(
+    is_alive: impl Fn() -> bool,
+    mut probe: Probe,
+    notice: Notice,
+) -> StartupOutcome<T>
+where
+    Probe: FnMut() -> Waiting,
+    Waiting: Future<Output = Result<T>>,
+    Notice: FnOnce(Duration),
+{
+    let started = tokio::time::Instant::now();
+    let deadline = started + START_TIMEOUT;
+    let mut notice = Some(notice);
+    loop {
+        let last_error = match probe().await {
+            Ok(ready) => return StartupOutcome::Ready(ready),
+            Err(error) => error,
+        };
+        if !is_alive() {
+            return StartupOutcome::Exited;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return StartupOutcome::StillStarting { last_error };
+        }
+        if now.duration_since(started) >= START_NOTICE_DELAY
+            && let Some(notice) = notice.take()
+        {
+            notice(now.duration_since(started));
+        }
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
 }
 
 /// The daemon this client launched and where its log stood at launch.
@@ -545,6 +602,73 @@ mod tests {
             .unwrap();
         drop(replacement);
     }
+    #[tokio::test(start_paused = true)]
+    async fn slow_startup_is_awaited_rather_than_reported_as_a_failure() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0usize);
+        let announced = Cell::new(None);
+        let started = tokio::time::Instant::now();
+        let outcome = wait_for_ready_daemon(
+            || true,
+            || {
+                attempts.set(attempts.get() + 1);
+                let ready = attempts.get() > 500;
+                async move {
+                    if ready {
+                        Ok("client")
+                    } else {
+                        Err(anyhow!("connection refused"))
+                    }
+                }
+            },
+            |waited| announced.set(Some(waited)),
+        )
+        .await;
+        assert!(matches!(outcome, StartupOutcome::Ready("client")));
+        let waited = tokio::time::Instant::now().duration_since(started);
+        assert!(
+            waited > START_NOTICE_DELAY && waited < START_TIMEOUT,
+            "the test must cross the notice delay without reaching the bound, but waited {waited:?}"
+        );
+        assert!(announced.get().is_some(), "a long wait must say so");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_that_exits_is_reported_at_once() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0usize);
+        let started = tokio::time::Instant::now();
+        let outcome: StartupOutcome<()> = wait_for_ready_daemon(
+            || attempts.get() < 3,
+            || {
+                attempts.set(attempts.get() + 1);
+                async { Err(anyhow!("connection refused")) }
+            },
+            |_| panic!("an exit must not wait long enough to announce itself"),
+        )
+        .await;
+        assert!(
+            matches!(outcome, StartupOutcome::Exited),
+            "an exited daemon must be reported as exited"
+        );
+        assert!(tokio::time::Instant::now().duration_since(started) < START_NOTICE_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_alive_daemon_that_never_answers_stops_at_the_bound() {
+        let started = tokio::time::Instant::now();
+        let outcome: StartupOutcome<()> = wait_for_ready_daemon(
+            || true,
+            || async { Err(anyhow!("connection refused")) },
+            |_| {},
+        )
+        .await;
+        assert!(matches!(outcome, StartupOutcome::StillStarting { .. }));
+        assert!(tokio::time::Instant::now().duration_since(started) >= START_TIMEOUT);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn executable_identity_detects_an_nfs_style_replaced_binary() {
