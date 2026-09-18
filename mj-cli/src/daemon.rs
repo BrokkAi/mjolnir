@@ -5,9 +5,7 @@ use mj_core::config::data_dir;
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(unix))]
-use anyhow::bail;
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 use std::fs::{self, OpenOptions};
@@ -74,7 +72,19 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
 pub async fn connect_or_start() -> Result<DaemonClient> {
     // Serialize replacement and publication across clients, then re-read the
     // endpoint. A client waiting here must reuse the winner's daemon.
-    let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    connect_or_start_holding(&startup).await
+}
+
+/// The body of [`connect_or_start`] for a caller that already holds the
+/// daemon startup lock.
+///
+/// That lock is not reentrant within one process, so a caller that needs it
+/// held across more than one step — a restart holds it across the stop and the
+/// replacement — must come through here instead of calling
+/// [`connect_or_start`] again. The guard is taken by reference only so the
+/// requirement is visible at every call site.
+async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonClient> {
     if let Ok(metadata) = read_metadata_any() {
         ensure_supported_daemon_protocol(metadata.protocol_version)?;
     }
@@ -177,6 +187,128 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     };
     let output = launched.output_since_launch(&log_path).await;
     Err(launched.failure(reason, output, &log_path))
+}
+
+/// The daemon a restart produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartedDaemon {
+    pub pid: u32,
+    /// Whether the daemon runs this client's own executable file. `None` on a
+    /// platform where a process's executable cannot be identified.
+    pub runs_this_build: Option<bool>,
+}
+
+/// How many times a restart stops the daemon it finds and starts its own.
+///
+/// The startup lock excludes a client that has not started its daemon yet, but
+/// not one that started it just before this restart took the lock, so one
+/// retry is worth making. A second loss means that client is producing daemons
+/// faster than they can be replaced, which is a report rather than a race to
+/// keep running.
+const RESTART_ATTEMPTS: usize = 2;
+
+/// Stop the running Mjolnir daemon and start one from this client's executable.
+///
+/// The startup lock is held from before the stop until the replacement has
+/// answered a request. Every client that starts a daemon takes that lock
+/// first, including clients built before this function existed, so none of
+/// them can install a daemon of its own in the gap the stop opens. Without
+/// that, an attached client running an older build wins the gap and the
+/// restart reports someone else's daemon as the one it was asked for.
+pub async fn restart_daemon() -> Result<RestartedDaemon> {
+    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    for attempt in 1..=RESTART_ATTEMPTS {
+        if let Ok(metadata) = read_metadata_any() {
+            replace_daemon(&metadata).await?;
+        }
+        let mut client = connect_or_start_holding(&startup).await?;
+        let status = client.status().await?;
+        let identity = daemon_uses_current_executable(status.pid)?;
+        if identity != Some(false) || attempt == RESTART_ATTEMPTS {
+            return restart_verdict(
+                status.pid,
+                identity,
+                process_executable_path(status.pid).as_deref(),
+                running_executable_path().as_deref(),
+            );
+        }
+    }
+    unreachable!("the final attempt always returns a verdict")
+}
+
+/// Turn one executable-identity answer into the restart's result.
+///
+/// This is separate from the restart itself so the outcome can be exercised
+/// without starting daemons. It is also the decision the command used to skip:
+/// reporting success on a changed process id alone is what let a restart
+/// announce a daemon running code the caller had just replaced.
+fn restart_verdict(
+    pid: u32,
+    identity: Option<bool>,
+    daemon: Option<&Path>,
+    client: Option<&Path>,
+) -> Result<RestartedDaemon> {
+    if identity == Some(false) {
+        let daemon = daemon.map_or_else(
+            || "another executable".to_owned(),
+            |path| path.display().to_string(),
+        );
+        let client = client.map_or_else(
+            || "this client's executable".to_owned(),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "Mjolnir daemon {pid} runs {daemon}, not this build ({client}). \
+             Another attached client started it. Close clients from the \
+             previous build, then run `mj daemon restart` again."
+        );
+    }
+    Ok(RestartedDaemon {
+        pid,
+        runs_this_build: identity,
+    })
+}
+
+/// The file a process is running, for a message a person reads.
+///
+/// Linux names an unlinked executable with a ` (deleted)` suffix. That suffix
+/// is the fact the reader needs, so it is kept rather than trimmed.
+pub(crate) fn process_executable_path(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let process_id = sysinfo::Pid::from_u32(pid);
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[process_id]),
+            true,
+            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+        );
+        system
+            .process(process_id)
+            .and_then(|process| process.exe())
+            .map(Path::to_path_buf)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The file this client is running, named the same way.
+pub(crate) fn running_executable_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link("/proc/self/exe").ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe().ok()
+    }
 }
 
 /// Why waiting for a launched daemon stopped.
@@ -320,8 +452,12 @@ fn executable_file_identity(path: &Path) -> std::io::Result<ExecutableFileIdenti
     })
 }
 
+/// Whether process `pid` runs the same executable file as this client.
+///
+/// `Ok(None)` means the question could not be answered: the process is gone,
+/// or this platform does not expose a process's executable.
 #[cfg(target_os = "linux")]
-fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
+pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
     let current = executable_file_identity(Path::new("/proc/self/exe"))
         .context("inspect the development client executable")?;
     let daemon_path = PathBuf::from(format!("/proc/{pid}/exe"));
@@ -341,7 +477,7 @@ fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
 }
 
 #[cfg(target_os = "macos")]
-fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
+pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
     let process_id = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes_specifics(
@@ -371,6 +507,14 @@ fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
         executable_file_identity(&current)? == executable_file_identity(path)?
             && modified <= process.start_time(),
     ))
+}
+
+/// Platforms that do not expose a process's executable answer "unknown", so
+/// every caller has one shape to handle.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
+    let _ = pid;
+    Ok(None)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -601,6 +745,77 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(replacement);
+    }
+    /// The restart holds one guard across its stop and its start. That is only
+    /// safe because the lock is not reentrant: a second acquisition inside the
+    /// same process blocks exactly as another process would, so a restart that
+    /// called `connect_or_start` again would wait on itself until the deadline.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_startup_lock_is_not_reentrant_within_one_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon-start.lock");
+        let held = acquire_start_guard(path.clone()).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                acquire_start_guard(path.clone())
+            )
+            .await
+            .is_err(),
+            "a second acquisition in this process must block while the first is held"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), acquire_start_guard(path))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    #[test]
+    fn a_restart_onto_this_build_succeeds_and_says_so() {
+        let verdict = restart_verdict(
+            4242,
+            Some(true),
+            Some(Path::new("/opt/mj/mj")),
+            Some(Path::new("/opt/mj/mj")),
+        )
+        .unwrap();
+        assert_eq!(
+            verdict,
+            RestartedDaemon {
+                pid: 4242,
+                runs_this_build: Some(true)
+            }
+        );
+    }
+    #[test]
+    fn a_restart_that_cannot_identify_the_daemon_succeeds_without_the_guarantee() {
+        let verdict = restart_verdict(7, None, None, None).unwrap();
+        assert_eq!(
+            verdict,
+            RestartedDaemon {
+                pid: 7,
+                runs_this_build: None
+            }
+        );
+    }
+    #[test]
+    fn a_restart_onto_another_build_fails_and_names_both_executables() {
+        let error = restart_verdict(
+            99,
+            Some(false),
+            Some(Path::new("/checkout/target/debug/mj (deleted)")),
+            Some(Path::new("/checkout/target/debug/mj")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("99"), "{error}");
+        assert!(
+            error.contains("/checkout/target/debug/mj (deleted)"),
+            "{error}"
+        );
+        assert!(error.contains("(/checkout/target/debug/mj)"), "{error}");
+        assert!(error.contains("mj daemon restart"), "{error}");
     }
     #[tokio::test(start_paused = true)]
     async fn slow_startup_is_awaited_rather_than_reported_as_a_failure() {

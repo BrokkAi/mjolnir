@@ -1037,12 +1037,18 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             println!("Mjolnir daemon stopped; detached workers remain active.");
         }
         DaemonCommand::Restart => {
-            if let Ok(daemon) = daemon::connect_management().await {
-                daemon.stop_and_wait().await?;
-            }
-            let mut daemon = daemon::connect_or_start().await?;
-            let status = daemon.status().await?;
-            println!("Mjolnir daemon restarted as PID {}.", status.pid);
+            let restarted = daemon::restart_daemon().await?;
+            // A restart onto another build is an error, so reaching here means
+            // the daemon is either proved to be this build or unidentifiable;
+            // say which, because "restarted" alone is what used to mislead.
+            let checked = match restarted.runs_this_build {
+                Some(true) => ", running this build",
+                _ => "",
+            };
+            println!(
+                "Mjolnir daemon restarted as PID {}{checked}.",
+                restarted.pid
+            );
         }
     }
     Ok(())
