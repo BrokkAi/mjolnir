@@ -22,7 +22,13 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 - [x] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`). Done 2026-09-18T13:20-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean. Docs text for zoom and the moved `pane_size` updated; screenshots still to regenerate.
 - [x] M5: last pane on `prefix+;`. Done 2026-09-18T14:05-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [x] Docs and screenshot regeneration for the key changes. Done 2026-09-18T14:05-05:00; `terminal-surface.mdx` and `configuration.md` cover the chips, the notices, the wheel, zoom, last pane, and the moved `pane_size`; the four captures under `docs/src/assets/screenshots/` were regenerated and the palette shows **Zoom pane** (`ctrl+b z`) and **Focus last pane** (`ctrl+b ;`).
-- [ ] End-to-end check against the lab, then push.
+- [x] End-to-end check against the lab, then push. Run on 2026-09-18T15:05-05:00
+  against the fake-harness lab: six of the seven acceptance behaviours passed as
+  written; the `⋯ → Open in split right` notice read "Already open in this
+  pane" because the keyboard had already moved when the session was named. The
+  wording was unified to that one notice (see the Decision Log, 2026-09-18) and
+  the behaviour, a focus move plus a notice and no blank pane, is what the plan
+  asks for. See `Artifacts and Notes`.
 
 ## Surprises & Discoveries
 
@@ -104,6 +110,9 @@ this plan are unaffected: they build and test the default members only.
 - Decision: for a session already open in another pane, "open in split" flashes a notice and moves the focus.
   Rationale: user decision. Silently moving the keyboard was the confusing part; the move itself is what the user usually wanted.
   Date/Author: 2026-09-18, Jonathan Ellis with Fable.
+- Decision: the split notice has one wording, "Already open in this pane", on both the focus-move arm and the nothing-to-put-back arm of `open_session_in_split`.
+  Rationale: the end-to-end run showed the "another pane" arm is unreachable from the terminal. Every way to name a session (row click, the `⋯` chip, arrow keys) opens it first through `open_chat_session`, which already moves the keyboard to the pane showing it, so the split command always runs with the keyboard in the session's pane. Putting the "keyboard moved" notice inside `open_chat_session` instead would flash it on every arrow-key pass over a session shown in another pane, which is noise. The wording that is true on the real path is kept; the arm stays as a defensive case for a caller that has not opened the session.
+  Date/Author: 2026-09-18, Fable.
 - Decision: `pane_size` moves from `prefix+z` to `prefix+shift+z` so herdr's `prefix+z` can mean zoom.
   Rationale: herdr binds zoom to `prefix+z` by default. Keeping parity with herdr matters more than keeping the current sizing key.
   Date/Author: 2026-09-18, Fable.
@@ -190,7 +199,7 @@ Tests in `mj-tui/src/tests.rs`, the `surface_controls.rs` tests, and the `mj-cha
 ### M2: split-open notices for an already-open session
 
 
-In `open_session_in_split`: when the session is in another pane, keep the focus move and then `set_notice("Already open in another pane; the keyboard moved there")`. When the session is in the focused pane and there is nothing to put back (`moving && displaced.is_none()`), `set_notice("Already open in this pane")` and return before splitting. The existing displaced path, where a row selection just pulled the session in and the previous session goes back, is unchanged. This mirrors the "Not enough room to split" notice and is verified end to end. Update the "Conversation panes" section of `terminal-surface.mdx`.
+In `open_session_in_split`: when the session is in another pane, keep the focus move and then `set_notice("Already open in this pane")` (one wording for both arms; see the Decision Log for why the focus-move arm is not reachable from the terminal). When the session is in the focused pane and there is nothing to put back (`moving && displaced.is_none()`), `set_notice("Already open in this pane")` and return before splitting. The existing displaced path, where a row selection just pulled the session in and the previous session goes back, is unchanged. This mirrors the "Not enough room to split" notice and is verified end to end. Update the "Conversation panes" section of `terminal-surface.mdx`.
 
 ### M3: pointer and focus fidelity
 
@@ -254,7 +263,94 @@ Every step is an ordinary source edit; re-running the checks is safe. No migrati
 ## Artifacts and Notes
 
 
-(evidence added as milestones land)
+### End-to-end run against the fake-harness lab, 2026-09-18
+
+Build `target/debug/mj` at `686dd831`; lab from
+`python3 tests/e2e/prepare-luna-lab.py --seed 7 --hel ./target/debug/mj
+--fake-delay-ms 500`; isolated `MJ_CONFIG_DIR`/`MJ_DATA_DIR` under
+`/tmp/hel-r-3432302-_zidk7ap`; `tmux -L pane-ux-7`, one 220x50 window. Three
+sessions on profile `fake` and target `localhost` (raw localhost):
+A `fe9285ad…` (later titled `P2 alpha000…`), B `3e23dff2…` (later `Q1
+beta000…`), C `5360d284…`. Mouse events were injected as SGR sequences through
+`tmux send-keys -H`; writing them to `#{pane_tty}` does not work, because that
+is the slave side and never reaches the program's stdin.
+
+1. Close chip on an unfocused pane — pass. Two panes, both title rows carry a
+   chip (`×` at columns 145 and 218):
+
+       ╭ localhost/project  Idle  fake  P2 alpha000 alpha001 alpha002 alpha…─ × ╮╭ localhost/project  Idle  fake  5360d284d64f1c81bcdae3c98ee58569 ─── × ╮
+
+   A left-click on the unfocused left pane's `×` (col 145, row 1) left one pane
+   holding the focused session, and the Sessions highlight did not move:
+
+       ╭ localhost/project  Idle  fake  5360d284d64f1c81bcdae3c98ee58569 ─
+       │› ○ 5360d284d64f1c81bcdae3c98ee58569
+
+2. Split notices — mixed. "Already open in this pane" fires as designed: with
+   panes `C | A` and A focused, clicking A's Sessions row and pressing
+   `prefix+v` left the two panes unchanged and printed
+
+       Already open in this pane
+
+   The `⋯ → Open in split right` case does not print the notice the plan
+   predicts. With panes `B | A`, keyboard in the left (B) pane, clicking A's
+   `⋯` chip moved the accent border to the right (A) pane *before* the menu
+   opened — `DashboardState::handle_surface_mouse` sets `selected_session_id`,
+   and the selection is opened through `DashboardContext::open_chat_session`,
+   which silently focuses the pane that already holds the session
+   (`mj-cli/src/dashboard/drafts.rs:93`). Activating "Open in split right" then
+   ran with the session already in the focused pane and printed
+
+       Already open in this pane
+
+   The user-visible outcome the Purpose asks for still holds — the keyboard
+   moved to the pane that has the session, a notice appeared, and no blank pane
+   was created — but the wording is the other branch's. The
+   `"Already open in another pane; the keyboard moved there"` arm
+   (`mj-cli/src/dashboard.rs:943`) was not reachable from the dashboard in this
+   run: every route that names a session for the split (row click, `⋯` chip,
+   arrow keys in Sessions) opens it first, and `focus_conversation_pane` clears
+   the selection, so the focused pane and the session's pane are never
+   different when the command runs.
+
+3. Wheel over an unfocused pane — pass. Panes `B | A`, keyboard in B. Five
+   `\e[<64;180;20M` wheel-up events over the right (A) pane scrolled A only:
+
+       right, before:  │ ● Agent · 11:39
+       right, after:   │ │ alpha098 alpha099 alpha100 alpha101 alpha102 …
+       left,  before:  │ │ beta176 beta177 beta178 beta179 beta180 …
+       left,  after:   │ │ beta176 beta177 beta178 beta179 beta180 …
+
+4. Focused transcript border — pass. SGR at the two transcript top-left
+   corners, keyboard in the left pane:
+
+       left  corner: ['38;2;52;70;94', '1', '38;2;99;216;229']   (accent)
+       right corner: ['0', '38;2;52;70;94', '48;2;17;29;45']     (resting)
+
+5. Zoom — pass. `prefix+z` filled the band with one pane and drew the chip left
+   of `×` (columns 215 and 218):
+
+       ╭ localhost/project  Idle  fake  Q1 beta000 beta001 … ─── Z  × ╮
+
+   `prefix+l` while zoomed showed the hidden neighbour, still zoomed:
+
+       ╭ localhost/project  Idle  fake  P2 alpha000 alpha001 … ─── Z  × ╮
+
+   Clicking ` Z ` (col 215, row 1) restored the two panes. On a single pane
+   `prefix+z` printed `Only one pane; nothing to zoom`.
+
+6. Last pane — pass. `prefix+;` moved the accent border back to the pane
+   focused before; on a single pane it printed `No previous pane`. Note for
+   whoever repeats this: `tmux send-keys` eats a bare `;`, so send it as
+   `send-keys -H 3b`.
+
+7. Restart — pass. `prefix+q` from a zoomed two-pane layout, then a fresh `mj`
+   with the same lab environment, came back with two panes and no `Z` chip:
+
+       ╭ localhost/project  Idle  fake  Q1 beta000 bet…── × ╮╭ localhost/project  Idle  fake  P2 alpha000 alpha001 alpha002 alph…─ × ╮
+
+Lab torn down afterwards: tmux server killed and every process whose environment
+named this lab's config and data directories terminated.
 
 ## Interfaces and Dependencies
 

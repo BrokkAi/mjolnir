@@ -938,14 +938,19 @@ impl DashboardContext {
     /// showing before the selection followed. A session open in a different
     /// pane moves the focus there instead of appearing twice, and a
     /// conversation area with no room for two panes says so.
+    ///
+    /// Every terminal path that names a session opens it first, and
+    /// `open_chat_session` already moves the keyboard to the pane showing it.
+    /// So when the session is on screen this runs with the keyboard in its
+    /// pane, and the notice says so; the explicit focus move below only
+    /// covers a caller that has not opened the session yet.
     pub(crate) fn open_session_in_split(&mut self, session_id: &str, direction: Direction) {
         let focused = self.dashboard.focused_pane();
         if let Some(pane) = self.dashboard.pane_for_session(session_id)
             && pane != focused
         {
             self.dashboard.focus_pane(pane);
-            self.dashboard
-                .set_notice("Already open in another pane; the keyboard moved there");
+            self.dashboard.set_notice("Already open in this pane");
             self.sync_opening_session();
             self.save_active_workspace_layout();
             return;
