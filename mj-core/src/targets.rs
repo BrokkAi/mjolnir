@@ -427,12 +427,6 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
     unreachable!("a finite mount list always has an unused numbered destination")
 }
 
-// TODO(milestone 3): remove once `mj-tui` calls `path_completion::common_insert`.
-/// Deprecated alias for `crate::path_completion::common_insert`.
-pub fn path_completion(prefix: &str, candidates: &[String]) -> Option<String> {
-    crate::path_completion::common_insert(prefix, candidates)
-}
-
 pub trait CommandExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput>;
 

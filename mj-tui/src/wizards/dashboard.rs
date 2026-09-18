@@ -116,7 +116,11 @@ fn commit_mount_access(mounts: &mut MountWizard, index: usize) {
 }
 
 fn declare_mount_controls(form: &mut Dialog<WizardControl>, mounts: &MountWizard) {
-    form.declare_with_enabled(WizardControl::MountSource, ControlKind::TextField, true);
+    form.declare_with_enabled(
+        WizardControl::MountSource,
+        mounts.source.control_kind(),
+        true,
+    );
     form.declare_with_enabled(
         WizardControl::MountDestination,
         ControlKind::TextField,
@@ -154,7 +158,7 @@ fn declare_review_controls(
 
 mod begin;
 mod new_session;
-mod paths;
+pub(crate) mod paths;
 mod resume;
 mod targets;
 
@@ -174,17 +178,6 @@ impl DashboardState {
         {
             return self.keep(wizard);
         }
-        if let Event::Key(key) = &event
-            && key.kind == crossterm::event::KeyEventKind::Press
-            && key.modifiers == KeyModifiers::CONTROL
-            && key.code == KeyCode::Char(' ')
-            && wizard.form().borrow().focused() == Some(WizardControl::MountSource)
-            && !wizard.mounts().source.is_empty()
-        {
-            let target = wizard.target();
-            return self
-                .complete_wizard_mount_source(wizard, nth_key(&self.config.targets, target));
-        }
         let form_event = match &event {
             Event::Key(key)
                 if key.kind == crossterm::event::KeyEventKind::Repeat
@@ -196,7 +189,14 @@ impl DashboardState {
         };
         let result = wizard.form().borrow_mut().handle(&form_event);
         self.last_event_consumed.set(result.consumed);
-        if let Some(interaction) = wizard.mounts_mut().access_combo.route(result.action) {
+        let action = match route_path_completion(self, &mut wizard, result.action) {
+            Ok(action) => {
+                self.mode = wizard.into_mode();
+                return action;
+            }
+            Err(interaction) => interaction,
+        };
+        if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
         if result.consumed {
@@ -286,33 +286,23 @@ impl DashboardState {
     }
 
     /// Edits the attachment editor's two path fields. Up and Down walk the
-    /// completion list when there is one, and the source history when the
-    /// source is empty, before the field itself sees the key.
+    /// source history when the source is empty, before the field itself sees
+    /// the key. An open completion popup takes those keys first, in the form.
     fn apply_mount_field_edit(&self, mounts: &mut MountWizard, id: WizardControl, edit: FieldEdit) {
         if let FieldEdit::Key(key) = edit
             && id == WizardControl::MountSource
+            && mounts.source.is_empty()
+            && !mounts.history.is_empty()
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
         {
-            if !mounts.completion_candidates.is_empty()
-                && matches!(key.code, KeyCode::Up | KeyCode::Down)
-            {
-                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                let len = mounts.completion_candidates.len();
-                move_index(&mut mounts.completion_index, len, delta);
-                return;
-            }
-            if mounts.source.is_empty()
-                && !mounts.history.is_empty()
-                && matches!(key.code, KeyCode::Up | KeyCode::Down)
-            {
-                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                let len = mounts.history.len();
-                move_index(&mut mounts.history_index, len, delta);
-                mounts.source = mounts.history[mounts.history_index]
-                    .to_string_lossy()
-                    .into_owned()
-                    .into();
-                return;
-            }
+            let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+            let len = mounts.history.len();
+            move_index(&mut mounts.history_index, len, delta);
+            mounts.source = mounts.history[mounts.history_index]
+                .to_string_lossy()
+                .into_owned()
+                .into();
+            return;
         }
         let input = match id {
             WizardControl::MountSource => &mut mounts.source,
@@ -320,7 +310,6 @@ impl DashboardState {
             _ => return,
         };
         if PathField::apply(input, edit) == EditOutcome::Changed {
-            mounts.completion_candidates.clear();
             mounts.error = None;
             self.record_event_handled();
         }
@@ -534,14 +523,6 @@ impl DashboardState {
     ) -> DashboardAction {
         let target_template_id = nth_key(&self.config.targets, wizard.target());
         match id {
-            WizardControl::MountSource if !wizard.mounts().completion_candidates.is_empty() => {
-                let candidate =
-                    wizard.mounts().completion_candidates[wizard.mounts().completion_index].clone();
-                let mounts = wizard.mounts_mut();
-                mounts.source = candidate.into();
-                mounts.completion_candidates.clear();
-                self.keep(wizard)
-            }
             WizardControl::MountSource if wizard.mounts().source.is_empty() => {
                 wizard.mounts_mut().error =
                     Some("Choose or type a directory on the controller.".into());
@@ -577,7 +558,7 @@ impl DashboardState {
                 mounts.source.clear();
                 mounts.destination.clear();
                 mounts.error = None;
-                mounts.completion_candidates.clear();
+                mounts.source.dismiss_completion();
                 wizard.form_mut().forget_draft_part("attachment editor");
                 wizard.set_step(WizardStep::Review);
                 wizard.form_mut().focus(WizardControl::Add);
@@ -585,26 +566,6 @@ impl DashboardState {
             }
 
             _ => self.keep(wizard),
-        }
-    }
-
-    fn complete_wizard_mount_source<W: WizardDraft>(
-        &mut self,
-        mut wizard: W,
-        target_template_id: String,
-    ) -> DashboardAction {
-        let prefix = wizard.mounts().source.to_string();
-        if prefix.is_empty() {
-            return self.keep(wizard);
-        }
-        if let Some(candidates) = wizard.mounts().completion_cache.get(&prefix).cloned() {
-            apply_mount_completions(wizard.mounts_mut(), &prefix, candidates);
-            return self.keep(wizard);
-        }
-        self.mode = wizard.into_mode();
-        DashboardAction::CompleteMountSource {
-            target_template_id,
-            prefix,
         }
     }
 

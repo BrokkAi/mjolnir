@@ -245,9 +245,10 @@ pub(crate) enum DashboardIoUpdate {
         episode_id: u64,
         result: std::result::Result<Option<String>, String>,
     },
-    MountCompletions {
+    PathCompletions {
+        context: String,
         prefix: String,
-        result: std::result::Result<Vec<String>, String>,
+        result: std::result::Result<mj_core::path_completion::PathCompletion, String>,
     },
     MountValidation {
         context: String,
@@ -1125,10 +1126,14 @@ impl DashboardContext {
                 episode_id,
                 result,
             } => self.apply_worker_diagnosis(session_id, episode_id, result),
-            DashboardIoUpdate::MountCompletions { prefix, result } => match result {
-                Ok(candidates) => self
+            DashboardIoUpdate::PathCompletions {
+                context,
+                prefix,
+                result,
+            } => match result {
+                Ok(completion) => self
                     .dashboard
-                    .apply_mount_source_completions(&prefix, candidates),
+                    .apply_path_completions(&context, &prefix, completion),
                 Err(error) => self
                     .dashboard
                     .set_notice(format!("Path completion failed: {error}")),

@@ -781,7 +781,7 @@ impl SetupDialog {
             .collect()
     }
 
-    fn prepare(&mut self) {
+    pub(crate) fn prepare(&mut self) {
         if let Some(review) = &self.review_editor {
             review.prepare();
             return;
@@ -814,7 +814,11 @@ impl SetupDialog {
         form.begin_frame();
         let initial = if let Some(editor) = &self.editor {
             if editor.choices.is_empty() {
-                form.declare(Field, ControlKind::TextField);
+                let kind = match &editor.input {
+                    EditorInput::Path(input) => input.control_kind(),
+                    EditorInput::Text(_) => ControlKind::TextField,
+                };
+                form.declare(Field, kind);
                 Field
             } else {
                 form.declare(
@@ -1736,6 +1740,15 @@ impl DashboardState {
         } else {
             interaction
         };
+        let interaction =
+            match crate::wizards::route_path_completion(self, &mut dialog, interaction) {
+                Ok(action) => {
+                    dialog.prepare();
+                    self.mode = Mode::Setup(dialog);
+                    return action;
+                }
+                Err(interaction) => interaction,
+            };
         let mut action = DashboardAction::None;
         match interaction {
             Some(Interaction::Activate(OpenSearch)) => {
@@ -1800,11 +1813,17 @@ impl DashboardState {
                 }
             }
             Some(Interaction::Edit(Field, edit)) => {
-                if let Some(editor) = &mut dialog.editor
-                    && TextField::apply(&mut editor.input, edit)
-                        == mj_chat::components::EditOutcome::Changed
-                {
-                    self.record_event_handled();
+                if let Some(editor) = &mut dialog.editor {
+                    // A path field's own apply closes its completion popup
+                    // when the edit changes the text it was completing.
+                    let outcome = match &mut editor.input {
+                        EditorInput::Path(input) => PathField::apply(input, edit),
+                        EditorInput::Text(input) => TextField::apply(input, edit),
+                    };
+                    if outcome == mj_chat::components::EditOutcome::Changed {
+                        dialog.prepare();
+                        self.record_event_handled();
+                    }
                 }
             }
             Some(Interaction::ComboBoxCommit(Choices, index)) => {
@@ -2555,6 +2574,57 @@ fn split_page(
         };
     }
     form.split_actions(area, actions)
+}
+
+impl crate::wizards::CompletesPaths for SetupDialog {
+    /// A local setting completes on the controller; a target setting
+    /// completes on the machine it configures. A destination inside a
+    /// container that does not exist yet completes nowhere.
+    fn focused_path_input(
+        &mut self,
+        _dashboard: &DashboardState,
+    ) -> Option<(
+        &mut PathInput,
+        mj_core::path_completion::CompletionHost,
+        mj_core::path_completion::CompletionKind,
+    )> {
+        use mj_core::path_completion::{CompletionHost, CompletionKind};
+        if !self.form.borrow().is_focused(SetupControl::Field) {
+            return None;
+        }
+        let editor = self.editor.as_ref()?;
+        if editor.adding || !matches!(editor.input, EditorInput::Path(_)) {
+            return None;
+        }
+        let (host, kind) = match schema::path_kind(&editor.path)? {
+            schema::PathKind::Local => {
+                (CompletionHost::Local, schema::completion_kind(&editor.path))
+            }
+            // The machine is read before the input is borrowed mutably.
+            schema::PathKind::Target => (
+                CompletionHost::Machine(Box::new(self.machine_for_path(&editor.path)?)),
+                CompletionKind::Directories,
+            ),
+            schema::PathKind::RelativeDestination => return None,
+        };
+        let EditorInput::Path(input) = &mut self.editor.as_mut()?.input else {
+            return None;
+        };
+        Some((input, host, kind))
+    }
+
+    fn dismiss_unfocused_completions(&mut self) {
+        if self.form.borrow().is_focused(SetupControl::Field) {
+            return;
+        }
+        if let Some(Editor {
+            input: EditorInput::Path(input),
+            ..
+        }) = &mut self.editor
+        {
+            input.dismiss_completion();
+        }
+    }
 }
 
 #[cfg(test)]

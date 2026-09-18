@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -34,7 +34,7 @@ use mj_chat::components::{
     Form, FormViewport, Interaction, PopupSide,
 };
 use mj_chat::selection::FrameSurfaces;
-use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination, path_completion};
+use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination};
 
 use crate::widgets::{
     Truncate, centered_modal, dismissible_modal_title, format_resource_bytes, truncate_to_cells,
@@ -198,9 +198,6 @@ pub(crate) struct MountWizard {
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) history: Vec<std::path::PathBuf>,
     history_index: usize,
-    completion_cache: BTreeMap<String, Vec<String>>,
-    completion_candidates: Vec<String>,
-    completion_index: usize,
     /// Sources the target's host reported as unable to hold Podman's overlay,
     /// keyed by the typed source and holding the `filesystem (reason)` label.
     forced_sources: BTreeMap<String, String>,
@@ -219,9 +216,6 @@ impl MountWizard {
             mounts: Vec::new(),
             history,
             history_index: 0,
-            completion_cache: BTreeMap::new(),
-            completion_candidates: Vec::new(),
-            completion_index: 0,
             forced_sources: BTreeMap::new(),
             error: None,
             editing_mount: None,
@@ -266,7 +260,7 @@ impl MountWizard {
         self.source.clear();
         self.destination.clear();
         self.access = MountAccess::Ro;
-        self.completion_candidates.clear();
+        self.source.dismiss_completion();
         self.error = None;
     }
 }
@@ -460,7 +454,7 @@ fn prepare_mount_editor(mounts: &mut MountWizard) {
     mounts.access = MountAccess::Ro;
     mounts.error = None;
     mounts.editing_mount = None;
-    mounts.completion_candidates.clear();
+    mounts.source.dismiss_completion();
 }
 
 /// Loads the selected attachment into the editor. Answers false when there is
@@ -479,7 +473,7 @@ fn prepare_selected_mount_editor(mounts: &mut MountWizard) -> bool {
     }
     mounts.error = None;
     mounts.editing_mount = Some(index);
-    mounts.completion_candidates.clear();
+    mounts.source.dismiss_completion();
     true
 }
 
@@ -839,24 +833,10 @@ fn default_resource_destination(
     unreachable!()
 }
 
-fn apply_mount_completions(wizard: &mut MountWizard, prefix: &str, candidates: Vec<String>) {
-    wizard
-        .completion_cache
-        .insert(prefix.to_owned(), candidates.clone());
-    if let Some(completed) = path_completion(prefix, &candidates) {
-        wizard.source = completed.into();
-    }
-    if candidates.len() > 1 {
-        wizard.completion_candidates = candidates.into_iter().take(5).collect();
-        wizard.completion_index = 0;
-    } else {
-        wizard.completion_candidates.clear();
-    }
-}
-
 mod dashboard;
 mod draft;
 
+pub(crate) use dashboard::paths::{CompletesPaths, route_path_completion};
 pub(crate) use draft::{DraftChange, WizardDraft, target_advance_enabled};
 
 #[cfg(test)]

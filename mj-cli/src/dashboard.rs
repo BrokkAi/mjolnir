@@ -300,6 +300,9 @@ pub(crate) struct DashboardContext {
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
+    /// The completion request in flight, with the draft it was asked for. A
+    /// newer request or a changed draft cancels it.
+    pub(crate) completion_job: Option<(String, Arc<AtomicBool>)>,
     pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
     /// The cancellable worker resolving an isolated session's network clone
     /// plan, keyed by the TUI generation that requested it.
@@ -1349,6 +1352,7 @@ impl DashboardContext {
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
             path_input_job: None,
+            completion_job: None,
             review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker_targets_tx,

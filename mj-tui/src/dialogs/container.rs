@@ -64,8 +64,11 @@ impl Row<'_> {
         }
     }
 
-    fn control(&self) -> Option<(ContainerEditFocus, ControlKind)> {
+    fn control(&self, editor: &ContainerEditor) -> Option<(ContainerEditFocus, ControlKind)> {
         match self {
+            Self::Field(ContainerEditFocus::Source, ..) => {
+                Some((ContainerEditFocus::Source, editor.source.control_kind()))
+            }
             Self::Field(id, ..) => Some((*id, ControlKind::TextField)),
             Self::Access(kind) => Some((ContainerEditFocus::Access, *kind)),
             Self::List(id, rows, selected) => Some((
@@ -198,11 +201,11 @@ impl ContainerEditor {
     }
 
     /// Refresh eligibility after a domain change, including before the first frame.
-    fn prepare(&self) {
+    pub(crate) fn prepare(&self) {
         let mut form = self.form.borrow_mut();
         form.begin_frame();
         for row in self.rows() {
-            if let Some((id, kind)) = row.control() {
+            if let Some((id, kind)) = row.control(self) {
                 form.register(id, kind, Rect::default(), true);
             }
         }
@@ -353,7 +356,7 @@ pub(crate) fn render_container_editor(
     let mut focus_row = None;
     let mut row_y = 0_u16;
     for row in &rows {
-        if row.control().is_some_and(|(id, _)| id == focused) {
+        if row.control(editor).is_some_and(|(id, _)| id == focused) {
             let offset = match row {
                 Row::List(_, _, selected) => u16::try_from(*selected).unwrap_or(u16::MAX),
                 _ => 0,
@@ -377,6 +380,7 @@ pub(crate) fn render_container_editor(
     row_y = 0;
     let access_choices = crate::wizards::access_choices(false);
     let mut access_field = None;
+    let mut source_field = None;
     for row in rows {
         let height = row.height();
         let rect = viewport.row(row_y, height);
@@ -404,13 +408,16 @@ pub(crate) fn render_container_editor(
                     rect.height,
                 );
                 match id {
-                    ContainerEditFocus::Source => mj_chat::components::PathField::render(
-                        frame,
-                        field_area,
-                        &editor.source,
-                        &mut form,
-                        id,
-                    ),
+                    ContainerEditFocus::Source => {
+                        source_field = Some(field_area);
+                        mj_chat::components::PathField::render(
+                            frame,
+                            field_area,
+                            &editor.source,
+                            &mut form,
+                            id,
+                        )
+                    }
                     ContainerEditFocus::Destination => mj_chat::components::PathField::render(
                         frame,
                         field_area,
@@ -481,6 +488,19 @@ pub(crate) fn render_container_editor(
         ],
         &mut form,
     );
+    // The completion popup hangs over the rows below the attached directory,
+    // so it is drawn again once those rows are on the screen.
+    if let Some(field) = source_field
+        && focused == ContainerEditFocus::Source
+    {
+        mj_chat::components::PathField::render(
+            frame,
+            field,
+            &editor.source,
+            &mut form,
+            ContainerEditFocus::Source,
+        );
+    }
     if let Some(field) = access_field
         && editor.access_combo.is_open(ContainerEditFocus::Access)
     {
@@ -574,19 +594,40 @@ impl DashboardState {
         }
         let result = editor.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
-        let interaction = editor.access_combo.route(result.action);
         let mut changed_structure = false;
+        let routed = match crate::wizards::route_path_completion(self, &mut editor, result.action) {
+            Ok(action) => {
+                editor.prepare();
+                self.mode = Mode::EditContainer(editor);
+                return action;
+            }
+            Err(interaction) => interaction,
+        };
+        let interaction = editor.access_combo.route(routed);
         match interaction {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => {
                 self.cancel_modal();
                 return DashboardAction::None;
             }
             Some(Interaction::Edit(id, edit)) => {
-                if editor
-                    .field_mut(id)
-                    .is_some_and(|field| TextField::apply(field, edit) == EditOutcome::Changed)
-                {
+                // A path field's own apply closes its completion popup when
+                // the edit changes the text it was completing.
+                let changed = match id {
+                    Source => {
+                        mj_chat::components::PathField::apply(&mut editor.source, edit)
+                            == EditOutcome::Changed
+                    }
+                    Destination => {
+                        mj_chat::components::PathField::apply(&mut editor.destination, edit)
+                            == EditOutcome::Changed
+                    }
+                    other => editor
+                        .field_mut(other)
+                        .is_some_and(|field| TextField::apply(field, edit) == EditOutcome::Changed),
+                };
+                if changed {
                     editor.error = None;
+                    changed_structure = true;
                 }
             }
             Some(Interaction::Select(Mounts, index)) => editor.mount_index = index,
@@ -651,6 +692,40 @@ impl DashboardState {
         }
         self.mode = Mode::EditContainer(editor);
         DashboardAction::None
+    }
+}
+
+impl crate::wizards::CompletesPaths for ContainerEditor {
+    /// The attached directory lives on the session's own target host; the
+    /// container destination does not exist yet, so it does not complete.
+    fn focused_path_input(
+        &mut self,
+        dashboard: &DashboardState,
+    ) -> Option<(
+        &mut PathInput,
+        mj_core::path_completion::CompletionHost,
+        mj_core::path_completion::CompletionKind,
+    )> {
+        if self.focused() != ContainerEditFocus::Source {
+            return None;
+        }
+        let target = dashboard
+            .state
+            .sessions
+            .get(&self.session_id)?
+            .target_template_id
+            .clone();
+        Some((
+            &mut self.source,
+            mj_core::path_completion::CompletionHost::Target(target),
+            mj_core::path_completion::CompletionKind::Directories,
+        ))
+    }
+
+    fn dismiss_unfocused_completions(&mut self) {
+        if self.focused() != ContainerEditFocus::Source {
+            self.source.dismiss_completion();
+        }
     }
 }
 
@@ -782,5 +857,56 @@ mod tests {
             DashboardAction::None
         );
         assert!(matches!(dashboard.mode, Mode::EditContainer(_)));
+    }
+
+    /// The attached directory is a path on the host that runs the session's
+    /// container, so its completions come from that target.
+    #[test]
+    fn container_editor_completes_on_the_session_target() {
+        let mut dashboard = open();
+        let Mode::EditContainer(editor) = &mut dashboard.mode else {
+            panic!("container editor");
+        };
+        editor.form.get_mut().focus(ContainerEditFocus::Source);
+        editor.source.set_value("/opt/c");
+        editor.prepare();
+        let complete = crossterm::event::KeyEvent::new(
+            KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+
+        assert_eq!(
+            dashboard.handle_key(complete),
+            DashboardAction::CompletePath {
+                host: mj_core::path_completion::CompletionHost::Target("podman".into()),
+                kind: mj_core::path_completion::CompletionKind::Directories,
+                prefix: "/opt/c".into(),
+            }
+        );
+        let context = dashboard.path_input_context();
+        dashboard.apply_path_completions(
+            &context,
+            "/opt/c",
+            mj_core::path_completion::PathCompletion {
+                candidates: vec!["/opt/cache/".into(), "/opt/config/".into()],
+                insert: None,
+                truncated: false,
+            },
+        );
+        let Mode::EditContainer(editor) = &dashboard.mode else {
+            panic!("container editor");
+        };
+        assert!(editor.source.is_completing());
+
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Enter));
+        let Mode::EditContainer(editor) = &dashboard.mode else {
+            panic!("container editor");
+        };
+        assert_eq!(editor.source, "/opt/config/");
+        assert!(!editor.source.is_completing());
+        // Accepting a candidate is not attaching it: the editor keeps the
+        // entry open so a destination can still be chosen.
+        assert!(editor.mounts.is_empty());
     }
 }

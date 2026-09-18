@@ -11,9 +11,9 @@ Before this change, completion existed only for the mount-source field of the ne
 ## Progress
 
 - [x] (2026-09-18 14:35Z) Surveyed every path input, the existing mount-only completion, the SSH command plumbing, and the web surfaces. Wrote this plan.
-- [ ] Milestone 1: core completion primitives, shared host, one controller entry point.
-- [ ] Milestone 2: `PathInput` completion state, `ControlKind::PathField`, popup rendering and form routing.
-- [ ] Milestone 3: every terminal screen wired through one routing helper; generic dashboard job with its own cancellation slot.
+- [x] (2026-09-18 15:00Z) Milestone 1: core completion primitives, shared host, one controller entry point. Committed as 05da4a5a.
+- [x] (2026-09-18 15:00Z) Milestone 2: `PathInput` completion state, `ControlKind::PathField`, popup rendering and form routing. Committed with milestone 1.
+- [x] (2026-09-18 15:40Z) Milestone 3: every terminal screen wired through one routing helper; generic dashboard job with its own cancellation slot.
 - [ ] Milestone 4: web endpoint and live suggestions in `pathField()`.
 - [ ] Full validation, commit, push.
 
@@ -26,6 +26,10 @@ Before this change, completion existed only for the mount-source field of the ne
 - Observation: A host abstraction already exists for the cache code and does exactly what completion needs: it names a machine (local or SSH), keys cached answers per machine, and passes user text to `sh -c` as `$1` instead of interpolating it.
   Evidence: `mj-controller/src/controller/cache_host.rs`, `CacheHost::shell_command`.
 - Observation: Ctrl-Space is unreliable in browsers (macOS reserves it for input-source switching), so the web surface must use live suggestions.
+- Observation: The form moves focus on Tab before it reports the popup dismissal, so by the time a screen routes `PathDismiss` the focused control is already the next field. The rule became "only the focused field may keep a popup", enforced by `CompletesPaths::dismiss_unfocused_completions` at the start of routing, which also covers clicks and any other focus change.
+  Evidence: the `tab_leaves_the_field_and_closes_the_popup` test in `mj-tui/src/wizards/tests.rs` failed under the narrower "dismiss the focused input" rule.
+- Observation: A popup drawn in the middle of a form is overdrawn by the rows rendered after it in the same frame. The mount editor and the container editor redraw the focused path field after the rest of the form, the same trick the access combobox already used.
+- Observation: The old single-candidate wizard test passed a prefix that no longer matched the field, so its assertion never ran. It now asserts that a single candidate is inserted without opening a popup.
 
 ## Decision Log
 

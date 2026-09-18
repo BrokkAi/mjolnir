@@ -1551,3 +1551,64 @@ fn import_confirmation_allows_worktree_opt_out_and_cancellation() {
         }
     ));
 }
+
+/// The replacement origin may be a URL or `owner/repo`, so completion is
+/// offered only while the text reads as a path on this machine.
+#[test]
+fn repository_origin_completes_local_paths() {
+    let launch = DashboardAction::ResumeSession {
+        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
+        session_id: "session-1".into(),
+        profile_id: "codex-1".into(),
+        target_template_id: "podman".into(),
+        additional_mounts: Vec::new(),
+        resource_allocation: None,
+        discard_queue: false,
+    };
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.show_repository_origin_dialog(
+        "session-1".into(),
+        "bifrost".into(),
+        "b41dc78".into(),
+        "https://github.com/BrokkAi/bifrost.git".into(),
+        "BrokkAi/bifrost".into(),
+        launch,
+    );
+    let complete = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+
+    dashboard.handle_paste("BrokkAi/bifrost-dev");
+    assert_eq!(dashboard.handle_key(complete), DashboardAction::None);
+
+    let Mode::RepositoryOrigin(dialog) = &mut dashboard.mode else {
+        panic!("expected repository origin dialog");
+    };
+    dialog.replacement.set_value("/srv/b");
+    assert_eq!(
+        dashboard.handle_key(complete),
+        DashboardAction::CompletePath {
+            host: mj_core::path_completion::CompletionHost::Local,
+            kind: mj_core::path_completion::CompletionKind::Directories,
+            prefix: "/srv/b".into(),
+        }
+    );
+    let context = dashboard.path_input_context();
+    dashboard.apply_path_completions(
+        &context,
+        "/srv/b",
+        mj_core::path_completion::PathCompletion {
+            candidates: vec!["/srv/bifrost/".into(), "/srv/bridge/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let Mode::RepositoryOrigin(dialog) = &dashboard.mode else {
+        panic!("expected repository origin dialog");
+    };
+    assert!(dialog.replacement.is_completing());
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::RepositoryOrigin(dialog) = &dashboard.mode else {
+        panic!("expected repository origin dialog");
+    };
+    assert_eq!(dialog.replacement, "/srv/bifrost/");
+}

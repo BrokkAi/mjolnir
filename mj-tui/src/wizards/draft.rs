@@ -42,7 +42,7 @@ pub(crate) enum DraftChange {
 }
 
 /// The shared shape of the new-session and resume/move wizards.
-pub(crate) trait WizardDraft: Sized {
+pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn step(&self) -> WizardStep;
     fn set_step(&mut self, step: WizardStep);
     fn profile(&self) -> usize;
@@ -127,6 +127,21 @@ pub(crate) trait WizardDraft: Sized {
     /// Handles an event on a step only one wizard has. Answers true when the
     /// step took responsibility for it.
     fn handle_step_event(&mut self, dashboard: &mut DashboardState, event: &Event) -> bool;
+    /// Closes the popup of a path field only one wizard has when the
+    /// keyboard has moved elsewhere.
+    fn dismiss_unfocused_extra_completions(&mut self, _focused: Option<WizardControl>) {}
+    /// The focused path field of a step only one wizard has, with the host
+    /// that owns its path. The shared mount source is handled for both.
+    fn focused_extra_path_input(
+        &mut self,
+        _dashboard: &DashboardState,
+    ) -> Option<(
+        &mut PathInput,
+        mj_core::path_completion::CompletionHost,
+        mj_core::path_completion::CompletionKind,
+    )> {
+        None
+    }
 }
 
 /// Whether the target step's Next is enabled: the draft must be able to use
@@ -388,6 +403,47 @@ impl WizardDraft for NewWizard {
         dashboard.target_readiness_rejection(target_id)
     }
 
+    fn dismiss_unfocused_extra_completions(&mut self, focused: Option<WizardControl>) {
+        if focused != Some(WizardControl::ProjectDirectory) {
+            self.project_directory.dismiss_completion();
+        }
+        if focused != Some(WizardControl::NewBundleSource) {
+            self.new_bundle_source.dismiss_completion();
+        }
+    }
+
+    /// The project directory lives on the target's machine; a bundle source
+    /// is a controller path only when it is a path at all.
+    fn focused_extra_path_input(
+        &mut self,
+        dashboard: &DashboardState,
+    ) -> Option<(
+        &mut PathInput,
+        mj_core::path_completion::CompletionHost,
+        mj_core::path_completion::CompletionKind,
+    )> {
+        use mj_core::path_completion::{CompletionHost, CompletionKind, looks_like_path};
+        let focused = self.form.borrow().focused()?;
+        match focused {
+            WizardControl::ProjectDirectory => {
+                let host = CompletionHost::Target(nth_key(&dashboard.config.targets, self.target));
+                Some((
+                    &mut self.project_directory,
+                    host,
+                    CompletionKind::Directories,
+                ))
+            }
+            WizardControl::NewBundleSource if looks_like_path(self.new_bundle_source.value()) => {
+                Some((
+                    &mut self.new_bundle_source,
+                    CompletionHost::Local,
+                    CompletionKind::Directories,
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn declare_extra_step(&self, dashboard: &DashboardState, form: &mut Dialog<WizardControl>) {
         match self.step {
             WizardStep::Bundle => {
@@ -405,7 +461,7 @@ impl WizardDraft for NewWizard {
             WizardStep::ProjectDirectory => {
                 form.declare_with_enabled(
                     WizardControl::ProjectDirectory,
-                    ControlKind::TextField,
+                    self.project_directory.control_kind(),
                     true,
                 );
                 declare_wizard_buttons(form, true, true);
@@ -421,7 +477,7 @@ impl WizardDraft for NewWizard {
                 );
                 form.declare_with_enabled(
                     WizardControl::NewBundleSource,
-                    ControlKind::TextField,
+                    self.new_bundle_source.control_kind(),
                     true,
                 );
                 form.declare_with_enabled(

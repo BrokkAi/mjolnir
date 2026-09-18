@@ -6,6 +6,7 @@ use mj_core::config::{
     Config, ContainerTemplate as ConfigContainer, HarnessKind, HarnessProfile, ProjectBundle,
     ProjectRepository, TargetTemplate,
 };
+use mj_core::path_completion::{CompletionHost, CompletionKind};
 use mj_core::state::State;
 
 use super::test_support::IsolatedTest;

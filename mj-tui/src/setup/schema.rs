@@ -537,6 +537,17 @@ pub(super) enum PathKind {
     RelativeDestination,
 }
 
+/// What a local path setting accepts. Three settings name a file; every other
+/// path setting names a directory.
+pub(super) fn completion_kind(path: &[String]) -> mj_core::path_completion::CompletionKind {
+    use mj_core::path_completion::CompletionKind;
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["phone", "tls_cert" | "tls_key"] | ["machines", _, "identity_file"] => CompletionKind::Any,
+        _ => CompletionKind::Directories,
+    }
+}
+
 pub(super) fn path_kind(path: &[String]) -> Option<PathKind> {
     use PathKind::*;
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();

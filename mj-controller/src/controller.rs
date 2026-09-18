@@ -57,7 +57,6 @@ struct ConfigRenameJournal {
     old_id: String,
     new_id: String,
 }
-use mj_core::path_completion::{CompletionHost, CompletionKind};
 use mj_core::state::{
     HostContainerSize, SessionRecord, SessionResourceAllocation, SessionState, State,
     new_session_id, normalize_session_title,
@@ -552,25 +551,6 @@ impl Controller {
             .get(target_id)
             .context("Unknown path target")?;
         resolve_target_input_path(target, path, executor)
-    }
-
-    // TODO(milestone 3): remove once `mj-cli` asks for `complete_path` directly.
-    /// Complete a mount source on the container engine host, preserving ~/
-    /// while editing. Unlike the code it replaces, this also answers for bare
-    /// targets, whose paths live on the target's own machine.
-    pub fn complete_mount_source(
-        &self,
-        target_id: &str,
-        prefix: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Vec<String>> {
-        self.complete_path(
-            &CompletionHost::Target(target_id.to_owned()),
-            prefix,
-            CompletionKind::Directories,
-            executor,
-        )
-        .map(|completion| completion.candidates)
     }
 
     /// Verify a mount source on the host where Mjolnir will consume it, and report
