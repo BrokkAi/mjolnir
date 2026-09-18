@@ -49,19 +49,66 @@ explicit trigger condition, so they are done only if measurement shows they are 
       existing empty-response detector and its weakness, and the `mj wait` behaviour.
 - [x] (2026-09-17) Established harness behaviour from the pinned bridge sources rather
       than from guesswork, and recorded what remains unknown.
-- [x] (2026-09-17) Wrote this plan. Phase 1 (plan only) ends here.
-- [ ] Milestone 0: measure what each harness does with a prompt during compaction.
-- [ ] Milestone 1: one shared answer to "did this turn produce anything", used by the
-      worker warning and by `mj wait`.
-- [ ] Milestone 2: the same answer on both user-facing surfaces, with the prompt text
-      recoverable into the composer.
-- [ ] Milestone 3 (conditional, see its trigger): hold queue promotion until the session
-      has been quiet for a settle window.
-- [ ] Milestone 4 (conditional, see its trigger): read the ACP compaction updates that
-      the Codex bridge's own schema defines.
+- [x] (2026-09-17) Wrote this plan. Phase 1 (plan only) ended here; the maintainer
+      approved it with four decisions, recorded in the `Decision Log`.
+- [x] (2026-09-18) Milestone 0: measured Claude and Codex live, on the pinned bridges,
+      with a prompt queued behind `/compact`. Neither returned early and neither lost the
+      queued prompt. Results and journal evidence are in `Surprises & Discoveries`.
+- [x] (2026-09-18) Milestone 1: one shared answer to "did this turn produce anything",
+      used by the worker, which now fails such a turn under the stop reason
+      `prompt_unanswered` so `mj wait` reports a named error.
+- [x] (2026-09-18) Milestone 2: the same answer on both surfaces, with the prompt text
+      recoverable into the composer and never resent automatically.
+- [x] (2026-09-18) Live test: the scripted agent's swallow mode and the
+      `unanswered-prompt` scenario, which fails on the unfixed build and passes on this
+      one.
+- [ ] Milestone 3 (conditional): hold queue promotion until the session has been quiet
+      for a settle window. **Trigger did not fire** — see Milestone 0. Not built.
+- [ ] Milestone 4 (conditional): read the ACP compaction updates the Codex bridge's own
+      schema defines. **Trigger did not fire** — Codex reports compaction as an ordinary
+      tool call, and no `compaction_update` was observed. Not built.
 
 
 ## Surprises & Discoveries
+
+- Observation (Milestone 0, live, Codex on `@brokkai/codex-acp@1.11.4`): `/compact` does
+  not return early, the queued prompt is held while it runs, and compaction is visible to
+  Mjolnir as an ordinary tool call rather than as a compaction update.
+  Evidence: the session's relay journal, ordinals 58-70. 58 queues `/compact`, 59 starts
+  it, 63 is `"sessionUpdate": "tool_call", "title": "Compact conversation", "kind":
+  "think"` with `_meta.contextCompaction`, 64 queues the next prompt *while the first is
+  in flight*, 68 completes the tool call, 69 completes the `/compact` prompt with
+  `EndTurn` after 8.1 seconds, and only then does 70 start the queued prompt, which was
+  answered. No `compaction_update` or `compaction_summary_chunk` appeared.
+
+- Observation (Milestone 0, live, Claude Code on
+  `@agentclientprotocol/claude-agent-acp@0.73.0`): the same, and the banners the bridge
+  source predicted arrive exactly as predicted, as ordinary assistant text.
+  Evidence: the session's relay journal, ordinals 26-33. 28 is an `agent_message_chunk`
+  reading `"Compacting..."`, 29 reads `"\n\nCompacting failed: Not enough messages to
+  compact."`, 31 completes the `/compact` prompt with `EndTurn` *after* those, 32 queues
+  the next prompt and 33 starts it, and it was answered.
+
+- Observation: the reported loss therefore does not reproduce on either pinned bridge, so
+  Milestones 3 and 4 stay unbuilt behind their triggers, as the maintainer directed.
+  Not observed: a *successful* Claude compaction. The one measured refused itself with
+  "Not enough messages to compact", so the case where a compaction turn produces nothing
+  but the two banners was not seen live. It is covered by construction instead: a prompt
+  that asks the harness to compact is never judged unanswered
+  (`mj_core::acp::prompt_requests_compaction`), with a unit test for each side of it.
+
+- Observation: minimal test fixtures answered a prompt with a bare `end_turn` and no
+  output at all, which is exactly the shape this change reports as unanswered. Five had
+  to start answering like a working harness.
+  Evidence: `mj-worker/src/acp/plan_tests.rs` and `mj-worker/src/acp/session_config_tests.rs`
+  failed with `left: "prompt_unanswered", right: "EndTurn"` until their scripted agents
+  sent one `agent_message_chunk` before their result.
+
+- Observation: a permission request is the only thing some real turns produce, so
+  counting session updates alone would report them as unanswered. The count now includes
+  every request the agent makes of Mjolnir.
+  Evidence: `acp::plan_tests::guardian_approval_uses_auto_without_a_followup_prompt`
+  passed again as soon as `RequestPermissionRequest` marked the counter.
 
 - Observation: `mj_core::activity::ActivityFacts` has no `compaction_in_flight` field.
   The task description that led to this plan asserted it does.
@@ -166,11 +213,74 @@ explicit trigger condition, so they are done only if measurement shows they are 
   exist, so it is derived.
   Date/Author: 2026-09-17, plan author.
 
+- Decision (maintainer): keep Milestones 3 and 4 behind their triggers and do not build
+  them now, but run Milestone 0 live for Claude and Codex rather than treating the bridge
+  sources as sufficient. If a harness were measured returning early, Milestone 3 would be
+  built in the same phase.
+  Rationale: source reading says what a bridge intends; only a live run says what it does.
+  Date/Author: 2026-09-18, maintainer. Outcome: neither harness returned early, so
+  Milestone 3 stays unbuilt.
+
+- Decision (maintainer): an unanswered turn is reported by `mj wait` as an error with a
+  stop reason and diagnostic code of its own, `prompt_unanswered`, following the
+  `harness_inactive` pattern from #1020.
+  Rationale: automation must be able to tell this failure from every other error without
+  matching on prose.
+  Date/Author: 2026-09-18, maintainer.
+
+- Decision (maintainer): the false positive is acceptable only if "output" is defined
+  widely — a turn that made tool calls, wrote files or ran commands has answered even
+  with no text.
+  Rationale: silence is not the same as inaction, and flagging a working turn would be a
+  worse failure than the one being fixed.
+  Date/Author: 2026-09-18, maintainer. Implemented as
+  `mj_core::acp::session_update_is_agent_output`, which counts tool calls and tool call
+  updates, with a test for a text-free tool-only turn; the worker additionally counts
+  every request the agent makes of Mjolnir, because a permission request alone can be
+  the only thing a real turn produces.
+
+- Decision (maintainer): restore the text into the composer; never resend automatically,
+  because of the duplicate-execution risk.
+  Date/Author: 2026-09-18, maintainer.
+
+- Decision: derive the verdict in the worker at prompt completion rather than in the
+  controller from the turn's transcript span, as the approved plan had proposed.
+  Rationale: the worker already holds a per-turn count taken at dispatch, so the answer
+  needs no new query, no `TurnSummary` field and no controller change; and recording it
+  as the turn's stop reason makes `mj wait`, the session summary, the chat and the web
+  viewer all report it without any of them learning a new rule. `stop_reason` is an
+  existing `String` field, so this still adds no field to any durable record and there is
+  still no migration.
+  Date/Author: 2026-09-18, implementer.
+
+- Decision: exclude a bridge's compaction banners from what counts as an answer, and
+  never judge a prompt that itself asked the harness to compact.
+  Rationale: the banners are the one thing a harness emits *instead of* acting on the
+  prompt, and they are ordinary assistant text, so without naming them the shape issue
+  #970 reported stays invisible. The paired exception keeps a real `/compact` turn, whose
+  honest answer is those banners, from being reported as a failure.
+  Date/Author: 2026-09-18, implementer.
+
 
 ## Outcomes & Retrospective
 
-To be written at the end of each milestone. At the time of writing, Phase 1 (plan only)
-is complete and no product code has changed.
+The work is complete and the reported failure mode is now visible wherever it can be
+seen: `mj wait` returns `error (prompt_unanswered)` with the reason, both surfaces show
+the same explanation, and the prompt text can be put back in the composer on either one.
+
+The measurement changed the shape of the fix. Neither pinned bridge loses a prompt queued
+behind `/compact` any more — both hold it while the compaction turn runs, and both end
+that turn only when compaction has finished — so the interlock the issue proposed would
+have guarded a window that is already closed. What remained, and is now fixed, is that
+Mjolnir called a turn that produced nothing a success, which is the part that was ours
+and the part that protects against any future swallow, whatever causes it.
+
+What is not covered: a harness that accepts a prompt and produces something unrelated to
+it still looks like an answer, because ACP gives a client no way to attribute output to a
+prompt. A harness that emits its own prose during a swallowed turn is caught only when
+that prose is a compaction banner Mjolnir names. If a loss is seen again in a shape this
+misses, Milestone 3's settle window is the next step and its specification is unchanged
+below.
 
 
 ## Context and Orientation
@@ -212,8 +322,23 @@ previous ACP call returns — this part of the issue's diagnosis is confirmed on
 is doing. It holds `ActivityFacts` (the facts), `classify` (what state they mean),
 `has_work_in_flight`, `is_quiet`, `safe_to_replace`, `checkpoint_blocker`, `chat_phase`,
 `while_disconnected`, `StallPolicy` and `stall_verdict`. Any new predicate about whether
-the session is ready for something belongs in this module, not in the relay. There is no
-compaction fact in it today.
+the session is ready for something belongs in this module, not in the relay.
+
+State this plainly, because the brief that led to this work assumed the opposite:
+**`ActivityFacts` has no `compaction_in_flight` field and no other compaction fact.**
+Read the struct at `mj-core/src/activity.rs:41-82`; every field is listed there and none
+concerns compaction, and `grep -rn "compaction_in_flight" --include=*.rs` returns
+nothing. The reason is not an oversight. A fact has to come from something Mjolnir can
+observe, and the ACP schema this build compiles against —
+`agent-client-protocol-schema` 1.5.0, whose `SessionUpdate` enum is at
+`src/v1/client.rs:99-139` — has no compaction variant at all, so no compaction signal can
+reach the worker in a form it can decode. What the harnesses actually send instead was
+measured rather than assumed, and is recorded under `Surprises & Discoveries`: Codex
+reports compaction as an ordinary tool call, and Claude Code as two lines of assistant
+text. Neither is a fact about compaction; both are ordinary output that happens to be
+about compacting. That is why this change names the Claude banners explicitly instead of
+adding a compaction fact, and why adding one is Milestone 4, behind a trigger that has
+not fired.
 
 **The turn record.** When a prompt completes, the controller projects a
 `MaterializedTurnOutcome` (`mj-core/src/state.rs:205-222`) carrying the command id, the
@@ -258,159 +383,133 @@ a bound.
 The work is one measurement milestone, two implementation milestones that are always
 done, and two conditional milestones that are done only if the measurement says so.
 
-### Milestone 0 — Measure what each harness does with a prompt during compaction
+### Milestone 0 — Measure what each harness does with a prompt during compaction (done)
 
-Scope: no product code changes. At the end of this milestone the `Surprises &
-Discoveries` section states, per harness, whether `session/prompt` can return while the
-harness is still working, and whether any compaction signal reaches Mjolnir.
+Scope: no product code changes. The question is whether the window the issue describes is
+still open on the bridges this repository pins, because everything else depends on it.
 
-Work: run a private instance (instance name `fix970`, phone port 4170, see `Concrete
-Steps`) with `RUST_LOG=debug` for the worker, open a session on the cheap `deepseek`
-profile, and record the worker log around a `/compact` submission followed immediately by
-a second prompt. Three questions to answer, each recorded as confirmed or unknown:
+Work: a private instance (name `fix970`, phone port 4170; see `Concrete Steps`) with a
+local-bare target, one session per harness, and in each: a warm-up prompt, then `/compact`
+followed immediately by a second prompt, so the second is queued behind the first. The
+evidence is the session's own relay journal at
+`~/.local/share/mjolnir/instances/fix970/workers/<session>/relay-journal/active.jsonl`,
+which records every command and every session update in order with ordinals. That is
+better evidence than a log: it is the same record the projection is built from.
+
+Three questions, answered per harness:
 
 1. Does the bridge's `session/prompt` for `/compact` return before the compaction output
-   appears? If it does not, the issue's window is closed for that harness.
-2. Does any `session/update` arrive that Mjolnir's ACP schema cannot decode? The Codex
-   bridge's bundled schema defines `compaction_update`; Mjolnir's Rust schema does not.
-   If such notifications arrive, note how the worker currently treats them (decode error,
-   silently ignored, or surfaced as an adapter payload).
-3. With a second prompt queued behind `/compact`, does it get an answer?
+   appears? **No, on both.** Codex completed the prompt at ordinal 69, after the
+   compaction tool call completed at 68, 8.1 seconds after starting it. Claude Code
+   completed the prompt at ordinal 31, after both banners at 28 and 29.
+2. Does any compaction signal arrive that Mjolnir's ACP schema cannot decode? **No.**
+   Codex reports compaction as an ordinary `tool_call` titled "Compact conversation" with
+   `_meta.contextCompaction`; Claude Code reports it as two `agent_message_chunk` lines.
+   No `compaction_update` or `compaction_summary_chunk` appeared, and no decode failure
+   was recorded.
+3. With a second prompt queued behind `/compact`, does it get an answer? **Yes, on both.**
+   Codex answered it at ordinals 78-109, Claude Code at 35-37.
 
-Acceptance: three recorded answers, each marked confirmed or unknown, with a quoted log
-line for each confirmed one. This milestone may end with "the reported loss does not
-reproduce on the pinned bridges", which is a valid and useful result.
+Result: the reported loss does not reproduce on the pinned bridges, so the triggers for
+Milestones 3 and 4 did not fire and neither was built. Full quotations are in
+`Surprises & Discoveries`.
 
-### Milestone 1 — One shared answer to "did this turn produce anything"
+### Milestone 1 — One shared answer to "did this turn produce anything" (done)
 
-Scope: the worker's detector becomes specific about what counts as producing something,
-the controller learns to answer the same question from a finished turn's span, and
-`mj wait` stops calling an unanswered turn finished. At the end of this milestone,
-automation can tell a swallowed prompt from an answered one.
+Scope: the worker becomes specific about what counts as producing something, and a turn
+the harness ended without producing anything is failed under a stop reason of its own, so
+`mj wait` reports a named error instead of success.
 
-Work, in order:
+This differs from the approved plan in where the answer is computed. The plan proposed
+deriving it in the controller from the finished turn's transcript span and a new
+`TurnSummary` field. The worker already holds a per-turn count taken at dispatch, so the
+answer needs no new query and no controller change, and recording it as the turn's stop
+reason makes every reader report it without learning a new rule. The `Decision Log` has
+the reasoning. Nothing durable gained a field either way, so there is still no migration.
 
-*Commit 1 — the shared classifier.* In `mj-core/src/acp.rs`, beside the existing
-`session_update_has_native_history`, add:
+*Commit 1 — the shared classifier* (`c83e6f6a`). In `mj-core/src/acp.rs`, beside
+`session_update_has_native_history`:
 
     /// Whether this update is the agent doing the work a prompt asked for.
-    ///
-    /// Catalogues, mode changes, configuration options, session metadata and
-    /// usage accounting all arrive without the agent having done anything, so
-    /// a turn carrying only those produced no answer.
     pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool
 
-It returns true for `AgentMessageChunk`, `AgentThoughtChunk`, `ToolCall`,
-`ToolCallUpdate`, `Plan` and `UserMessageChunk` (a harness echoing the prompt back is
-evidence it took it), and false for `AvailableCommandsUpdate`, `ConfigOptionUpdate`,
-`CurrentModeUpdate`, `SessionInfoUpdate` and `UsageUpdate`. The enum is
-`#[non_exhaustive]`, so the match must have a catch-all arm returning true: an unknown
-future variant must not be read as "the agent did nothing".
+Answering is defined widely, as the maintainer directed: agent messages, thoughts, plans,
+tool calls and tool call updates all count, so a turn that only edited files and said
+nothing has answered. Excluded is traffic a harness emits on its own schedule —
+`AvailableCommandsUpdate`, `ConfigOptionUpdate`, `CurrentModeUpdate`, `SessionInfoUpdate`
+and `UsageUpdate`. The match is written as a negation with a catch-all, so an unknown
+future variant of the `#[non_exhaustive]` enum counts as output: reporting a working turn
+as unanswered would be worse than missing a swallow. Tests cover both sides, including a
+text-free tool-only turn.
 
-In `mj-core/src/transcript.rs`, add the same question for a stored transcript item:
+*Commit 2 — the worker counts and reports it* (`f9fb1e22`, with the follow-up `6d1255ac`).
+Three parts, all in `mj-worker/src/acp/`:
 
-    /// Whether this transcript item is output the agent produced.
-    pub fn item_is_agent_output(item: &TranscriptItem) -> bool
+Two more pieces of the classifier went into `mj-core/src/acp.rs` with this commit, because
+the Milestone 0 measurement showed they were needed. `session_update_is_compaction_banner`
+recognizes the progress text a bridge streams while compacting ("Compacting...",
+"Compacting completed.", "Compacting failed…"), and `session_update_is_agent_output`
+excludes it: those banners are the one thing a harness emits *instead of* acting on the
+prompt, and they are ordinary assistant text, so without naming them the shape issue #970
+reported stays invisible. `prompt_requests_compaction` recognizes Mjolnir's own outgoing
+`/compact` text, and a turn answering such a prompt is never judged, because banners are
+the honest answer to it. Only Mjolnir's outgoing text is inspected, never the harness's.
 
-Read the existing item kinds in that file before writing it; it must count agent
-messages, thoughts and tool calls, and must not count the user's own prompt item, harness
-turn markers, or system and warning lines Mjolnir itself wrote.
+`drive.rs` gains `AgentOutputCount`, a shared counter marked wherever the agent acts: in
+the session-update handler when `session_update_is_agent_output` accepts the update, and
+in every handler that serves a request the agent makes — a permission, a terminal
+(create, output, wait, kill, release), an elicitation or any other ext request, and
+Grok's own turn-completion notification. The measurement's lesson is in that list: a real
+turn can produce a permission request and nothing else, and counting only session updates
+would report it as unanswered.
 
-In `mj-core/src/state.rs`, beside `classify_prompt_completion`, add the interpretation
-both consumers share:
+`prompt_returned_without_updates` now fires only for `StopReason::EndTurn`. A cancelled,
+refused or token-limited turn already reports its own ending, and relabelling it would
+hide why it really ended.
 
-    /// What a finished turn delivered.
-    pub enum TurnDelivery {
-        /// The agent produced output for this prompt.
-        Answered,
-        /// The agent ended the turn without producing anything. The prompt may
-        /// never have been acted on.
-        Unanswered,
-        /// The turn did not end normally, so this question does not apply.
-        NotApplicable,
-    }
+`session.rs` then fails such a turn rather than only warning about it: the stop reason is
+`mj_core::acp::PROMPT_UNANSWERED_STOP_REASON` ("prompt_unanswered") and the diagnostic
+carries the same code, following the `harness_inactive` pattern from #1020. Because any
+stop reason that is not a known completion classifies as an error
+(`mj_core::state::classify_prompt_completion`), `mj wait` reports
+`error (prompt_unanswered)` with the explanation and exits non-zero, and nothing in the
+controller had to change. A test in `mj-controller/src/server/api/tests.rs` pins that
+mapping.
 
-    pub fn turn_delivery(outcome: &TurnOutcomeKind, produced_agent_output: bool)
-        -> TurnDelivery
+The warning text keeps `PROMPT_EMPTY_RESPONSE_MARKER` as its prefix, because
+`mj-core/src/credentials.rs:504` matches on it, and adds the sentence a person can act
+on: which harness ended the turn, that the prompt may never have been acted on, and to
+check the workspace before resending in case the work was done without being reported.
 
-`NotApplicable` for `Rejected` and `Interrupted`, and for a `Completed` turn whose stop
-reason is not `Finished` under `classify_prompt_completion` — a cancelled, quota-limited
-or errored turn already reports its own failure and must not be relabelled. Unit tests in
-the same files cover each arm.
+Five scripted test agents that answered a prompt with a bare `end_turn` and no output now
+send one line first, which is what a working harness does.
 
-*Commit 2 — the worker counts only agent output.* In `mj-worker/src/acp/session.rs`
-around line 578, the counter compared before and after the prompt must count only updates
-for which `session_update_is_agent_output` is true. Find where `session_update_count` is
-incremented (`mj-worker/src/acp/drive.rs`, search `session_update_count`) and add a second
-counter beside it rather than changing the meaning of the existing one, which other code
-reads. `prompt_returned_without_updates` then compares the new counter. Its existing unit
-tests (`mj-worker/src/acp/tests.rs:964-966`) stay valid; add one showing that a turn
-carrying only a usage update and an available-commands update is still "no output".
+### Milestone 2 — Say it on both surfaces, and keep the text (done)
 
-*Commit 3 — the controller answers from the turn's span.* Add
-`produced_agent_output: bool` to `TurnSummary` (`mj-core/src/storage.rs:138-148`). This
-is an in-memory struct returned by a query, not a stored record, so nothing is migrated
-and no schema changes. Compute it in `load_materialized_turn_summary_from`
-(`mj-controller/src/database/materialized.rs:380-427`) in the same connection: a
-`SELECT EXISTS(...)` over `materialized_transcript_items` bounded by the same
-`position >= ?2 AND position <= ?3` as the timestamps query, restricted to items that
-`item_is_agent_output` accepts. Write the SQL against the columns that query already
-uses; read the surrounding functions in that file before choosing the predicate, and put
-the interpretation in the shared helper rather than duplicating a list of kinds in SQL if
-the stored shape allows it. Update the two fake backends in
-`mj-controller/src/server/api/tests.rs` (lines 415 and 1202) and the real one in
-`mj-controller/src/server_runtime/api.rs:1228`.
+Scope: a person watching either surface sees the same verdict and can put the prompt back
+in the composer without retyping it. Neither surface resends anything: Mjolnir cannot
+tell a prompt the harness dropped from one it acted on silently, so resending would risk
+running the same instruction twice and stays the person's decision.
 
-*Commit 4 — `mj wait` stops lying.* In `mj-controller/src/server/api/wait.rs`, after the
-summary is loaded (line 199), ask `turn_delivery` with the decision's outcome and the
-summary's `produced_agent_output`. On `TurnDelivery::Unanswered`, replace the outcome with
-`WaitOutcome::Error` and set the message to exactly:
+The warning already reaches both surfaces as a system line in the transcript
+(`mj-transcript/src/transcript.rs:1220`), so the work here is the recovery affordance.
 
-    the harness ended the turn without answering; the prompt may not have been
-    delivered — resend it
+*Commit 3 — both surfaces* (`57203c2e`). In `mj-chat/src/chat.rs`, `apply_materialized`
+calls a new `keep_unanswered_prompt`: when the session's `last_turn_outcome` is a
+completed turn whose stop reason is `prompt_unanswered`, and that turn has not already
+been recorded, the prompt is read from the turn's own first transcript item and pushed
+onto the existing unsent list under a new `UnsentKind::Unanswered`, headed "Prompt was not
+answered", so the existing Ctrl-Alt-R restore path works unchanged. Reading the text from
+the transcript rather than from anything the client remembers is what makes a prompt
+submitted from the web viewer, or promoted from the queue, recoverable in the terminal
+too. Two tests in `mj-chat/src/chat/tests.rs` cover it: an unanswered turn is recorded
+once however often the projection arrives and restores into the composer, and a finished
+turn leaves nothing to restore.
 
-Keep the turn id and span in the response so a caller can still read the turn. Add tests
-in `mj-controller/src/server/api/tests.rs` driving `resolve_wait` plus the summary step:
-one turn with agent output returns `finished`; one without returns `error` with that
-message; a cancelled turn without output still returns `cancelled`; a turn that is still
-running returns nothing.
-
-### Milestone 2 — Say it on both surfaces, and keep the text
-
-Scope: a person watching either surface sees the same verdict, and can put the prompt
-back in the composer without retyping it.
-
-The worker already emits a warning carrying `PROMPT_EMPTY_RESPONSE_MARKER`, and both
-surfaces already render worker warnings as system lines, so after Milestone 1 commit 2
-the failure is visible in the transcript on both surfaces with no UI work. The text of
-that marker is not addressed to a person, so:
-
-*Commit 5 — the message a person can act on.* Change the warning the worker emits at
-`mj-worker/src/acp/session.rs:578-592` to carry both the stable marker (which
-`mj-core/src/credentials.rs:504` matches on, so it must not be removed) and a sentence
-telling the person what happened and what to do:
-
-    ACP prompt returned no session updates: the harness ended the turn without
-    answering. The prompt may not have been acted on — resend it.
-
-Update `mj-worker/src/acp/tests.rs:2325`, which asserts on the exact string, to assert
-the marker is contained rather than equal.
-
-*Commit 6 — recoverable text in the terminal chat.* When the chat sees a completed turn
-it submitted whose transcript span carries this marker, push the prompt text onto the
-existing `unsent` list (`mj-chat/src/chat.rs:354-414`) with a new `UnsentKind` headline
-"Prompt was not answered", so the existing Ctrl-Alt-R restore path works unchanged. Add a
-chat test in `mj-chat/src/chat/tests.rs` following the naming style there, for example
-`unanswered_turn_offers_the_prompt_for_restore`, driving the event application directly
-rather than through rendering.
-
-*Commit 7 — the same in the web viewer.* In `mj-controller/src/web/viewer.js`, where the
-transcript renders a warning item, recognize the marker and render the turn's user prompt
-with a "Put back in composer" action, reusing the take-back path already written for
-queued prompts (line 3060-3075). Add a case to the DOM-level tests in
-`mj-controller/src/web/test-dom.js` if that file covers transcript rendering; otherwise
-add a Playwright case under `tests/e2e/web/` following the existing fixture-driven
-specs, run with `MJ_BROWSER_SPEC=<spec> npx playwright test` from `tests/e2e/web`.
+In `mj-controller/src/web/viewer.js`, a warning row carrying the marker gains a "Put back
+in composer" button holding the prompt that turn was running, which is the newest user row
+before it. It reuses `setComposerText`, the same path the queue's Edit button uses. A case
+in `tests/e2e/web/viewer.unit.test.mjs` runs the new function under Node.
 
 ### Milestone 3 — Conditional: hold promotion until the session settles
 
@@ -534,81 +633,113 @@ again.
 
 ## Validation and Acceptance
 
-**Unit and behaviour tests.** `cargo test` must pass on the dev profile, and
-`cargo clippy --all-targets -- -D warnings` must be clean. The new tests, and what each
-proves:
+**Unit and behaviour tests.** `cargo test` passes on the dev profile and
+`cargo clippy --all-targets -- -D warnings` is clean. The new tests, and what each proves:
 
-- `mj-core/src/acp.rs`: a usage update and an available-commands update are not agent
-  output; an agent message and a tool call are; an unrecognized variant is treated as
-  output.
-- `mj-core/src/state.rs`: `turn_delivery` returns `Unanswered` only for a completed turn
-  whose stop reason means finished and which produced nothing.
-- `mj-worker/src/acp/tests.rs`: a prompt whose turn carried only non-output updates is
-  reported as producing nothing. This test fails before commit 2 and passes after.
-- `mj-controller/src/server/api/tests.rs`: `mj wait` returns `error` with the resend
-  message for an unanswered turn, `finished` for an answered one, and is unchanged for
-  cancelled, quota-limited and still-running turns. These fail before commit 4.
-- `mj-chat/src/chat/tests.rs`: an unanswered turn puts its text where Ctrl-Alt-R restores
-  it.
+- `mj-core/src/acp.rs`, `agent_output_tests`: a usage update, a command catalogue, a mode
+  change, a config-option update and session metadata are not an answer; a message, a
+  thought, a tool call and a tool call update are, so a text-free tool-only turn is never
+  flagged; a compaction banner is not, while ordinary prose that merely mentions
+  compacting is; and only a prompt beginning `/compact` counts as asking to compact.
+- `mj-worker/src/acp/tests.rs`,
+  `only_a_finished_turn_that_produced_nothing_counts_as_unanswered`: the verdict is taken
+  only for `end_turn`, and `max_tokens`, `refusal` and `cancelled` keep their own reasons.
+- `mj-worker/src/acp/tests.rs`, the scripted-bridge case that drives a real ACP
+  connection: a turn the bridge ends successfully with no output finishes as
+  `prompt_unanswered` and warns with the marker and the explanation. It failed before the
+  change, which reported `EndTurn`.
+- `mj-controller/src/server/api/tests.rs`,
+  `an_unanswered_turn_reaches_wait_as_a_named_error` and the stop-reason mapping: `mj wait`
+  returns `error` carrying both `prompt_unanswered` and the explanation, and every other
+  ending is unchanged.
+- `mj-chat/src/chat/tests.rs`: an unanswered turn is recorded once and restores into the
+  composer; a finished turn leaves nothing to restore.
+- `tests/e2e/web/viewer.unit.test.mjs`: the warning row offers the prompt that turn was
+  running, and no other row offers anything.
 
-**Live test that fails on the unfixed build.** The repository already has a scripted ACP
-agent used by the end-to-end lab: `tests/e2e/reliability_lab.py:408-470` writes a Python
-bridge into the runtime root and configures a `codex`-kind profile named `fake` against a
-`local-bare` target, with behaviour switched by environment variables such as
-`MJ_FAKE_ACP_DELAY_MS` and `MJ_FAKE_ACP_PROMPT_DELAY_MS` (declared in the generated
-config at line 617). Add one more switch, `MJ_FAKE_ACP_SWALLOW_PROMPT`, whose value is the
-one-based index of the prompt the fake agent swallows. For that prompt the fake agent
-returns `{"stopReason": "end_turn"}` and sends no `session/update` at all; for the variant
-that reproduces issue #970's exact shape, it first sends one `agent_message_chunk`
-containing the text `Compacting...` and then returns `end_turn` with no answer.
+**Live test that fails on the unfixed build.** The scripted ACP agent in
+`tests/e2e/reliability_lab.py` gained a swallow mode: `MJ_FAKE_ACP_SWALLOW_PROMPT` is the
+one-based index of the prompt it accepts and then ends as a successful turn without doing
+anything, and `MJ_FAKE_ACP_SWALLOW_BANNER` makes it first stream "Compacting..." and
+"Compacting completed." into that turn. The banner variant is the shape issue #970
+reported, and it is the one a session-wide update counter cannot see.
 
-Then, in a new script under `tests/e2e/` following the style of the existing ones:
+The `unanswered-prompt` scenario opens a session on the fake profile against a local-bare
+target, has one prompt answered normally, then has the second swallowed with banners, and
+requires `mj wait` to report the failure. Run it from the repository root:
 
-1. Start the lab, open a session on the `fake` profile.
-2. Send a first prompt and let it be answered normally.
-3. Send a second prompt with the swallow switch set to 2, and run `mj wait` on it.
+    cargo build
+    python3 tests/e2e/reliability_lab.py --scenario unanswered-prompt \
+        --seed 970 --hel target/debug/mj
 
-Expected before the change, on both variants: `mj wait` exits reporting `finished`, and
-the transcript shows the user line with nothing under it. Expected after the change:
-`mj wait` exits reporting `error` with the message "the harness ended the turn without
-answering; the prompt may not have been delivered — resend it", and the transcript carries
-the warning line. The "Compacting..." variant is the one that fails on the unfixed build
-*even with the existing detector in place*, because that detector is defeated by the
-banner; state this explicitly in the test's comment, because it is the whole point.
+On this build it passes:
 
-**Acceptance, as behaviour a person can check.** With the lab running and the swallow
-switch set, `mj -i fix970 wait <session>` prints an error naming the unanswered prompt
-rather than success; the terminal chat shows a line under the prompt saying the harness
-ended the turn without answering; pressing Ctrl-Alt-R with an empty composer restores the
-prompt text; and the web viewer shows the same line with a control that puts the text
-back in the composer.
+    reliability: passed scenario=unanswered-prompt seed=970 leaks=0
 
+and the run's `trace.json` records what `mj wait` printed for each turn:
+
+    answered-turn   -> finished (EndTurn) turn 1 in 0.0s
+                       reliability reply: first seed=970
+    unanswered-turn -> error (prompt_unanswered) turn 2 in 0.0s
+                       ACP prompt returned no session updates: Codex ended the turn
+                       without producing any message, thought or tool call, so this
+                       prompt may never have been acted on. Check the workspace before
+                       resending it, in case the work was done without being reported.
+
+The same scenario was run against the product code of the base commit, with the scenario
+itself unchanged, and failed:
+
+    reliability: failed: a swallowed prompt was reported as success:
+    'finished (EndTurn) turn 2 in 0.0s\n\nCompacting...Compacting completed.'
+
+That is the proof the test is not self-fulfilling: the unfixed build calls the swallowed
+turn a success *even though the pre-existing empty-response check is in it*, because the
+banners defeat that check.
+
+Because a `local-bare` session runs `target/debug/mj-worker`, which `cargo build --bin mj`
+and `cargo test` do not rebuild, run a full `cargo build` before the live test and prove
+the running worker is the one you built:
+
+    strings target/debug/mj-worker | grep -c 'may never have been acted on'   # 1
+
+**Acceptance, as behaviour a person can check.** With the swallow switch set, `mj wait`
+prints `error (prompt_unanswered)` and exits non-zero rather than reporting success; the
+terminal chat shows the warning under the prompt and, with an empty composer, Ctrl-Alt-R
+restores the prompt text under the heading "Prompt was not answered"; and the web viewer
+shows the same warning row with a "Put back in composer" button.
 
 ## Idempotence and Recovery
 
-Every step is repeatable. The commits are additive: commits 1 and 3 add a function and a
-struct field with no behaviour change, commit 2 narrows a counter, and commit 4 changes
-one mapping in the wait path. Any single commit can be reverted without breaking the
-ones before it, except that commit 4 depends on commit 3's field and commit 6 depends on
-commit 5's message text.
+Every step is repeatable, and the live scenario cleans up after itself: it closes the
+session, stops the daemon and fails if any process it owned survived.
 
-No migration is required, and none is permitted by this plan: nothing durable changes
-shape. `TurnSummary` is a query result, not a stored record. If a later revision does add
-a durable field, `MaterializedTurnOutcome` and `MaterializedSession` are
-`#[serde(deny_unknown_fields)]`, so that change is **breaking** and must follow the
-migration rules in `CLAUDE.md` — new revision, raised minimum compatible read/write
-revision in the same transaction, tested with isolated `MJ_CONFIG_DIR` and `MJ_DATA_DIR`.
+The commits are ordered so each stands alone. `c83e6f6a` adds the classifier and changes
+no behaviour. `f9fb1e22` makes the worker count agent output and fail an unanswered turn;
+`6d1255ac` removes a duplicate constant it left behind. `57203c2e` adds the two surface
+affordances, and depends on `f9fb1e22` only for the stop reason it keys on. `de01ae6f`
+adds the live test. Reverting any later commit leaves the earlier ones working.
 
-Milestones 1 and 2 make no protocol change: no new field crosses the worker-to-daemon
-boundary and the HTTP wait response keeps its existing shape, only choosing a different
-existing outcome value. Milestone 4, if it is ever triggered, does change the worker
-state on the wire and requires bumping `PROTOCOL_VERSION` in `mj-client/src/daemon.rs`
-by one.
+No migration is required and none was made: nothing durable changed shape. The verdict
+travels in `TurnOutcomeKind::Completed`'s existing `stop_reason` string, which already
+carries `harness_inactive` and other worker-chosen reasons. This matters because
+`MaterializedTurnOutcome` and `MaterializedSession` (`mj-core/src/state.rs:205-226`) are
+`#[serde(deny_unknown_fields)]`, so a new field there would be an incompatible read for an
+older build and a **breaking** migration under the rules in `CLAUDE.md`. An older reader
+sees an unfamiliar stop reason instead, which it already classifies as an error — the
+cautious answer.
+
+There is no protocol change: no new field crosses the worker-to-daemon boundary and the
+HTTP wait response keeps its shape, choosing a different existing outcome value.
+`PROTOCOL_VERSION` in `mj-client/src/daemon.rs` is untouched. Milestone 4, if it is ever
+triggered, would change the published worker state and would need that bump.
+
+One behaviour changes for existing sessions: a turn a harness ends with `end_turn` and no
+output at all is now an error rather than a success. Automation that treated such a turn
+as finished will start seeing `error (prompt_unanswered)`, which is the intent.
 
 Live-test recovery: if a `fix970` worker survives a daemon stop, terminate it by process
 group before removing the instance directories; removing files under a running writer
 recreates them.
-
 
 ## Artifacts and Notes
 
@@ -626,7 +757,9 @@ The promotion gate as it stands on master, from
         return Ok(None);
     }
 
-The detector as it stands, from `mj-worker/src/acp/drive.rs:1065-1071`:
+The detector as it was before this work, from `mj-worker/src/acp/drive.rs`. The counters
+it compared counted every session update, and it fired for every stop reason but
+`Cancelled`:
 
     pub(super) fn prompt_returned_without_updates(
         stop_reason: &StopReason,
@@ -635,6 +768,38 @@ The detector as it stands, from `mj-worker/src/acp/drive.rs:1065-1071`:
     ) -> bool {
         *stop_reason != StopReason::Cancelled && updates_before == updates_after
     }
+
+and as it is now, reading counters that count only agent output, and judging only a turn
+the harness called finished:
+
+    pub(super) fn prompt_returned_without_updates(
+        stop_reason: &StopReason,
+        updates_before: u64,
+        updates_after: u64,
+    ) -> bool {
+        *stop_reason == StopReason::EndTurn && updates_before == updates_after
+    }
+
+The measured Codex compaction turn, from the `fix970` relay journal, abridged to the
+`sessionUpdate` values and the command boundaries:
+
+    58 command_queued    prompt "/compact"
+    59 command_started
+    63 session_update    tool_call "Compact conversation" (kind think)
+    64 command_queued    prompt "Reply with exactly: SECOND-PROMPT-ANSWERED"
+    68 session_update    tool_call_update completed
+    69 command_completed stop_reason EndTurn
+    70 command_started   the queued prompt, which was answered
+
+The measured Claude compaction turn, from the same instance:
+
+    26 command_queued    prompt "/compact"
+    27 command_started
+    28 session_update    agent_message_chunk "Compacting..."
+    29 session_update    agent_message_chunk "\n\nCompacting failed: Not enough messages to compact."
+    31 command_completed stop_reason EndTurn
+    32 command_queued    prompt "Reply with exactly: SECOND-PROMPT-ANSWERED"
+    33 command_started   which was answered
 
 The compaction banners inside the pinned Claude bridge's `/compact` turn, from
 `@agentclientprotocol/claude-agent-acp@0.73.0`, `dist/acp-agent.js:2147-2168`, abridged:
@@ -660,80 +825,80 @@ schema does not, from `@brokkai/codex-acp@1.11.4`, `dist/index.js:19324-19345`, 
 
 ## Interfaces and Dependencies
 
-No new dependency is added by Milestones 0 to 3. Milestone 4, if triggered, may require a
-newer `agent-client-protocol` crate than the 2.0.0 pinned in `Cargo.lock`.
+No dependency was added or changed. Milestone 4, if it is ever triggered, may require a
+newer `agent-client-protocol` than the 2.0.0 in `Cargo.lock`, whose schema crate 1.5.0 has
+no compaction variant.
 
-In `mj-core/src/acp.rs`, define:
+In `mj-core/src/acp.rs`:
 
-    pub fn session_update_is_agent_output(
-        update: &agent_client_protocol::schema::v1::SessionUpdate,
-    ) -> bool;
+    /// The stop reason recorded for a turn the harness ended without answering.
+    pub const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
 
-In `mj-core/src/transcript.rs`, define:
+    pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool;
+    pub fn session_update_is_compaction_banner(update: &SessionUpdate) -> bool;
+    pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool;
 
-    pub fn item_is_agent_output(item: &TranscriptItem) -> bool;
+In `mj-worker/src/acp/drive.rs`, crate-private:
 
-In `mj-core/src/state.rs`, define:
+    #[derive(Clone, Default)]
+    pub(super) struct AgentOutputCount(Arc<AtomicU64>);
+    impl AgentOutputCount { fn mark(&self); fn get(&self) -> u64 }
 
-    pub enum TurnDelivery { Answered, Unanswered, NotApplicable }
+    pub(super) fn prompt_unanswered_message(harness: HarnessKind) -> String;
 
-    pub fn turn_delivery(
-        outcome: &TurnOutcomeKind,
-        produced_agent_output: bool,
-    ) -> TurnDelivery;
+In `mj-chat/src/chat.rs`, private: `UnsentKind::Unanswered` and
+`ChatState::keep_unanswered_prompt(&MaterializedSession)`.
 
-In `mj-core/src/storage.rs`, `TurnSummary` gains:
+In `mj-controller/src/web/viewer.js`: `PROMPT_UNANSWERED_MARKER` and
+`unansweredPromptFor(entry, lastUserText)`.
 
-    pub produced_agent_output: bool,
+Nothing outside `mj_core::acp` decides what counts as the harness answering, and nothing
+outside `mj_core::activity` may decide whether the next queued command may be dispatched
+if Milestone 3 is ever built.
 
-In `mj-core/src/activity.rs`, only if Milestone 3 is triggered, define:
+## Open Questions for the Maintainer (all resolved)
 
-    pub struct PromotionPolicy { pub settle: Duration, pub cap: Duration }
+The four questions this plan raised at review were answered when it was approved; the
+answers are in the `Decision Log` as maintainer decisions. In short: keep Milestones 3 and
+4 behind their triggers but measure live rather than trusting the bridge sources; report
+an unanswered turn through `mj wait` as an error with its own stop reason and diagnostic
+code; accept the residual false positive only because "output" is defined widely enough
+that a tool-only turn counts as an answer; and restore the prompt into the composer rather
+than resending it.
 
-    pub fn promotion_hold_until_ms(
-        facts: &ActivityFacts,
-        policy: PromotionPolicy,
-        now_ms: i64,
-    ) -> Option<i64>;
-
-Nothing outside `mj_core::activity` may answer "may the next queued command be
-dispatched": `promote_next_queued_command` calls this function and adds no predicate of
-its own.
-
-
-## Open Questions for the Maintainer
-
-These are decisions the plan author recommends but does not own.
-
-1. Is the bridge-source evidence enough to treat the reported compaction window as closed
-   upstream, so Milestone 3 stays behind its trigger rather than being built now?
-   Recommendation: yes. Building a settle window costs a new timer in the relay
-   coordinator and a bound nobody can justify from evidence, to guard a window the pinned
-   bridge no longer opens.
-
-2. Should an unanswered turn make `mj wait` return `error`, or should it get its own
-   `WaitOutcome` value? Recommendation: `error` with the specific message. A new outcome
-   is an API change every caller must learn, and every current caller already treats
-   `error` as "do not proceed", which is the right behaviour here.
-
-3. How much weight should the false positive carry — a harness that genuinely answers
-   with nothing at all would now be reported as unanswered? Recommendation: accept it.
-   Local-only commands forward their result text as assistant output on the pinned
-   bridges, so the observed shape is rare, and "the harness ended the turn without
-   answering" is a true statement about that turn even when nothing was dropped.
-
-4. Is Milestone 2's restore path (reusing the unsent-prompt list and Ctrl-Alt-R) the
-   affordance you want, or should an unanswered prompt be offered as a one-key resend?
-   Recommendation: restore, not resend. Restore puts the person in control, and the
-   duplicate-execution risk of resending is real and unmeasurable from the client side.
-
+One thing worth a later look, noticed while validating and deliberately not changed here:
+`mj wait` prints the failure message twice, once as the outcome message and once as the
+diagnostic, because `WaitDecision::from_outcome` falls back to the diagnostic for the
+message and `wait_report_lines` then prints the diagnostic as well. That is pre-existing —
+`harness_inactive` reads the same way — and fixing it belongs with the wait reporting,
+not with this issue.
 
 ## Revision Note
 
-2026-09-17: first revision, written as phase 1 (plan only) for issue #970. The plan
-departs from the issue's proposed design in one respect, and the reason is recorded in
-`Decision Log`: the issue proposes a clock-driven undelivered state with slow-tool and
-user-shell exclusions, and this plan instead takes the verdict when the turn completes,
-which needs no bound and excludes those cases by construction. The clock-driven hold is
-retained as Milestone 3 behind an explicit trigger, so the issue's design is not
-discarded, only deferred until measurement justifies it.
+2026-09-17: first revision, written as phase 1 (plan only) for issue #970.
+
+2026-09-18: second revision, written as the work was implemented. The changes, and why:
+
+The milestones are rewritten to describe what was built rather than what was proposed,
+because a plan that disagrees with the code it produced is worse than no plan. Milestone 0
+is recorded as done, with its live measurements quoted in `Surprises & Discoveries` and
+abridged in `Artifacts and Notes`; both harnesses hold a queued prompt correctly, so the
+triggers for Milestones 3 and 4 did not fire and those milestones stay unbuilt with their
+specifications intact.
+
+Milestone 1 now computes the verdict in the worker at prompt completion and records it as
+the turn's stop reason, instead of deriving it in the controller from the turn's
+transcript span. The reason is in the `Decision Log`: the worker already holds a per-turn
+count, and a stop reason reaches `mj wait`, the session summary and both surfaces without
+any of them learning a new rule. Two pieces the approved plan did not foresee were added
+because the measurement showed they were needed: compaction banners are excluded from what
+counts as an answer, and a prompt that asked the harness to compact is never judged.
+
+The `Context and Orientation` section now states plainly that `ActivityFacts` holds no
+compaction fact, why it cannot hold one today, and what the harnesses send instead. The
+brief that commissioned this work assumed such a fact existed, and an unmarked false
+premise in a plan is how the next reader inherits it.
+
+`Validation and Acceptance` is rewritten around the tests that now exist, including the
+live scenario's output on this build and its failure on the base commit's product code,
+which is what makes it evidence rather than decoration.

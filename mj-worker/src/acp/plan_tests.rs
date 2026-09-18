@@ -262,7 +262,8 @@ impl PlanProbe {
             },
         }))
         .await;
-        self.result(request, json!({"stopReason": "end_turn"})).await;
+        self.result(request, json!({"stopReason": "end_turn"}))
+            .await;
     }
 
     async fn event(&mut self) -> RuntimeEvent {

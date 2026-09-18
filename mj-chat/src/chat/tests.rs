@@ -2304,7 +2304,6 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
     );
 }
 
-
 /// A prompt the harness ended without answering keeps its text where
 /// Ctrl-Alt-R can put it back, and says so in the transcript (#970).
 #[test]
@@ -2312,16 +2311,19 @@ fn an_unanswered_prompt_is_marked_and_stays_restorable() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let mut session = MaterializedSession::empty("1234567890");
     session.applied_event_ordinal = 9;
-    session.transcript.push(TranscriptItem {
-        stable_id: "user:1".into(),
-        position: 4,
-        latest_content_event_ordinal: None,
-        created_at_ms: 10,
-        last_changed_at_ms: 10,
-        body: TranscriptBody::User {
-            content: vec![serde_json::json!({"type": "text", "text": "rename the module"})],
-        },
-    }.into());
+    session.transcript.push(
+        TranscriptItem {
+            stable_id: "user:1".into(),
+            position: 4,
+            latest_content_event_ordinal: None,
+            created_at_ms: 10,
+            last_changed_at_ms: 10,
+            body: TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "rename the module"})],
+            },
+        }
+        .into(),
+    );
     session.last_turn_outcome = Some(unanswered_outcome(
         mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
     ));

@@ -316,7 +316,11 @@ pub const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
 /// `compact_result`), so they are indistinguishable from an answer unless they
 /// are named. Compaction is not in the ACP schema this build compiles against,
 /// which is why there is nothing better to match on. See issue #970.
-const COMPACTION_BANNERS: &[&str] = &["compacting...", "compacting completed.", "compacting failed"];
+const COMPACTION_BANNERS: &[&str] = &[
+    "compacting...",
+    "compacting completed.",
+    "compacting failed",
+];
 
 /// Whether this update is a bridge's own compaction progress text rather than
 /// anything the agent produced by working.
@@ -347,7 +351,11 @@ pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
     let Some(ContentBlock::Text(first)) = prompt.first() else {
         return false;
     };
-    first.text.trim_start().to_lowercase().starts_with("/compact")
+    first
+        .text
+        .trim_start()
+        .to_lowercase()
+        .starts_with("/compact")
 }
 
 /// Whether this update is the agent doing the work a prompt asked for.
@@ -843,7 +851,6 @@ mod missing_thread_tests {
         .unwrap();
         assert!(session_update_has_native_history(&agent_content));
     }
-
 }
 
 /// What counts as the harness answering a prompt (#970).
@@ -931,7 +938,9 @@ mod agent_output_tests {
     fn only_a_prompt_that_asks_to_compact_is_answered_by_compacting() {
         let text = |value: &str| vec![ContentBlock::Text(TextContent::new(value))];
         assert!(prompt_requests_compaction(&text("/compact")));
-        assert!(prompt_requests_compaction(&text("  /compact keep the plan")));
+        assert!(prompt_requests_compaction(&text(
+            "  /compact keep the plan"
+        )));
         assert!(!prompt_requests_compaction(&text("compact the loop")));
         assert!(!prompt_requests_compaction(&text("/context")));
         assert!(!prompt_requests_compaction(&[]));
