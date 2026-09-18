@@ -7,9 +7,13 @@ use agent_client_protocol::schema::v1::{
     SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions, ToolCallUpdate,
 };
 
+/// Every launch request states the servers Mjolnir owns. A bridge that opens
+/// the session again is a new harness process, and Codex builds the resumed
+/// thread's MCP set from the request alone (#1085), so a resume that sends
+/// none leaves the session without its delegation tools.
 #[test]
-fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
-    let spec = LaunchSpec {
+fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
+    let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
         goal_recovery: Default::default(),
@@ -36,12 +40,39 @@ fn a_new_session_states_an_empty_mcp_set_and_resume_never_sends_one() {
         Some(&serde_json::json!([])),
         "a new session always states its MCP set, even when it is empty"
     );
-    let resumed =
-        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap();
-    assert!(
-        resumed.get("mcpServers").is_none(),
-        "resume must preserve the native server set"
-    );
+    for opened in [
+        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
+        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+    ] {
+        assert!(
+            opened
+                .get("mcpServers")
+                .is_none_or(|servers| servers == &serde_json::json!([])),
+            "a session with no Mjolnir servers asks for none: {opened}"
+        );
+    }
+
+    spec.subagent_mcp_socket = Some("/worker/subagents.sock".into());
+    let names = |request: &serde_json::Value| -> Vec<String> {
+        request
+            .get("mcpServers")
+            .and_then(serde_json::Value::as_array)
+            .expect("every launch request states its MCP set")
+            .iter()
+            .map(|server| server["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    for request in [
+        serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
+        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+    ] {
+        assert_eq!(
+            names(&request),
+            vec!["mj-agents".to_owned()],
+            "the delegation server must survive a relaunch: {request}"
+        );
+    }
 }
 
 #[test]
@@ -4264,6 +4295,148 @@ for line in sys.stdin:
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+/// A replacement bridge is a fresh harness process, and Codex builds the
+/// resumed thread's MCP set out of the `session/resume` request alone, so the
+/// delegation server has to be stated again at every launch. Without this the
+/// session's `mcp__mj_agents__*` tools disappeared after the first daemon or
+/// bridge restart (#1085).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relaunched_codex_session_is_opened_with_the_delegation_mcp_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("second-bridge");
+    let opens = temp.path().join("opens.txt");
+    let script = temp.path().join("restarting_codex.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+import json, os, sys, time
+marker = {marker:?}
+opens = {opens:?}
+
+def write(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+second = os.path.exists(marker)
+mode = {{"id": "interaction_mode", "name": "Mode", "category": "mode",
+        "type": "select", "currentValue": "agent",
+        "options": [{{"value": "agent", "name": "Agent"}}]}}
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get("method"), request.get("id")
+    if ident is None:
+        continue
+    if method == "initialize":
+        write({{"jsonrpc": "2.0", "id": ident, "result": {{
+            "protocolVersion": 1,
+            "agentCapabilities": {{"loadSession": True,
+                                  "sessionCapabilities": {{"resume": {{}}}}}}}}}})
+        continue
+    if method in ("session/new", "session/resume", "session/load"):
+        servers = request.get("params", {{}}).get("mcpServers")
+        names = "none" if servers is None else ",".join(
+            server["name"] for server in servers)
+        with open(opens, "a") as log:
+            log.write(method + " " + names + "\n")
+        write({{"jsonrpc": "2.0", "id": ident, "result": {{
+            "sessionId": "scripted", "configOptions": [mode],
+            "modes": {{"currentModeId": "agent",
+                      "availableModes": [{{"id": "agent", "name": "Agent"}}]}}}}}})
+        continue
+    if method == "session/set_config_option":
+        write({{"jsonrpc": "2.0", "id": ident, "result": {{"configOptions": [mode]}}}})
+        continue
+    if method == "session/prompt":
+        if not second:
+            # The bridge dies on a thread that has been used, the way it does
+            # when the daemon restarts underneath a live session.
+            open(marker, "w").close()
+            time.sleep(0.2)
+            break
+        write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
+            "sessionId": "scripted",
+            "update": {{"sessionUpdate": "agent_message_chunk",
+                       "content": {{"type": "text", "text": "ok"}}}}}}}})
+        write({{"jsonrpc": "2.0", "id": ident, "result": {{"stopReason": "end_turn"}}}})
+        continue
+    write({{"jsonrpc": "2.0", "id": ident, "result": {{}}}})
+"#,
+        ),
+    )
+    .unwrap();
+
+    let (request_tx, request_rx) = mpsc::channel(1);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_mcp_socket: Some(temp.path().join("subagents.sock")),
+        goal_recovery: Default::default(),
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        environment: BTreeMap::new(),
+        cwd: temp.path().to_path_buf(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Codex,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
+        stall_policy: None,
+    };
+    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+
+    let mut started = Vec::new();
+    let mut prompt_sent = false;
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
+            .await
+            .expect("ACP runtime keeps reporting")
+            .expect("event channel stays open");
+        match event {
+            RuntimeEvent::SessionStarted { resumed, .. } => started.push(resumed),
+            RuntimeEvent::SessionConfigured { .. } => {
+                if started.len() == 2 {
+                    break;
+                }
+                if !prompt_sent {
+                    // A thread is only resumed once it has been used.
+                    request_tx
+                        .send(CommandRequest::Prompt {
+                            request_id: "prompt-1".into(),
+                            prompt: vec![ContentBlock::Text(TextContent::new("do work"))],
+                        })
+                        .await
+                        .unwrap();
+                    prompt_sent = true;
+                }
+            }
+            RuntimeEvent::Stopped => panic!("the worker stopped instead of relaunching"),
+            _ => {}
+        }
+    }
+    assert_eq!(started, vec![false, true], "the second open is a resume");
+
+    drop(request_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(10), runtime)
+        .await
+        .expect("closing the command channel must end the runtime")
+        .expect("runtime task does not panic")
+        .expect("a relaunched bridge must not fail the worker");
+
+    assert_eq!(
+        std::fs::read_to_string(&opens).unwrap(),
+        "session/new mj-agents\nsession/resume mj-agents\n",
+        "every launch must carry the delegation server"
+    );
 }
 
 #[cfg(unix)]
