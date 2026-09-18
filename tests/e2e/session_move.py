@@ -105,6 +105,9 @@ def run(lab):
     survivor = pathlib.Path(before_swap["project_directory"]) / "in-place-survivor.txt"
     survivor_content = "survives an in-place harness swap\n" * 4096
     survivor.write_text(survivor_content)
+    # The survivor is untracked, so the status the move must preserve now
+    # includes it.
+    expected_status = lab.git_output(["status", "--porcelain"], cwd=checkout)
     daemon_log = lab.data / "daemon.log"
     log_offset = daemon_log.stat().st_size if daemon_log.exists() else 0
     move("fake", "destination", "discard", "profile")

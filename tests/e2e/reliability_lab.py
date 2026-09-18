@@ -464,7 +464,19 @@ for line in sys.stdin:
     method = message.get("method")
     ident = message.get("id")
     if method == "initialize":
-        result = {"protocolVersion": 1}
+        # The pinned adapter advertises goal control; the worker refuses to
+        # resume a Codex session whose adapter cannot pause a goal.
+        result = {
+            "protocolVersion": 1,
+            "_meta": {
+                "goal": {
+                    "version": 1,
+                    "controlMethod": "_session/goal",
+                    "actions": ["resume", "pause", "clear"],
+                    "resumePolicies": ["pause", "preserve"],
+                },
+            },
+        }
     elif method in ("session/new", "session/load"):
         delay()
         rollout_dir = os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "08", "30")
