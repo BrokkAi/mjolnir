@@ -177,10 +177,7 @@ pub fn validate_network_url(url: &str) -> Result<()> {
             display_url(value)
         );
     }
-    if value == "." || value == ".." || value.starts_with("./") || value.starts_with("../") {
-        bail!("Git URL {} is a local repository path", display_url(value));
-    }
-    if is_windows_absolute_path(value) || value.starts_with('/') || value.starts_with('~') {
+    if crate::path_completion::looks_like_path(value) {
         bail!("Git URL {} is a local repository path", display_url(value));
     }
     if value.starts_with("ext::")
@@ -377,7 +374,7 @@ fn is_object_id(value: &str) -> bool {
         && value.bytes().any(|byte| byte != b'0')
 }
 
-fn is_windows_absolute_path(value: &str) -> bool {
+pub(crate) fn is_windows_absolute_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()

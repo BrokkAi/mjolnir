@@ -684,6 +684,107 @@ fn expanded_combobox_escape_is_local_and_popup_rows_commit() {
     );
 }
 
+/// A path field with a following button, so focus has somewhere to go.
+fn path_form(len: usize, expanded: bool) -> Form<u8> {
+    let mut form = Form::new();
+    form.register(
+        1,
+        ControlKind::PathField {
+            len,
+            selected: 0,
+            expanded,
+        },
+        Rect::new(0, 0, 10, 1),
+        true,
+    );
+    form.register(2, ControlKind::Button, Rect::new(0, 8, 6, 1), true);
+    form.end_frame(1);
+    form
+}
+
+#[test]
+fn path_field_routes_popup_keys() {
+    let mut form = path_form(3, true);
+    assert_eq!(
+        form.handle(&key(KeyCode::Down)).action,
+        Some(Interaction::Select(1, 1))
+    );
+    assert_eq!(form.selected(1), Some(1));
+    assert_eq!(
+        form.handle(&key(KeyCode::Enter)).action,
+        Some(Interaction::PathCommit(1, 1))
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Esc)).action,
+        Some(Interaction::PathDismiss(1))
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Tab)).action,
+        Some(Interaction::PathDismiss(1))
+    );
+    assert_eq!(form.focused(), Some(2));
+}
+
+#[test]
+fn ctrl_space_on_a_path_field_requests_completion() {
+    let mut form = path_form(0, false);
+    assert_eq!(
+        form.handle(&chord(KeyCode::Char(' '), KeyModifiers::CONTROL))
+            .action,
+        Some(Interaction::Complete(1))
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Null)).action,
+        Some(Interaction::Complete(1))
+    );
+}
+
+#[test]
+fn collapsed_path_field_edits_like_a_text_field() {
+    let mut form = path_form(0, false);
+    let typed = key(KeyCode::Char('a'));
+    let Event::Key(event) = typed else {
+        unreachable!("the fixture makes key events")
+    };
+    assert_eq!(
+        form.handle(&Event::Key(event)).action,
+        Some(Interaction::Edit(1, FieldEdit::Key(event)))
+    );
+    assert_eq!(
+        form.handle(&key(KeyCode::Enter)).action,
+        Some(Interaction::Activate(1))
+    );
+}
+
+#[test]
+fn popup_click_commits_and_outside_click_dismisses() {
+    let mut form = path_form(3, true);
+    form.register_popup(
+        1,
+        Rect::new(0, 1, 12, 5),
+        vec![None, Some(0), Some(1), Some(2), None],
+    );
+    form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 3));
+    assert_eq!(
+        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 3))
+            .action,
+        Some(Interaction::PathCommit(1, 1))
+    );
+
+    let mut form = path_form(3, true);
+    form.register_popup(
+        1,
+        Rect::new(0, 1, 12, 5),
+        vec![None, Some(0), Some(1), Some(2), None],
+    );
+    assert_eq!(
+        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 8))
+            .action,
+        Some(Interaction::PathDismiss(1))
+    );
+    assert_eq!(form.focused(), Some(2));
+}
+
 /// A key press carrying modifiers, which the shared `key` fixture cannot make.
 fn chord(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))

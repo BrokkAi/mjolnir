@@ -613,26 +613,33 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::CompleteMountSource {
-            target_template_id,
-            prefix,
-        } => {
+        DashboardAction::CompletePath { host, kind, prefix } => {
+            let input_context = context.dashboard.path_input_context();
             let config = context.controller.config.clone();
-            let requested = prefix.clone();
-            spawn_cancellable_io(
+            let prefix_for_work = prefix.clone();
+            let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
-                "completing attached directory",
+                "completing path",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    config_only_controller(config).complete_mount_source(
-                        &target_template_id,
-                        &requested,
+                    // A completion is worth only a short wait: the person is
+                    // still typing while it runs.
+                    let executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(5));
+                    config_only_controller(config).complete_path(
+                        &host,
+                        &prefix_for_work,
+                        kind,
                         &executor,
                     )
                 },
-                move |result| DashboardIoUpdate::MountCompletions { prefix, result },
+                move |result| DashboardIoUpdate::PathCompletions {
+                    context: input_context,
+                    prefix,
+                    result,
+                },
             );
+            context.track_completion(cancelled);
         }
         DashboardAction::ValidateMountSource {
             target_template_id,

@@ -436,11 +436,12 @@ pub(crate) fn render_notice_log(
     } else {
         let now = std::time::Instant::now();
         let age_width = 8;
-        let text_width = usize::from(list_area.width).saturating_sub(age_width + 1);
-        let rows = history
+        // Every message is kept whole: a long failure wraps after its age
+        // column rather than losing its tail, which is the part that says
+        // what went wrong. The widget wraps by cell, so an unbroken path or
+        // token still wraps instead of running off the edge.
+        let lines = history
             .iter()
-            .skip(dialog.scroll)
-            .take(usize::from(list_area.height))
             .map(|record| {
                 let age = mj_client::usage_format::format_clock(
                     now.saturating_duration_since(record.at).as_secs(),
@@ -455,14 +456,19 @@ pub(crate) fn render_notice_log(
                         format!("{:>age_width$} ", format!("{age} ago")),
                         theme::muted(),
                     ),
-                    Span::styled(
-                        truncate_to_cells(&record.text, text_width, Truncate::PLAIN),
-                        style,
-                    ),
+                    Span::styled(record.text.clone(), style),
                 ])
             })
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(rows), list_area);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let total = paragraph.line_count(list_area.width.max(1));
+        let max_scroll = total.saturating_sub(usize::from(list_area.height));
+        dialog.max_scroll.set(max_scroll);
+        let scroll = dialog.scroll.min(max_scroll);
+        frame.render_widget(
+            paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+            list_area,
+        );
     }
     Dialog::render_actions(
         frame,

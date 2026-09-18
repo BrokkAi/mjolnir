@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Position;
 
 use mj_core::config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
+use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation, State};
 
 use mj_core::targets::{AdditionalMount, MountAccess};
@@ -1315,7 +1316,21 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
     for character in "/opt/cache".chars() {
         ready_key(&mut dashboard, key(KeyCode::Char(character)));
     }
-    dashboard.apply_mount_source_completions("/opt/ca", vec!["/opt/cache/".into()]);
+    // A single candidate is inserted without opening a popup, so Enter still
+    // moves on to the destination.
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "/opt/cache",
+        PathCompletion {
+            candidates: vec!["/opt/cache/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    assert!(!wizard.mounts.source.is_completing());
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
@@ -1398,7 +1413,7 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
 }
 
 #[test]
-fn directory_completion_is_bounded_and_keyboard_selectable() {
+fn directory_completion_lists_every_candidate_and_selects_with_keys() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
@@ -1412,30 +1427,34 @@ fn directory_completion_is_bounded_and_keyboard_selectable() {
     let candidates = (0..12)
         .map(|index| format!("/opt/directory-{index}/"))
         .collect::<Vec<_>>();
-    dashboard.apply_mount_source_completions("/opt/", candidates);
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "/opt/",
+        PathCompletion {
+            candidates: candidates.clone(),
+            insert: None,
+            truncated: false,
+        },
+    );
 
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected directory editor");
     };
-    assert_eq!(wizard.mounts.completion_candidates.len(), 5);
+    // The popup scrolls, so every candidate the host sent is kept.
+    assert_eq!(wizard.mounts.source.completions().len(), candidates.len());
+    let rendered = drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(rendered.contains(" matches "), "{rendered}");
+    assert!(rendered.contains("/opt/directory-0/"), "{rendered}");
+
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected directory editor");
     };
     assert_eq!(wizard.mounts.source, "/opt/directory-1/");
+    assert!(!wizard.mounts.source.is_completing());
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw bounded directory editor");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
+    let rendered = drawn(&mut dashboard, 100, 30).join("\n");
     assert!(rendered.contains("Add directory"));
     assert!(rendered.contains("Cancel"));
 }
@@ -3622,4 +3641,183 @@ fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
         panic!("an aged failure must be re-probed");
     };
     assert_eq!(target_ids, ["podman"]);
+}
+
+fn ctrl_space() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
+}
+
+/// A bare SSH target owns the project directory, so its completions come from
+/// the target's own machine rather than the controller.
+#[test]
+fn project_directory_completes_on_the_target_host() {
+    let mut config = config();
+    config.targets = BTreeMap::from([(
+        "remote".into(),
+        TargetTemplate::SshBare {
+            ssh: SshConnection {
+                host: "example.test".into(),
+                user: None,
+                identity_file: None,
+                extra_args: vec![],
+            },
+            permissions: mj_core::config::PermissionMode::Guardian,
+            workspace_prefix: PathBuf::from("workspaces"),
+        },
+    )]);
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::New(wizard) if wizard.step == WizardStep::ProjectDirectory
+    ));
+    for character in "/srv/p".chars() {
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
+    }
+
+    assert_eq!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::CompletePath {
+            host: CompletionHost::Target("remote".into()),
+            kind: CompletionKind::Directories,
+            prefix: "/srv/p".into(),
+        }
+    );
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "/srv/p",
+        PathCompletion {
+            candidates: vec!["/srv/project/".into(), "/srv/proxy/".into()],
+            insert: Some("/srv/pro".into()),
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the project directory step");
+    };
+    assert_eq!(wizard.project_directory, "/srv/pro");
+    assert!(wizard.project_directory.is_completing());
+
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the project directory step");
+    };
+    assert_eq!(wizard.project_directory, "/srv/proxy/");
+}
+
+/// The bundle source also accepts `owner/repo` and URLs, so only text that
+/// reads as a path asks the controller for directories.
+#[test]
+fn bundle_source_completes_only_for_path_like_text() {
+    let mut dashboard = dashboard_at_new_bundle_editor();
+    type_source(&mut dashboard, "owner/repo");
+    assert_eq!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::None
+    );
+
+    for _ in 0.."owner/repo".len() {
+        ready_key(&mut dashboard, key(KeyCode::Backspace));
+    }
+    type_source(&mut dashboard, "./re");
+    assert_eq!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::CompletePath {
+            host: CompletionHost::Local,
+            kind: CompletionKind::Directories,
+            prefix: "./re".into(),
+        }
+    );
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "./re",
+        PathCompletion {
+            candidates: vec!["./repo/".into(), "./research/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the bundle editor");
+    };
+    assert!(wizard.new_bundle_source.is_completing());
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the bundle editor");
+    };
+    assert_eq!(wizard.new_bundle_source, "./repo/");
+}
+
+/// A reply that arrives after another keystroke belongs to text the field no
+/// longer holds, so it is dropped without touching what was typed.
+#[test]
+fn stale_completion_reply_is_dropped() {
+    let mut dashboard = dashboard_at_mount_editor("/opt");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    wizard.form.get_mut().focus(WizardControl::MountSource);
+    assert!(matches!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::CompletePath { .. }
+    ));
+    let context = dashboard.path_input_context();
+    ready_key(&mut dashboard, key(KeyCode::Char('e')));
+
+    dashboard.apply_path_completions(
+        &context,
+        "/opt",
+        PathCompletion {
+            candidates: vec!["/opt/one/".into(), "/opt/two/".into()],
+            insert: Some("/opt/".into()),
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    assert_eq!(wizard.mounts.source, "/opte");
+    assert!(!wizard.mounts.source.is_completing());
+}
+
+/// Tab keeps moving focus while a popup is open, and the popup closes behind
+/// it rather than staying over the next field.
+#[test]
+fn tab_leaves_the_field_and_closes_the_popup() {
+    let mut dashboard = dashboard_at_mount_editor("/opt");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    wizard.form.get_mut().focus(WizardControl::MountSource);
+    assert!(matches!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::CompletePath { .. }
+    ));
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "/opt",
+        PathCompletion {
+            candidates: vec!["/opt/one/".into(), "/opt/two/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    assert!(wizard.mounts.source.is_completing());
+
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected directory editor");
+    };
+    assert_eq!(wizard.mounts.source, "/opt");
+    assert!(!wizard.mounts.source.is_completing());
+    assert_ne!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::MountSource)
+    );
 }

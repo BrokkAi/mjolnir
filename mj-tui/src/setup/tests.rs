@@ -1926,3 +1926,94 @@ fn the_first_page_groups_its_sections_and_reports_what_each_one_is_set_to() {
         "a first-page section counted its settings instead of reporting them:\n{drawn}"
     );
 }
+
+fn ctrl_space() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
+}
+
+/// An identity file is a file, not a directory, and it lives on the machine
+/// running Mjolnir rather than on the machine it configures.
+#[test]
+fn setup_identity_file_completes_files_locally() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.machines.insert(
+        "builder".into(),
+        serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
+    );
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "builder");
+    choose(&mut dashboard, "identity_file");
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.editor.as_mut().unwrap().input.set_value("/keys/id");
+    dialog.prepare();
+
+    assert_eq!(
+        dashboard.handle_key(ctrl_space()),
+        DashboardAction::CompletePath {
+            host: mj_core::path_completion::CompletionHost::Local,
+            kind: mj_core::path_completion::CompletionKind::Any,
+            prefix: "/keys/id".into(),
+        }
+    );
+    let context = dashboard.path_input_context();
+    dashboard.apply_path_completions(
+        &context,
+        "/keys/id",
+        mj_core::path_completion::PathCompletion {
+            candidates: vec!["/keys/id_ed25519".into(), "/keys/id_rsa".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    let EditorInput::Path(input) = &dialog.editor.as_ref().unwrap().input else {
+        panic!("path editor");
+    };
+    assert!(input.is_completing());
+
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    assert_eq!(
+        dialog.editor.as_ref().unwrap().input.value(),
+        "/keys/id_rsa"
+    );
+}
+
+/// A workspace prefix belongs to the machine it is configured on, so its
+/// completions come from that machine and list directories only.
+#[test]
+fn setup_workspace_prefix_completes_on_its_machine() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.machines.insert(
+        "builder".into(),
+        serde_json::from_value(json!({"kind":"ssh","host":"builder"})).unwrap(),
+    );
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "builder");
+    choose(&mut dashboard, "workspace_prefix");
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    dialog.editor.as_mut().unwrap().input.set_value("/srv/w");
+    dialog.prepare();
+
+    let action = dashboard.handle_key(ctrl_space());
+    let DashboardAction::CompletePath { host, kind, prefix } = action else {
+        panic!("expected a completion request, got {action:?}");
+    };
+    assert_eq!(prefix, "/srv/w");
+    assert_eq!(kind, mj_core::path_completion::CompletionKind::Directories);
+    let mj_core::path_completion::CompletionHost::Machine(machine) = host else {
+        panic!("a target path completes on its own machine");
+    };
+    assert!(matches!(*machine, mj_core::config::Machine::Ssh { .. }));
+}

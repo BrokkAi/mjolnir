@@ -1131,26 +1131,6 @@ pub(crate) fn render_mount_wizard(
                 }),
         );
     }
-    if !mounts.completion_candidates.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Matches (↑/↓ select · Enter choose):",
-            Style::default().fg(theme::palette().muted),
-        ));
-        lines.extend(mounts.completion_candidates.iter().take(5).enumerate().map(
-            |(index, candidate)| {
-                Line::raw(format!(
-                    "{}{}",
-                    if index == mounts.completion_index {
-                        "› "
-                    } else {
-                        "  "
-                    },
-                    candidate
-                ))
-            },
-        ));
-    }
     if let Some(error) = &mounts.error {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -1205,14 +1185,15 @@ pub(crate) fn render_mount_wizard(
             source_row.height,
         ),
     );
+    let source_field = Rect::new(
+        source_row.x.saturating_add(10),
+        source_row.y,
+        field_width,
+        source_row.height,
+    );
     PathField::render(
         frame,
-        Rect::new(
-            source_row.x.saturating_add(10),
-            source_row.y,
-            field_width,
-            source_row.height,
-        ),
+        source_field,
         &mounts.source,
         form,
         WizardControl::MountSource,
@@ -1277,6 +1258,17 @@ pub(crate) fn render_mount_wizard(
         ],
         form,
     );
+    // The completion popup hangs over the rows below the source, so it is
+    // drawn again once those rows are on the screen.
+    if form.focused() == Some(WizardControl::MountSource) {
+        PathField::render(
+            frame,
+            source_field,
+            &mounts.source,
+            form,
+            WizardControl::MountSource,
+        );
+    }
     if mounts.access_combo.is_open(WizardControl::MountAccess) {
         render_access_combo(
             frame,

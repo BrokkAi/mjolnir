@@ -21,6 +21,7 @@ pub mod hex;
 pub mod local_git;
 pub mod local_sockets;
 pub mod login_environment;
+pub mod path_completion;
 pub mod path_input;
 pub mod project_memory;
 pub mod refusal;

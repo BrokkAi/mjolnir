@@ -8,6 +8,7 @@ mod lifecycle;
 mod mbx;
 pub mod move_session;
 mod network_git;
+mod path_completion;
 pub mod profile_config;
 mod provisioning;
 mod readiness;
@@ -550,59 +551,6 @@ impl Controller {
             .get(target_id)
             .context("Unknown path target")?;
         resolve_target_input_path(target, path, executor)
-    }
-
-    /// Complete a mount source on the container engine host, preserving ~/ while editing.
-    pub fn complete_mount_source(
-        &self,
-        target_id: &str,
-        prefix: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Vec<String>> {
-        let target = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?;
-        let home = if mj_core::path_input::needs_home(Path::new(prefix))? {
-            Some(resolve_target_input_path(target, Path::new("~"), executor)?)
-        } else {
-            None
-        };
-        let expanded = mj_core::path_input::expand_home(Path::new(prefix), home.as_deref())?;
-        let mut lookup = expanded.to_string_lossy().into_owned();
-        // Completion is a text protocol: a trailing separator requests children.
-        if prefix.ends_with('/') && !lookup.ends_with('/') {
-            lookup.push('/');
-        }
-        let candidates = match target {
-            TargetTemplate::LocalPodman { .. }
-            | TargetTemplate::LocalDocker { .. }
-            | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::AwsEc2 { .. } => targets::local_directory_completions(&lookup),
-            TargetTemplate::SshPodman { ssh, .. } | TargetTemplate::SshDocker { ssh, .. } => {
-                targets::ssh_directory_completions(&SshTarget::from(ssh), &lookup, executor)?
-            }
-            TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
-                bail!("resource path completion is unsupported for bare targets")
-            }
-        };
-        candidates
-            .into_iter()
-            .map(|candidate| {
-                let Some(home) = &home else {
-                    return Ok(candidate);
-                };
-                let suffix = Path::new(&candidate)
-                    .strip_prefix(home)
-                    .context("Completed path is outside the requested home")?;
-                let mut value = Path::new("~").join(suffix).to_string_lossy().into_owned();
-                if candidate.ends_with('/') && !value.ends_with('/') {
-                    value.push('/');
-                }
-                Ok(value)
-            })
-            .collect()
     }
 
     /// Verify a mount source on the host where Mjolnir will consume it, and report
@@ -1305,12 +1253,8 @@ pub fn resolve_target_input_path(
     if !mj_core::path_input::needs_home(path)? {
         return Ok(path.to_path_buf());
     }
-    match target {
-        TargetTemplate::SshBare { ssh, .. }
-        | TargetTemplate::SshPodman { ssh, .. }
-        | TargetTemplate::SshDocker { ssh, .. } => resolve_ssh_input_path(ssh, path, executor),
-        _ => mj_core::path_input::expand_local(path),
-    }
+    let host = cache_host::CacheHost::for_path_target(target)?;
+    mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
 }
 
 /// Resolve the login home on a configured machine, for the Settings screen's
@@ -1323,40 +1267,10 @@ pub fn resolve_machine_input_path(
     if !mj_core::path_input::needs_home(path)? {
         return Ok(path.to_path_buf());
     }
-    match machine {
-        mj_core::config::Machine::Ssh { ssh, .. } => resolve_ssh_input_path(ssh, path, executor),
-        // An EC2 instance does not exist until a session starts, so the only
-        // home this screen can resolve is this machine's.
-        mj_core::config::Machine::Local { .. } | mj_core::config::Machine::AwsEc2 { .. } => {
-            mj_core::path_input::expand_local(path)
-        }
-    }
-}
-
-fn resolve_ssh_input_path(
-    ssh: &mj_core::config::SshConnection,
-    path: &Path,
-    executor: &impl CommandExecutor,
-) -> Result<PathBuf> {
-    let mut ssh = ssh.clone();
-    ssh.identity_file = ssh
-        .identity_file
-        .as_deref()
-        .map(mj_core::path_input::expand_local)
-        .transpose()?;
-    let command = crate::targets::ssh_command(
-        &SshTarget::from(&ssh),
-        ["sh", "-c", "printf '%s' \"$HOME\""],
-    )
-    .purpose("resolve remote home directory");
-    let output = executor.execute(&command)?;
-    anyhow::ensure!(
-        output.status == 0,
-        "Could not resolve remote home: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let home = String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
-    mj_core::path_input::expand_home(path, Some(Path::new(&home)))
+    // An EC2 instance does not exist until a session starts, so the only home
+    // this screen can resolve is this machine's.
+    let host = cache_host::CacheHost::for_path_machine(machine)?;
+    mj_core::path_input::expand_home(path, Some(&host.home(executor)?))
 }
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {

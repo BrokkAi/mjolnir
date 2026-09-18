@@ -98,6 +98,43 @@ impl DashboardState {
     /// A durable transition record that failed before it could return to an
     /// ordinary state. This is intentionally narrower than `Error`: only
     /// Closing/Destroying records with an explicit error qualify.
+    /// Whether the session's target failed, so there is no worker to attach
+    /// to. Opening one is a decision (read the transcript, or recover it),
+    /// which is why the automatic startup pick and the selection follow
+    /// leave it alone and the band explains instead.
+    pub fn session_failed(&self, session_id: &str) -> bool {
+        self.state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.state == SessionState::Error)
+    }
+
+    /// What to show for a failed session: its recorded error, or a plain
+    /// sentence when the daemon recorded none.
+    pub(crate) fn session_failure_text(&self, session_id: &str) -> String {
+        self.state
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.last_error.clone())
+            .unwrap_or_else(|| "The session's worker is no longer running.".to_owned())
+    }
+
+    /// A daemon notice about a session in another workspace names that
+    /// workspace first, so a footer that cuts the tail still says where to
+    /// look.
+    pub fn notice_naming_workspace(&self, session_id: &str, text: String) -> String {
+        let Some(session) = self.state.sessions.get(session_id) else {
+            return text;
+        };
+        if self.active_workspace_id.as_deref() == Some(session.workspace_id.as_str()) {
+            return text;
+        }
+        let name = self
+            .workspace_display_name(&session.workspace_id)
+            .to_owned();
+        format!("In workspace {name}: {text}")
+    }
+
     pub fn transition_failure_kind(&self, session_id: &str) -> Option<SessionTransitionKind> {
         if self.session_operations.contains_key(session_id) {
             return None;

@@ -1208,6 +1208,80 @@ fn run_viewer_script(name: &str, script: &str) {
     run_web_check(name, script);
 }
 
+/// Live path suggestions are the only place the browser types and asks at
+/// once, so the shipped source has to drop an answer that no longer matches
+/// what the field holds, and accepting a row has to re-announce the edit.
+#[test]
+fn web_path_suggestions_drop_stale_answers_and_re_announce_an_accepted_row() {
+    let source = viewer_source("function attachPathSuggestions(", "\nfunction pathField(");
+    let setup = r#"
+const PATH_SUGGESTION_DELAY_MS = 0;
+const setTimeout = run => run();
+const clearTimeout = () => {};
+const el = (name, className, textContent) => ({
+  tagName: name.toUpperCase(),
+  className: className || '',
+  textContent: textContent === undefined ? '' : textContent,
+  dataset: {},
+  children: [],
+  attributes: {},
+  classList: { add() {}, remove() {} },
+  append(...children) { this.children.push(...children); },
+  replaceChildren(...children) { this.children = children; },
+  setAttribute(key, value) { this.attributes[key] = value; },
+  addEventListener() {},
+});
+const requests = [];
+let pending = null;
+const request = (url, options) => new Promise(resolve => {
+  requests.push({ url, body: JSON.parse(options.body) });
+  pending = resolve;
+});
+class Event { constructor(type) { this.type = type; } }
+const input = {
+  value: '',
+  listeners: new Map(),
+  after(node) { this.next = node; },
+  addEventListener(type, listener) {
+    this.listeners.set(type, [...(this.listeners.get(type) || []), listener]);
+  },
+  dispatchEvent(event) { for (const l of this.listeners.get(event.type) || []) l(event); },
+  fire(type, event = {}) { this.dispatchEvent({ type, preventDefault() {}, ...event }); },
+};
+const document = { activeElement: input };
+const flush = () => new Promise(resolve => setImmediate(resolve));
+"#;
+    let checks = r#"
+attachPathSuggestions(input, { host: () => 'raw', kind: 'directories', applies: () => true });
+const list = input.next;
+
+input.value = '/work/re';
+input.fire('input');
+if (requests.length !== 1) throw Error('the field did not ask for suggestions');
+const answer = { candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false };
+
+// An answer for text the person has moved past is not drawn under them.
+input.value = '/work/rep';
+pending(answer);
+await flush();
+if (list.children.length !== 0) throw Error('a stale answer was rendered');
+
+input.value = '/work/re';
+input.fire('input');
+pending(answer);
+await flush();
+if (list.children.length !== 2) throw Error('the answer was not rendered');
+if (input.value !== '/work/re') throw Error('the typed text was rewritten');
+
+input.fire('keydown', { key: 'ArrowDown' });
+input.fire('keydown', { key: 'Enter' });
+if (input.value !== '/work/repos/') throw Error('Enter did not accept the highlighted row');
+if (requests.length !== 3 || requests[2].body.prefix !== '/work/repos/')
+  throw Error('accepting did not re-announce the edit');
+"#;
+    run_viewer_script("path-suggestions", &format!("{setup}\n{source}\n{checks}"));
+}
+
 #[test]
 fn web_configuration_repair_action_explains_missing_entries_without_a_request() {
     let source = viewer_source("async function runSessionAction(", "sessions.onclick");
@@ -2041,6 +2115,102 @@ async fn a_bundle_preflight_reports_network_sources_and_excludes_local_changes()
     assert!(answer.local_changes_excluded);
     assert_eq!(answer.remote_repositories[0].default_branch, "main");
     assert_eq!(answer.remote_repositories[0].push_urls.len(), 1);
+}
+
+/// The browser names a target and a kind; the controller has to be asked
+/// about that machine, not the controller's own disk, and the candidates
+/// have to reach the browser unchanged.
+#[tokio::test]
+async fn a_path_completion_is_forwarded_with_its_host_and_kind() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/paths/complete")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"target_id":"raw","prefix":"/srv/pr","kind":"any"}"#,
+                ))
+                .unwrap(),
+        ),
+    );
+    let request = preflights.recv().await.expect("the controller was asked");
+    let PreflightRequest::CompletePath(request) = request else {
+        panic!("expected a path completion");
+    };
+    assert_eq!(request.host, CompletionHost::Target("raw".into()));
+    assert_eq!(request.prefix, "/srv/pr");
+    assert_eq!(request.kind, CompletionKind::Any);
+    request
+        .reply
+        .send(Ok(PathCompletion {
+            candidates: vec!["/srv/projects/".into(), "/srv/prompts.txt".into()],
+            insert: Some("/srv/pro".into()),
+            truncated: false,
+        }))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "candidates": ["/srv/projects/", "/srv/prompts.txt"],
+            "insert": "/srv/pro",
+            "truncated": false,
+        })
+    );
+}
+
+/// Neither an unknown target nor an implausible prefix is worth a shell.
+#[tokio::test]
+async fn a_path_completion_rejects_unknown_targets_and_oversized_prefixes() {
+    let long_prefix = "/".repeat(4097);
+    for (body, why) in [
+        (
+            r#"{"target_id":"missing","prefix":"/srv/"}"#.to_owned(),
+            "an unknown target",
+        ),
+        (
+            serde_json::json!({ "prefix": long_prefix }).to_string(),
+            "an oversized prefix",
+        ),
+    ] {
+        let (app, _, _, mut preflights, _) = app();
+        let response = app
+            .oneshot(
+                Request::post("/api/paths/complete")
+                    .header(COOKIE, cookie())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{why}");
+        assert!(
+            preflights.try_recv().is_err(),
+            "{why} reached the controller"
+        );
+    }
+}
+
+/// Completion lists directories on the controller's machines, so it lives
+/// behind the viewer cookie like every other controller question.
+#[tokio::test]
+async fn a_path_completion_requires_a_session() {
+    let (app, _, _, mut preflights, _) = app();
+    let response = app
+        .oneshot(
+            Request::post("/api/paths/complete")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"prefix":"/srv/"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(preflights.try_recv().is_err());
 }
 
 /// Everything an agent writes goes through the Markdown renderer, so the

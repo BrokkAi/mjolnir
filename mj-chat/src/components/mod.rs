@@ -29,9 +29,13 @@ pub use text_layout::{
     Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,
 };
 
-/// A path field with the standard readline editing and cursor behavior.
+/// A path field with the standard readline editing and cursor behavior, plus
+/// an anchored popup of filesystem completions.
 pub struct PathField;
 impl PathField {
+    /// The popup is at most this many rows tall, matching the shared popup shell.
+    const VISIBLE_ROWS: usize = 8;
+
     pub fn render<K: Copy + Eq>(
         frame: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
@@ -39,9 +43,90 @@ impl PathField {
         form: &mut Form<K>,
         id: K,
     ) {
-        TextField::render(frame, area, input, form, id);
+        use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+        use unicode_width::UnicodeWidthStr;
+
+        TextField::render_with_kind(frame, area, input, input.control_kind(), form, id);
+        if !form.is_focused(id) {
+            return;
+        }
+        let bounds = frame.area();
+        if input.is_completing() {
+            let candidates = input.completions();
+            let title = if input.completion_truncated() {
+                " first 50 matches \u{b7} keep typing "
+            } else {
+                " matches \u{b7} \u{2191}/\u{2193} select \u{b7} Enter accept "
+            };
+            let longest = candidates
+                .iter()
+                .map(|text| text.width())
+                .max()
+                .unwrap_or(0);
+            let width = longest
+                .saturating_add(4)
+                .max(usize::from(area.width))
+                .max(title.width().saturating_add(2));
+            let Some((outer, inner)) = AutocompletePopup::render(
+                frame,
+                bounds,
+                area,
+                u16::try_from(width).unwrap_or(u16::MAX),
+                candidates.len().min(Self::VISIBLE_ROWS),
+                title,
+                PopupSide::Below,
+            ) else {
+                return;
+            };
+            let items = candidates
+                .iter()
+                .map(|candidate| ListItem::new(candidate.as_str()))
+                .collect::<Vec<_>>();
+            let mut state = ListState::default();
+            state.select(Some(input.completion_selected()));
+            frame.render_stateful_widget(
+                List::new(items).highlight_style(crate::theme::selection(true)),
+                inner,
+                &mut state,
+            );
+            let offset = state.offset();
+            let mut popup_row_map = vec![None; usize::from(outer.height)];
+            for (row, candidate) in popup_row_map
+                .iter_mut()
+                .enumerate()
+                .skip(1)
+                .take(usize::from(inner.height))
+            {
+                *candidate = offset
+                    .checked_add(row.saturating_sub(1))
+                    .filter(|index| *index < candidates.len());
+            }
+            form.register_popup(id, outer, popup_row_map);
+        } else if input.completion_pending().is_some() {
+            const WAITING: &str = "Completing\u{2026}";
+            let width = WAITING
+                .width()
+                .saturating_add(4)
+                .max(usize::from(area.width));
+            if let Some((_, inner)) = AutocompletePopup::render(
+                frame,
+                bounds,
+                area,
+                u16::try_from(width).unwrap_or(u16::MAX),
+                1,
+                " completing ",
+                PopupSide::Below,
+            ) {
+                frame.render_widget(Paragraph::new(WAITING), inner);
+            }
+        }
     }
+
     pub fn apply(input: &mut crate::path_input::PathInput, edit: FieldEdit) -> EditOutcome {
-        TextField::apply(input, edit)
+        let outcome = TextField::apply(input, edit);
+        if outcome.changed() {
+            input.dismiss_completion();
+        }
+        outcome
     }
 }

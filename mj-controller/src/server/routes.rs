@@ -111,6 +111,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/bundles", post(create_bundle))
         .route("/api/preflight/new", post(preflight_new))
         .route("/api/preflight/resume", post(preflight_resume))
+        .route("/api/paths/complete", post(complete_path))
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(

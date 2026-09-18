@@ -16,6 +16,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       ], bundles, capacity: [], launch_failures: [],
     },
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
+    completions: [],
     holdCreate: null, holdLaunch: null,
     holdPreflight: null,
     worktreeOptions: { available: true, default_create: true },
@@ -49,6 +50,10 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
         local_changes_excluded: !bare,
         managed_worktree: bare ? state.worktreeOptions : { available: false, default_create: false },
       });
+    }
+    if (pathname === '/api/paths/complete') {
+      state.completions.push(route.request().postDataJSON());
+      return json({ candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false });
     }
     if (pathname === '/api/bundles') {
       state.creates.push(route.request().postDataJSON());
@@ -136,6 +141,36 @@ test('raw projects use host-specific recents and preserve edited paths across Ba
   await page.locator('#new-next').click();
   await expect(page.locator('#new-step')).toContainText('/work/custom');
   expect(state.preflights[0]).toMatchObject({ target_id: 'local', project_directory: '/work/custom' });
+});
+
+// Suggestions answer the machine that owns the path and never rewrite what
+// is being typed; a bundle source that is not a path asks nothing at all.
+test('a project directory suggests paths on its own host and a bundle source only when it is one', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page, 'local');
+  const directory = page.locator('#new-project-directory');
+  await directory.fill('/work/re');
+  await expect.poll(() => state.completions.length).toBe(1);
+  expect(state.completions[0]).toEqual({ target_id: 'local', prefix: '/work/re', kind: 'directories' });
+  const rows = page.locator('.field-suggestions .palette-row[role="option"]');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toBeVisible();
+  await expect(directory).toHaveValue('/work/re');
+
+  await directory.press('ArrowDown');
+  await directory.press('Enter');
+  await expect(directory).toHaveValue('/work/repos/');
+  // Accepting a directory asks for its children, on the same host.
+  await expect.poll(() => state.completions.length).toBe(2);
+  expect(state.completions[1]).toEqual({ target_id: 'local', prefix: '/work/repos/', kind: 'directories' });
+
+  await page.locator('#new-back').click();
+  await page.locator('#new-target').getByRole('radio', { name: /^container/ }).check();
+  await page.locator('#new-next').click();
+  await page.getByRole('button', { name: 'Create bundle', exact: true }).click();
+  await page.locator('#new-bundle-source').fill('owner/repo');
+  await page.waitForTimeout(400);
+  expect(state.completions).toHaveLength(2);
 });
 
 test('empty bundle list supports creation, retry, selection, and remote review', async ({ page }) => {

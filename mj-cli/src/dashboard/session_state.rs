@@ -128,6 +128,7 @@ impl DashboardContext {
         };
         if self.dashboard.transition_kind(&selected).is_some()
             || self.dashboard.transition_failure_kind(&selected).is_some()
+            || self.dashboard.session_failed(&selected)
         {
             self.defer_chat_open();
             return;
@@ -368,6 +369,11 @@ impl DashboardContext {
             self.dashboard.focus_prompt();
             for (pane, session_id) in restored {
                 self.dashboard.focus_pane(pane);
+                if self.dashboard.session_failed(&session_id) {
+                    // The band says the session failed; attaching would
+                    // wait on a worker that is gone.
+                    continue;
+                }
                 self.open_chat_session(&session_id);
             }
             self.dashboard.focus_pane(focused);

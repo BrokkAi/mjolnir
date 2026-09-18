@@ -542,3 +542,56 @@ fn rendered_combobox_popup_rows_commit_with_a_mouse_click() {
         Some(Interaction::ComboBoxCommit(1, 1))
     );
 }
+
+/// Renders a focused path field at row 1 of a 40x14 screen and returns the
+/// whole buffer as text.
+fn path_field_screen(input: &crate::path_input::PathInput) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(40, 14)).expect("terminal");
+    let mut form = Form::new();
+    // The popup only follows focus, which a form settles at the end of a pass.
+    form.declare(1, input.control_kind());
+    form.end_frame(1);
+    terminal
+        .draw(|frame| {
+            form.begin_frame();
+            crate::components::PathField::render(
+                frame,
+                Rect::new(0, 1, 12, 1),
+                input,
+                &mut form,
+                1,
+            );
+            form.end_frame(1);
+        })
+        .expect("draw path field");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn path_field_popup_shows_candidates_a_wait_or_nothing() {
+    let mut input = crate::path_input::PathInput::from("~/p");
+    assert!(!path_field_screen(&input).contains("Completing"));
+
+    input.request_completion();
+    assert!(path_field_screen(&input).contains("Completing"));
+
+    assert!(input.apply_completion(
+        "~/p",
+        mj_core::path_completion::PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
+    ));
+    let text = path_field_screen(&input);
+    assert!(text.contains("Enter accept"), "{text}");
+    assert!(text.contains("~/projects/"), "{text}");
+    assert!(text.contains("~/provision/"), "{text}");
+    assert!(!text.contains("Completing"), "{text}");
+}

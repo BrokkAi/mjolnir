@@ -235,8 +235,10 @@ pub enum DashboardAction {
         repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
         retry: Box<DashboardAction>,
     },
-    CompleteMountSource {
-        target_template_id: String,
+    /// Ask the host that owns a path field for its completion candidates.
+    CompletePath {
+        host: mj_core::path_completion::CompletionHost,
+        kind: mj_core::path_completion::CompletionKind,
         prefix: String,
     },
     ValidateMountSource {

@@ -1,30 +1,162 @@
 use super::*;
+use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 
-impl DashboardState {
-    /// Apply a completion response only when the source text has not changed
-    /// since the request left the UI. Typed input always outranks suggestions.
-    pub fn apply_mount_source_completions(&mut self, prefix: &str, candidates: Vec<String>) {
-        match self.mode.clone() {
-            Mode::New(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
-            Mode::Resume(wizard) => self.apply_wizard_mount_completions(wizard, prefix, candidates),
-            _ => {}
+/// A screen that owns path fields the shared completion popup can serve.
+pub(crate) trait CompletesPaths {
+    /// The focused path field, the host that owns its path, and what to list;
+    /// `None` when the focused control is not a completable path.
+    fn focused_path_input(
+        &mut self,
+        dashboard: &DashboardState,
+    ) -> Option<(&mut PathInput, CompletionHost, CompletionKind)>;
+
+    /// Closes the popup of any path field the keyboard has left. Only the
+    /// focused field may keep one: Tab moves focus before the form reports
+    /// the dismissal, and a popup over a field nobody is editing is noise.
+    fn dismiss_unfocused_completions(&mut self) {}
+}
+
+/// Consumes the completion interactions every screen shares, so no screen
+/// repeats the popup's key handling. `Ok(action)` means the interaction was
+/// consumed; `Err` hands it back for the screen's own match.
+pub(crate) fn route_path_completion<K: Copy + Eq, S: CompletesPaths>(
+    dashboard: &DashboardState,
+    screen: &mut S,
+    interaction: Option<Interaction<K>>,
+) -> Result<DashboardAction, Option<Interaction<K>>> {
+    screen.dismiss_unfocused_completions();
+    match interaction {
+        Some(Interaction::Complete(_)) => {
+            let Some((input, host, kind)) = screen.focused_path_input(dashboard) else {
+                return Ok(DashboardAction::None);
+            };
+            match input.request_completion() {
+                Some(prefix) => Ok(DashboardAction::CompletePath { host, kind, prefix }),
+                None => Ok(DashboardAction::None),
+            }
         }
+        Some(Interaction::PathCommit(_, index)) => {
+            if let Some((input, ..)) = screen.focused_path_input(dashboard) {
+                input.select_completion(index);
+                input.accept_completion();
+            }
+            Ok(DashboardAction::None)
+        }
+        Some(Interaction::PathDismiss(_)) => {
+            if let Some((input, ..)) = screen.focused_path_input(dashboard) {
+                input.dismiss_completion();
+            }
+            Ok(DashboardAction::None)
+        }
+        // A list elsewhere on the screen still owns its own selection, so only
+        // a field with an open popup takes this one.
+        Some(Interaction::Select(id, index)) => match screen.focused_path_input(dashboard) {
+            Some((input, ..)) if input.is_completing() => {
+                input.select_completion(index);
+                Ok(DashboardAction::None)
+            }
+            _ => Err(Some(Interaction::Select(id, index))),
+        },
+        other => Err(other),
+    }
+}
+
+/// The focused path field of either wizard: the shared mount source, or a
+/// field the wizard alone has.
+pub(crate) fn focused_wizard_path_input<'a, W: WizardDraft>(
+    wizard: &'a mut W,
+    dashboard: &DashboardState,
+) -> Option<(&'a mut PathInput, CompletionHost, CompletionKind)> {
+    let focused = wizard.form().borrow().focused();
+    if focused == Some(WizardControl::MountSource) {
+        let host = CompletionHost::Target(nth_key(&dashboard.config.targets, wizard.target()));
+        return Some((
+            &mut wizard.mounts_mut().source,
+            host,
+            CompletionKind::Directories,
+        ));
+    }
+    wizard.focused_extra_path_input(dashboard)
+}
+
+/// Closes the popup of every wizard path field that is not focused.
+pub(crate) fn dismiss_unfocused_wizard_completions<W: WizardDraft>(wizard: &mut W) {
+    let focused = wizard.form().borrow().focused();
+    if focused != Some(WizardControl::MountSource) {
+        wizard.mounts_mut().source.dismiss_completion();
+    }
+    wizard.dismiss_unfocused_extra_completions(focused);
+}
+
+impl CompletesPaths for NewWizard {
+    fn focused_path_input(
+        &mut self,
+        dashboard: &DashboardState,
+    ) -> Option<(&mut PathInput, CompletionHost, CompletionKind)> {
+        focused_wizard_path_input(self, dashboard)
     }
 
-    fn apply_wizard_mount_completions<W: WizardDraft>(
+    fn dismiss_unfocused_completions(&mut self) {
+        dismiss_unfocused_wizard_completions(self);
+    }
+}
+
+impl CompletesPaths for ResumeWizard {
+    fn focused_path_input(
         &mut self,
-        mut wizard: W,
+        dashboard: &DashboardState,
+    ) -> Option<(&mut PathInput, CompletionHost, CompletionKind)> {
+        focused_wizard_path_input(self, dashboard)
+    }
+
+    fn dismiss_unfocused_completions(&mut self) {
+        dismiss_unfocused_wizard_completions(self);
+    }
+}
+
+impl DashboardState {
+    /// Apply a completion reply to the field that asked for it. A reply for a
+    /// draft the screen has moved on from is dropped: typed input always
+    /// outranks a suggestion.
+    pub fn apply_path_completions(
+        &mut self,
+        context: &str,
         prefix: &str,
-        candidates: Vec<String>,
+        completion: PathCompletion,
     ) {
-        if wizard.step() != WizardStep::Mounts
-            || wizard.form().borrow().focused() != Some(WizardControl::MountSource)
-            || wizard.mounts().source != prefix
-        {
+        if self.path_input_context() != context {
             return;
         }
-        apply_mount_completions(wizard.mounts_mut(), prefix, candidates);
-        self.mode = wizard.into_mode();
+        // The screen is detached so it can be handed back as `&mut` alongside
+        // the dashboard it reads targets and sessions from.
+        let mode = std::mem::replace(&mut self.mode, Mode::Dashboard);
+        self.mode = match mode {
+            Mode::New(mut wizard) => {
+                apply_focused_completion(&mut wizard, self, prefix, completion);
+                Mode::New(wizard)
+            }
+            Mode::Resume(mut wizard) => {
+                apply_focused_completion(&mut wizard, self, prefix, completion);
+                Mode::Resume(wizard)
+            }
+            Mode::EditContainer(mut editor) => {
+                if apply_focused_completion(&mut editor, self, prefix, completion) {
+                    editor.prepare();
+                }
+                Mode::EditContainer(editor)
+            }
+            Mode::Setup(mut dialog) => {
+                if apply_focused_completion(&mut dialog, self, prefix, completion) {
+                    dialog.prepare();
+                }
+                Mode::Setup(dialog)
+            }
+            Mode::RepositoryOrigin(mut dialog) => {
+                apply_focused_completion(&mut dialog, self, prefix, completion);
+                Mode::RepositoryOrigin(dialog)
+            }
+            other => other,
+        };
     }
 
     /// Apply the host's answer about one mount source. A source whose
@@ -182,10 +314,11 @@ impl DashboardState {
     pub fn path_input_context(&self) -> String {
         let draft = match &self.mode {
             Mode::New(w) => format!(
-                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                "new:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
                 self.config.targets.iter().nth(w.target),
                 w.step,
                 w.project_directory.value(),
+                w.new_bundle_source.value(),
                 w.mounts.source.value(),
                 w.mounts.destination.value(),
                 w.mounts.access
@@ -210,6 +343,12 @@ impl DashboardState {
                 e.source.value(),
                 e.destination.value(),
                 e.access
+            ),
+            Mode::RepositoryOrigin(dialog) => format!(
+                "origin:{}:{}:{}",
+                dialog.session_id,
+                dialog.repository_id,
+                dialog.replacement.value()
             ),
             _ => String::new(),
         };
@@ -244,5 +383,19 @@ impl DashboardState {
                 }
             }
         }
+    }
+}
+
+/// Applies a reply to whichever field of `screen` is focused, answering
+/// whether the field took it.
+fn apply_focused_completion<S: CompletesPaths>(
+    screen: &mut S,
+    dashboard: &DashboardState,
+    prefix: &str,
+    completion: PathCompletion,
+) -> bool {
+    match screen.focused_path_input(dashboard) {
+        Some((input, ..)) => input.apply_completion(prefix, completion),
+        None => false,
     }
 }

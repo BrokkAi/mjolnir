@@ -79,6 +79,60 @@ pub(super) fn spawn_resume_preflight(
     });
 }
 
+/// Answer one path-completion request on its own task.
+///
+/// Listing a directory can mean an SSH round trip, so it stays off the feed
+/// loop and runs under the same supervision, cap and cancellation as a
+/// preflight. A browser that abandons the request, or a controller that is
+/// shutting down, stops the child process rather than waiting for it.
+pub(super) fn spawn_path_completion(
+    jobs: &mut tokio::task::JoinSet<()>,
+    config: &Config,
+    request: crate::server::PathCompletionRequest,
+    termination: &tokio_util::sync::CancellationToken,
+) {
+    let crate::server::PathCompletionRequest {
+        host,
+        prefix,
+        kind,
+        mut reply,
+    } = request;
+    let config = config.clone();
+    let termination = termination.clone();
+    jobs.spawn(async move {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
+        let mut blocking = tokio::task::spawn_blocking(move || {
+            let executor =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(5));
+            config_only_controller(config).complete_path(&host, &prefix, kind, &executor)
+        });
+        let answer = tokio::select! {
+            biased;
+            _ = termination.cancelled() => None,
+            _ = reply.closed() => None,
+            answer = &mut blocking => Some(answer),
+        };
+        let Some(answer) = answer else {
+            drop(cancellation_guard);
+            if let Err(error) = blocking.await {
+                tracing::warn!(%error, "cancelled phone path completion task failed");
+            }
+            return;
+        };
+        let answer = match answer {
+            Ok(answer) => answer.map_err(|error| format!("{error:#}")),
+            Err(error) => {
+                tracing::warn!(%error, "phone path completion task failed");
+                Err(format!("path completion task failed: {error}"))
+            }
+        };
+        if reply.send(answer).is_err() {
+            tracing::debug!("phone path completion reply dropped after client disconnect");
+        }
+    });
+}
+
 /// What resuming this session on this target does to its repository content.
 ///
 /// Anything but a local-checkout conversion is `Ready` and reads nothing:

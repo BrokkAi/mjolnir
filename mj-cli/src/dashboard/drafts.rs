@@ -317,12 +317,32 @@ impl DashboardContext {
         }
     }
 
+    /// Remembers the completion request in flight. Only one is useful at a
+    /// time, so a new one cancels the last.
+    pub(crate) fn track_completion(&mut self, cancelled: Arc<AtomicBool>) {
+        if let Some((_, previous)) = self
+            .completion_job
+            .replace((self.dashboard.path_input_context(), cancelled))
+        {
+            previous.store(true, Ordering::Release);
+        }
+    }
+
     pub(crate) fn cancel_stale_path_input(&mut self) {
+        let context = self.dashboard.path_input_context();
         if self
             .path_input_job
             .as_ref()
-            .is_some_and(|(context, _)| *context != self.dashboard.path_input_context())
+            .is_some_and(|(job_context, _)| *job_context != context)
             && let Some((_, cancelled)) = self.path_input_job.take()
+        {
+            cancelled.store(true, Ordering::Release);
+        }
+        if self
+            .completion_job
+            .as_ref()
+            .is_some_and(|(job_context, _)| *job_context != context)
+            && let Some((_, cancelled)) = self.completion_job.take()
         {
             cancelled.store(true, Ordering::Release);
         }

@@ -10,7 +10,7 @@ default-members = ["mj-core", "mj-review", "mj-checkpoint", "mj-transcript", "mj
 # inherits it with `version.workspace = true`, so all package versions
 # cannot drift apart (RELEASING.md requires them to match).
 [workspace.package]
-version = "2.13.0"
+version = "2.14.0"
 edition = "2024"
 license = "GPL-3.0-only"
 # Each published crate carries a `LICENSE` symlink to the root file. `cargo
@@ -32,16 +32,16 @@ rust-version = "1.96"
 # is repeated here. Keeping every same-release path dependency in this one
 # table lets cargo-release update the version requirements automatically.
 [workspace.dependencies]
-mj-review = { path = "mj-review", package = "brokk-mj-review", version = "2.13.0" }
-mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", version = "2.13.0" }
-mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.13.0" }
+mj-review = { path = "mj-review", package = "brokk-mj-review", version = "2.14.0" }
+mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", version = "2.14.0" }
+mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.14.0" }
 anvil-client = { package = "brokk-anvil-client", version = "0.28.2" }
-mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.13.0", default-features = false }
-mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.13.0" }
-mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.13.0" }
-mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.13.0" }
-mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.13.0" }
-mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.13.0" }
+mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.14.0", default-features = false }
+mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.14.0" }
+mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.14.0" }
+mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.14.0" }
+mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.14.0" }
+mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.14.0" }
 sessionwiki = { package = "brokk-sessionwiki", version = "0.29.0" }
 
 # Every external dependency that two or more crates share is declared once

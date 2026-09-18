@@ -106,7 +106,10 @@ pub struct ImportProfileOption {
 /// burst of background failures that overwrote each other can still be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NoticeLogDialog {
+    /// First wrapped line drawn.
     pub(crate) scroll: usize,
+    /// The largest useful `scroll`, measured by the renderer at its width.
+    pub(crate) max_scroll: std::cell::Cell<usize>,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
@@ -713,6 +716,8 @@ impl DashboardState {
                 form.focus(DialogControl::TargetList);
             }
         }
+        // The field's kind carries its popup state, so it is re-declared on
+        // every event before the form reads keys against it.
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
@@ -902,9 +907,20 @@ impl DashboardState {
         event: Event,
         mut dialog: RepositoryOriginDialog,
     ) -> DashboardAction {
+        // The field's kind carries its popup state, so it is re-declared on
+        // every event before the form reads keys against it.
+        let kind = dialog.replacement.control_kind();
+        dialog.form.get_mut().declare(DialogControl::Field, kind);
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
-        let interaction = result.action;
+        let interaction =
+            match crate::wizards::route_path_completion(self, &mut dialog, result.action) {
+                Ok(action) => {
+                    self.mode = Mode::RepositoryOrigin(dialog);
+                    return action;
+                }
+                Err(interaction) => interaction,
+            };
         match interaction {
             Some(Interaction::Cancel) | Some(Interaction::Activate(DialogControl::Cancel)) => {
                 self.cancel_modal();
@@ -1113,6 +1129,7 @@ impl DashboardState {
     pub(crate) fn begin_notice_log(&mut self) {
         self.mode = Mode::NoticeLog(NoticeLogDialog {
             scroll: 0,
+            max_scroll: std::cell::Cell::new(0),
             form: RefCell::new(Dialog::default()),
         });
     }
@@ -1122,7 +1139,7 @@ impl DashboardState {
         event: Event,
         mut dialog: NoticeLogDialog,
     ) -> DashboardAction {
-        let last = self.notices.history().len().saturating_sub(1);
+        let last = dialog.max_scroll.get();
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
         {
@@ -1346,6 +1363,8 @@ impl DashboardState {
         mut dialog: ConfirmDialog,
         event: Event,
     ) -> DashboardAction {
+        // The field's kind carries its popup state, so it is re-declared on
+        // every event before the form reads keys against it.
         let result = dialog.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
@@ -1534,6 +1553,36 @@ impl DashboardState {
                 self.rebuild_resume_rows();
             }
             None => self.cancel_modal(),
+        }
+    }
+}
+
+impl crate::wizards::CompletesPaths for RepositoryOriginDialog {
+    /// The replacement origin may be a URL, so it completes only while it
+    /// reads as a path on the controller.
+    fn focused_path_input(
+        &mut self,
+        _dashboard: &DashboardState,
+    ) -> Option<(
+        &mut PathInput,
+        mj_core::path_completion::CompletionHost,
+        mj_core::path_completion::CompletionKind,
+    )> {
+        if !self.form.borrow().is_focused(DialogControl::Field)
+            || !mj_core::path_completion::looks_like_path(self.replacement.value())
+        {
+            return None;
+        }
+        Some((
+            &mut self.replacement,
+            mj_core::path_completion::CompletionHost::Local,
+            mj_core::path_completion::CompletionKind::Directories,
+        ))
+    }
+
+    fn dismiss_unfocused_completions(&mut self) {
+        if !self.form.borrow().is_focused(DialogControl::Field) {
+            self.replacement.dismiss_completion();
         }
     }
 }

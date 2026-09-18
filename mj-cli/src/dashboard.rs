@@ -168,7 +168,11 @@ fn startup_session_choice<'a>(
     sessions
         .into_iter()
         .filter(|session| {
-            Some(session.workspace_id.as_str()) == workspace_id && session.state.is_active()
+            Some(session.workspace_id.as_str()) == workspace_id
+                && session.state.is_active()
+                // A failed target has no worker: opening it is a decision
+                // for the person, not a place to start.
+                && session.state != mj_core::state::SessionState::Error
         })
         .max_by(|left, right| {
             activity_at_ms(&left.id)
@@ -303,6 +307,9 @@ pub(crate) struct DashboardContext {
     /// The active global review choice discovery. New profile/model
     /// selections cancel the old request before starting another one.
     pub(crate) path_input_job: Option<(String, Arc<AtomicBool>)>,
+    /// The completion request in flight, with the draft it was asked for. A
+    /// newer request or a changed draft cancels it.
+    pub(crate) completion_job: Option<(String, Arc<AtomicBool>)>,
     pub(crate) review_discovery_cancel: Option<Arc<AtomicBool>>,
     /// The cancellable worker resolving an isolated session's network clone
     /// plan, keyed by the TUI generation that requested it.
@@ -1381,6 +1388,7 @@ impl DashboardContext {
             manual_quota_refresh_generation: None,
             target_test_cancel: None,
             path_input_job: None,
+            completion_job: None,
             review_discovery_cancel: None,
             session_preflight_cancel: None,
             worker_targets_tx,

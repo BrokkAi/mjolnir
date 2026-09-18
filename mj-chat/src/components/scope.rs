@@ -55,6 +55,12 @@ pub enum Interaction<K> {
     ComboBoxCommit(K, usize),
     /// Dismiss an expanded combobox without changing its value.
     ComboBoxDismiss(K),
+    /// Request completions for a path field.
+    Complete(K),
+    /// Accept the highlighted completion.
+    PathCommit(K, usize),
+    /// Close the completion popup without changing the value.
+    PathDismiss(K),
     /// Edit a text field.
     Edit(K, FieldEdit),
     /// Escape requests dismissal of the active form.
@@ -135,6 +141,15 @@ pub enum ControlKind {
         /// Whether the popup is expanded.
         expanded: bool,
     },
+    /// A path text field with a popup of completions.
+    PathField {
+        /// Number of candidates in the popup.
+        len: usize,
+        /// Current popup cursor.
+        selected: usize,
+        /// Whether the popup is open.
+        expanded: bool,
+    },
     /// A horizontally navigable tab strip.
     Tabs {
         /// Number of tabs.
@@ -150,7 +165,11 @@ impl ControlKind {
     }
 
     fn is_field(self) -> bool {
-        matches!(self, Self::TextField)
+        matches!(self, Self::TextField | Self::PathField { .. })
+    }
+
+    fn is_path_field(self) -> bool {
+        matches!(self, Self::PathField { .. })
     }
 
     fn is_checkbox(self) -> bool {
@@ -173,6 +192,7 @@ impl ControlKind {
         match self {
             Self::ChoiceList { selected, .. }
             | Self::ComboBox { selected, .. }
+            | Self::PathField { selected, .. }
             | Self::Tabs { selected, .. } => Some(selected),
             _ => None,
         }
@@ -521,6 +541,22 @@ impl<K: Copy + Eq> Form<K> {
         }
     }
 
+    /// Registers a popup anchored to a control that has already registered
+    /// itself. Unlike [`register_combobox`](Self::register_combobox) this only
+    /// adds the popup geometry, so a path field keeps the cursor map its text
+    /// editor just registered.
+    pub(crate) fn register_popup(
+        &mut self,
+        id: K,
+        popup_area: Rect,
+        popup_row_map: Vec<Option<usize>>,
+    ) {
+        if let Some(control) = self.control_mut(id) {
+            control.popup_area = popup_area;
+            control.popup_row_map = popup_row_map;
+        }
+    }
+
     /// Registers screen cells corresponding to cursors in a wrapped field.
     pub(crate) fn register_with_multiline_cursor_map(
         &mut self,
@@ -573,6 +609,10 @@ impl<K: Copy + Eq> Form<K> {
             || matches!(
                 (control.kind, kind),
                 (ControlKind::ComboBox { len: before, .. }, ControlKind::ComboBox { len: after, .. }) if before != after
+            )
+            || matches!(
+                (control.kind, kind),
+                (ControlKind::PathField { len: before, .. }, ControlKind::PathField { len: after, .. }) if before != after
             )
         {
             control.area = Rect::default();
@@ -828,6 +868,11 @@ impl<K: Copy + Eq> Form<K> {
                     selected: selected.min(len.saturating_sub(1)),
                     expanded,
                 },
+                ControlKind::PathField { len, expanded, .. } => ControlKind::PathField {
+                    len,
+                    selected: selected.min(len.saturating_sub(1)),
+                    expanded,
+                },
                 kind => kind,
             };
         }
@@ -921,7 +966,25 @@ impl<K: Copy + Eq> Form<K> {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let focused = self.focused().filter(|id| self.is_eligible(*id));
+        // Ctrl-Space asks a path field for completions. Some terminals send it
+        // as NUL instead of a modified space, so both spellings are accepted;
+        // neither survives the modifier gate below.
+        if is_press
+            && let Some(id) = focused
+            && self.kind(id).is_path_field()
+            && (key.code == KeyCode::Null
+                || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(' ')))
+        {
+            return Some(EventResult::with_action(Interaction::Complete(id)));
+        }
         if ordinary && is_tab(*key) {
+            if let Some(id) = focused
+                && matches!(self.kind(id), ControlKind::PathField { expanded: true, .. })
+            {
+                // Tab still moves focus; the popup closes behind it.
+                self.focus_pending_sibling(!is_back_tab(*key));
+                return Some(EventResult::with_action(Interaction::PathDismiss(id)));
+            }
             if let Some(id) = focused
                 && let ControlKind::ComboBox {
                     selected,
@@ -941,6 +1004,11 @@ impl<K: Copy + Eq> Form<K> {
                 && matches!(self.kind(id), ControlKind::ComboBox { expanded: true, .. })
             {
                 return Some(EventResult::with_action(Interaction::ComboBoxDismiss(id)));
+            }
+            if let Some(id) = focused
+                && matches!(self.kind(id), ControlKind::PathField { expanded: true, .. })
+            {
+                return Some(EventResult::with_action(Interaction::PathDismiss(id)));
             }
             return Some(EventResult::with_action(Interaction::Cancel));
         }
@@ -967,6 +1035,27 @@ impl<K: Copy + Eq> Form<K> {
                 return Some(EventResult::handled());
             }
             return None;
+        }
+        // An open completion popup takes the navigation keys and Enter; every
+        // other key, including letters, stays text so typing keeps editing.
+        if ordinary
+            && let ControlKind::PathField {
+                len,
+                selected,
+                expanded: true,
+            } = kind
+        {
+            if is_press && key.code == KeyCode::Enter {
+                return Some(EventResult::with_action(Interaction::PathCommit(
+                    id, selected,
+                )));
+            }
+            if !matches!(key.code, KeyCode::Char(_))
+                && let Some(next) = list_selection(key.code, key.modifiers, selected, len)
+            {
+                self.set_selected(id, next);
+                return Some(EventResult::with_action(Interaction::Select(id, next)));
+            }
         }
         if kind.is_field() {
             if is_press && ordinary && key.code == KeyCode::Enter {
@@ -1211,6 +1300,11 @@ impl<K: Copy + Eq> Form<K> {
                                     selected,
                                     expanded: true,
                                 } if control.enabled => Some((id, len, selected)),
+                                ControlKind::PathField {
+                                    len,
+                                    selected,
+                                    expanded: true,
+                                } if control.enabled => Some((id, len, selected)),
                                 _ => None,
                             })
                         }
@@ -1258,8 +1352,26 @@ impl<K: Copy + Eq> Form<K> {
                                 self.cancel_pointer();
                                 return Some(EventResult::handled());
                             }
-                            let in_popup =
-                                kind.is_combo_box() && control.popup_area.contains((x, y).into());
+                            // A press on another control closes an open
+                            // completion popup. Focus follows the press, but
+                            // the press itself only dismisses; the new control
+                            // answers the next click.
+                            if let Some(previous) =
+                                self.focused().filter(|previous| *previous != id)
+                                && matches!(
+                                    self.kind(previous),
+                                    ControlKind::PathField { expanded: true, .. }
+                                )
+                            {
+                                self.cancel_pointer();
+                                self.focus(id);
+                                return Some(EventResult::with_action(Interaction::PathDismiss(
+                                    previous,
+                                )));
+                            }
+                            let control = self.control(id)?;
+                            let in_popup = (kind.is_combo_box() || kind.is_path_field())
+                                && control.popup_area.contains((x, y).into());
                             if in_popup {
                                 let row = usize::from(y.saturating_sub(control.popup_area.y));
                                 if control.popup_row_map.get(row).copied().flatten().is_none() {
@@ -1286,6 +1398,14 @@ impl<K: Copy + Eq> Form<K> {
                                 self.last_click = None;
                             }
                             self.focus(id);
+                            // A press inside the popup is a row click, not a
+                            // place-the-cursor click, so it arms the gesture
+                            // before the field's editor claims it.
+                            if in_popup && kind.is_path_field() {
+                                self.pressed_target = target;
+                                self.pointer_owner = Some(PointerOwner::Control(id));
+                                return Some(EventResult::handled());
+                            }
                             if kind.is_field() || editor {
                                 return Some(EventResult::with_action(Interaction::Edit(
                                     id,
@@ -1418,6 +1538,18 @@ impl<K: Copy + Eq> Form<K> {
                     Some(Interaction::ComboBoxDismiss(id))
                 } else {
                     Some(Interaction::Activate(id))
+                }
+            }
+            ControlKind::PathField { expanded, .. } => {
+                if expanded && control.popup_area.contains((x, y).into()) {
+                    let row = usize::from(y.saturating_sub(control.popup_area.y));
+                    let index = control.popup_row_map.get(row).copied().flatten()?;
+                    self.set_selected(id, index);
+                    Some(Interaction::PathCommit(id, index))
+                } else {
+                    // A click in the field itself keeps the cursor placement
+                    // the press already emitted.
+                    None
                 }
             }
             ControlKind::TextField => None,
