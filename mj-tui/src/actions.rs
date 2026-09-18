@@ -32,6 +32,7 @@ pub enum CommandId {
     MoveSession,
     ForceDestroySession,
     MarkAllRead,
+    FilterSessions,
     NextAttention,
     PreviousAttention,
     CancelOperation,
@@ -447,6 +448,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::FilterSessions,
+        label: "Search sessions",
+        description: "Type to keep only the sessions whose name, project, profile, or target matches. The letters b, w, i, d, and a keep only blocked, working, idle, or done sessions, or all of them.",
+        scope: Scope::Sessions,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('/'), "/")],
+        action: None,
+        footer: footer_word!("search"),
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::NextAttention,
         label: "Next session needing you",
         description: "Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.",
@@ -616,7 +629,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ManageTargets,
         label: "Manage runtimes",
-        description: "Add a runtime and choose the machine it runs on.",
+        description: "Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.",
         scope: Scope::Settings,
         pane_keys: &[],
         action: Some(KeyAction::ManageTargets),
@@ -867,12 +880,12 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
 /// again in the palette only lengthens the search. The keyboard chords, footer
 /// hints, and onboarding buttons that run them are unaffected.
 const PALETTE_HIDDEN: &[CommandId] = &[
-    CommandId::Palette,          // already open when the list is drawn
-    CommandId::Workspaces,       // the pinned ☰ in the Workspaces pane
-    CommandId::NewSessionWizard, // the Create button in the Sessions pane
-    CommandId::ResumeDialog,     // the Resume button in the Sessions pane
-    CommandId::SwitchWorkspace,  // the numbered keys act on the visible tab strip
+    CommandId::Palette,         // already open when the list is drawn
+    CommandId::SwitchWorkspace, // the numbered keys act on the visible tab strip
 ];
+
+/// How many commands the palette remembers under its Recent heading.
+pub(crate) const RECENT_COMMANDS: usize = 5;
 
 /// Whether [`palette_entries`](crate::palette::palette_entries) skips `id`.
 pub(crate) fn hidden_from_palette(id: CommandId) -> bool {
@@ -1002,6 +1015,13 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        // Commands a person reaches for by name are worth remembering; the
+        // pane keys and the palette itself are not.
+        if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {
+            self.recent_commands.retain(|recent| *recent != id);
+            self.recent_commands.push_front(id);
+            self.recent_commands.truncate(RECENT_COMMANDS);
+        }
         if matches!(id, CommandId::StopSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
@@ -1083,6 +1103,10 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),
+            CommandId::FilterSessions => {
+                self.begin_sessions_filter();
+                DashboardAction::None
+            }
             CommandId::NextAttention => self.step_attention(1),
             CommandId::PreviousAttention => self.step_attention(-1),
             CommandId::CancelOperation => {
@@ -1271,7 +1295,9 @@ mod tests {
         // Still dispatchable: the pinned hamburger runs it through
         // `run_available_command`, which needs the command to stay available.
         assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
-        assert!(hidden_from_palette(CommandId::Workspaces));
+        // Listed in the palette too: the button is one way in, but a person
+        // who types "work" expects to find it.
+        assert!(!hidden_from_palette(CommandId::Workspaces));
     }
 
     /// The footer, the help overlay, and the palette all read one command per
@@ -1295,17 +1321,14 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_omits_only_commands_with_a_pinned_button() {
+    fn the_palette_omits_only_itself_and_the_numbered_workspace_keys() {
+        for id in [CommandId::Palette, CommandId::SwitchWorkspace] {
+            assert!(hidden_from_palette(id), "{id:?}");
+        }
         for id in [
             CommandId::Workspaces,
             CommandId::NewSessionWizard,
             CommandId::ResumeDialog,
-            CommandId::Palette,
-            CommandId::SwitchWorkspace,
-        ] {
-            assert!(hidden_from_palette(id), "{id:?}");
-        }
-        for id in [
             CommandId::RestartSession,
             CommandId::OpenConfig,
             CommandId::WebViewer,

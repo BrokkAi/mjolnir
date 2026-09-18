@@ -97,6 +97,62 @@ pub(crate) enum SessionsRow {
     Session { index: usize, expanded: bool },
 }
 
+/// The Sessions pane's filter: free text and an optional attention state.
+///
+/// `editing` means typed characters go into `query`; otherwise the pane's
+/// plain keys keep their meaning and the filter merely stays in force.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionsFilter {
+    pub query: String,
+    pub state: Option<SessionStateFilter>,
+    pub editing: bool,
+}
+
+/// The attention states the Sessions pane can be narrowed to, with the
+/// letters that pick them (the same letters as herdr's navigator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStateFilter {
+    /// `b`: waiting for input or failed.
+    Blocked,
+    /// `w`: a turn or background work in progress.
+    Working,
+    /// `i`: idle with nothing unread.
+    Idle,
+    /// `d`: finished with an unread answer.
+    Done,
+}
+
+impl SessionStateFilter {
+    pub(crate) fn from_letter(letter: char) -> Option<Option<Self>> {
+        Some(match letter {
+            'a' => None,
+            'b' => Some(Self::Blocked),
+            'w' => Some(Self::Working),
+            'i' => Some(Self::Idle),
+            'd' => Some(Self::Done),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Done => "done",
+        }
+    }
+
+    pub(crate) fn admits(self, level: AttentionLevel) -> bool {
+        match self {
+            Self::Blocked => matches!(level, AttentionLevel::Waiting | AttentionLevel::Failed),
+            Self::Working => level == AttentionLevel::Working,
+            Self::Idle => matches!(level, AttentionLevel::Idle | AttentionLevel::Inactive),
+            Self::Done => level == AttentionLevel::Unread,
+        }
+    }
+}
+
 /// The full-height session sidebar, targets, and quotas.
 pub(crate) const DASHBOARD_PANE_COUNT: usize = 3;
 
@@ -691,6 +747,10 @@ pub struct DashboardState {
     /// the selected session anchored to the conversation.
     pub(crate) session_action_focus: Option<CommandId>,
     pub(crate) session_menu_ids: Vec<String>,
+    /// The Sessions pane's search and state filter, when one is open.
+    pub(crate) sessions_filter: Option<SessionsFilter>,
+    /// The commands run lately, newest first, for the palette's Recent group.
+    pub(crate) recent_commands: std::collections::VecDeque<CommandId>,
     /// The rows the open resume dialog shows, derived from the records, the
     /// scans, and the dialog's own search. Rebuilt where those change and once
     /// a second for the activity labels; empty when no dialog is open.
@@ -860,6 +920,8 @@ impl DashboardState {
             surface_form: RefCell::new(mj_chat::components::Form::default()),
             session_action_focus: None,
             session_menu_ids: Vec::new(),
+            sessions_filter: None,
+            recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
             resume_hit_counts: [0; 3],
             session_row_areas: Vec::new(),

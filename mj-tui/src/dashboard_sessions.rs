@@ -186,6 +186,147 @@ impl DashboardState {
     /// visible regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
+        let sessions = self.ordered_sessions_unfiltered();
+        let Some(filter) = self.sessions_filter.as_ref() else {
+            return sessions;
+        };
+        sessions
+            .into_iter()
+            .filter(|session| self.session_matches_filter(session, filter))
+            .collect()
+    }
+
+    /// Whether one session survives the Sessions pane filter: its state is
+    /// admitted and the query is found in its name, project, profile, or
+    /// target, ignoring case.
+    fn session_matches_filter(&self, session: &SessionRecord, filter: &SessionsFilter) -> bool {
+        if let Some(state) = filter.state
+            && !state.admits(self.attention_level(&session.id))
+        {
+            return false;
+        }
+        let query = filter.query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let source = self.project_source(session);
+        [
+            session.display_title().to_lowercase(),
+            session.id.to_lowercase(),
+            source.short.to_lowercase(),
+            source.full.to_lowercase(),
+            session.last_profile.to_lowercase(),
+            session.target_template_id.to_lowercase(),
+        ]
+        .iter()
+        .any(|field| field.contains(&query))
+    }
+
+    /// Opens the Sessions filter for typing, keeping any state filter that
+    /// is already in force.
+    pub(crate) fn begin_sessions_filter(&mut self) {
+        let filter = self
+            .sessions_filter
+            .get_or_insert_with(SessionsFilter::default);
+        filter.editing = true;
+        self.focus_sessions();
+    }
+
+    /// The text the pane title shows for the filter in force, or empty.
+    pub(crate) fn sessions_filter_label(&self) -> String {
+        let Some(filter) = self.sessions_filter.as_ref() else {
+            return String::new();
+        };
+        let mut parts = Vec::new();
+        if filter.editing || !filter.query.is_empty() {
+            parts.push(format!("/{}", filter.query));
+        }
+        if let Some(state) = filter.state {
+            parts.push(state.label().to_owned());
+        }
+        parts.join(" · ")
+    }
+
+    /// Answers a key for the Sessions filter, or `None` when the filter does
+    /// not claim it. While editing, printable keys are text and the arrows
+    /// still move the selection; `Enter` keeps the filter and returns the
+    /// letters to the pane; `Esc` clears the text, and a second `Esc` clears
+    /// the state filter too. When not editing, the state letters narrow the
+    /// list and `Esc` drops the whole filter.
+    pub(crate) fn handle_sessions_filter_key(&mut self, key: KeyEvent, plain: bool) -> Option<()> {
+        let editing = self
+            .sessions_filter
+            .as_ref()
+            .is_some_and(|filter| filter.editing);
+        if editing {
+            self.set_session_action_focus(None);
+            let filter = self.sessions_filter.as_mut()?;
+            match key.code {
+                KeyCode::Enter => {
+                    filter.editing = false;
+                    if filter.query.is_empty() && filter.state.is_none() {
+                        self.sessions_filter = None;
+                    }
+                }
+                KeyCode::Esc => {
+                    if filter.query.is_empty() {
+                        self.sessions_filter = None;
+                    } else {
+                        filter.query.clear();
+                    }
+                }
+                KeyCode::Backspace => {
+                    filter.query.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    filter.query.clear();
+                }
+                KeyCode::Char(character)
+                    if !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    filter.query.push(character);
+                }
+                _ => return None,
+            }
+            self.clamp_selections();
+            return Some(());
+        }
+        if !plain {
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc if self.sessions_filter.is_some() => {
+                self.sessions_filter = None;
+            }
+            KeyCode::Char(letter) if SessionStateFilter::from_letter(letter).is_some() => {
+                let state = SessionStateFilter::from_letter(letter)?;
+                match (state, self.sessions_filter.as_mut()) {
+                    (None, None) => return None,
+                    (None, Some(filter)) => {
+                        filter.state = None;
+                        if filter.query.is_empty() {
+                            self.sessions_filter = None;
+                        }
+                    }
+                    (Some(state), Some(filter)) => filter.state = Some(state),
+                    (Some(state), None) => {
+                        self.sessions_filter = Some(SessionsFilter {
+                            query: String::new(),
+                            state: Some(state),
+                            editing: false,
+                        });
+                    }
+                }
+            }
+            _ => return None,
+        }
+        self.clamp_selections();
+        Some(())
+    }
+
+    fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
         if let Some(parent_id) = self.subagent_parent_id.as_deref() {
             let mut children = self
                 .state
@@ -486,6 +627,15 @@ impl DashboardState {
         if let Some(session) = self.state.sessions.get(&target.session_id) {
             let key = self.project_source(session).key;
             self.collapsed_project_keys.remove(&key);
+        }
+        // A filter that hides the session the person asked for is no longer
+        // what they want.
+        if !self
+            .ordered_sessions()
+            .iter()
+            .any(|session| session.id == target.session_id)
+        {
+            self.sessions_filter = None;
         }
         self.select_active_session(&target.session_id);
         self.open_selected_session()

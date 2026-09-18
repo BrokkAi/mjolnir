@@ -75,6 +75,15 @@ The Sessions pane keeps **Create** and **Resume** above the session list. They
 remain available when the list is empty or filtered. Both Create shortcuts open
 the full creation wizard; Resume searches every non-live session.
 
+Press `/` in Sessions to search the live list. Typing narrows it to sessions
+whose name, project, profile, or target contains the text, and the pane title
+shows the query. `Enter` keeps the filter and hands the letters back to the
+pane; `Esc` clears the text, and a second `Esc` clears the whole filter. The
+letters `b`, `w`, `i`, and `d` keep only blocked (waiting or failed),
+working, idle, or done (unread) sessions, `a` shows all again, and a state
+filter composes with the search text. Switching workspace clears the filter,
+and so does jumping with `prefix+o` to a session the filter would hide.
+
 Normal session rows use four lines: the session name, one metadata line, and
 two wrapped output lines. The metadata keeps the profile, target, and useful
 status details together; the output shows the latest reply, tool activity, or
@@ -94,6 +103,9 @@ Pane-specific actions are deliberately small:
 | Sessions | `n` / `N` | Open the full session creation wizard |
 | Sessions | `Space` | Fold or unfold the selected project |
 | Sessions | `1`–`9` | Fold or unfold the numbered project |
+| Sessions | `/` | Search sessions by name, project, profile, or target |
+| Sessions | `b` / `w` / `i` / `d` / `a` | Show only blocked, working, idle, or done sessions, or all |
+| Sessions | `Esc` | Clear the search text, then the whole filter |
 | Targets | `Enter` or `e` | Open target actions, including test and rename |
 | Quota | `Enter` or `e` | Edit the selected profile configuration ID |
 
@@ -195,6 +207,8 @@ Click **Commands** or press `prefix+:` to expose both shortcut-backed and palett
   </a>
   <figcaption>Type to filter commands. Unavailable actions remain visible with the reason they cannot run.</figcaption>
 </figure>
+
+Matching is fuzzy: `cre` finds **Create session** and `mvs` finds **Move session**, with a command whose label starts with the query first, then in-order matches on the label, then commands whose description contains the text. With an empty query the last five commands you ran appear under **Recent** before the groups. Create, Resume, and Workspaces are listed like every other command, so a search finds them even though they also have buttons.
 
 Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, Restart, and Delete. Stop, Restart, Move, and Delete have no keyboard shortcut: they are available from the palette and from a session row's **⋯** menu only, so a mis-hit key cannot stop a live session. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop and Restart run without confirmation, and Stop also retries a stop that failed part-way. Delete permanently removes the session, its target, and its recovery archive after a Yes/No choice; `y` accepts, `n` cancels. The palette is also how you discover useful commands that have no dedicated key.
 

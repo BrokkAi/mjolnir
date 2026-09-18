@@ -2716,3 +2716,158 @@ fn priority_order_lists_waiting_first_without_project_headings() {
         .collect::<Vec<_>>();
     assert_eq!(ids[0], "done");
 }
+
+#[test]
+fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "qui".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Sessions · /qui")),
+        "{lines:#?}"
+    );
+
+    // Enter keeps the filter and returns the letters to the pane; `j` moves
+    // again instead of typing.
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+
+    // A query nothing matches says so instead of showing an empty pane.
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for character in "zzz".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert!(ids(&dashboard).is_empty());
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("No sessions match")),
+        "{lines:#?}"
+    );
+
+    // Esc clears the text, and Esc again drops the filter.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(ids(&dashboard), ["asks"]);
+    dashboard.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(ids(&dashboard), ["done"]);
+    dashboard.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(ids(&dashboard), ["quiet"]);
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Sessions · idle")),
+        "{lines:#?}"
+    );
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    assert!(dashboard.sessions_filter.is_none());
+
+    // The state filter and the text filter compose.
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Char('q')));
+    assert!(ids(&dashboard).is_empty());
+    dashboard.handle_key(key(KeyCode::Backspace));
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        ids(&dashboard),
+        ["asks"],
+        "typing `a` edits the query while editing"
+    );
+
+    // Jumping to a session the filter hides drops the filter: with both
+    // questions answered, `done` (unread, hidden by the blocked filter) is
+    // the only entry left in the queue.
+    dashboard.handle_key(key(KeyCode::Enter));
+    for id in ["asks", "remote"] {
+        dashboard
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    assert_eq!(
+        chord(&mut dashboard, CommandId::NextAttention),
+        DashboardAction::Open {
+            session_id: "done".into()
+        }
+    );
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    open_palette(&mut dashboard);
+    for character in "cre".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    let Mode::Palette(palette) = &dashboard.mode else {
+        panic!("palette open");
+    };
+    assert_eq!(palette.entries[0].id, CommandId::NewSessionWizard);
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    // A subsequence query ranks a word-start match above a description hit.
+    open_palette(&mut dashboard);
+    for character in "mvs".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    let Mode::Palette(palette) = &dashboard.mode else {
+        panic!("palette open");
+    };
+    assert_eq!(
+        palette.entries[0].id,
+        CommandId::MoveSession,
+        "{:?}",
+        palette.entries
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    // Running a command puts it under Recent the next time the palette opens
+    // with an empty query.
+    chord(&mut dashboard, CommandId::MarkAllRead);
+    open_palette(&mut dashboard);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let recent = lines
+        .iter()
+        .position(|line| line.contains("Recent"))
+        .expect("Recent heading");
+    assert!(lines[recent + 1].contains("Mark all read"), "{lines:#?}");
+}

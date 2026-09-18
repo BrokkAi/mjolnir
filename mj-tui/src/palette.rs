@@ -40,6 +40,9 @@ use crate::{DashboardAction, DashboardState, Focus, Mode};
 pub(crate) struct PaletteEntry {
     pub(crate) id: CommandId,
     pub(crate) availability: Availability,
+    /// Listed under the Recent heading because it was run lately, ahead of
+    /// its own group.
+    pub(crate) recent: bool,
 }
 
 /// The open palette.
@@ -135,34 +138,75 @@ fn scope_order(dashboard: &DashboardState) -> Vec<Scope> {
     order
 }
 
-/// Ranks candidates the way the composer's completion does: every label that
-/// starts with the query first, and only if none does, everything whose label
-/// or description contains it.
+/// How well `query` matches a command, higher being better, or `None` when
+/// it does not match at all.
 ///
-/// This is the rule of `matching_indices` in `src/chat/autocomplete.rs`,
-/// copied rather than shared because the two crates have no common home for it
-/// yet. M4 of this plan proposes that home.
+/// A label that starts with the query beats everything. Otherwise the query's
+/// characters must appear in the label in order (so `cre` finds "Create
+/// session" and `mvs` finds "Move session"), scored by how many land on the
+/// start of a word and how many sit next to each other. A query found only in
+/// the description ranks last, so a word from the description still finds the
+/// command without outranking a label hit.
+pub(crate) fn match_score(label: &str, description: &str, query: &str) -> Option<u32> {
+    let query = query.to_lowercase();
+    let label_lower = label.to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    if label_lower.starts_with(&query) {
+        return Some(10_000);
+    }
+    if let Some(score) = subsequence_score(&label_lower, &query) {
+        return Some(1_000 + score);
+    }
+    description.to_lowercase().contains(&query).then_some(100)
+}
+
+/// The in-order match of `query` in `text`, scored for word starts and
+/// adjacency, or `None` when a character of the query never appears.
+fn subsequence_score(text: &str, query: &str) -> Option<u32> {
+    let mut score = 0u32;
+    let mut previous_index: Option<usize> = None;
+    let mut previous_char = ' ';
+    let mut chars = text.char_indices().peekable();
+    for wanted in query.chars() {
+        loop {
+            let (index, found) = chars.next()?;
+            if found == wanted {
+                if !previous_char.is_alphanumeric() {
+                    score += 30;
+                }
+                if previous_index
+                    .is_some_and(|previous| previous + previous_char.len_utf8() == index)
+                {
+                    score += 20;
+                }
+                previous_index = Some(index);
+                previous_char = found;
+                break;
+            }
+            previous_char = found;
+        }
+    }
+    // Fewer leftover characters means a tighter match.
+    Some(score + 10u32.saturating_sub(text.len().saturating_sub(query.len()).min(10) as u32))
+}
+
+/// Orders the entries by [`match_score`], keeping registry order among
+/// equals so the groups stay together when the query is broad.
 fn rank(entries: Vec<PaletteEntry>, query: &str) -> Vec<PaletteEntry> {
     if query.is_empty() {
         return entries;
     }
-    let query = query.to_lowercase();
-    let prefix = entries
-        .iter()
-        .filter(|entry| spec(entry.id).label.to_lowercase().starts_with(&query))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !prefix.is_empty() {
-        return prefix;
-    }
-    entries
+    let mut scored = entries
         .into_iter()
-        .filter(|entry| {
+        .filter_map(|entry| {
             let spec = spec(entry.id);
-            spec.label.to_lowercase().contains(&query)
-                || spec.description.to_lowercase().contains(&query)
+            match_score(spec.label, spec.description, query).map(|score| (score, entry))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, entry)| entry).collect()
 }
 
 /// Every command the palette would list for `query`, in drawing order.
@@ -184,8 +228,28 @@ pub(crate) fn palette_entries(dashboard: &DashboardState, query: &str) -> Vec<Pa
             entries.push(PaletteEntry {
                 id: spec.id,
                 availability,
+                recent: false,
             });
         }
+    }
+    if query.is_empty() {
+        // What was run lately leads an unfiltered list; the same commands
+        // stay in their own groups below, so nothing moves out of place.
+        let recent = dashboard
+            .recent_commands
+            .iter()
+            .filter_map(|id| {
+                entries
+                    .iter()
+                    .find(|entry| entry.id == *id)
+                    .map(|entry| PaletteEntry {
+                        recent: true,
+                        ..entry.clone()
+                    })
+            })
+            .collect::<Vec<_>>();
+        entries.splice(0..0, recent);
+        return entries;
     }
     rank(entries, query)
 }
@@ -348,12 +412,16 @@ enum PaletteLine {
 /// The rows the palette draws, with a heading wherever the group changes.
 fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<PaletteLine> {
     let mut lines = Vec::new();
-    let mut previous: Option<Scope> = None;
+    // `None` is the Recent group, which has no scope of its own.
+    let mut previous: Option<Option<Scope>> = None;
     for (index, entry) in palette.entries.iter().enumerate() {
-        let scope = spec(entry.id).scope;
-        if previous != Some(scope) {
-            lines.push(PaletteLine::Heading(heading_for(dashboard, scope)));
-            previous = Some(scope);
+        let group = (!entry.recent).then(|| spec(entry.id).scope);
+        if previous != Some(group) {
+            lines.push(PaletteLine::Heading(match group {
+                Some(scope) => heading_for(dashboard, scope),
+                None => "Recent".to_owned(),
+            }));
+            previous = Some(group);
         }
         lines.push(PaletteLine::Command(index));
     }
@@ -653,15 +721,13 @@ mod tests {
         assert!(rename < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < global, "{lines:#?}");
-        // The palette never lists itself, nor the commands a pinned button
-        // already runs. "Workspaces" is searched only below the Anywhere
-        // heading, because the workspace pane's own title is drawn behind the
-        // palette.
+        // The palette never lists itself. Create and Resume are listed even
+        // though they have buttons, so a search finds them.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
-        assert!(row_of(&lines, "Create session").is_none(), "{lines:#?}");
-        assert!(row_of(&lines, "Resume a session").is_none(), "{lines:#?}");
+        assert!(row_of(&lines, "Create session").is_some(), "{lines:#?}");
+        assert!(row_of(&lines, "Resume a session").is_some(), "{lines:#?}");
         assert!(
-            !lines
+            lines
                 .iter()
                 .skip(anywhere + 1)
                 .any(|line| line.contains("Workspaces")),
@@ -873,12 +939,10 @@ mod tests {
         );
 
         let entries = palette_entries(&dashboard, "rename");
+        assert_eq!(entries[0].id, CommandId::RenameSession);
         assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.availability)
-                .collect::<Vec<_>>(),
-            vec![Availability::Blocked("a session transition is in progress")]
+            entries[0].availability,
+            Availability::Blocked("a session transition is in progress")
         );
 
         open_palette(&mut dashboard);

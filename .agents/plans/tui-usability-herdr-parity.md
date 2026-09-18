@@ -16,7 +16,7 @@ Milestone numbers match the "Plan of Work" section.
 
 - [x] (2026-09-18 21:30Z) M1 Attention routing: `prefix+o` next-attention command, `prefix+shift+o` previous, `[advanced] session_order = "priority"`, attention badges on workspace tabs and folded project headings. Documented in terminal-surface, sessions, and configuration pages.
 - [x] (2026-09-18 23:10Z) M2 Notifications: `[notify]` config (mode off/terminal/system, bell, delay, title), BEL and window title from the terminal loop after each frame, macOS/Linux desktop notification via `osascript`/`notify-send` off the loop, suppression for the visible session, Setup section under Display, documented in configuration and terminal-surface pages.
-- [ ] M3 Finding things: `/` filter in the Sessions pane with state letters, fuzzy palette ranking with recents, Create/Resume/Workspaces visible in the palette, one word per concept across panes, Setup, and commands.
+- [x] (2026-09-19 00:20Z) M3 Finding things: `/` search in the Sessions pane with `b w i d a` state letters and an empty-result hint, fuzzy palette ranking (prefix, then in-order label match scored by word starts and adjacency, then description) with a Recent group of the last five commands, Create/Resume/Workspaces listed in the palette. Naming: left as is (see Decision Log); the Manage runtimes description now says "target" so either word finds it.
 - [ ] M4 Keyboard consistency: tmux/screen prefix collision notice, letter accelerators on every confirmation, bindable Manage machines and Restart daemon, confirmation for Stop and Restart, single-Esc exit from help filter, Esc on a pane clears the notice.
 - [ ] M5 Per-session context: git branch and ahead/behind on session rows, `prefix+d` changed-files overlay, context-window usage per session when the harness reports it.
 - [ ] M6 Layout and terminal integration: notice history overlay and stacked failure notices, `NO_COLOR` plus ASCII symbol set, stacked narrow layout under 80 columns, read-only second transcript column at 160 columns or more.
@@ -50,6 +50,9 @@ Milestone numbers match the "Plan of Work" section.
   Date/Author: 2026-09-18, Claude.
 - Decision: Notifications live in a new `[notify]` section of `config.toml`, not under `[advanced]`.
   Rationale: `[advanced]` is documented as diagnostic display tuning. Notifications are a first-class preference with several fields (mode, sound, debounce) and deserve their own section, mirroring Herdr's `[toast]`/`[sound]` split in a single table.
+  Date/Author: 2026-09-18, Claude.
+- Decision: "Runtimes" (Setup, `[targets.<id>]`) and "Targets" (the pane, the docs page) stay as they are.
+  Rationale: The docs define a target as a runtime on a machine, and Setup edits the runtime half; renaming either would break that model and every doc page that uses it. The findability problem is solved by fuzzy palette search over label and description, and the Manage runtimes description now contains the word target.
   Date/Author: 2026-09-18, Claude.
 - Decision: The Sessions pane search is a live filter (rows disappear as you type) rather than a separate navigator dialog.
   Rationale: The dashboard has one screen by design (`mj-tui/src/combined.rs:1-6`); an extra modal for search would contradict that. State-letter filters (`a` all, `b` blocked, `w` working, `i` idle, `d` done) work the same way as Herdr's navigator so the vocabulary carries over.
@@ -216,5 +219,6 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-19: M3 complete. Palette search ranks instead of excluding, so a query that prefix-matches one label still lists weaker matches below it; two registry tests were updated to that rule.
 - 2026-09-18: M2 complete. `[notify]` has `bell` rather than Herdr's sound-file fields, and the title is independent of the mode.
 - 2026-09-18: M1 complete. Added the `Failed` attention level and the saved-view mechanism for cross-workspace jumps; moved per-feature documentation into each milestone.

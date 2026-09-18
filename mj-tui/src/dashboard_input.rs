@@ -341,6 +341,16 @@ impl DashboardState {
         if let Some(action) = self.handle_workspace_pane_key(key) {
             return action;
         }
+        // The Sessions filter takes the keys it is editing with, and its state
+        // letters, before anything else can read them as navigation.
+        if self.focus == Focus::Sessions
+            && self
+                .handle_sessions_filter_key(key, plain && self.session_action_focus.is_none())
+                .is_some()
+        {
+            self.record_event_handled();
+            return DashboardAction::None;
+        }
         match (key.code, command) {
             // Shift-Tab is the reverse of the registry's Tab.
             (KeyCode::BackTab, _) => {

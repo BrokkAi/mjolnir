@@ -1041,10 +1041,11 @@ pub(crate) fn render_sessions(
         drawn_session_rows(dashboard, width)
     };
     let focused = dashboard.focus() == Focus::Sessions;
+    let filter_label = dashboard.sessions_filter_label();
     frame.render_widget(
         sessions_block(
             focused,
-            "",
+            &filter_label,
             area.width,
             dashboard.pane_size(SupportPane::Sessions),
             dashboard.pending_input_count(),
@@ -1084,6 +1085,14 @@ pub(crate) fn render_sessions(
         .with_offset(offset)
         .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
+    if drawn.is_empty() && dashboard.sessions_filter.is_some() && rows_area.height > 0 {
+        frame.render_widget(
+            Paragraph::new("No sessions match · Esc clears the filter")
+                .style(theme::muted())
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            rows_area,
+        );
+    }
     // The table scrolled only as far as it had to; remember where it settled
     // so the next frame does not scroll back to the top.
     dashboard.sessions_scroll.set(state.offset());
