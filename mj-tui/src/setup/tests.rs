@@ -1736,3 +1736,132 @@ fn the_sessionwiki_page_estimates_what_an_archive_window_would_reclaim() {
         "the row must report what the saved value would reclaim:\n{reclaim}"
     );
 }
+
+/// Opens the settings search and types `query` into it.
+fn search(dashboard: &mut DashboardState, query: &str) {
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    if !query.is_empty() {
+        dashboard.handle_paste(query);
+    }
+}
+
+fn search_state(dashboard: &mut DashboardState) -> &SearchState {
+    setup_dialog_mut(&mut dashboard.mode)
+        .expect("settings")
+        .search
+        .as_ref()
+        .expect("an open search")
+}
+
+fn result_paths(dashboard: &mut DashboardState) -> Vec<Vec<String>> {
+    let search = search_state(dashboard);
+    search
+        .matches
+        .iter()
+        .filter_map(|index| search.entries.get(*index))
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
+#[test]
+fn search_reaches_a_nested_setting_without_browsing_to_its_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    search(&mut dashboard, "memory");
+    assert_eq!(
+        result_paths(&mut dashboard),
+        vec![vec![
+            "targets".to_owned(),
+            "podman".to_owned(),
+            "memory".to_owned()
+        ]],
+        "a runtime's memory limit must be reachable from the root page"
+    );
+
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert!(dialog.search.is_none(), "the search closes when it lands");
+    assert_eq!(dialog.path, vec!["targets".to_owned(), "podman".to_owned()]);
+    assert_eq!(
+        dialog.editor.as_ref().map(|editor| editor.path.clone()),
+        Some(vec![
+            "targets".to_owned(),
+            "podman".to_owned(),
+            "memory".to_owned()
+        ]),
+        "landing on a value opens it for editing"
+    );
+}
+
+#[test]
+fn search_finds_a_setting_by_what_it_does_rather_than_its_name() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    // "compaction" appears only in the help for the context budget, whose own
+    // label never mentions it.
+    search(&mut dashboard, "compaction");
+    let paths = result_paths(&mut dashboard);
+    assert!(
+        !paths.is_empty()
+            && paths.iter().all(|path| {
+                path.first().is_some_and(|section| section == "profiles")
+                    && path.last().is_some_and(|key| key == "context_window_bytes")
+            }),
+        "help text must be searchable: {paths:?}"
+    );
+}
+
+#[test]
+fn search_selects_a_switch_without_flipping_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    search(&mut dashboard, "show stopped");
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(dialog.path, vec!["advanced".to_owned()]);
+    assert_eq!(
+        dialog.keys().get(dialog.selected).map(String::as_str),
+        Some("show_stopped_sessions"),
+        "the switch is left selected on its own page"
+    );
+    assert!(dialog.editor.is_none());
+    assert_eq!(
+        dialog.draft["advanced"]["show_stopped_sessions"],
+        Value::Bool(false),
+        "finding a setting must not change it"
+    );
+}
+
+#[test]
+fn typing_in_the_search_does_not_reach_the_page_shortcuts() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    let before = setup_dialog_mut(&mut dashboard.mode)
+        .expect("settings")
+        .keys()
+        .len();
+    search(&mut dashboard, "");
+    // On a collection page a bare "a" adds an entry; inside the query it is
+    // just a letter.
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(search_state(&mut dashboard).input.value(), "a");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert!(dialog.editor.is_none(), "no entry was added");
+    assert_eq!(dialog.keys().len(), before);
+}
+
+#[test]
+fn search_lists_every_setting_with_its_section_and_value() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    search(&mut dashboard, "image");
+    let drawn = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(
+        drawn.contains("Container image") && drawn.contains("ubuntu:24.04"),
+        "a result must name the setting and show what it holds:\n{drawn}"
+    );
+    assert!(
+        drawn.contains("Runtimes \u{203a} podman"),
+        "a result must name the section it lives in:\n{drawn}"
+    );
+}

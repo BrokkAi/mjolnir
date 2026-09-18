@@ -1,5 +1,6 @@
 //! In-memory setup form. Discovery and persistence run in supervised workers.
 mod schema;
+mod search;
 
 use crate::{
     DashboardAction, DashboardState, Mode,
@@ -10,7 +11,7 @@ use crate::{
     },
     widgets::{centered_modal_fixed, dismissible_modal_title},
 };
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mj_chat::components::PathField;
 use mj_chat::components::{
     ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
@@ -24,6 +25,7 @@ use mj_core::config::Config;
 use ratatui::{
     Frame,
     layout::Rect,
+    style::Modifier,
     text::Line,
     widgets::{List as RatatuiList, ListItem, ListState, Paragraph, Wrap},
 };
@@ -62,6 +64,11 @@ pub(crate) enum SetupControl {
     List,
     Field,
     Choices,
+    Search,
+    Results,
+    /// Not a drawn control: the key that opens the search, routed through the
+    /// same interaction path as the dialog's other shortcuts.
+    OpenSearch,
     Back,
     Add,
     Remove,
@@ -111,6 +118,50 @@ struct Editor {
     adding: bool,
 }
 
+/// The open search: the query, the index it filters, and the row the arrows
+/// are on. It replaces the page body while it is up; the page underneath keeps
+/// its own path so closing the search returns to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchState {
+    input: TextInput,
+    entries: Vec<search::SearchEntry>,
+    /// Indices into `entries`, in the order they are drawn.
+    matches: Vec<usize>,
+    selected: usize,
+}
+
+impl SearchState {
+    fn new(draft: &Value) -> Self {
+        let entries = search::index(draft);
+        let matches = search::matches(&entries, "");
+        Self {
+            input: TextInput::new(),
+            entries,
+            matches,
+            selected: 0,
+        }
+    }
+
+    fn refilter(&mut self) {
+        self.matches = search::matches(&self.entries, self.input.value());
+        self.selected = self.selected.min(self.matches.len().saturating_sub(1));
+    }
+
+    fn selected_entry(&self) -> Option<&search::SearchEntry> {
+        self.matches
+            .get(self.selected)
+            .and_then(|index| self.entries.get(*index))
+    }
+}
+
+/// What activating a search result leaves for the caller to do, because Code
+/// Review is opened through its own dialog rather than as a page of values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Jump {
+    Done,
+    OpenReview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SetupSize {
     width: u16,
@@ -125,6 +176,7 @@ pub(crate) struct SetupDialog {
     path: Vec<String>,
     selected: usize,
     editor: Option<Editor>,
+    search: Option<SearchState>,
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
@@ -285,6 +337,36 @@ fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
     }
 }
 
+/// Whether `path` lists entries the user named rather than fixed settings.
+fn is_collection(path: &[String], value: &Value) -> bool {
+    value.is_array()
+        || (path.len() == 1
+            && matches!(
+                path[0].as_str(),
+                "profiles" | "machines" | "targets" | "bundles"
+            ))
+        || path.last().is_some_and(|key| key == "environment")
+}
+
+/// The name a row carries on the page `path`.
+///
+/// The label table is keyed by the last segment of a path, so a name the user
+/// chose must never be looked up in it: a machine called `local` is that
+/// machine, not the "Local repository directory" setting that shares the key.
+fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) -> String {
+    if parent.is_array() {
+        return value
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1));
+    }
+    if is_collection(path, parent) {
+        return key.to_owned();
+    }
+    schema::label(key)
+}
+
 /// `automatic` replaces the placeholder for an unset value when its resolved
 /// default is known.
 fn value_summary(
@@ -367,15 +449,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
                 continue;
             }
             let Some(child) = child else { continue };
-            let name = if value.is_array() {
-                child
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1))
-            } else {
-                schema::label(&key)
-            };
+            let name = row_label(path, value, &key, Some(child));
             let mut child_path = path.to_vec();
             child_path.push(key.clone());
             let mut summary = value_summary(path, &key, child, draft, None);
@@ -475,6 +549,7 @@ impl SetupDialog {
             path: Vec::new(),
             selected: 0,
             editor: None,
+            search: None,
             review_editor: None,
             review_validation: None,
             form: RefCell::new(Dialog::default()),
@@ -507,13 +582,7 @@ impl SetupDialog {
     }
 
     fn collection(&self) -> bool {
-        self.current().is_array()
-            || (self.path.len() == 1
-                && matches!(
-                    self.path[0].as_str(),
-                    "profiles" | "machines" | "targets" | "bundles"
-                ))
-            || self.path.last().is_some_and(|key| key == "environment")
+        is_collection(&self.path, self.current())
     }
 
     /// The one action set for the current screen. Buttons appear only on the
@@ -521,6 +590,14 @@ impl SetupDialog {
     /// popup, and `prepare` all read this list so they cannot drift apart.
     fn actions(&self) -> Vec<(SetupControl, &'static str, bool)> {
         use SetupControl::*;
+        // The search covers the page, so the page's own actions go with it and
+        // Back means "leave the search" rather than "leave this page".
+        if self.search.is_some() {
+            return vec![
+                (Back, "Back", true),
+                (Save, self.save_label(), !self.saving),
+            ];
+        }
         if let Some(editor) = &self.editor
             && editor.choices.is_empty()
         {
@@ -565,16 +642,16 @@ impl SetupDialog {
                 interactive && !self.discovering && !self.saving,
             ));
         }
-        actions.push((
-            Save,
-            if self.saving {
-                "Saving…"
-            } else {
-                "Save and Close"
-            },
-            !self.saving,
-        ));
+        actions.push((Save, self.save_label(), !self.saving));
         actions
+    }
+
+    fn save_label(&self) -> &'static str {
+        if self.saving {
+            "Saving…"
+        } else {
+            "Save and Close"
+        }
     }
 
     /// The actions drawn in the dialog's footer row: the way back out of a
@@ -601,6 +678,25 @@ impl SetupDialog {
             return;
         }
         use SetupControl::*;
+        if let Some(search) = &self.search {
+            let len = search.matches.len();
+            let selected = search.selected;
+            let query = search.input.value().to_owned();
+            let actions = self.actions();
+            let form = self.form.get_mut();
+            form.begin_frame();
+            form.declare(Search, ControlKind::TextField);
+            form.declare_with_enabled(Results, ControlKind::ChoiceList { len, selected }, len > 0);
+            // A new query is a new list, so the viewport starts at its top
+            // rather than wherever the previous results were scrolled to.
+            form.set_list_identity(Results, format!("search/{query}"));
+            form.set_menu(true);
+            for (id, _, enabled) in actions {
+                form.declare_with_enabled(id, ControlKind::Button, enabled);
+            }
+            form.end_frame(Search);
+            return;
+        }
         let len = self.keys().len();
         self.selected = self.selected.min(len.saturating_sub(1));
         let actions = self.actions();
@@ -705,6 +801,43 @@ impl SetupDialog {
                 cleared.join(" and ")
             )
         });
+    }
+
+    fn open_search(&mut self) {
+        self.search = Some(SearchState::new(&self.draft));
+        self.form = RefCell::new(Dialog::default());
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.form = RefCell::new(Dialog::default());
+    }
+
+    /// Moves the dialog to `path` and opens it the way its own page would, so
+    /// a search result lands exactly where browsing to it would have.
+    fn jump_to(&mut self, path: &[String]) -> Jump {
+        let Some((key, parent)) = path.split_last() else {
+            return Jump::Done;
+        };
+        self.close_search();
+        self.path = parent.to_vec();
+        let Some(index) = self.keys().iter().position(|candidate| candidate == key) else {
+            return Jump::Done;
+        };
+        self.selected = index;
+        if path == ["review"] {
+            return Jump::OpenReview;
+        }
+        // Opening a boolean row is what toggles it, so a search only selects
+        // one: finding a setting must never be the same as changing it.
+        let toggles = self
+            .draft
+            .pointer(&pointer(path))
+            .is_some_and(Value::is_boolean);
+        if !toggles {
+            self.open_selected();
+        }
+        Jump::Done
     }
 
     fn back(&mut self) -> bool {
@@ -1433,13 +1566,22 @@ impl DashboardState {
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(Interaction::Activate(Save))
                     }
-                    KeyCode::Backspace if dialog.editor.is_none() => {
+                    // Every shortcut below is a bare key, so none of them may
+                    // fire while the search query has the keyboard.
+                    KeyCode::Char('/')
+                        if dialog.editor.is_none()
+                            && dialog.search.is_none()
+                            && key.modifiers.is_empty() =>
+                    {
+                        Some(Interaction::Activate(OpenSearch))
+                    }
+                    KeyCode::Backspace if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Back))
                     }
-                    KeyCode::Char('a') if dialog.editor.is_none() => {
+                    KeyCode::Char('a') if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Add))
                     }
-                    KeyCode::Delete if dialog.editor.is_none() => {
+                    KeyCode::Delete if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Remove))
                     }
                     _ => None,
@@ -1447,9 +1589,31 @@ impl DashboardState {
             }
             _ => None,
         };
-        let form_result = shortcut
-            .is_none()
-            .then(|| dialog.form.get_mut().handle(&event));
+        // Arrows browse the results while the query keeps the keyboard, which
+        // is how the command palette's search behaves.
+        let browse = match &event {
+            Event::Key(key)
+                if key.kind != KeyEventKind::Release
+                    && dialog.search.is_some()
+                    && dialog.form.borrow().is_focused(Search)
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
+            {
+                Some(KeyEvent::new(key.code, KeyModifiers::NONE))
+            }
+            _ => None,
+        };
+        let form_result = shortcut.is_none().then(|| {
+            let form = dialog.form.get_mut();
+            match browse {
+                Some(browse) => {
+                    form.focus(Results);
+                    let result = form.handle(&Event::Key(browse));
+                    form.focus(Search);
+                    result
+                }
+                None => form.handle(&event),
+            }
+        });
         if let Some(result) = &form_result {
             self.last_event_consumed.set(result.consumed);
         }
@@ -1465,6 +1629,40 @@ impl DashboardState {
         };
         let mut action = DashboardAction::None;
         match interaction {
+            Some(Interaction::Activate(OpenSearch)) => {
+                dialog.open_search();
+            }
+            Some(Interaction::Cancel) | Some(Interaction::Activate(Back))
+                if dialog.search.is_some() =>
+            {
+                dialog.close_search();
+            }
+            Some(Interaction::Edit(Search, edit)) => {
+                if let Some(search) = &mut dialog.search
+                    && TextField::apply(&mut search.input, edit)
+                        == mj_chat::components::EditOutcome::Changed
+                {
+                    search.refilter();
+                    self.record_event_handled();
+                }
+            }
+            Some(Interaction::Select(Results, index)) => {
+                if let Some(search) = &mut dialog.search {
+                    search.selected = index;
+                }
+            }
+            Some(Interaction::Activate(Search | Results) | Interaction::Toggle(Results)) => {
+                let target = dialog
+                    .search
+                    .as_ref()
+                    .and_then(SearchState::selected_entry)
+                    .map(|entry| entry.path.clone());
+                if let Some(path) = target
+                    && dialog.jump_to(&path) == Jump::OpenReview
+                {
+                    action = dialog.open_review(self);
+                }
+            }
             Some(Interaction::Cancel) if dialog.editor.is_some() => {
                 dialog.back();
             }
@@ -1893,6 +2091,10 @@ pub(crate) fn render_setup(
         form.end_frame(initial);
         return;
     }
+    if dialog.search.is_some() {
+        render_search(frame, popup, inner, dialog);
+        return;
+    }
     let text_editor = dialog
         .editor
         .as_ref()
@@ -2014,17 +2216,7 @@ pub(crate) fn render_setup(
                             .and_then(|index| dialog.current().get(index))
                     });
                 let interface = dialog.path.is_empty() && key == "interface";
-                let name = if dialog.current().is_array() {
-                    value
-                        .and_then(|value| value.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            format!("Item {}", key.parse::<usize>().unwrap_or(0) + 1)
-                        })
-                } else {
-                    schema::label(key)
-                };
+                let name = row_label(&dialog.path, dialog.current(), key, value);
                 Line::raw(format!(
                     "{name:<32}  {}",
                     if interface {
@@ -2127,6 +2319,81 @@ pub(crate) fn render_setup(
         );
     }
     form.end_frame(initial);
+}
+
+/// Draws the search in place of the page: the query, then every setting that
+/// matches it with the section it lives in and the value it holds now.
+fn render_search(frame: &mut Frame, popup: Rect, inner: Rect, dialog: &SetupDialog) {
+    use SetupControl::*;
+    let search = dialog.search.as_ref().expect("an open search");
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Settings",
+        theme::title(true),
+        !dialog.saving,
+    );
+    frame.render_widget(
+        theme::modal().title(title).title(
+            Line::styled(
+                format!(" {} settings ", search.matches.len()),
+                theme::muted(),
+            )
+            .right_aligned(),
+        ),
+        popup,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Search every setting by name, by what it does, or by its value. Esc returns to the list.",
+        )
+            .wrap(Wrap { trim: false })
+            .style(theme::muted()),
+        Rect::new(inner.x, inner.y, inner.width, 2),
+    );
+    let query = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    TextField::render(frame, query, &search.input, &mut form, Search);
+    if search.input.is_empty() {
+        frame.render_widget(
+            Line::styled(
+                "Type to filter…",
+                theme::muted().add_modifier(Modifier::ITALIC),
+            ),
+            query,
+        );
+    }
+    let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
+    let top = inner.y + 4;
+    let results = Rect::new(
+        inner.x,
+        top,
+        inner.width,
+        footer_row.y.saturating_sub(top).max(1),
+    );
+    if search.matches.is_empty() {
+        frame.render_widget(Line::raw("No matching setting"), results);
+        form.register(
+            Results,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            results,
+            false,
+        );
+    } else {
+        let rows = search
+            .matches
+            .iter()
+            .filter_map(|index| search.entries.get(*index))
+            .map(|entry| search::row(entry, results.width))
+            .collect::<Vec<_>>();
+        ChoiceList::render(frame, results, &rows, search.selected, &mut form, Results);
+    }
+    Dialog::render_actions(frame, footer_row, &dialog.footer_actions(), &mut form);
+    form.end_frame(Search);
 }
 
 /// Splits a settings page into its body and the stacked column of `actions`.
