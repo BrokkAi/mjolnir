@@ -231,6 +231,35 @@ pub(super) async fn connect_started_worker_with_timeout(
     connect_to_starting_worker(&mut connection, executor, timeout).await
 }
 
+/// Marker on a failure from the startup connect wait, saying whether the
+/// worker had got as far as publishing its control socket.
+///
+/// A worker that never did has no relay, no durable journal and no harness, so
+/// starting a new one over the same root cannot duplicate or corrupt work. A
+/// caller that wants to retry a failed start needs exactly this fact, and only
+/// this wait knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::controller) struct WorkerStartupFailure {
+    pub reached_socket: bool,
+}
+
+impl std::fmt::Display for WorkerStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.reached_socket {
+            formatter.write_str("the worker had published its control socket")
+        } else {
+            formatter.write_str("the worker never published a control socket")
+        }
+    }
+}
+
+impl std::error::Error for WorkerStartupFailure {}
+
+/// Whether a startup step means the worker had already published its socket.
+fn reached_socket(step: Option<&str>) -> bool {
+    matches!(step, Some("bind-socket" | "serving"))
+}
+
 /// What one look at the worker says the wait should do next.
 enum StartupVerdict {
     /// The worker will never answer. The string says why, and a refusal is the
@@ -314,7 +343,9 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
             match probe.inspect().map(|probe| verdict(&probe)) {
                 Some(StartupVerdict::Hopeless(reason, refusal)) => {
-                    let error = error.context(reason);
+                    let error = error.context(reason).context(WorkerStartupFailure {
+                        reached_socket: reached_socket(step.as_deref()),
+                    });
                     // A refusal is a precondition the caller can fix, so its
                     // sentence travels to the caller as a 409 rather than
                     // stopping at the daemon log.
@@ -384,9 +415,12 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             ),
         },
     };
+    let marker = WorkerStartupFailure {
+        reached_socket: reached_socket(step.as_deref()),
+    };
     match last_error {
-        Some(error) => Err(error.context(gave_up)),
-        None => bail!("{gave_up}"),
+        Some(error) => Err(error.context(gave_up).context(marker)),
+        None => Err(anyhow::Error::new(marker).context(gave_up)),
     }
 }
 
