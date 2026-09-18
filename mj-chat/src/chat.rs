@@ -56,7 +56,7 @@ use mj_core::elicitation::ElicitationValue;
 use mj_core::elicitation::{ElicitationRequest, ElicitationResponse};
 use mj_core::state::{
     MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, QueuedCommandKind,
-    SessionRecord, TranscriptBody, TranscriptItem,
+    SessionRecord, TranscriptBody, TranscriptItem, TurnOutcomeKind,
 };
 
 use mj_core::relay::{
@@ -384,6 +384,10 @@ struct SavedChatDraft {
 enum UnsentKind {
     Prompt,
     Shell,
+    /// A prompt the relay did send and the harness ended without answering
+    /// (#970). It is kept here for the same reason a refused one is: so the
+    /// text can be put back in the composer without being retyped.
+    Unanswered,
 }
 
 impl UnsentKind {
@@ -392,6 +396,7 @@ impl UnsentKind {
         match self {
             Self::Prompt => "Prompt was not sent",
             Self::Shell => "Shell command was not sent",
+            Self::Unanswered => "Prompt was not answered",
         }
     }
 }
@@ -537,6 +542,9 @@ pub struct ChatState {
     /// Submits the relay refused, oldest first. Client-local: `apply_materialized`
     /// rebuilds `entries` from the projection, which never saw these.
     unsent_prompts: Vec<UnsentPrompt>,
+    /// The command id of the last turn recorded as unanswered, so the same
+    /// projection arriving again does not record it twice (#970).
+    unanswered_turn: Option<String>,
     /// Queue entries optimistically moved back into the composer. A relay
     /// snapshot can still contain one until its removal command is projected,
     /// so keep its identity hidden across those stale snapshots.
@@ -719,6 +727,7 @@ impl ChatState {
             pending_history_search: None,
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
+            unanswered_turn: None,
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
             active_user_shells: Vec::new(),
@@ -823,9 +832,11 @@ impl ChatState {
     /// The real composer for a session that is not attached yet: parked
     /// behind a Starting/Resuming transition or an in-flight attach. It edits
     /// exactly like the attached composer — the whole readline chord set —
-    /// but `Enter` keeps the draft and explains instead of sending, because
-    /// there is no session to send to, and command completion stays off
-    /// because no session can answer commands. The draft survives until the
+    /// and `Enter` on a plain prompt clears the input, shows the text as a
+    /// queued preview, and returns `ChatAction::Prompt` so the host can have
+    /// the daemon deliver it once the session is live. A command keeps the
+    /// draft and explains, because no session can answer it yet, and command
+    /// completion stays off for the same reason. The draft survives until the
     /// host carries it into the attached chat.
     pub fn standby(
         session_id: &str,
@@ -1046,12 +1057,59 @@ impl ChatState {
                 self.set_notice(format!("Could not read goal state: {error:#}"));
             }
         }
+        self.keep_unanswered_prompt(session);
         self.set_config_options(config_options);
         self.acp_surface
             .apply_projected_configuration(&session.configuration);
         self.acp_surface
             .set_agent_commands(available_commands.to_vec());
         self.rebuild_command_choices();
+    }
+
+    /// Keep the text of a prompt the harness ended without answering, so it
+    /// can be put back in the composer with Ctrl-Alt-R instead of retyped.
+    ///
+    /// The prompt is read from the turn's own first transcript item rather
+    /// than from anything this client remembers, so a prompt submitted from
+    /// the web viewer or promoted from the queue is recoverable here too. The
+    /// record is deliberately not a resend: Mjolnir cannot tell a prompt the
+    /// harness dropped from one it acted on silently, so resending is the
+    /// person's decision (#970).
+    fn keep_unanswered_prompt(&mut self, session: &MaterializedSession) {
+        let Some(outcome) = &session.last_turn_outcome else {
+            return;
+        };
+        let TurnOutcomeKind::Completed { stop_reason } = &outcome.outcome else {
+            return;
+        };
+        if stop_reason != mj_core::acp::PROMPT_UNANSWERED_STOP_REASON
+            || self.unanswered_turn.as_deref() == Some(outcome.command_id.as_str())
+        {
+            return;
+        }
+        self.unanswered_turn = Some(outcome.command_id.clone());
+        let Some(position) = outcome.turn_start_position else {
+            return;
+        };
+        let Some(TranscriptBody::User { content }) = session
+            .transcript
+            .iter()
+            .find(|item| item.position == position)
+            .map(|item| &item.body)
+        else {
+            return;
+        };
+        let (payload, _) = materialized_content_prompt(content);
+        if payload.text.trim().is_empty() {
+            return;
+        }
+        self.record_unsent_prompt(
+            UnsentKind::Unanswered,
+            payload.text,
+            payload.images,
+            "the harness ended the turn without answering; check the workspace before resending"
+                .to_owned(),
+        );
     }
 
     fn take_diffstat_requests(&mut self, maximum: usize) -> Vec<ToolDiffstatRequest> {

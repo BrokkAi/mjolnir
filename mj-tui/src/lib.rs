@@ -77,6 +77,7 @@ pub use crate::ingest::{
 pub use crate::keybinds::KeyRoute;
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
+pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
 pub use crate::workspaces::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 pub use mj_core::workspace::{PaneSize, PaneSizes};
 
@@ -116,6 +117,13 @@ pub enum DashboardAction {
     },
     RestartSession {
         session_id: String,
+    },
+    /// A prompt typed into a standby composer while its session was still
+    /// starting. The host asks the daemon to deliver it once the session is
+    /// live; the dashboard only shows it as a queued preview.
+    QueueStartupPrompt {
+        session_id: String,
+        text: String,
     },
     CreateSession {
         create_managed_worktree: Option<bool>,
@@ -287,6 +295,10 @@ pub enum DashboardAction {
         target_ids: Vec<String>,
     },
     LoadWebAccess,
+    /// Stop the running daemon and start one from the build this surface is
+    /// running, then report which build came up. The keep-alive never starts
+    /// a daemon, so this is how a surface gets one back.
+    RestartDaemon,
     RecoverWebViewer(WebViewerRecovery),
     InspectWebListener,
     CancelWebAccess,
@@ -334,6 +346,7 @@ pub enum DashboardAction {
     OpenConfig,
     DiscoverSetup {
         generation: u64,
+        scope: DetectScope,
     },
     SaveSetup {
         generation: u64,
@@ -609,6 +622,16 @@ pub struct DashboardState {
     /// session so each draft stays with its row; the controller hands the
     /// draft to the real composer when the chat opens.
     pub(crate) standby_prompts: BTreeMap<String, ChatState>,
+    /// The composer that catches typing between the new-session wizard
+    /// closing and the daemon registering the session, when there is no
+    /// session id to key a standby by yet. It is adopted by the new session's
+    /// standby as soon as the launch registers.
+    pub(crate) launch_standby: Option<ChatState>,
+    /// The session the Sessions pane had selected when the launch standby
+    /// began. Keys go to the launch standby only while the selection is still
+    /// that one, so moving to another session hands its conversation the
+    /// keyboard back without losing the typed text.
+    pub(crate) launch_standby_anchor: Option<String>,
     /// Durable move intents retained by the daemon, including failed and
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
@@ -797,6 +820,8 @@ impl DashboardState {
             go_contexts: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
+            launch_standby: None,
+            launch_standby_anchor: None,
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
             target_readiness: BTreeMap::new(),

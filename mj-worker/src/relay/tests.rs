@@ -280,9 +280,7 @@ fn worker_facts_match_the_published_state() {
             started_at_ms: 1_234,
         })
         .unwrap();
-    relay
-        .record_session_update(tool_call_update())
-        .unwrap();
+    relay.record_session_update(tool_call_update()).unwrap();
     let published = relay.operational_state();
     assert_eq!(relay.activity_facts(), published.facts(), "a working relay");
     assert_eq!(

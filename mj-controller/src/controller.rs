@@ -86,7 +86,8 @@ pub use resume::{
 pub use reviewer::reviewer_stager;
 pub use subagents::RegisterSubagentRequest;
 pub use worker_binary::{
-    WorkerBinaryAvailability, pin_worker_binary_sources, worker_binary_prerequisite_for_arch,
+    WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
+    worker_binary_prerequisite_for_arch,
 };
 pub use worker_restart::WorkerUpgradeOutcome;
 pub use worktree::{ResumePlan, local_project_repository, resume_compatibility};
@@ -1184,44 +1185,75 @@ pub(crate) fn requires_private_profile_home(profile: &mj_core::config::HarnessPr
     profile.codex_provider().ok().flatten().is_some()
 }
 
+/// Where this session's harness reads and writes its profile inside the target.
+///
+/// Every case but one is the per-session root `removable_profile_root` names; a
+/// profile that runs straight out of the user's own home has no per-session root
+/// and uses that home. Muse keeps its state in a `muse` subdirectory of the
+/// root, because its ACP adapter owns the directory it is given.
 fn target_profile_home(
     locator: &targets::TargetLocator,
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
-    let home = match locator {
-        targets::TargetLocator::LocalBare { worker_root }
-            if profile.kind == mj_core::config::HarnessKind::Claude
-                || requires_private_profile_home(profile) =>
-        {
-            Path::new(worker_root)
-                .join("profile")
-                .to_string_lossy()
-                .into_owned()
+    let root = removable_profile_root(locator, session_id, profile)
+        .unwrap_or_else(|| profile.home.to_string_lossy().into_owned());
+    if profile.kind == mj_core::config::HarnessKind::Muse {
+        PathBuf::from(root)
+            .join("muse")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        root
+    }
+}
+
+/// The per-session profile directory an in-place harness replacement may delete,
+/// or `None` when the session runs straight out of the user's own profile home.
+///
+/// This is the root that [`target_profile_home`] derives its answer from, not
+/// that answer itself: a Muse session's home is a `muse` subdirectory of a
+/// per-session root, and the whole root is what belongs to the session.
+pub(super) fn removable_profile_root(
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    profile: &mj_core::config::HarnessProfile,
+) -> Option<String> {
+    match locator {
+        targets::TargetLocator::LocalBare { worker_root } => {
+            if profile.kind == mj_core::config::HarnessKind::Muse {
+                Some(
+                    mj_core::config::data_dir()
+                        .join("profiles")
+                        .join(session_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else if profile.kind == mj_core::config::HarnessKind::Claude
+                || requires_private_profile_home(profile)
+            {
+                Some(
+                    Path::new(worker_root)
+                        .join("profile")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                // The session reads and writes the user's own profile home.
+                // Nothing here belongs to the session, so nothing is removed.
+                None
+            }
         }
-        targets::TargetLocator::LocalBare { .. } => profile.home.to_string_lossy().into_owned(),
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. } => {
-            format!("/var/lib/hel/profiles/{session_id}")
+            Some(format!("/var/lib/hel/profiles/{session_id}"))
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
-            format!(".local/share/hel/profiles/{session_id}")
+            Some(format!(".local/share/hel/profiles/{session_id}"))
         }
-    };
-    if profile.kind == mj_core::config::HarnessKind::Muse {
-        let root = if matches!(locator, targets::TargetLocator::LocalBare { .. }) {
-            mj_core::config::data_dir()
-                .join("profiles")
-                .join(session_id)
-        } else {
-            PathBuf::from(home)
-        };
-        root.join("muse").to_string_lossy().into_owned()
-    } else {
-        home
     }
 }
 

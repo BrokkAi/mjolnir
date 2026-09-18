@@ -27,9 +27,10 @@ use mj_controller::controller::ResumeRepositorySourcePreflight;
 use mj_controller::session_manager::SessionManagerControl;
 use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
-    DashboardAction, PreparedMaterializedSessionDetail, PreparedMaterializedSessionSummary,
-    RemoteRepositoryPreview, ReviewSettingsChoices, ReviewSettingsDiscoveryResult,
-    SessionOperationKind, WebViewerAccess,
+    DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
+    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
+    ReviewSettingsChoices, ReviewSettingsDiscoveryResult, SessionOperationKind, SetupDetection,
+    WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
@@ -93,6 +94,9 @@ pub(crate) enum DashboardIoUpdate {
         message: String,
     },
     CreateSession(Box<DashboardCreateSessionUpdate>),
+    /// An explicit daemon restart finished. The sentence is what the surface
+    /// shows: which build came up, or why no daemon of this build did.
+    DaemonRestarted(std::result::Result<String, String>),
     GoSelectionSaved(std::result::Result<(), String>),
     GoContext {
         session_id: String,
@@ -112,6 +116,13 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         title: String,
         result: std::result::Result<String, String>,
+    },
+    /// A prompt typed into a standby composer and handed to the daemon for
+    /// delivery once the session is live.
+    StartupPromptQueued {
+        session_id: String,
+        text: String,
+        result: std::result::Result<(), String>,
     },
     ContainerSettings {
         session_id: String,
@@ -167,7 +178,7 @@ pub(crate) enum DashboardIoUpdate {
     },
     SetupDiscovered {
         generation: u64,
-        result: std::result::Result<Config, String>,
+        result: std::result::Result<mj_tui::SetupDetection, String>,
     },
     BuildCachePreviewed {
         generation: u64,
@@ -642,6 +653,10 @@ impl DashboardContext {
                     }
                 }
             }
+            DashboardIoUpdate::DaemonRestarted(result) => match result {
+                Ok(sentence) => self.dashboard.set_notice(sentence),
+                Err(error) => self.dashboard.set_failure_notice(error),
+            },
             DashboardIoUpdate::GoSelectionSaved(result) => {
                 self.go_selection_in_flight = false;
                 if let Err(error) = result {
@@ -730,6 +745,21 @@ impl DashboardContext {
                         }
                         self.dashboard.show_launch_failure(error, Some(*retry));
                     }
+                }
+            }
+            DashboardIoUpdate::StartupPromptQueued {
+                session_id,
+                text,
+                result,
+            } => {
+                // A queued prompt shows as a preview already, so success needs
+                // no notice. A refusal puts the text back in the composer.
+                if let Err(error) = result {
+                    self.dashboard.restore_standby_prompt(&session_id, &text);
+                    self.dashboard.set_failure_notice(format!(
+                        "Could not queue the prompt for session {}: {error}",
+                        short_id(&session_id)
+                    ));
                 }
             }
             DashboardIoUpdate::RenameSession {
@@ -1253,6 +1283,19 @@ impl DashboardContext {
                     SessionOperationKind::Launching,
                     None,
                 );
+                // Anything typed while the launch was being prepared belongs to
+                // this session now: its composer becomes the session's standby,
+                // and each prompt already entered there goes to the daemon to
+                // be delivered when the harness is ready.
+                for text in self.dashboard.adopt_launch_standby(&session_id) {
+                    spawn_startup_prompt(
+                        session_id.clone(),
+                        text,
+                        None,
+                        self.dashboard_io_tx.clone(),
+                        self.critical_operations.clone(),
+                    );
+                }
                 // The next thing the person does with a launching session is
                 // write its first message, so the keyboard starts where the
                 // type-ahead composer is.

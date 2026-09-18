@@ -75,6 +75,11 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
+    /// Hand a changed workspace list to everything reading the daemon's, the
+    /// same republication the daemon's own workspace actions perform. A
+    /// backend built without a daemon has no one to publish to.
+    fn republish_workspaces(&self, _workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {}
+
     /// Whether the index is stale enough that a query should ask for a sync.
     fn wiki_sync_is_stale(&self) -> bool {
         false
@@ -142,6 +147,10 @@ impl ExportRuntime for RuntimeState {
         Box::pin(async move { self.close_session(session_id).await })
     }
 
+    fn republish_workspaces(&self, workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {
+        RuntimeState::publish_workspaces(self, workspaces);
+    }
+
     fn wiki_sync_is_stale(&self) -> bool {
         crate::sessionwiki::sync_is_stale(self.wiki().last_success())
     }
@@ -179,8 +188,10 @@ impl ExportRuntime for RuntimeState {
         request: WikiRestoreRequest,
     ) -> BoxFuture<'static, Result<Option<String>>> {
         Box::pin(async move {
+            // The HTTP API has no request-scoped cancellation; the daemon's
+            // shutdown drain cancels the queue's own token directly.
             Ok(self
-                .restore_wiki_session(request)
+                .restore_wiki_session(request, &tokio_util::sync::CancellationToken::new())
                 .await?
                 .map(|registered| registered.session.id))
         })
@@ -1086,6 +1097,24 @@ fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    /// Create the workspace, then republish the list so the terminal tabs and
+    /// the viewer see it without waiting for the next daemon action.
+    fn create_workspace(
+        &self,
+        name: String,
+    ) -> BoxFuture<'_, Result<mj_core::workspace::WorkspaceRecord>> {
+        Box::pin(async move {
+            let workspace = tokio::task::spawn_blocking(move || {
+                crate::database::create_or_get_workspace(&name)
+            })
+            .await??;
+            let workspaces =
+                tokio::task::spawn_blocking(crate::database::list_workspaces).await??;
+            self.exports.republish_workspaces(workspaces);
+            Ok(workspace)
+        })
+    }
+
     fn published_profile_config(
         &self,
         profile: &str,

@@ -459,13 +459,6 @@ impl HarnessKind {
         matches!(self, Self::Claude | Self::Codex)
     }
 
-    /// Whether this harness marks the end of its own turn. Every other harness
-    /// leaves the turn running until the `session/prompt` reply arrives, so a
-    /// lost reply hangs it until the watchdog steps in.
-    pub const fn marks_own_turn_end(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
-    }
-
     /// The harness-home-relative directories that hold its native session
     /// files, scanned when a checkpoint captures or restores native state.
     pub const fn native_session_dirs(self) -> &'static [&'static str] {
@@ -533,6 +526,11 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
 }
+
+/// The transcript budget a profile without an explicit `context_window_bytes`
+/// runs under. It lives beside the setting so compaction and the settings
+/// screen read one number.
+pub const DEFAULT_CONTEXT_BYTES: usize = 256 * 1024;
 
 /// The `guardian_review_model` value that picks the newest flash model.
 pub const GUARDIAN_REVIEW_NEWEST_FLASH: &str = "newest-flash";

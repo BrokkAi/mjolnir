@@ -960,7 +960,7 @@ fn an_auth_required_prompt_failure_carries_the_credential_marker() {
 }
 
 #[test]
-fn only_non_cancelled_prompts_without_updates_need_an_empty_response_warning() {
+fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
     assert!(prompt_returned_without_updates(&StopReason::EndTurn, 7, 7));
     assert!(!prompt_returned_without_updates(&StopReason::EndTurn, 7, 8));
     assert!(!prompt_returned_without_updates(
@@ -968,6 +968,18 @@ fn only_non_cancelled_prompts_without_updates_need_an_empty_response_warning() {
         7,
         7
     ));
+    // A turn that ended for a reason of its own already reports that reason.
+    // Relabelling it "unanswered" would hide why it really ended.
+    for stop_reason in [
+        StopReason::MaxTokens,
+        StopReason::MaxTurnRequests,
+        StopReason::Refusal,
+    ] {
+        assert!(
+            !prompt_returned_without_updates(&stop_reason, 7, 7),
+            "{stop_reason:?} must keep its own stop reason"
+        );
+    }
 }
 
 /// Answers `initialize` and `session/new`, then fails the first
@@ -2312,9 +2324,14 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             _ => {}
         }
     };
+    // The bridge called this turn a success and produced nothing, so it is
+    // reported under its own stop reason rather than as a finished turn (#970).
     assert_eq!(
         (&completed.0, &completed.1),
-        (&"second".to_owned(), &"EndTurn".to_owned())
+        (
+            &"second".to_owned(),
+            &PROMPT_UNANSWERED_STOP_REASON.to_owned()
+        )
     );
     let usage = completed
         .2
@@ -2322,7 +2339,15 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     assert_eq!(usage.total_tokens, 30);
     assert_eq!(usage.scope, mj_core::usage::UsageScope::Turn);
     assert_eq!(usage.thought_tokens, None);
-    assert_eq!(empty_warning.as_deref(), Some(PROMPT_EMPTY_RESPONSE_MARKER));
+    let empty_warning = empty_warning.expect("an unanswered turn must warn");
+    assert!(
+        empty_warning.contains(PROMPT_EMPTY_RESPONSE_MARKER),
+        "{empty_warning}"
+    );
+    assert!(
+        empty_warning.contains("may never have been acted on"),
+        "{empty_warning}"
+    );
 
     request_tx
         .send(CommandRequest::Prompt {
@@ -2645,7 +2670,10 @@ async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
     let RuntimeEvent::Warning { message } = warning else {
         panic!("expected the stall warning");
     };
-    assert!(message.contains("long-build"), "names the tool call: {message}");
+    assert!(
+        message.contains("long-build"),
+        "names the tool call: {message}"
+    );
     assert!(
         message.contains("MJ_TURN_TOOL_STALL_TIMEOUT_MS"),
         "names the knob that raises the limit: {message}"
@@ -2733,7 +2761,10 @@ async fn a_silent_harness_fails_the_turn_with_a_reason() {
     assert_eq!(stop_reason, TURN_STALLED_STOP_REASON);
     let diagnostic = diagnostic.expect("the outcome carries the reason, not only the transcript");
     assert_eq!(diagnostic.code.as_deref(), Some(TURN_STALLED_STOP_REASON));
-    assert!(diagnostic.message.contains("stopped responding"), "{diagnostic:?}");
+    assert!(
+        diagnostic.message.contains("stopped responding"),
+        "{diagnostic:?}"
+    );
 
     drop(request_tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
@@ -4710,20 +4741,40 @@ fn salvage_settles_a_named_tool_and_ignores_the_rest() {
     assert!(salvage_tool_call_update(&message).is_none());
 }
 
+/// Both stall bounds are off unless an operator asks for one.
+///
+/// Mjolnir does not guess that a quiet turn is a dead turn: silence is not
+/// evidence, and failing a healthy turn for it destroys real work (#1020,
+/// #1017). Only a positive number of milliseconds arms a bound, so an unset,
+/// empty, zero or mistyped value leaves the turn running and visible.
 #[test]
-fn the_stall_watchdog_covers_only_harnesses_whose_turn_ends_on_the_reply() {
-    assert!(turn_ends_only_on_prompt_reply(HarnessKind::Muse));
-    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Claude));
-    assert!(!turn_ends_only_on_prompt_reply(HarnessKind::Codex));
+fn a_stall_bound_is_off_unless_a_positive_timeout_is_configured() {
+    for off in [
+        None,
+        Some(""),
+        Some("  "),
+        Some("0"),
+        Some("off"),
+        Some("-5"),
+    ] {
+        assert_eq!(
+            parse_stall_timeout(off),
+            None,
+            "{off:?} must not arm a watchdog"
+        );
+    }
+    assert_eq!(
+        parse_stall_timeout(Some(" 30000 ")),
+        Some(Duration::from_millis(30_000)),
+        "a positive value arms the bound it names"
+    );
 }
 
 #[test]
 fn the_stall_message_says_what_happened_and_what_to_do() {
     let silent = turn_stall_message(
         HarnessKind::Muse,
-        &mj_core::activity::StallVerdict::Silent {
-            silent_ms: 630_000,
-        },
+        &mj_core::activity::StallVerdict::Silent { silent_ms: 630_000 },
     );
     assert!(silent.contains("stopped responding"));
     assert!(
@@ -4789,14 +4840,26 @@ fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
     );
 }
 
-/// The default bounds: ten minutes of silence, four hours for one tool call.
-/// The tool-call bound is long on purpose — failing a healthy long build loses
-/// work silently, while a bound that is too long only delays a failure the
-/// user can already end with a cancel.
+/// The daemon carries both knobs to the workers it starts. A worker re-execs
+/// with a cleared environment, so a value set for the daemon reaches it only
+/// because this list names it. Without the silence knob in that list there is
+/// no way to arm the opt-in bound on any target.
 #[test]
-fn the_tool_call_bound_is_much_longer_than_the_silence_bound() {
-    assert_eq!(DEFAULT_TURN_STALL_TIMEOUT_MS, 600_000);
-    assert_eq!(DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS, 14_400_000);
+fn the_daemon_carries_both_stall_knobs_to_its_workers() {
+    let carried = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../mj-controller/src/controller/worker_binary/launch.rs"
+    ))
+    .expect("read the launch configuration that carries the knobs");
+    for name in [
+        TURN_STALL_TIMEOUT_VARIABLE,
+        TOOL_CALL_STALL_TIMEOUT_VARIABLE,
+    ] {
+        assert!(
+            carried.contains(name),
+            "the daemon must carry {name} to the worker that reads it"
+        );
+    }
 }
 
 /// Fake bridge that rejects every attempt to reload a recorded session and

@@ -2739,6 +2739,7 @@ async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
     request
         .reply
         .send(Ok(MovePreparation {
+            in_place: false,
             source_unavailable: false,
             conversion: None,
             selection: request.selection,
@@ -3232,6 +3233,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        in_place: false,
         source_unavailable: false,
         conversion: None,
         selection,
@@ -3513,9 +3515,25 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
             "no cancellable operation",
         ),
         (
-            ActionOutcome::Failed,
+            ActionOutcome::Failed {
+                reference: "4321-9".to_owned(),
+            },
             StatusCode::INTERNAL_SERVER_ERROR,
-            "could not start this action",
+            "reference 4321-9",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(
+                "this instance has no workspace yet; create one before starting a session",
+            )),
+            StatusCode::CONFLICT,
+            "no workspace yet",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::unusable(
+                "no target named laptop is configured",
+            )),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no target named laptop",
         ),
     ] {
         let (app, mut actions, _, _, _) = app();

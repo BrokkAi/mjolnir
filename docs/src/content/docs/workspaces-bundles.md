@@ -45,6 +45,19 @@ and are unique case-insensitively. `Release work` and `release work` therefore
 name the same workspace. Deleting the last workspace leaves the manager open;
 Mjolnir does not create a session automatically.
 
+### Workspaces without a terminal
+
+A script does not need the dashboard. `mj workspaces list` prints the
+workspaces, and `mj workspaces create <name>` creates one — or selects the one
+that already carries the name, so it is safe to run before every session. Both
+are thin clients for `GET` and `POST /api/v1/workspaces`; see the
+[HTTP API reference](/api-reference/#list-workspaces).
+
+`mj new` does not require one at all. With no `--workspace-id` and no global
+`--workspace`, it uses the instance's only workspace, or the `default` workspace
+when the instance has none, so `mj -i <name> new ...` works on a brand-new
+instance. An instance with several workspaces must name one.
+
 ### What belongs to a workspace
 
 A workspace owns the active presentation of:

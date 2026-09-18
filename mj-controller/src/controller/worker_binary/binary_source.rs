@@ -334,6 +334,16 @@ pub fn worker_binary_prerequisite_for_arch(arch: &str) -> Result<WorkerBinaryAva
     worker_binary_for_arch(arch, WorkerBinaryRequirement::PortableLinux)
 }
 
+/// The worker a `local-bare` session on this host would use.
+///
+/// A local session runs on the controller's own machine, so it may use the
+/// native worker rather than the portable Linux one. `mj doctor` reports on it
+/// separately for that reason: rebuilding only the portable worker leaves a
+/// local session on old code, and the other way round.
+pub fn native_worker_binary_prerequisite() -> Result<WorkerBinaryAvailability> {
+    worker_binary_for_arch(std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost)
+}
+
 pub(super) fn worker_binary_for_arch(
     arch: &str,
     requirement: WorkerBinaryRequirement,

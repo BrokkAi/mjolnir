@@ -142,12 +142,23 @@ pub enum ActivityState {
     Turn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at_ms: Option<i64>,
+        /// When anything last arrived from the harness over ACP. A reader
+        /// subtracts it from the current time to get the silence age, which is
+        /// the only evidence there is that a running turn may have stopped
+        /// making progress. Older workers do not report it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_activity_at_ms: Option<i64>,
     },
     /// No turn boundary is open, but a tool call is running. Harnesses that
     /// mark no turn of their own are visible only this way.
     Tool {
         tool_call_id: String,
         started_at_ms: i64,
+        /// See [`ActivityState::Turn::last_activity_at_ms`]. Silence during a
+        /// tool call is ordinary: a long build sends no protocol traffic at
+        /// all. It is reported because a reader may still want to see it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_activity_at_ms: Option<i64>,
     },
     /// Only work the agent left running behind it.
     Background {
@@ -241,6 +252,86 @@ impl ActivityState {
             other => other,
         }
     }
+
+    /// When the harness last sent anything, while work is in flight.
+    ///
+    /// Only a `Turn` or a `Tool` carries this: silence means nothing about a
+    /// session that is not running anything. An `Unknown` state answers with
+    /// what was last known, so a session the daemon cannot see still reports
+    /// the last activity it saw rather than pretending there was none.
+    #[must_use]
+    pub fn last_activity_at_ms(&self) -> Option<i64> {
+        match self {
+            Self::Turn {
+                last_activity_at_ms,
+                ..
+            }
+            | Self::Tool {
+                last_activity_at_ms,
+                ..
+            } => *last_activity_at_ms,
+            Self::Unknown { last_known, .. } => last_known.last_activity_at_ms(),
+            _ => None,
+        }
+    }
+
+    /// How long the harness has been silent while work is in flight.
+    ///
+    /// This is a fact, not a verdict. Mjolnir does not decide from it that a
+    /// turn is dead — silence during a long build is ordinary, and guessing
+    /// wrong destroys real work (#1020). It is published so a person or an
+    /// orchestrator can see "running, nothing for eleven minutes" and choose
+    /// what to do, and so the opt-in watchdog has one place to read it from.
+    ///
+    /// `None` when nothing is running, when the worker is too old to report
+    /// the timestamp, or when the timestamp is in the future.
+    #[must_use]
+    pub fn silent_for_ms(&self, now_ms: i64) -> Option<u64> {
+        let last = self.last_activity_at_ms()?;
+        u64::try_from(now_ms.checked_sub(last)?).ok()
+    }
+}
+
+/// How long the harness has been silent, from the facts rather than a state.
+///
+/// The same answer as [`ActivityState::silent_for_ms`], for a caller that
+/// holds [`ActivityFacts`]. There is one rule and it lives here: silence is
+/// only meaningful while something is in flight.
+#[must_use]
+pub fn silent_for_ms(facts: &ActivityFacts, now_ms: i64) -> Option<u64> {
+    classify(facts).silent_for_ms(now_ms)
+}
+
+/// How long something took, in the coarsest unit that still tells the truth.
+///
+/// A bound shortened for a test trips in seconds, and reporting that as "about
+/// 1 minute" makes the message read like a bug in itself.
+#[must_use]
+pub fn describe_duration(millis: u64) -> String {
+    let seconds = millis / 1_000;
+    if seconds < 90 {
+        return format!("{seconds} second(s)");
+    }
+    format!("about {} minute(s)", seconds / 60)
+}
+
+/// Below this, silence is ordinary and saying so is noise rather than news.
+///
+/// Every surface uses the same threshold so a turn does not read as quiet in
+/// one place and ordinary in another.
+pub const SILENCE_WORTH_REPORTING: Duration = Duration::from_secs(60);
+
+/// The one phrase every surface uses for a running turn that has gone quiet.
+///
+/// `None` when nothing is running, when the worker is too old to report the
+/// ACP clock, or when the session has been quiet for less than
+/// [`SILENCE_WORTH_REPORTING`]. This is a report, not a verdict: a turn
+/// waiting on a long build is silent and perfectly healthy.
+#[must_use]
+pub fn silence_note(state: &ActivityState, now_ms: i64) -> Option<String> {
+    let silent_ms = state.silent_for_ms(now_ms)?;
+    (silent_ms >= SILENCE_WORTH_REPORTING.as_millis() as u64)
+        .then(|| format!("no harness activity for {}", describe_duration(silent_ms)))
 }
 
 /// What a session is doing, from everything known about it.
@@ -268,6 +359,7 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
     if facts.prompt_started_at_ms.is_some() || facts.harness_turn_started_at_ms.is_some() {
         return ActivityState::Turn {
             started_at_ms: turn_started_at_ms,
+            last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
     // A harness that marks no turn of its own is visible only through the
@@ -277,11 +369,13 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
         return ActivityState::Tool {
             tool_call_id: tool.tool_call_id.clone(),
             started_at_ms: tool.started_at_ms,
+            last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
     if running_is_corroborated {
         return ActivityState::Turn {
             started_at_ms: turn_started_at_ms,
+            last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
     if facts.background_commands > 0 || facts.active_user_shells > 0 {
@@ -419,6 +513,11 @@ pub fn while_disconnected(
         MaterializedExecutionState::Idle => ActivityState::Idle { since_ms: None },
         MaterializedExecutionState::Running { started_at_ms } => ActivityState::Turn {
             started_at_ms: Some(started_at_ms),
+            // Nobody can see the worker, so there is no ACP clock to read. The
+            // silence age is genuinely unknown, and reporting the projection's
+            // own timestamp here would present a disconnection as harness
+            // silence.
+            last_activity_at_ms: None,
         },
         MaterializedExecutionState::Closing => ActivityState::Closing,
         MaterializedExecutionState::Closed => ActivityState::Closed,

@@ -24,8 +24,8 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
     spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
-    spawn_workspace_create, spawn_workspace_delete, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_startup_prompt, spawn_workspace_create, spawn_workspace_delete,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -179,9 +179,10 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::OpenConfig => context.dashboard.begin_setup(),
-        DashboardAction::DiscoverSetup { generation } => {
+        DashboardAction::DiscoverSetup { generation, scope } => {
             super::io::spawn_setup_discovery(
                 generation,
+                scope,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );
@@ -347,6 +348,9 @@ pub(crate) async fn apply_dashboard_action(
         | DashboardAction::RecoverWebViewer(_)
         | DashboardAction::InspectWebListener) => {
             spawn_web_request(context, action);
+        }
+        DashboardAction::RestartDaemon => {
+            spawn_daemon_restart(context);
         }
         DashboardAction::CancelWebAccess => {
             context.web_request_cancel = None;
@@ -554,6 +558,24 @@ pub(crate) async fn apply_dashboard_action(
                     .dashboard
                     .set_notice("Import cancelled; no Mjolnir files were changed.");
             }
+        }
+        DashboardAction::QueueStartupPrompt { session_id, text } => {
+            // The daemon clears the saved draft only when it still holds the
+            // text this prompt was typed from; anything else stays put.
+            let inherited_draft = context
+                .controller
+                .state
+                .sessions
+                .get(&session_id)
+                .filter(|session| session.draft_input == text)
+                .map(|session| session.draft_input.clone());
+            spawn_startup_prompt(
+                session_id,
+                text,
+                inherited_draft,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
         }
         DashboardAction::RenameSession { session_id, title } => {
             context.dashboard.set_notice("Renaming session…");
@@ -1322,6 +1344,41 @@ pub(crate) fn start_preflighted_session_launch(
     start_session_launch_with_repository_preflight(context, action, Some(repository_preflight));
 }
 
+/// Opens the composer that catches typing while a creation runs. Registration
+/// is several seconds of work away — loading the controller, probing Git
+/// remotes, registering with the daemon — and until it lands there is no
+/// session id to key a standby composer by, so the launch standby holds the
+/// text and the new session's standby adopts it.
+fn begin_launch_standby(context: &mut DashboardContext, action: &DashboardAction) {
+    let DashboardAction::CreateSession {
+        profile_id,
+        bundle_id,
+        project_directory,
+        ..
+    } = action
+    else {
+        return;
+    };
+    let target = project_directory
+        .as_ref()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|| bundle_id.clone());
+    context
+        .dashboard
+        .begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+            target,
+            profile: profile_id.clone(),
+            title: String::new(),
+            harness_kind: context
+                .controller
+                .config
+                .profiles
+                .get(profile_id)
+                .map(|profile| profile.kind),
+            subagent_count: 0,
+        });
+}
+
 fn start_session_launch_with_repository_preflight(
     context: &mut DashboardContext,
     action: DashboardAction,
@@ -1342,6 +1399,7 @@ fn start_session_launch_with_repository_preflight(
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
             context.dashboard.set_notice("Preparing session launch…");
+            begin_launch_standby(context, &action);
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,
@@ -1486,6 +1544,41 @@ impl DashboardContext {
 }
 
 /// Own each dialog request, cancel stale polling, and observe background task failures.
+/// Restart the daemon from this surface, off the event loop.
+///
+/// Stopping and starting a daemon takes seconds and holds a file lock, so it
+/// can never run on the render loop. The outcome is a sentence for the notice
+/// bar rather than a silent success, for the same reason `mj daemon restart`
+/// now names the build that came up: a restart that lands on someone else's
+/// build must not look like the one that was asked for.
+fn spawn_daemon_restart(context: &mut DashboardContext) {
+    let updates = context.dashboard_io_tx.clone();
+    let guard = context
+        .critical_operations
+        .begin("restarting the Mjolnir daemon");
+    context
+        .dashboard
+        .set_notice("Restarting the Mjolnir daemon...");
+    tokio::spawn(async move {
+        let result = daemon::restart_daemon().await.map_or_else(
+            |error| Err(format!("Could not restart the Mjolnir daemon: {error:#}")),
+            |restarted| {
+                Ok(match restarted.runs_this_build {
+                    Some(true) => format!(
+                        "Mjolnir daemon restarted as PID {}, running this build.",
+                        restarted.pid
+                    ),
+                    _ => format!("Mjolnir daemon restarted as PID {}.", restarted.pid),
+                })
+            },
+        );
+        if let Err(error) = updates.send(DashboardIoUpdate::DaemonRestarted(result)) {
+            tracing::warn!(%error, "daemon restart outcome dropped because the surface closed");
+        }
+        drop(guard);
+    });
+}
+
 fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
     context.web_request_cancel = None;
     context.web_request_generation = context.web_request_generation.wrapping_add(1);

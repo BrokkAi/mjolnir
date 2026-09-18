@@ -148,10 +148,26 @@ whether archived queued work should be started or discarded.
 resume under one daemon-owned operation. It is available for a live session
 when changing its target, profile, or both. Preparation checks compatibility
 before the active turn is interrupted, and confirmation explicitly acknowledges
-that interruption. Move rebuilds a fresh environment; it does not preserve
-running process memory, installed packages, container layers, or arbitrary
-files outside the declared workspace. The same target/profile compatibility
-rules used by resume still apply.
+that interruption.
+
+A move that keeps the same target, the same attached directories, and the same
+resource allocation replaces only the harness, in place. The container or bare
+worker root, the workspace, untracked files, and build caches are kept; the old
+worker daemon and profile home are removed inside the existing environment, the
+new profile is staged there, and the harness state is restored from the
+checkpoint. Running process memory is still lost, because the old harness
+process is stopped.
+
+A move that changes the target still rebuilds the environment from the
+checkpoint. Such a move does not preserve running process memory, installed
+packages, container layers, or arbitrary files outside the declared workspace.
+
+If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
+not retry in place: it releases the environment and leaves the session stopped
+with its verified checkpoint, so you can retry the move or resume with the
+previous settings.
+
+The same target/profile compatibility rules used by resume still apply.
 
 The move confirmation lists queued prompts and configuration commands. Discard
 is the default and restores the destination idle. If you choose Start, the
@@ -183,7 +199,8 @@ needs another supported profile before cross-harness handoff can work.
 
 The visible conversation and declared repository state survive a harness change;
 harness-private state is not translated into another harness's native history.
-Move also reconstructs the environment rather than transferring live processes.
+Move restores the harness from the checkpoint rather than transferring live
+processes, whether or not it keeps the environment.
 
 **Destroy** is permanent. Destroying a stopped session removes its recovery
 archive and record. Force-destroy can tear down an active target without a new

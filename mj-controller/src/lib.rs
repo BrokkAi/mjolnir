@@ -42,4 +42,5 @@ pub mod web_viewer;
 
 pub mod checkpoint_transfer;
 
+pub mod image_pull_gate;
 pub mod recovery_gate;

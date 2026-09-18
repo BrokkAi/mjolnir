@@ -72,8 +72,9 @@ struct Cli {
 enum Command {
     /// Work in a folder using remembered account and target settings.
     Go(go::GoArgs),
-    /// Open the workspace selector even when Mjolnir could auto-attach.
-    Workspaces,
+    /// Open the workspace selector even when Mjolnir could auto-attach, or
+    /// list and create workspaces without a terminal.
+    Workspaces(WorkspacesArgs),
     /// Open the web viewer in a native desktop window.
     App,
     /// Mint the private launch document consumed by `mj-desktop`.
@@ -134,6 +135,22 @@ enum Command {
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
+}
+
+/// `mj workspaces` on its own opens the workspace manager in the dashboard, as
+/// it always has. The subcommands are the non-interactive form a script uses.
+#[derive(Debug, Args)]
+struct WorkspacesArgs {
+    #[command(subcommand)]
+    command: Option<WorkspacesCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspacesCommand {
+    /// List the workspaces sessions can be created in.
+    List(api_commands::WorkspacesListArgs),
+    /// Create a workspace, or select the one that already has the name.
+    Create(api_commands::WorkspaceCreateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -324,7 +341,10 @@ fn run(cli: Cli) -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
-    if matches!(cli.command, None | Some(Command::Workspaces)) {
+    if matches!(
+        cli.command,
+        None | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+    ) {
         // Interactive dashboard startup is the one place an update may be
         // checked, prompted for, and applied on every launch. The whole flow
         // finishes before daemon startup and the TUI takes over the terminal; a
@@ -364,9 +384,10 @@ fn install_panic_logging() {
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
         Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
-        None | Some(Command::Go(_)) | Some(Command::Workspaces) | Some(Command::App) => {
-            logging::ProcessKind::Tui
-        }
+        None
+        | Some(Command::Go(_))
+        | Some(Command::Workspaces(WorkspacesArgs { command: None }))
+        | Some(Command::App) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
     }
 }
@@ -375,7 +396,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
     match command {
         None => "dashboard",
         Some(Command::Go(_)) => "go",
-        Some(Command::Workspaces) => "workspaces",
+        Some(Command::Workspaces(_)) => "workspaces",
         Some(Command::App) => "app",
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
@@ -429,9 +450,15 @@ async fn run_command(
                 .context("prepare fast start")??;
             run_workspace_dashboard(None, false, Some((mode, setup))).await
         }
-        Some(Command::Workspaces) => {
-            run_workspace_dashboard(requested_workspace.as_deref(), true, None).await
-        }
+        Some(Command::Workspaces(args)) => match args.command {
+            None => run_workspace_dashboard(requested_workspace.as_deref(), true, None).await,
+            Some(WorkspacesCommand::List(args)) => api_commands::workspaces_list(args)
+                .await
+                .map(|()| DashboardExit::Normal),
+            Some(WorkspacesCommand::Create(args)) => api_commands::workspaces_create(args)
+                .await
+                .map(|()| DashboardExit::Normal),
+        },
         Some(Command::App) => desktop::run_desktop_app()
             .await
             .map(|()| DashboardExit::Normal),
@@ -744,6 +771,7 @@ async fn prompt_move_confirmation(
         .clone()
         .unwrap_or_else(|| source_target.clone());
     let cross_harness = preparation.cross_harness;
+    let in_place = preparation.in_place;
     let clear_resource_allocation = preparation.selection.clear_resource_allocation;
     let queued_commands = preparation.queued_commands.clone();
     let session_id = preparation.selection.session_id.clone();
@@ -755,8 +783,17 @@ async fn prompt_move_confirmation(
         if cross_harness {
             eprintln!("This changes harnesses; the transcript handoff is text-only.");
         }
+        if in_place {
+            eprintln!(
+                "Only the harness and profile are replaced; the environment and workspace are kept."
+            );
+        }
         if active {
-            eprintln!("Active work will be interrupted and restored into a fresh environment.");
+            if in_place {
+                eprintln!("Active work will be interrupted; the session keeps its environment.");
+            } else {
+                eprintln!("Active work will be interrupted and restored into a fresh environment.");
+            }
         }
         if clear_resource_allocation {
             eprintln!(
@@ -899,15 +936,21 @@ async fn run_workspace_dashboard(
     );
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
-    let attachment_task = daemon::maintain_attachment(
+    let attachment = daemon::maintain_attachment(
         client_id.clone(),
         std::process::id(),
         attachment_cancellation.clone(),
     );
-    let result =
-        run_dashboard_for_workspace(&selected, &client_id, open_workspace_manager, go).await;
+    let result = run_dashboard_for_workspace(
+        &selected,
+        &client_id,
+        open_workspace_manager,
+        go,
+        attachment.presence,
+    )
+    .await;
     attachment_cancellation.cancel();
-    if let Err(error) = attachment_task.await {
+    if let Err(error) = attachment.task.await {
         tracing::warn!(%error, "workspace attachment task failed");
     }
     match daemon::connect_existing().await {
@@ -973,6 +1016,11 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
     Ok("workspace-1".to_owned())
 }
 
+/// Name an executable for a person, or say plainly that it is unknown.
+fn describe_executable(path: Option<std::path::PathBuf>) -> String {
+    path.map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
+}
+
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Status => {
@@ -993,6 +1041,20 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 },
                 status.phone_status
             );
+            // Two builds can report the same version, so the version line
+            // cannot answer "is my rebuilt code running?". The executable file
+            // can, and it is the question a development restart turns on.
+            match daemon::process_runs_this_executable(status.pid)? {
+                Some(true) => println!("This daemon runs this build."),
+                Some(false) => println!(
+                    "This daemon runs a different executable ({}) than this client ({}); \
+                     commands work, but code you rebuilt is not running. \
+                     Run `mj daemon restart` from this build.",
+                    describe_executable(daemon::process_executable_path(status.pid)),
+                    describe_executable(daemon::running_executable_path()),
+                ),
+                None => {}
+            }
             if daemon.protocol_version() != daemon::PROTOCOL_VERSION {
                 println!(
                     "The daemon speaks protocol {} while this build speaks {}; \
@@ -1010,12 +1072,18 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             println!("Mjolnir daemon stopped; detached workers remain active.");
         }
         DaemonCommand::Restart => {
-            if let Ok(daemon) = daemon::connect_management().await {
-                daemon.stop_and_wait().await?;
-            }
-            let mut daemon = daemon::connect_or_start().await?;
-            let status = daemon.status().await?;
-            println!("Mjolnir daemon restarted as PID {}.", status.pid);
+            let restarted = daemon::restart_daemon().await?;
+            // A restart onto another build is an error, so reaching here means
+            // the daemon is either proved to be this build or unidentifiable;
+            // say which, because "restarted" alone is what used to mislead.
+            let checked = match restarted.runs_this_build {
+                Some(true) => ", running this build",
+                _ => "",
+            };
+            println!(
+                "Mjolnir daemon restarted as PID {}{checked}.",
+                restarted.pid
+            );
         }
     }
     Ok(())

@@ -300,16 +300,19 @@ Container `pull_policy` accepts:
 
 | Value | Launch behavior |
 | --- | --- |
-| `auto` | Use the existing image; pull when missing. Eligible moving tags are refreshed in the background for Podman, Docker, and SSH Podman. Apple resolves it during provisioning. |
+| `auto` | Use the existing image. A missing image is downloaded when the daemon starts; eligible moving tags are also refreshed hourly. Apple resolves it during provisioning. |
 | `always` | Refresh during launch. |
 | `newer` | Refresh when the runtime supports a newer-only check; Docker treats it as `always`. |
 | `missing` | Pull only if absent. |
 | `never` | Never pull; fail if absent. |
 
 Running containers are never replaced in place. A refreshed image is used by
-the next new or recreated session. Digest references remain pinned, versioned
-tags remain cached under `auto`, and local image names are not background
-refreshed.
+the next new or recreated session. Digest references remain pinned and
+versioned tags remain cached under `auto`: the daemon downloads either one once
+if the host lacks it, then only checks that it is still there. A `localhost/`
+or `local/` image cannot be downloaded from a registry, so a missing one is
+reported once as a failure rather than retried into a notice every hour. Only
+`never` keeps an image out of the daemon's startup download.
 
 ## Target environment versus profile environment
 

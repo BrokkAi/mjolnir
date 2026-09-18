@@ -298,6 +298,90 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
     )
 }
 
+/// The stop reason recorded for a turn the harness ended without answering.
+///
+/// A reason of its own, like `harness_inactive` for a stalled turn, so
+/// `mj wait`, the session summary, the chat and the recorded events all name
+/// what happened and automation can tell this apart from any other error. Any
+/// stop reason that is not a known completion already classifies as an error
+/// (`crate::state::classify_prompt_completion`), so nothing has to learn this
+/// string to keep working.
+pub const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
+
+/// The progress text an ACP bridge streams while it compacts a session's
+/// context, verbatim from the bridges Mjolnir pins.
+///
+/// `@agentclientprotocol/claude-agent-acp` emits these as ordinary assistant
+/// text (`dist/acp-agent.js`, the `status` handler keyed on `compacting` and
+/// `compact_result`), so they are indistinguishable from an answer unless they
+/// are named. Compaction is not in the ACP schema this build compiles against,
+/// which is why there is nothing better to match on. See issue #970.
+const COMPACTION_BANNERS: &[&str] = &[
+    "compacting...",
+    "compacting completed.",
+    "compacting failed",
+];
+
+/// Whether this update is a bridge's own compaction progress text rather than
+/// anything the agent produced by working.
+///
+/// A turn carrying only these compacted the context; it did not act on the
+/// prompt. Recognizing them is what lets Mjolnir see a prompt that was
+/// swallowed during compaction, which is the loss reported in #970.
+pub fn session_update_is_compaction_banner(update: &SessionUpdate) -> bool {
+    let chunk = match update {
+        SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => chunk,
+        _ => return false,
+    };
+    let ContentBlock::Text(text) = &chunk.content else {
+        return false;
+    };
+    let text = text.text.trim().to_lowercase();
+    COMPACTION_BANNERS
+        .iter()
+        .any(|banner| text.starts_with(banner))
+}
+
+/// Whether this prompt is Mjolnir forwarding a request to compact the context.
+///
+/// A turn that answers this prompt with nothing but compaction banners did
+/// exactly what was asked, so it must not be reported as unanswered. Only
+/// Mjolnir's own outgoing text is inspected, never the harness's.
+pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
+    let Some(ContentBlock::Text(first)) = prompt.first() else {
+        return false;
+    };
+    first
+        .text
+        .trim_start()
+        .to_lowercase()
+        .starts_with("/compact")
+}
+
+/// Whether this update is the agent doing the work a prompt asked for.
+///
+/// This is how Mjolnir tells "the harness answered" from "the harness ended
+/// the turn without acting on the prompt" (#970). Answering is deliberately
+/// defined widely: a turn that only ran tools, edited files or executed
+/// commands and never wrote a word has answered. Only traffic that arrives
+/// without the agent having done anything is excluded — command catalogues,
+/// mode and configuration announcements, session metadata, and usage
+/// accounting, all of which a harness emits on its own schedule.
+///
+/// An unrecognized future variant counts as output. `SessionUpdate` is
+/// `#[non_exhaustive]`, and reporting an answered turn as unanswered because
+/// this build is older than the harness would be worse than missing a swallow.
+pub fn session_update_is_agent_output(update: &SessionUpdate) -> bool {
+    !matches!(
+        update,
+        SessionUpdate::AvailableCommandsUpdate(_)
+            | SessionUpdate::ConfigOptionUpdate(_)
+            | SessionUpdate::CurrentModeUpdate(_)
+            | SessionUpdate::SessionInfoUpdate(_)
+            | SessionUpdate::UsageUpdate(_)
+    ) && !session_update_is_compaction_banner(update)
+}
+
 /// The stable part of Codex's refusal to resume a thread it never wrote to
 /// disk. Codex defers a thread's rollout file until the first user message, so
 /// a thread that was created and never prompted does not exist to resume.
@@ -766,5 +850,99 @@ mod missing_thread_tests {
         }))
         .unwrap();
         assert!(session_update_has_native_history(&agent_content));
+    }
+}
+
+/// What counts as the harness answering a prompt (#970).
+#[cfg(test)]
+mod agent_output_tests {
+    use super::*;
+
+    fn update(value: serde_json::Value) -> SessionUpdate {
+        serde_json::from_value(value).expect("session update fixture")
+    }
+
+    #[test]
+    fn traffic_the_harness_emits_on_its_own_is_not_an_answer() {
+        for value in [
+            serde_json::json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
+            serde_json::json!({"sessionUpdate": "current_mode_update", "currentModeId": "default"}),
+            serde_json::json!({"sessionUpdate": "config_option_update", "configOptions": []}),
+            serde_json::json!({"sessionUpdate": "session_info_update"}),
+            serde_json::json!({"sessionUpdate": "usage_update", "used": 12, "size": 100}),
+        ] {
+            assert!(
+                !session_update_is_agent_output(&update(value.clone())),
+                "{value} must not count as the agent answering"
+            );
+        }
+    }
+
+    /// A turn that only ran tools answered the prompt. Text is not the test:
+    /// an agent that edits a file and says nothing has still done the work.
+    #[test]
+    fn tool_calls_and_text_both_count_as_an_answer() {
+        for value in [
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Edit README.md",
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "done"},
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "thinking"},
+            }),
+        ] {
+            assert!(
+                session_update_is_agent_output(&update(value.clone())),
+                "{value} must count as the agent answering"
+            );
+        }
+    }
+
+    /// The exact shape issue #970 reported: the bridge streams its compaction
+    /// progress into the swallowed prompt's turn, so counting every message
+    /// would hide the loss.
+    #[test]
+    fn compaction_progress_text_is_not_an_answer() {
+        for text in [
+            "Compacting...",
+            "\n\nCompacting completed.",
+            "Compacting failed: out of memory.",
+        ] {
+            let banner = update(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }));
+            assert!(session_update_is_compaction_banner(&banner), "{text}");
+            assert!(!session_update_is_agent_output(&banner), "{text}");
+        }
+        let answer = update(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Compacting the loop saves two allocations."},
+        }));
+        assert!(!session_update_is_compaction_banner(&answer));
+        assert!(session_update_is_agent_output(&answer));
+    }
+
+    #[test]
+    fn only_a_prompt_that_asks_to_compact_is_answered_by_compacting() {
+        let text = |value: &str| vec![ContentBlock::Text(TextContent::new(value))];
+        assert!(prompt_requests_compaction(&text("/compact")));
+        assert!(prompt_requests_compaction(&text(
+            "  /compact keep the plan"
+        )));
+        assert!(!prompt_requests_compaction(&text("compact the loop")));
+        assert!(!prompt_requests_compaction(&text("/context")));
+        assert!(!prompt_requests_compaction(&[]));
     }
 }

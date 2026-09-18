@@ -467,6 +467,19 @@ pub enum DaemonAction {
         command_id: String,
         command: RelayCommand,
     },
+    /// Deliver a prompt typed while a session was still starting, once the
+    /// daemon sees that session's harness become ready. The daemon owns the
+    /// wait, so the prompt arrives whether or not this client is still
+    /// running or still showing that session.
+    QueueStartupPrompt {
+        session_id: String,
+        text: String,
+        /// The saved draft text this prompt was typed from, if the client
+        /// also persisted it. Cleared after a successful submit so the
+        /// delivered prompt does not reappear as a draft.
+        #[serde(default)]
+        inherited_draft: Option<String>,
+    },
     SyncSession {
         session_id: String,
     },
@@ -1331,6 +1344,28 @@ impl DaemonClient {
         }
     }
 
+    /// Hand the daemon a prompt for a session that is still starting. The
+    /// daemon replies as soon as the prompt is queued, not when it is
+    /// delivered; delivery failures come back as a session notice.
+    pub async fn queue_startup_prompt(
+        &mut self,
+        session_id: String,
+        text: String,
+        inherited_draft: Option<String>,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::QueueStartupPrompt {
+                session_id,
+                text,
+                inherited_draft,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected startup prompt reply {reply:?}"),
+        }
+    }
+
     /// Ask the daemon to review the turn this session just finished.
     ///
     /// The refusal is a sentence for a person -- "prompts are queued", "set
@@ -1608,7 +1643,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

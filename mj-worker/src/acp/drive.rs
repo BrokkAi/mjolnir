@@ -26,15 +26,19 @@ pub(super) async fn drive<T>(
 where
     T: ConnectTo<Client>,
 {
+    // How many updates the agent produced by working, over the whole
+    // connection. A turn reads it before and after to learn whether the
+    // harness answered the prompt at all (#970).
+    let agent_output_count = AgentOutputCount::default();
     let grok_usage = grok_usage::Collector::default();
     let grok_notification_usage = grok_usage.clone();
     let grok_notification_events = events.clone();
     let grok_notification_harness = spec.harness;
+    let grok_notification_output_count = agent_output_count.clone();
     let notification_events = events.clone();
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
-    let session_update_count = Arc::new(AtomicU64::new(0));
-    let notification_session_update_count = session_update_count.clone();
+    let notification_agent_output_count = agent_output_count.clone();
     let resume_required = Arc::new(AtomicBool::new(
         spec.resume_session.is_some() || spec.harness != HarnessKind::Codex,
     ));
@@ -63,9 +67,11 @@ where
     let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
     let permission_activity = spec.acp_activity.clone();
+    let permission_output_count = agent_output_count.clone();
     let permission_step_clock = spec.step_clock.clone();
     let ext_events = events.clone();
     let ext_activity = spec.acp_activity.clone();
+    let ext_output_count = agent_output_count.clone();
     let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
@@ -88,11 +94,16 @@ where
     let release_terminals = terminals.clone();
     let create_events = events.clone();
     let create_activity = spec.acp_activity.clone();
+    let create_output_count = agent_output_count.clone();
     let create_step_clock = spec.step_clock.clone();
     let output_activity = spec.acp_activity.clone();
+    let output_output_count = agent_output_count.clone();
     let wait_activity = spec.acp_activity.clone();
+    let wait_output_count = agent_output_count.clone();
     let kill_activity = spec.acp_activity.clone();
+    let kill_output_count = agent_output_count.clone();
     let release_activity = spec.acp_activity.clone();
+    let release_output_count = agent_output_count.clone();
     // A terminal runs where the session runs unless the agent names a
     // directory of its own.
     let session_cwd = spec.cwd.clone();
@@ -187,12 +198,17 @@ where
                 ) {
                     return Ok(());
                 }
+                // Count only what the agent produced by working, so a turn
+                // carrying nothing but the harness's own announcements is
+                // still recognized as unanswered (#970).
+                if mj_core::acp::session_update_is_agent_output(&update) {
+                    notification_agent_output_count.mark();
+                }
                 let update = serde_json::to_value(update).map_err(|error| {
                     agent_client_protocol::Error::internal_error().data(serde_json::Value::String(
                         format!("serialize ACP session update for relay: {error}"),
                     ))
                 })?;
-                notification_session_update_count.fetch_add(1, Ordering::Release);
                 notification_events
                     .send(RuntimeEvent::SessionUpdate { update })
                     .await
@@ -234,6 +250,11 @@ where
         )
         .on_receive_notification(
             async move |notification: GrokUsageNotification, _cx| {
+                if grok_notification_harness == HarnessKind::Grok {
+                    // Grok reports a turn it ran here rather than through the
+                    // standard updates, so this is evidence the agent worked.
+                    grok_notification_output_count.mark();
+                }
                 if grok_notification_harness == HarnessKind::Grok
                     && let Err(error) = grok_notification_usage.observe(&notification.session_id.to_string(), &notification.update) {
                     grok_notification_events.send(RuntimeEvent::Warning {
@@ -247,6 +268,7 @@ where
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
+                permission_output_count.mark();
                 permission_step_clock.begin_client_work();
                 if permission_harness == HarnessKind::Muse
                     && permission_policy.is_unconstrained()
@@ -475,6 +497,7 @@ where
         .on_receive_request(
             async move |request: CreateTerminalRequest, responder, _cx| {
                 create_activity.mark();
+                create_output_count.mark();
                 create_step_clock.begin_client_work();
                 let started_at_ms = mj_core::clock::epoch_millis();
                 let spawn = TerminalSpawn {
@@ -526,6 +549,7 @@ where
         .on_receive_request(
             async move |request: TerminalOutputRequest, responder, _cx| {
                 output_activity.mark();
+                output_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(snapshot) = output_terminals.output(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -541,6 +565,7 @@ where
         .on_receive_request(
             async move |request: WaitForTerminalExitRequest, responder, _cx| {
                 wait_activity.mark();
+                wait_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(exit) = wait_terminals.exit_receiver(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -569,6 +594,7 @@ where
         .on_receive_request(
             async move |request: KillTerminalRequest, responder, _cx| {
                 kill_activity.mark();
+                kill_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 // The terminal stays valid: output and wait_for_exit still
                 // answer for it until the agent releases it.
@@ -582,6 +608,7 @@ where
         .on_receive_request(
             async move |request: ReleaseTerminalRequest, responder, _cx| {
                 release_activity.mark();
+                release_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(supervisor) = release_terminals.release(&terminal_id) else {
                     return responder.respond_with_error(unknown_terminal_error(&terminal_id));
@@ -610,6 +637,7 @@ where
         .on_receive_request(
             async move |request: agent_client_protocol::UntypedMessage, responder, _cx| {
                 ext_activity.mark();
+                ext_output_count.mark();
                 ext_step_clock.begin_client_work();
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
@@ -829,7 +857,7 @@ where
                 session_elicitations,
                 plan_implementation_slot,
                 opened,
-                session_update_count,
+                agent_output_count,
                 session_updates_enabled,
                 resume_required,
                 native_session_used,
@@ -915,27 +943,8 @@ pub(super) fn salvage_tool_call_update(update: &serde_json::Value) -> Option<Ses
     .ok()
 }
 
-/// How long a prompt may run with no ACP activity before the worker gives up on
-/// it. `MJ_TURN_STALL_TIMEOUT_MS` overrides the default; `0` disables the
-/// watchdog. Ten minutes clears a slow first token (seen at ~6 minutes) while
-/// still catching an adapter that stops relaying a turn it has completed.
-///
-/// This bound applies only while nothing is in flight. A turn with a tool call
-/// open is bounded by [`DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS`] instead.
-pub(super) const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
-
-/// How long one tool call may run before the worker gives up on the turn.
-/// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] overrides it; `0` removes the bound.
-///
-/// Four hours, because failing a healthy long tool call loses work silently:
-/// the run in issue #1020 was ninety-seven minutes in, and evaluation lanes
-/// routinely block on a single build or test suite for tens of minutes. A
-/// bound that is too long only delays a failure the user can already end with
-/// `mj cancel`. It exists at all because a bridge that dies with a tool card
-/// left open would otherwise hold the turn open forever; a bridge *process*
-/// that exits is detected separately and at once, by the `child.wait()` arm of
-/// the select in `mj-worker/src/acp.rs`, and does not wait for this.
-pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
+/// The name of the silence bound's override, in one place.
+pub(super) const TURN_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_STALL_TIMEOUT_MS";
 
 /// The name of the tool-call bound's override, in one place.
 ///
@@ -946,35 +955,46 @@ pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
 /// message and the lookup agree.
 pub(super) const TOOL_CALL_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_TOOL_STALL_TIMEOUT_MS";
 
-fn timeout_from_environment(name: &str, default_ms: u64) -> Option<Duration> {
-    let millis = match std::env::var(name) {
-        Ok(value) => value.trim().parse::<u64>().unwrap_or(default_ms),
-        Err(_) => default_ms,
-    };
+/// A stall bound from the text of its environment variable.
+///
+/// Both bounds are opt-in. Unset, empty, unparseable and `0` all mean "no
+/// bound"; only a positive number of milliseconds arms one. The permissive
+/// parse is deliberate: a typo must not silently arm a watchdog that ends
+/// turns. Pure so the rule can be tested without touching process-wide state.
+pub(super) fn parse_stall_timeout(value: Option<&str>) -> Option<Duration> {
+    let millis = value?.trim().parse::<u64>().unwrap_or_default();
     (millis > 0).then(|| Duration::from_millis(millis))
 }
 
-/// The two bounds a running turn is held to.
+fn timeout_from_environment(name: &str) -> Option<Duration> {
+    parse_stall_timeout(std::env::var(name).ok().as_deref())
+}
+
+/// The bounds a running turn is held to, both off unless configured.
+///
+/// Mjolnir does not guess that a quiet turn is a dead turn. Silence is not
+/// evidence: a turn waiting on a slow first token or a twenty-minute build
+/// sends nothing at all, and failing it destroys real work (#1020). Every
+/// ending Mjolnir decides on its own is deterministic instead — the bridge
+/// process exited, the transport closed, the worker restarted — and the
+/// silence age is published as a fact for a person or an orchestrator to act
+/// on (`mj_core::activity::ActivityState::silent_for_ms`).
+///
+/// An operator who wants an automatic ending opts in per session, through the
+/// worker's environment, by setting [`TURN_STALL_TIMEOUT_VARIABLE`] or
+/// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] to a positive number of milliseconds.
+/// The bound then applies to every harness: none of them ends a turn Mjolnir
+/// reports without the `session/prompt` reply, so none of them is a safe
+/// exception.
 pub(super) fn turn_stall_policy() -> mj_core::activity::StallPolicy {
     mj_core::activity::StallPolicy {
         silence: turn_stall_timeout(),
-        tool_call: timeout_from_environment(
-            TOOL_CALL_STALL_TIMEOUT_VARIABLE,
-            DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS,
-        ),
+        tool_call: timeout_from_environment(TOOL_CALL_STALL_TIMEOUT_VARIABLE),
     }
 }
 
 pub(super) fn turn_stall_timeout() -> Option<Duration> {
-    timeout_from_environment("MJ_TURN_STALL_TIMEOUT_MS", DEFAULT_TURN_STALL_TIMEOUT_MS)
-}
-
-/// Whether a harness's turn ends only when the `session/prompt` reply arrives.
-/// Claude and Codex mark their own turns; every other harness (Muse included)
-/// leaves the turn Running until the reply, so a lost reply hangs it forever
-/// unless the watchdog steps in.
-pub(super) fn turn_ends_only_on_prompt_reply(harness: HarnessKind) -> bool {
-    !harness.marks_own_turn_end()
+    timeout_from_environment(TURN_STALL_TIMEOUT_VARIABLE)
 }
 
 /// What the watchdog knows about the running turn right now.
@@ -997,18 +1017,6 @@ pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::Activity
 /// nothing has to learn this string to keep working.
 pub(super) const TURN_STALLED_STOP_REASON: &str = "harness_inactive";
 
-/// How long something took, in the coarsest unit that still tells the truth.
-///
-/// A bound shortened for a test trips in seconds, and reporting that as "about
-/// 1 minute" makes the message read like a bug in itself.
-fn stall_duration(millis: u64) -> String {
-    let seconds = millis / 1_000;
-    if seconds < 90 {
-        return format!("{seconds} second(s)");
-    }
-    format!("about {} minute(s)", seconds / 60)
-}
-
 /// The transcript message shown when a turn is failed for going silent. It says
 /// what happened and what the user can do, because the work may already be
 /// finished in the container even though mj never received it.
@@ -1017,13 +1025,11 @@ pub(super) fn turn_stall_message(
     verdict: &mj_core::activity::StallVerdict,
 ) -> String {
     let reason = match verdict {
-        mj_core::activity::StallVerdict::Live => {
-            "mj stopped waiting for the harness".to_owned()
-        }
+        mj_core::activity::StallVerdict::Live => "mj stopped waiting for the harness".to_owned(),
         mj_core::activity::StallVerdict::Silent { silent_ms } => format!(
             "mj received no activity from the harness for {} while a turn was running and no \
              tool call was open, so it failed the turn",
-            stall_duration(*silent_ms),
+            mj_core::activity::describe_duration(*silent_ms),
         ),
         mj_core::activity::StallVerdict::ToolCall {
             tool_call_id,
@@ -1034,8 +1040,8 @@ pub(super) fn turn_stall_message(
              which is past the limit on a single tool call, so mj failed the turn. Raise or \
              remove that limit with {TOOL_CALL_STALL_TIMEOUT_VARIABLE} (milliseconds, 0 removes \
              it)",
-            stall_duration(*running_ms),
-            stall_duration(*silent_ms),
+            mj_core::activity::describe_duration(*running_ms),
+            mj_core::activity::describe_duration(*silent_ms),
         ),
     };
     turn_stall_transcript_message(harness, &reason)
@@ -1062,12 +1068,59 @@ pub(super) fn prompt_failure_warning(error: &agent_client_protocol::Error) -> St
     }
 }
 
+/// How much the agent has produced by working, over one ACP connection.
+///
+/// A turn reads it before and after to learn whether the harness did anything
+/// the prompt asked for (#970). It is marked wherever the agent acts: the
+/// session updates that carry its messages, thoughts, plans and tool calls,
+/// and every request it makes of Mjolnir — a permission, a terminal, an
+/// elicitation. Traffic a harness emits on its own schedule is excluded, so a
+/// turn carrying only a command catalogue, a usage figure or a compaction
+/// banner counts as having produced nothing.
+#[derive(Clone, Default)]
+pub(super) struct AgentOutputCount(Arc<AtomicU64>);
+
+impl AgentOutputCount {
+    pub(super) fn mark(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// What the person is told when the harness ended a turn without answering.
+///
+/// It leads with the stable marker `mj_core::credentials` matches on, then
+/// says in plain language what happened and what to do. It deliberately does
+/// not claim the prompt was dropped: Mjolnir cannot tell a prompt the harness
+/// never acted on from one it acted on silently, and resending is the person's
+/// decision because the harness may have done the work already.
+pub(super) fn prompt_unanswered_message(harness: HarnessKind) -> String {
+    format!(
+        "{PROMPT_EMPTY_RESPONSE_MARKER}: {name} ended the turn without producing any message, \
+         thought or tool call, so this prompt may never have been acted on. Check the workspace \
+         before resending it, in case the work was done without being reported.",
+        name = harness.display_name(),
+    )
+}
+
+/// Whether the harness ended this turn without doing anything the prompt asked
+/// for.
+///
+/// Only a turn the harness reported as finished is judged. A cancelled,
+/// refused, token-limited or errored turn already reports its own ending, and
+/// relabelling those would hide the reason they really ended. The counters
+/// count agent output only (`mj_core::acp::session_update_is_agent_output`),
+/// so a turn that ran a tool and said nothing counts as answered, while a turn
+/// carrying only the harness's own banners counts as unanswered (#970).
 pub(super) fn prompt_returned_without_updates(
     stop_reason: &StopReason,
     updates_before: u64,
     updates_after: u64,
 ) -> bool {
-    *stop_reason != StopReason::Cancelled && updates_before == updates_after
+    *stop_reason == StopReason::EndTurn && updates_before == updates_after
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1080,7 +1133,7 @@ pub(super) async fn drive_connection(
     pending_elicitations: PendingElicitations,
     plan_implementation_slot: PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    session_update_count: Arc<AtomicU64>,
+    agent_output_count: AgentOutputCount,
     session_updates_enabled: Arc<AtomicBool>,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -1099,7 +1152,7 @@ pub(super) async fn drive_connection(
         &pending_elicitations,
         &plan_implementation_slot,
         opened,
-        &session_update_count,
+        &agent_output_count,
         &session_updates_enabled,
         resume_required,
         native_session_used,

@@ -327,7 +327,13 @@ pub(crate) struct SessionArgs {
 #[derive(Debug, Args)]
 pub(crate) struct CloseArgs {
     #[arg(long)]
-    session: String,
+    session: Option<String>,
+    /// Taken only so the command can explain itself. `mj close <id>` is a
+    /// common mistake, and every session command in this CLI names its
+    /// session with `--session`, so clap's "unexpected argument" would leave
+    /// the person guessing which option it wanted.
+    #[arg(value_name = "SESSION", hide = true)]
+    misplaced_session: Option<String>,
     /// Destroy the session without a checkpoint: the target is torn down, the
     /// recovery archive removed, sub-agents destroyed first; irreversible.
     #[arg(long)]
@@ -381,6 +387,60 @@ impl From<ResumeQueueArg> for mj_core::state::ResumeQueueDisposition {
 pub(crate) struct ApiInfoArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspacesListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceCreateArgs {
+    /// Workspace name, 1-64 characters. Naming one that already exists selects
+    /// it instead of failing, so this is safe to run before every session.
+    name: String,
+    #[arg(long)]
+    json: bool,
+}
+
+/// List the workspaces sessions can be created in.
+pub(crate) async fn workspaces_list(args: WorkspacesListArgs) -> Result<()> {
+    let list = ApiClient::connect().await?.workspaces().await?;
+    if args.json {
+        return print_json(&list);
+    }
+    let id_width = list
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.chars().count())
+        .chain(std::iter::once(2))
+        .max()
+        .unwrap_or(2);
+    println!("{:id_width$}  SESSIONS  NAME", "ID");
+    for workspace in &list.workspaces {
+        println!(
+            "{:id_width$}  {:8}  {}",
+            workspace.id, workspace.session_count, workspace.name
+        );
+    }
+    Ok(())
+}
+
+/// Create a workspace, or select the one that already carries the name.
+pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
+    let created = ApiClient::connect()
+        .await?
+        .create_workspace(args.name)
+        .await?;
+    if args.json {
+        return print_json(&created);
+    }
+    println!(
+        "workspace {}  {}",
+        created.workspace.id, created.workspace.name
+    );
+    Ok(())
 }
 
 /// Create a session and, when a prompt was given, hand it over as the first
@@ -635,6 +695,14 @@ pub(crate) async fn sessions(
             return print_json(&session);
         }
         println!("{}  {}  {}", session.id, session.state, session.title);
+        // Silence is reported, never acted on. A turn waiting on a long build
+        // is quiet and healthy, so this says what is true and leaves the
+        // decision — keep waiting, or `mj cancel-turn` — to the reader.
+        if let Some(note) = session.activity_state.as_ref().and_then(|state| {
+            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
+        }) {
+            println!("running, {note}");
+        }
         if let Some(error) = &session.error {
             println!("error: {error}");
         }
@@ -675,24 +743,46 @@ pub(crate) async fn sessions(
     Ok(())
 }
 
+/// Close a session, with or without a checkpoint.
+///
+/// A non-force close is accepted asynchronously, because checkpointing and
+/// tearing down a target take minutes. Follow it with `mj wait --session <id>`,
+/// which blocks while the close runs and reports why it failed if it does.
 pub(crate) async fn close(args: CloseArgs) -> Result<()> {
+    let session = close_session_id(&args)?;
     let client = ApiClient::connect().await?;
     client
-        .close(&args.session, args.force, args.delete_branch)
+        .close(session, args.force, args.delete_branch)
         .await?;
     match args.json {
         true => print_json(&serde_json::json!({
-            "session_id": args.session,
+            "session_id": session,
             "accepted": true,
             "forced": args.force,
         })),
         false => {
             match args.force {
-                true => println!("destroying {}", args.session),
-                false => println!("closing {}", args.session),
+                true => println!("destroying {session}"),
+                false => {
+                    println!("closing {session}");
+                    println!("watch it with `mj wait --session {session}`");
+                }
             }
             Ok(())
         }
+    }
+}
+
+/// Which session this close is for, or a message naming the option that says
+/// so.
+fn close_session_id(args: &CloseArgs) -> Result<&str> {
+    match (args.session.as_deref(), args.misplaced_session.as_deref()) {
+        (Some(session), None) => Ok(session),
+        (None, Some(session)) => {
+            bail!("name the session as an option: `mj close --session {session}`")
+        }
+        (Some(_), Some(_)) => bail!("name the session once, with --session"),
+        (None, None) => bail!("name the session to close with --session <id>"),
     }
 }
 
@@ -1158,6 +1248,60 @@ mod tests {
             });
             assert_eq!(crate::command_name(cli.command.as_ref()), matched);
         }
+    }
+
+    /// `mj workspaces` keeps opening the manager, and the two subcommands are
+    /// the non-interactive form a script uses to get a workspace before its
+    /// first session (#1080).
+    #[test]
+    fn workspaces_keeps_its_interactive_form_and_gains_list_and_create() {
+        let cli = Cli::try_parse_from(["mj", "workspaces"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        assert!(args.command.is_none(), "the bare form opens the manager");
+
+        let cli = Cli::try_parse_from(["mj", "workspaces", "list", "--json"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        let Some(crate::WorkspacesCommand::List(list)) = args.command else {
+            panic!("expected list");
+        };
+        assert!(list.json);
+
+        let cli = Cli::try_parse_from(["mj", "workspaces", "create", "Release work"]).unwrap();
+        let Some(Command::Workspaces(args)) = cli.command else {
+            panic!("expected the workspaces subcommand");
+        };
+        let Some(crate::WorkspacesCommand::Create(create)) = args.command else {
+            panic!("expected create");
+        };
+        assert_eq!(create.name, "Release work");
+        assert!(!create.json);
+
+        // The name is required: an empty create would otherwise reach the API.
+        assert!(Cli::try_parse_from(["mj", "workspaces", "create"]).is_err());
+    }
+
+    #[test]
+    fn close_names_the_option_that_takes_a_session_id() {
+        let parsed = Cli::try_parse_from(["mj", "close", "s1"]).expect("the id is accepted");
+        let Command::Close(args) = parsed.command.expect("close is a command") else {
+            panic!("close parsed as another command");
+        };
+        let error = close_session_id(&args).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--session s1"),
+            "the error has to say which option to use: {error:#}"
+        );
+
+        let parsed =
+            Cli::try_parse_from(["mj", "close", "--session", "s1"]).expect("the option parses");
+        let Command::Close(args) = parsed.command.expect("close is a command") else {
+            panic!("close parsed as another command");
+        };
+        assert_eq!(close_session_id(&args).unwrap(), "s1");
     }
 
     #[test]

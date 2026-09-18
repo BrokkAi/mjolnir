@@ -5,8 +5,8 @@
 //! summaries under it, with a shared one-row footer. There is no second screen
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
-use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions};
-use mj_chat::selection::{SurfaceFrame, SurfaceId};
+use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions, ChatState};
+use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
 use mj_core::state::SessionTransitionKind;
 use ratatui::Frame;
@@ -441,7 +441,19 @@ fn render_combined_themed(
                     .is_some_and(|session_id| dashboard.opening_session() == Some(session_id))
         }
     };
-    let desired_prompt = if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
+    // Between the new-session wizard closing and the daemon registering the
+    // session there is no session to key a standby by, so the launch standby
+    // fills the band instead and asks for the same room.
+    let launch_standby_drawn =
+        selected_transition.is_none() && dashboard.launch_standby_capturing();
+    let desired_prompt = if launch_standby_drawn {
+        dashboard
+            .launch_standby
+            .as_ref()
+            .map_or(PROMPT_MINIMUM, |standby| {
+                standby.desired_prompt_height(content_area.width)
+            })
+    } else if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
         dashboard
             .standby_prompt_mut(session_id)
             .desired_prompt_height(content_area.width)
@@ -678,7 +690,10 @@ fn render_combined_themed(
     dashboard.chat_transcript_area = Some(transcript_area);
     dashboard.chat_prompt_area = Some(prompt_area);
     let prompt_focused = dashboard.prompt_has_focus();
-    let chat_drew_footer = if let Some((session_id, transition, failed)) = selected_transition {
+    let chat_drew_footer = if launch_standby_drawn {
+        render_launch_standby_surface(frame, transcript_area, prompt_area, dashboard);
+        false
+    } else if let Some((session_id, transition, failed)) = selected_transition {
         render_transition_surface(
             frame,
             transcript_area,
@@ -909,8 +924,68 @@ fn draw_standby_prompt(
     let focused = dashboard.prompt_has_focus();
     let surfaces = {
         let standby = dashboard.standby_prompt_mut(session_id);
-        standby.draw_prompt_band(frame, prompt_area, focused, note);
-        standby.frame_surfaces().clone()
+        draw_standby_band(frame, prompt_area, standby, focused, note)
+    };
+    dashboard.frame_surfaces.append(&surfaces);
+}
+
+/// Draws one standby composer into the prompt band and reports its surfaces,
+/// shared by the per-session standby and the launch standby.
+fn draw_standby_band(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    standby: &mut ChatState,
+    focused: bool,
+    note: Option<Line<'static>>,
+) -> FrameSurfaces {
+    standby.draw_prompt_band(frame, prompt_area, focused, note);
+    standby.frame_surfaces().clone()
+}
+
+/// Draws the surface shown between the new-session wizard closing and the
+/// daemon registering the session: the launch has no session record yet, so
+/// the panel reports the stage in general terms and the launch standby holds
+/// whatever is typed until the new session's standby adopts it.
+fn render_launch_standby_surface(
+    frame: &mut Frame,
+    transcript_area: Rect,
+    prompt_area: Rect,
+    dashboard: &mut DashboardState,
+) {
+    let panel = theme::panel(false)
+        .title(format!(
+            " Transition · {} ",
+            SessionTransitionKind::Starting.label()
+        ))
+        .title(
+            Line::from(vec![
+                Span::raw(" "),
+                spinner::compact_span(dashboard.config.spinner, spinner::elapsed_ms()),
+                Span::raw(" "),
+            ])
+            .right_aligned(),
+        );
+    let details = vec![
+        Line::raw("Current stage: Preparing session launch…"),
+        Line::default(),
+        Line::styled(
+            "Type the first message now; it is sent when the session is live.",
+            theme::muted(),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(details)
+            .wrap(Wrap { trim: true })
+            .block(panel),
+        transcript_area,
+    );
+    let focused = dashboard.prompt_has_focus();
+    let Some(surfaces) = dashboard
+        .launch_standby
+        .as_mut()
+        .map(|standby| draw_standby_band(frame, prompt_area, standby, focused, None))
+    else {
+        return;
     };
     dashboard.frame_surfaces.append(&surfaces);
 }
@@ -1168,6 +1243,44 @@ mod tests {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::None
+        );
+    }
+
+    /// A launch that has not registered yet draws the same pair of panels a
+    /// Starting transition does, with the launch standby in the band, so the
+    /// typing has somewhere visible to go before the session exists.
+    #[test]
+    fn a_launch_being_prepared_draws_the_launch_standby() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_launch_standby(mj_chat::chat::SessionHeaderIdentity {
+            target: "/tmp/project".into(),
+            profile: "profile-1".into(),
+            title: String::new(),
+            harness_kind: None,
+            subagent_count: 0,
+        });
+        for character in "first message ahead".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .unwrap();
+
+        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let lines = buffer_lines(terminal.backend().buffer());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Preparing session launch")),
+            "launch stage missing from {lines:?}"
+        );
+        let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
+        assert!(
+            content
+                .iter()
+                .any(|line| line.contains("first message ahead")),
+            "draft missing from {content:?}"
         );
     }
 

@@ -5,16 +5,25 @@ use mj_core::config::data_dir;
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(unix))]
-use anyhow::bail;
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 pub(crate) use mj_client::daemon::*;
+pub(crate) use mj_client::executable::{
+    process_executable_path, process_runs_this_executable, running_executable_path,
+};
 pub(crate) use mj_controller::daemon::run_daemon_process;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 const DEV_RESTART_STALE_DAEMON_ENV: &str = "MJ_DEV_RESTART_STALE_DAEMON";
-const START_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a launched daemon may take to publish its endpoint before the
+/// client says out loud that startup is still running. Startup opens the store,
+/// applies migrations, pins worker sources and reconciles interrupted sessions
+/// before it can answer anything, so a busy machine or a large instance can
+/// pass this point and still be healthy.
+const START_NOTICE_DELAY: Duration = Duration::from_secs(8);
+/// The hard upper bound on waiting for a launched daemon, so the command
+/// cannot hang forever behind a wedged startup.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 struct DaemonStartGuard(fs::File);
 
@@ -66,7 +75,19 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
 pub async fn connect_or_start() -> Result<DaemonClient> {
     // Serialize replacement and publication across clients, then re-read the
     // endpoint. A client waiting here must reuse the winner's daemon.
-    let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    connect_or_start_holding(&startup).await
+}
+
+/// The body of [`connect_or_start`] for a caller that already holds the
+/// daemon startup lock.
+///
+/// That lock is not reentrant within one process, so a caller that needs it
+/// held across more than one step — a restart holds it across the stop and the
+/// replacement — must come through here instead of calling
+/// [`connect_or_start`] again. The guard is taken by reference only so the
+/// requirement is visible at every call site.
+async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonClient> {
     if let Ok(metadata) = read_metadata_any() {
         ensure_supported_daemon_protocol(metadata.protocol_version)?;
     }
@@ -135,41 +156,170 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     .await
     .context("spawn daemon task failed")??;
 
-    let deadline = Instant::now() + START_TIMEOUT;
-    let mut last_error = None;
-    while Instant::now() < deadline {
-        match connect_existing().await {
-            Ok(mut client) => match client.request(DaemonAction::Ping).await {
-                Ok(DaemonReply::Pong) => return Ok(client),
-                Ok(reply) => last_error = Some(anyhow!("unexpected startup reply {reply:?}")),
-                Err(error) => last_error = Some(error),
-            },
-            Err(error) => last_error = Some(error),
-        }
+    let outcome = wait_for_ready_daemon(
+        || process_is_alive(launched.pid),
+        || async {
+            let mut client = connect_existing().await?;
+            match client.request(DaemonAction::Ping).await? {
+                DaemonReply::Pong => Ok(client),
+                reply => Err(anyhow!("unexpected startup reply {reply:?}")),
+            }
+        },
+        |waited| {
+            eprintln!(
+                "Mjolnir daemon {} has been starting for {}s; still waiting.",
+                launched.pid,
+                waited.as_secs()
+            );
+        },
+    )
+    .await;
+    let reason = match outcome {
+        StartupOutcome::Ready(client) => return Ok(client),
         // A daemon that fails to initialize explains itself in its log and
-        // exits without ever publishing an endpoint. Report that explanation
-        // now instead of dialing the missing endpoint until the deadline.
-        if !process_is_alive(launched.pid) {
-            let output = launched.output_since_launch(&log_path).await;
-            return Err(launched.failure(
-                format!("Mjolnir daemon {} exited before it was ready", launched.pid),
-                output,
-                &log_path,
-            ));
+        // exits without ever publishing an endpoint. That explanation is the
+        // answer; the client's own failure to reach the absent endpoint is not.
+        StartupOutcome::Exited => {
+            format!("Mjolnir daemon {} exited before it was ready", launched.pid)
         }
-        tokio::time::sleep(RETRY_DELAY).await;
-    }
-    let output = launched.output_since_launch(&log_path).await;
-    let last_error = last_error.unwrap_or_else(|| anyhow!("Mjolnir daemon did not become ready"));
-    Err(launched.failure(
-        format!(
+        StartupOutcome::StillStarting { last_error } => format!(
             "Mjolnir daemon {} is still starting after {}s and has not accepted a request (last attempt: {last_error:#})",
             launched.pid,
             START_TIMEOUT.as_secs()
         ),
-        output,
-        &log_path,
-    ))
+    };
+    let output = launched.output_since_launch(&log_path).await;
+    Err(launched.failure(reason, output, &log_path))
+}
+
+/// The daemon a restart produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartedDaemon {
+    pub pid: u32,
+    /// Whether the daemon runs this client's own executable file. `None` on a
+    /// platform where a process's executable cannot be identified.
+    pub runs_this_build: Option<bool>,
+}
+
+/// How many times a restart stops the daemon it finds and starts its own.
+///
+/// The startup lock excludes a client that has not started its daemon yet, but
+/// not one that started it just before this restart took the lock, so one
+/// retry is worth making. A second loss means that client is producing daemons
+/// faster than they can be replaced, which is a report rather than a race to
+/// keep running.
+const RESTART_ATTEMPTS: usize = 2;
+
+/// Stop the running Mjolnir daemon and start one from this client's executable.
+///
+/// The startup lock is held from before the stop until the replacement has
+/// answered a request. Every client that starts a daemon takes that lock
+/// first, including clients built before this function existed, so none of
+/// them can install a daemon of its own in the gap the stop opens. Without
+/// that, an attached client running an older build wins the gap and the
+/// restart reports someone else's daemon as the one it was asked for.
+pub async fn restart_daemon() -> Result<RestartedDaemon> {
+    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    for attempt in 1..=RESTART_ATTEMPTS {
+        if let Ok(metadata) = read_metadata_any() {
+            replace_daemon(&metadata).await?;
+        }
+        let mut client = connect_or_start_holding(&startup).await?;
+        let status = client.status().await?;
+        let identity = process_runs_this_executable(status.pid)?;
+        if identity != Some(false) || attempt == RESTART_ATTEMPTS {
+            return restart_verdict(
+                status.pid,
+                identity,
+                process_executable_path(status.pid).as_deref(),
+                running_executable_path().as_deref(),
+            );
+        }
+    }
+    unreachable!("the final attempt always returns a verdict")
+}
+
+/// Turn one executable-identity answer into the restart's result.
+///
+/// This is separate from the restart itself so the outcome can be exercised
+/// without starting daemons. It is also the decision the command used to skip:
+/// reporting success on a changed process id alone is what let a restart
+/// announce a daemon running code the caller had just replaced.
+fn restart_verdict(
+    pid: u32,
+    identity: Option<bool>,
+    daemon: Option<&Path>,
+    client: Option<&Path>,
+) -> Result<RestartedDaemon> {
+    if identity == Some(false) {
+        let daemon = daemon.map_or_else(
+            || "another executable".to_owned(),
+            |path| path.display().to_string(),
+        );
+        let client = client.map_or_else(
+            || "this client's executable".to_owned(),
+            |path| path.display().to_string(),
+        );
+        bail!(
+            "Mjolnir daemon {pid} runs {daemon}, not this build ({client}). \
+             Another attached client started it. Close clients from the \
+             previous build, then run `mj daemon restart` again."
+        );
+    }
+    Ok(RestartedDaemon {
+        pid,
+        runs_this_build: identity,
+    })
+}
+
+/// Why waiting for a launched daemon stopped.
+enum StartupOutcome<T> {
+    /// It answered a request.
+    Ready(T),
+    /// The launched process is gone.
+    Exited,
+    /// It is still alive but has not answered within [`START_TIMEOUT`].
+    StillStarting { last_error: anyhow::Error },
+}
+
+/// Wait for a launched daemon to answer a request.
+///
+/// A daemon that is still alive is still starting: initialization runs before
+/// it publishes its endpoint, so a slow start is not a failure and the wait
+/// continues. Only the process leaving, or the hard [`START_TIMEOUT`] bound,
+/// ends the wait without a client. The clock is Tokio's, so tests can drive it.
+async fn wait_for_ready_daemon<T, Probe, Waiting, Notice>(
+    is_alive: impl Fn() -> bool,
+    mut probe: Probe,
+    notice: Notice,
+) -> StartupOutcome<T>
+where
+    Probe: FnMut() -> Waiting,
+    Waiting: Future<Output = Result<T>>,
+    Notice: FnOnce(Duration),
+{
+    let started = tokio::time::Instant::now();
+    let deadline = started + START_TIMEOUT;
+    let mut notice = Some(notice);
+    loop {
+        let last_error = match probe().await {
+            Ok(ready) => return StartupOutcome::Ready(ready),
+            Err(error) => error,
+        };
+        if !is_alive() {
+            return StartupOutcome::Exited;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return StartupOutcome::StillStarting { last_error };
+        }
+        if now.duration_since(started) >= START_NOTICE_DELAY
+            && let Some(notice) = notice.take()
+        {
+            notice(now.duration_since(started));
+        }
+        tokio::time::sleep(RETRY_DELAY).await;
+    }
 }
 
 /// The daemon this client launched and where its log stood at launch.
@@ -246,77 +396,6 @@ fn daemon_launch_executable() -> Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutableFileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn executable_file_identity(path: &Path) -> std::io::Result<ExecutableFileIdentity> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let metadata = fs::metadata(path)?;
-    Ok(ExecutableFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
-    let current = executable_file_identity(Path::new("/proc/self/exe"))
-        .context("inspect the development client executable")?;
-    let daemon_path = PathBuf::from(format!("/proc/{pid}/exe"));
-    let daemon = match executable_file_identity(&daemon_path) {
-        Ok(identity) => identity,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect daemon {pid} executable via {}",
-                    daemon_path.display()
-                )
-            });
-        }
-    };
-    Ok(Some(current == daemon))
-}
-
-#[cfg(target_os = "macos")]
-fn daemon_uses_current_executable(pid: u32) -> Result<Option<bool>> {
-    let process_id = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[process_id]),
-        true,
-        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-    );
-    let Some(process) = system.process(process_id) else {
-        return Ok(None);
-    };
-    let Some(path) = process.exe() else {
-        return Ok(None);
-    };
-    let current = std::env::current_exe().context("find development client executable")?;
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
-        Err(error) => return Err(error).context("inspect daemon executable"),
-    };
-    // macOS reports a pathname, not Linux's reference to the running inode.
-    // A newer file at that same pathname also means the daemon is stale.
-    let modified = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    Ok(Some(
-        executable_file_identity(&current)? == executable_file_identity(path)?
-            && modified <= process.start_time(),
-    ))
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 static DEVELOPMENT_DAEMON_REFRESH: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -358,7 +437,7 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
                 .context("parse development daemon start time")?
                 .into();
             let stale = tokio::task::spawn_blocking(move || -> Result<bool> {
-                Ok(daemon_uses_current_executable(pid)? == Some(false)
+                Ok(process_runs_this_executable(pid)? == Some(false)
                     || development_workers_changed_since(
                         started,
                         mj_controller::controller::worker_binary_prerequisite_for_arch,
@@ -448,35 +527,70 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     }
 }
 
+/// What the keep-alive last saw when it refreshed this client's presence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonPresence {
+    /// A daemon answered and knows this client is attached.
+    Attached,
+    /// No daemon answered. The string is the reason, for the person reading it.
+    Missing(String),
+}
+
+/// The keep-alive task and what it reports about the daemon.
+pub struct Attachment {
+    pub task: tokio::task::JoinHandle<()>,
+    pub presence: tokio::sync::watch::Receiver<DaemonPresence>,
+}
+
+/// Keep this client's presence fresh in whatever daemon is running.
+///
+/// This is a two-second timer, not a user action, so it only ever reconnects.
+/// It deliberately does not start a daemon: a timer cannot express the intent
+/// to start one, and when the client's own executable has been replaced on
+/// disk the daemon it would start runs code the user has already discarded.
+/// That is exactly how a stopped daemon used to come back on an old build,
+/// beating the restart that had just stopped it. When no daemon answers, the
+/// surface says so and offers its explicit restart instead.
 pub fn maintain_attachment(
     client_id: String,
     pid: u32,
     cancellation: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Attachment {
+    let (presence_tx, presence) = tokio::sync::watch::channel(DaemonPresence::Attached);
+    let task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    match connect_or_start().await {
-                        Ok(mut daemon) => {
-                            if let Err(error) = daemon
-                                .attach(client_id.clone(), pid)
-                                .await
-                            {
+                    let observed = match connect_existing().await {
+                        Ok(mut daemon) => match daemon.attach(client_id.clone(), pid).await {
+                            Ok(()) => DaemonPresence::Attached,
+                            Err(error) => {
                                 tracing::warn!(%error, "could not refresh daemon client presence");
+                                DaemonPresence::Missing(format!("{error:#}"))
                             }
-                        }
+                        },
                         Err(error) => {
                             tracing::warn!(%error, "could not reconnect dashboard to Mjolnir daemon");
+                            DaemonPresence::Missing(format!("{error:#}"))
                         }
-                    }
+                    };
+                    // `send_if_modified` so a daemon that keeps answering does
+                    // not wake the render loop every two seconds.
+                    presence_tx.send_if_modified(|current| {
+                        let changed = *current != observed;
+                        if changed {
+                            *current = observed;
+                        }
+                        changed
+                    });
                 }
             }
         }
-    })
+    });
+    Attachment { task, presence }
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -545,39 +659,189 @@ mod tests {
             .unwrap();
         drop(replacement);
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn executable_identity_detects_an_nfs_style_replaced_binary() {
+    /// The restart holds one guard across its stop and its start. That is only
+    /// safe because the lock is not reentrant: a second acquisition inside the
+    /// same process blocks exactly as another process would, so a restart that
+    /// called `connect_or_start` again would wait on itself until the deadline.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_startup_lock_is_not_reentrant_within_one_process() {
         let directory = tempfile::tempdir().unwrap();
-        let current = directory.path().join("mj");
-        let hard_link = directory.path().join("mj-hard-link");
-        let retained = directory.path().join(".nfs0000000000000001");
-
-        fs::write(&current, b"old executable").unwrap();
-        fs::hard_link(&current, &hard_link).unwrap();
-        assert_eq!(
-            executable_file_identity(&current).unwrap(),
-            executable_file_identity(&hard_link).unwrap(),
-            "two names for the same executable inode must not restart the daemon"
+        let path = directory.path().join("daemon-start.lock");
+        let held = acquire_start_guard(path.clone()).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                acquire_start_guard(path.clone())
+            )
+            .await
+            .is_err(),
+            "a second acquisition in this process must block while the first is held"
         );
-
-        fs::rename(&current, &retained).unwrap();
-        fs::write(&current, b"new executable").unwrap();
-        assert_ne!(
-            executable_file_identity(&retained).unwrap(),
-            executable_file_identity(&current).unwrap(),
-            "an NFS-retained old executable must differ from its replacement"
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), acquire_start_guard(path))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    /// The keep-alive is a timer, not a user action. It used to call
+    /// `connect_or_start`, which is how a daemon stopped by a restart came
+    /// back on the attached client's older build before the restart could
+    /// start its own.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one() {
+        const CHILD: &str = "MJ_TEST_KEEP_ALIVE_NEVER_STARTS_A_DAEMON";
+        const TEST: &str = "daemon::tests::the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        assert!(
+            !metadata_path().exists(),
+            "this isolated store starts without a daemon"
+        );
+        let cancellation = CancellationToken::new();
+        let attachment = maintain_attachment(
+            "keep-alive-test".to_owned(),
+            std::process::id(),
+            cancellation.clone(),
+        );
+        let mut presence = attachment.presence.clone();
+        tokio::time::timeout(Duration::from_secs(20), presence.changed())
+            .await
+            .expect("the keep-alive reports within a few ticks")
+            .expect("the keep-alive is still running");
+        assert!(
+            matches!(&*presence.borrow(), DaemonPresence::Missing(_)),
+            "a missing daemon must be reported, not replaced"
+        );
+        cancellation.cancel();
+        attachment.task.await.unwrap();
+        // Starting a daemon begins by taking the startup lock, which creates
+        // this file. Its absence is the proof that no start was attempted;
+        // the missing metadata alone would only prove none succeeded.
+        assert!(
+            !data_dir().join("daemon-start.lock").exists(),
+            "the keep-alive must never attempt to start a daemon"
+        );
+        assert!(
+            !metadata_path().exists(),
+            "the keep-alive must never start a daemon"
         );
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn current_process_is_running_the_current_executable() {
+    fn a_restart_onto_this_build_succeeds_and_says_so() {
+        let verdict = restart_verdict(
+            4242,
+            Some(true),
+            Some(Path::new("/opt/mj/mj")),
+            Some(Path::new("/opt/mj/mj")),
+        )
+        .unwrap();
         assert_eq!(
-            daemon_uses_current_executable(std::process::id()).unwrap(),
-            Some(true)
+            verdict,
+            RestartedDaemon {
+                pid: 4242,
+                runs_this_build: Some(true)
+            }
         );
-        assert_eq!(daemon_uses_current_executable(u32::MAX).unwrap(), None);
     }
+    #[test]
+    fn a_restart_that_cannot_identify_the_daemon_succeeds_without_the_guarantee() {
+        let verdict = restart_verdict(7, None, None, None).unwrap();
+        assert_eq!(
+            verdict,
+            RestartedDaemon {
+                pid: 7,
+                runs_this_build: None
+            }
+        );
+    }
+    #[test]
+    fn a_restart_onto_another_build_fails_and_names_both_executables() {
+        let error = restart_verdict(
+            99,
+            Some(false),
+            Some(Path::new("/checkout/target/debug/mj (deleted)")),
+            Some(Path::new("/checkout/target/debug/mj")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("99"), "{error}");
+        assert!(
+            error.contains("/checkout/target/debug/mj (deleted)"),
+            "{error}"
+        );
+        assert!(error.contains("(/checkout/target/debug/mj)"), "{error}");
+        assert!(error.contains("mj daemon restart"), "{error}");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn slow_startup_is_awaited_rather_than_reported_as_a_failure() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0usize);
+        let announced = Cell::new(None);
+        let started = tokio::time::Instant::now();
+        let outcome = wait_for_ready_daemon(
+            || true,
+            || {
+                attempts.set(attempts.get() + 1);
+                let ready = attempts.get() > 500;
+                async move {
+                    if ready {
+                        Ok("client")
+                    } else {
+                        Err(anyhow!("connection refused"))
+                    }
+                }
+            },
+            |waited| announced.set(Some(waited)),
+        )
+        .await;
+        assert!(matches!(outcome, StartupOutcome::Ready("client")));
+        let waited = tokio::time::Instant::now().duration_since(started);
+        assert!(
+            waited > START_NOTICE_DELAY && waited < START_TIMEOUT,
+            "the test must cross the notice delay without reaching the bound, but waited {waited:?}"
+        );
+        assert!(announced.get().is_some(), "a long wait must say so");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_that_exits_is_reported_at_once() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0usize);
+        let started = tokio::time::Instant::now();
+        let outcome: StartupOutcome<()> = wait_for_ready_daemon(
+            || attempts.get() < 3,
+            || {
+                attempts.set(attempts.get() + 1);
+                async { Err(anyhow!("connection refused")) }
+            },
+            |_| panic!("an exit must not wait long enough to announce itself"),
+        )
+        .await;
+        assert!(
+            matches!(outcome, StartupOutcome::Exited),
+            "an exited daemon must be reported as exited"
+        );
+        assert!(tokio::time::Instant::now().duration_since(started) < START_NOTICE_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_alive_daemon_that_never_answers_stops_at_the_bound() {
+        let started = tokio::time::Instant::now();
+        let outcome: StartupOutcome<()> = wait_for_ready_daemon(
+            || true,
+            || async { Err(anyhow!("connection refused")) },
+            |_| {},
+        )
+        .await;
+        assert!(matches!(outcome, StartupOutcome::StillStarting { .. }));
+        assert!(tokio::time::Instant::now().duration_since(started) >= START_TIMEOUT);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn development_refresh_detects_workers_installed_or_rebuilt_after_startup() {

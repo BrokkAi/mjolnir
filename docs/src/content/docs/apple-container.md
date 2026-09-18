@@ -55,9 +55,12 @@ host, or the 8-CPU/32-GiB baseline when none has been remembered. The selected
 per-session allocation takes precedence over these target-level backend
 fallbacks.
 
-Apple container also does not participate in the daemon's Podman/Docker image
-refresh loop. It evaluates `pull_policy` while provisioning each session, so an
-eligible image refresh happens as part of launch.
+Apple container takes part in the daemon's background image download like
+Podman and Docker: a configured image the host does not have is downloaded a
+few seconds after the daemon starts, and an eligible moving tag is refreshed
+hourly, with `container image inspect` and `container image pull`. It also
+evaluates `pull_policy` while provisioning each session, so an eligible image
+refresh still happens as part of launch.
 
 ## Verify it end to end
 

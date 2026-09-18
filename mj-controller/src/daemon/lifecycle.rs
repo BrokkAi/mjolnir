@@ -6,9 +6,7 @@ impl RuntimeState {
         session_id: String,
         kind: LifecycleKind,
         work: F,
-    ) -> Result<
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
-    >
+    ) -> Result<LifecycleWatch>
     where
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
@@ -22,9 +20,7 @@ impl RuntimeState {
         kind: LifecycleKind,
         resume_workspace_id: Option<String>,
         work: F,
-    ) -> Result<
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
-    >
+    ) -> Result<LifecycleWatch>
     where
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
@@ -39,9 +35,7 @@ impl RuntimeState {
         resume_workspace_id: Option<String>,
         request_key: Option<String>,
         work: F,
-    ) -> Result<
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
-    >
+    ) -> Result<LifecycleWatch>
     where
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
@@ -64,9 +58,7 @@ impl RuntimeState {
         request_key: Option<String>,
         create_control: Option<CreateSessionControl>,
         work: F,
-    ) -> Result<
-        tokio::sync::watch::Receiver<Option<std::result::Result<DaemonLifecycleResult, String>>>,
-    >
+    ) -> Result<LifecycleWatch>
     where
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
@@ -109,10 +101,14 @@ impl RuntimeState {
                     .map(|control| control.cancelled.clone())
                     .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+                // The operation's own id is also what a failure reports as its
+                // reference, so a person holding "the close did not finish"
+                // can find the daemon-log entry that says why.
+                let operation_reference = new_command_id("lifecycle")?;
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
-                        operation_id: new_command_id("lifecycle")?,
+                        operation_id: operation_reference.clone(),
                         create_control,
                         kind,
                         cancelled: cancelled.clone(),
@@ -142,15 +138,17 @@ impl RuntimeState {
                     })
                     .await
                     {
-                        Ok(result) => result.map_err(|error| format!("{error:#}")),
-                        Err(error) => Err(format!("daemon lifecycle task failed: {error}")),
+                        Ok(result) => result.map_err(|error| LifecycleFailure::of(&error)),
+                        Err(error) => Err(LifecycleFailure::internal(format!(
+                            "daemon lifecycle task failed: {error}"
+                        ))),
                     };
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"
                         );
                         if result.is_ok() {
-                            result = Err(reload_error);
+                            result = Err(LifecycleFailure::internal(reload_error));
                         } else {
                             tracing::warn!(
                                 session_id = %operation_session_id,
@@ -162,23 +160,40 @@ impl RuntimeState {
                     // A create or resume that failed owns its record. If it did
                     // not get as far as rolling that record back, the stored
                     // error is applied here, because nothing else will.
-                    if let Err(error) = &result
+                    if let Err(failure) = &result
                         && matches!(kind, LifecycleKind::Create | LifecycleKind::Resume)
                     {
                         state
-                            .fail_unfinished_provisioning(&operation_session_id, error)
+                            .fail_unfinished_provisioning(&operation_session_id, &failure.detail)
+                            .await;
+                    }
+                    // A close is accepted asynchronously: its caller has been
+                    // answered and the CLI has already printed `closing <id>`
+                    // and exited. A failure puts the record back in the state
+                    // it had, so without this the person is never told (#1081).
+                    if let Err(failure) = &result
+                        && kind == LifecycleKind::Close
+                    {
+                        state
+                            .record_failed_close(
+                                &operation_session_id,
+                                &operation_reference,
+                                failure,
+                            )
                             .await;
                     }
                     state.note_lifecycle_outcome(&operation_session_id);
                     if let Err(error) =
                         reach_test_hook("lifecycle_reservation_before_result_publication").await
                     {
-                        result = Err(format!("test lifecycle publication hook failed: {error:#}"));
+                        result = Err(LifecycleFailure::internal(format!(
+                            "test lifecycle publication hook failed: {error:#}"
+                        )));
                     }
                     let deferred_cleanup =
                         matches!(result, Ok(DaemonLifecycleResult::DeferredCleanup));
                     if let Err(error) = &result {
-                        tracing::warn!(session_id = %operation_session_id, ?kind, %error, "lifecycle operation failed");
+                        tracing::warn!(session_id = %operation_session_id, ?kind, reference = %operation_reference, %error, "lifecycle operation failed");
                     }
                     result_tx.send_replace(Some(result));
                     // Completion must release transient mutation ownership even
@@ -217,13 +232,11 @@ impl RuntimeState {
     }
 
     pub(super) async fn wait_lifecycle_result(
-        mut result: tokio::sync::watch::Receiver<
-            Option<std::result::Result<DaemonLifecycleResult, String>>,
-        >,
+        mut result: LifecycleWatch,
     ) -> Result<DaemonLifecycleResult> {
         loop {
             if let Some(result) = result.borrow_and_update().clone() {
-                return result.map_err(anyhow::Error::msg);
+                return result.map_err(LifecycleFailure::into_error);
             }
             result
                 .changed()
@@ -249,12 +262,7 @@ impl RuntimeState {
         outcome
     }
 
-    pub(super) fn remove_completed_lifecycle(
-        &self,
-        channel: &tokio::sync::watch::Receiver<
-            Option<std::result::Result<DaemonLifecycleResult, String>>,
-        >,
-    ) {
+    pub(super) fn remove_completed_lifecycle(&self, channel: &LifecycleWatch) {
         self.lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

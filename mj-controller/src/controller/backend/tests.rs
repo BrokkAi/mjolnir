@@ -15,7 +15,7 @@ use mj_core::state::{SessionRecord, SessionState, State};
 
 use crate::targets::{
     self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
-    SshTarget,
+    ImageHost, RefreshWhen, SshTarget,
 };
 
 use super::*;
@@ -397,7 +397,7 @@ fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) 
 }
 
 #[test]
-fn the_image_refresh_plan_covers_every_image_a_launch_no_longer_pulls() {
+fn the_image_refresh_plan_covers_every_configured_container_image_except_never() {
     use mj_core::config::ImagePullPolicy;
 
     let mut config = Config::default();
@@ -444,28 +444,56 @@ fn the_image_refresh_plan_covers_every_image_a_launch_no_longer_pulls() {
             ),
         },
     );
-    // Apple's engine still refreshes its image during provisioning.
+    // Apple's engine joins the startup download like every other engine.
     config.targets.insert(
         "apple".into(),
         TargetTemplate::AppleContainer {
-            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+            container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Auto),
+        },
+    );
+    // An explicit `never` is the one way to keep an image out of the plan.
+    config.targets.insert(
+        "never".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/offline:latest", ImagePullPolicy::Never),
+        },
+    );
+    // Two targets sharing one image on one host, wanting it at different
+    // freshness: one download, on the more eager schedule.
+    config.targets.insert(
+        "merge-missing".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/shared:2", ImagePullPolicy::Missing),
+        },
+    );
+    config.targets.insert(
+        "merge-newer".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/shared:2", ImagePullPolicy::Newer),
         },
     );
 
     let plan = image_refresh_plan(&config);
     assert_eq!(
         plan.len(),
-        3,
-        "expected one refresh per host and image: {plan:?}"
+        6,
+        "expected one refresh per host, image and platform: {plan:?}"
     );
 
-    let local = plan
-        .iter()
-        .find(|refresh| refresh.host == ImageHost::LocalPodman)
-        .expect("the auto latest target is refreshed");
+    let entry = |host: &ImageHost, image: &str| {
+        plan.iter()
+            .find(|refresh| &refresh.host == host && refresh.image == image)
+            .unwrap_or_else(|| panic!("no refresh for {image} on {}: {plan:?}", host.label()))
+    };
+
+    let local = entry(&ImageHost::LocalPodman, "ghcr.io/example/dev:latest");
+    assert_eq!(local.when, RefreshWhen::Always);
     assert_eq!(local.pull.program, "podman");
     assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
-    assert_eq!(local.prune.args, ["image", "prune", "-f"]);
+    assert_eq!(
+        local.prune.as_ref().expect("podman prunes").args,
+        ["image", "prune", "-f"]
+    );
     assert_eq!(
         local.image_id.args,
         [
@@ -477,18 +505,46 @@ fn the_image_refresh_plan_covers_every_image_a_launch_no_longer_pulls() {
         ]
     );
 
-    let docker = plan
-        .iter()
-        .find(|refresh| refresh.host == ImageHost::LocalDocker)
-        .expect("the explicit newer policy is refreshed too");
+    let docker = entry(&ImageHost::LocalDocker, "ghcr.io/example/dev:1.2.3");
+    assert_eq!(docker.when, RefreshWhen::Always);
     assert_eq!(docker.pull.program, "docker");
     assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
-    assert_eq!(docker.prune.args, ["image", "prune", "-f"]);
+    assert_eq!(
+        docker.prune.as_ref().expect("docker prunes").args,
+        ["image", "prune", "-f"]
+    );
+
+    // A versioned tag and a digest pin only need the host to have a copy.
+    let apple = entry(&ImageHost::AppleContainer, "ghcr.io/example/dev:1.2.3");
+    assert_eq!(apple.when, RefreshWhen::WhenAbsent);
+    assert_eq!(apple.pull.program, "container");
+    assert_eq!(
+        apple.pull.args,
+        ["image", "pull", "ghcr.io/example/dev:1.2.3"]
+    );
+    let pinned = plan
+        .iter()
+        .find(|refresh| refresh.image.contains("sha256:"))
+        .expect("a digest pin is still downloaded once when absent");
+    assert_eq!(pinned.when, RefreshWhen::WhenAbsent);
+
+    assert!(
+        !plan.iter().any(|refresh| refresh.image.contains("offline")),
+        "a never policy was downloaded in the background: {plan:?}"
+    );
+
+    let shared = entry(&ImageHost::LocalDocker, "ghcr.io/example/shared:2");
+    assert_eq!(
+        shared.when,
+        RefreshWhen::Always,
+        "the more eager of two targets sharing an image wins"
+    );
 
     let ssh = plan
         .iter()
         .find(|refresh| matches!(refresh.host, ImageHost::SshPodman(_)))
         .expect("the SSH host is refreshed over its own connection");
+    assert_eq!(ssh.when, RefreshWhen::Always);
     assert_eq!(ssh.pull.program, "ssh");
     // The identity file and destination come from the same builder
     // provisioning uses.
@@ -503,13 +559,13 @@ fn the_image_refresh_plan_covers_every_image_a_launch_no_longer_pulls() {
         Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
-        ssh.prune.args.last().map(String::as_str),
+        ssh.prune
+            .as_ref()
+            .expect("podman prunes")
+            .args
+            .last()
+            .map(String::as_str),
         Some("'podman' 'image' 'prune' '-f'")
-    );
-
-    assert!(
-        !plan.iter().any(|refresh| refresh.image.contains("sha256:")),
-        "a digest-pinned image was refreshed: {plan:?}"
     );
 }
 
@@ -556,9 +612,16 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
         Some("'docker' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
-        refresh.prune.args.last().map(String::as_str),
+        refresh
+            .prune
+            .as_ref()
+            .expect("docker prunes")
+            .args
+            .last()
+            .map(String::as_str),
         Some("'docker' 'image' 'prune' '-f'")
     );
+    assert_eq!(refresh.when, RefreshWhen::Always);
 }
 
 #[test]

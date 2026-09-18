@@ -197,7 +197,7 @@ pub async fn run_server(
         let (action_done_tx, mut action_done_rx) = tokio::sync::mpsc::unbounded_channel::<(
             u64,
             Option<String>,
-            std::result::Result<(), String>,
+            std::result::Result<(), PhoneActionFailure>,
         )>();
         let (action_started_tx, mut action_started_rx) =
             tokio::sync::mpsc::unbounded_channel::<PhoneActionStarted>();
@@ -261,7 +261,7 @@ pub async fn run_server(
                 operations = lifecycles.iter()
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
-                if let Err(error) = snapshot_tx.send(viewer_snapshot(
+                let snapshot = viewer_snapshot(
                     &controller,
                     &phone_workspaces,
                     &quotas,
@@ -281,7 +281,8 @@ pub async fn run_server(
                         reviews: &review_views(&daemon_runtime),
                     },
                     $revision,
-                )) {
+                );
+                if let Err(error) = snapshot_tx.send(snapshot) {
                     tracing::debug!(revision = $revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
                 }
             };
@@ -1165,10 +1166,14 @@ pub async fn run_server(
                                 revision = daemon_runtime.allocate_revision();
                                 publish_snapshot!(revision);
                             }
-                            let outcome = if accepted {
-                                ActionOutcome::accepted()
-                            } else {
-                                ActionOutcome::Failed
+                            let outcome = match (known, accepted) {
+                                (_, true) => ActionOutcome::accepted(),
+                                (false, _) => ActionOutcome::Refused(Refusal::unusable(format!(
+                                    "no target named {target_id} is configured"
+                                ))),
+                                (true, false) => ActionOutcome::Failed {
+                                    reference: "capacity-poller".to_owned(),
+                                },
                             };
                             if request.reply.send(outcome).is_err() {
                                 tracing::debug!(%target_id, "phone capacity refresh reply dropped after client disconnect");
@@ -1189,7 +1194,9 @@ pub async fn run_server(
                             let outcome = if known {
                                 ActionOutcome::accepted()
                             } else {
-                                ActionOutcome::Failed
+                                ActionOutcome::Refused(Refusal::unusable(format!(
+                                    "no enabled profile named {profile_id} is configured"
+                                )))
                             };
                             if request.reply.send(outcome).is_err() {
                                 tracing::debug!(%profile_id, "phone quota refresh reply dropped after client disconnect");
@@ -1290,12 +1297,14 @@ pub async fn run_server(
                                     &control,
                                 ))
                             })();
-                            result.map_err(|error| format!("{error:#}"))
+                            result.map_err(|error| PhoneActionFailure::of(&error))
                         })
                         .await;
                         let result = match joined {
                             Ok(result) => result,
-                            Err(error) => Err(format!("phone action task failed: {error}")),
+                            Err(error) => Err(PhoneActionFailure::internal(format!(
+                                "phone action task failed: {error}"
+                            ))),
                         };
                         if let Err(error) = done.send((action_id, session_id, result)) {
                             tracing::debug!(action_id, %error, "phone action finished after the server stopped");
@@ -1336,12 +1345,17 @@ pub async fn run_server(
                     // point at: that is what its request was waiting for.
                     action_replies.resolve(
                         started.action_id,
-                        if publication.is_ok() {
-                            ActionOutcome::Accepted {
+                        match &publication {
+                            Ok(()) => ActionOutcome::Accepted {
                                 session_id: Some(started_session_id),
-                            }
-                        } else {
-                            ActionOutcome::Failed
+                            },
+                            // Publication fails only for reasons this loop
+                            // words itself -- a race for the new session, or
+                            // an action that ended first -- so the text is
+                            // already safe and specific enough to send.
+                            Err(reason) => ActionOutcome::Refused(Refusal::precondition(
+                                reason.clone(),
+                            )),
                         },
                     );
                     if started.published.send(publication).is_err() {
@@ -1362,8 +1376,18 @@ pub async fn run_server(
                     }
                     // A `new` that failed before publishing a session never
                     // reached the arm that answers it, so its phone is still
-                    // waiting for a reply it can act on.
-                    action_replies.resolve(action_id, ActionOutcome::Failed);
+                    // waiting for a reply it can act on. A failure that named
+                    // a reason the caller can fix answers with that reason;
+                    // every other one answers generically and points at the
+                    // log entry below.
+                    let reference = action_reference(action_id);
+                    action_replies.resolve(
+                        action_id,
+                        match &result {
+                            Ok(()) => ActionOutcome::Accepted { session_id: session_id.clone() },
+                            Err(failure) => failure.outcome(&reference),
+                        },
+                    );
                     if let Some(workspace_id) = launch_workspaces.remove(&action_id)
                         && result.is_err()
                         && !session_id.as_ref().is_some_and(|id| closing_actions.contains_key(id))
@@ -1373,16 +1397,17 @@ pub async fn run_server(
                             action_id,
                             workspace_id,
                             session_id.clone(),
-                            result.as_ref().err().cloned(),
+                            result.as_ref().err().map(|failure| failure.detail.clone()),
                         );
                         revision = daemon_runtime.allocate_revision();
                         publish_snapshot!(revision);
                     }
-                    if let Err(error) = &result {
+                    if let Err(failure) = &result {
                         tracing::warn!(
                             action_id,
+                            reference,
                             session_id = session_id.as_deref(),
-                            %error,
+                            error = %failure.detail,
                             "phone action failed"
                         );
                     }
@@ -1391,6 +1416,14 @@ pub async fn run_server(
                         session_id.as_deref(),
                         &result,
                     );
+                    // A session that is taking work again has recovered from
+                    // whatever its last close did, so it stops reporting it.
+                    if result.is_ok() && let Some(session_id) = session_id.clone() {
+                        let daemon_runtime = daemon_runtime.clone();
+                        tokio::spawn(async move {
+                            daemon_runtime.clear_recorded_close_failure(&session_id).await;
+                        });
+                    }
                     request_controller_reload(
                         &mut controller_reload_in_flight,
                         &mut controller_reload_requested,

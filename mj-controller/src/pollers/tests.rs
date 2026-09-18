@@ -1067,6 +1067,223 @@ fn aws_capacity_sums_live_instance_allocations() {
     assert_eq!(total.disk_total_bytes, Some(300));
 }
 
+/// Collects what the daemon would have told the user about a download.
+#[derive(Default)]
+struct RefreshReports(std::sync::Mutex<Vec<ImageRefreshReport>>);
+
+impl RefreshReports {
+    fn record(&self) -> impl Fn(ImageRefreshReport) + '_ {
+        |report| self.0.lock().unwrap().push(report)
+    }
+
+    fn taken(&self) -> Vec<ImageRefreshReport> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// The pre-pull only helps if it starts before the person opens the New
+/// Session wizard, so the first refresh is a startup refresh and the hourly
+/// interval follows it.
+#[tokio::test(start_paused = true)]
+async fn the_first_refresh_runs_at_startup() {
+    assert!(
+        IMAGE_REFRESH_DELAY <= Duration::from_secs(5),
+        "the first refresh is the pre-pull for the first session: {IMAGE_REFRESH_DELAY:?}"
+    );
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let refresher = spawn_image_refresher(
+        {
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::Release);
+                Vec::new()
+            }
+        },
+        |_report| {},
+        cancellation.clone(),
+    );
+
+    // Let the task reach its first await so the interval's deadline is set
+    // from the same instant the test then advances past.
+    tokio::task::yield_now().await;
+    tokio::time::advance(IMAGE_REFRESH_DELAY + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "the refresher should have planned a refresh at startup"
+    );
+
+    tokio::time::advance(IMAGE_REFRESH_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        2,
+        "the hourly interval should follow the startup refresh"
+    );
+
+    cancellation.cancel();
+    refresher.await.expect("the refresher stops when cancelled");
+}
+
+/// The pre-pull's whole point: an image the host does not have is downloaded
+/// once, and the hourly refresh after that only checks that it is still there.
+#[test]
+fn a_missing_image_is_pulled_once_and_not_again_when_present() {
+    /// Reports the image as absent until a pull has run, the way a host
+    /// behaves the first time it sees an image.
+    struct FirstPullExecutor {
+        commands: std::sync::Mutex<Vec<Vec<String>>>,
+        pulled: std::sync::atomic::AtomicBool,
+    }
+
+    impl CommandExecutor for FirstPullExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.args.clone());
+            if command.args.first().map(String::as_str) == Some("pull") {
+                self.pulled.store(true, Ordering::Release);
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.args.contains(&"inspect".to_owned()) && !self.pulled.load(Ordering::Acquire)
+            {
+                return Ok(CommandOutput {
+                    status: 125,
+                    stdout: Vec::new(),
+                    stderr: b"no such image".to_vec(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let refresh = crate::targets::image_refresh(
+        crate::targets::ImageHost::LocalPodman,
+        "ghcr.io/example/dev:1.2.3",
+        None,
+        mj_core::config::ImagePullPolicy::Auto,
+    )
+    .expect("a versioned tag is downloaded when the host lacks it");
+    assert_eq!(refresh.when, crate::targets::RefreshWhen::WhenAbsent);
+
+    let executor = FirstPullExecutor {
+        commands: std::sync::Mutex::new(Vec::new()),
+        pulled: std::sync::atomic::AtomicBool::new(false),
+    };
+    let reports = RefreshReports::default();
+    assert_eq!(
+        refresh_host_image(&refresh, &executor, &reports.record())
+            .expect("the first refresh downloads the image"),
+        ImageRefreshOutcome::Pulled {
+            id: "sha256:1111".to_owned()
+        }
+    );
+    assert_eq!(
+        reports.taken(),
+        vec![
+            ImageRefreshReport::Started {
+                host: "local podman".to_owned(),
+                image: "ghcr.io/example/dev:1.2.3".to_owned(),
+            },
+            ImageRefreshReport::Pulled {
+                host: "local podman".to_owned(),
+                image: "ghcr.io/example/dev:1.2.3".to_owned(),
+            },
+        ],
+        "the user should hear about the download and about it finishing"
+    );
+    assert_eq!(
+        refresh_host_image(&refresh, &executor, &reports.record())
+            .expect("the second refresh finds it present"),
+        ImageRefreshOutcome::Present
+    );
+    assert!(
+        reports.taken().is_empty(),
+        "an hourly check that downloads nothing has nothing to say"
+    );
+
+    let commands = executor.commands.lock().unwrap();
+    let pulls = commands
+        .iter()
+        .filter(|args| args.first().map(String::as_str) == Some("pull"))
+        .count();
+    assert_eq!(pulls, 1, "the image was downloaded twice: {commands:?}");
+    let prunes = commands
+        .iter()
+        .filter(|args| args.contains(&"prune".to_owned()))
+        .count();
+    assert_eq!(
+        prunes, 1,
+        "only the refresh that downloaded the image has anything to prune: {commands:?}"
+    );
+    assert!(
+        commands
+            .last()
+            .is_some_and(|args| args.contains(&"inspect".to_owned())),
+        "the second refresh should stop after finding the image present: {commands:?}"
+    );
+}
+
+/// A moving tag keeps its hourly pull: a present image is not the same as a
+/// current one.
+#[test]
+fn an_always_refresh_pulls_even_when_the_image_is_present() {
+    struct PresentExecutor {
+        commands: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl CommandExecutor for PresentExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.args.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"sha256:2222\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let refresh = crate::targets::image_refresh(
+        crate::targets::ImageHost::LocalPodman,
+        "ghcr.io/example/dev:latest",
+        None,
+        mj_core::config::ImagePullPolicy::Auto,
+    )
+    .expect("a remote latest image is refreshed");
+    assert_eq!(refresh.when, crate::targets::RefreshWhen::Always);
+
+    let executor = PresentExecutor {
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_host_image(&refresh, &executor, &|_report| {}).expect("the refresh runs"),
+        ImageRefreshOutcome::Unchanged
+    );
+
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|args| args.first().map(String::as_str) == Some("pull")),
+        "a moving tag must still be pulled: {commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|args| args.contains(&"prune".to_owned())),
+        "a pull that ran still prunes: {commands:?}"
+    );
+}
+
 /// A background refresh is a chore, not a launch. One host that cannot
 /// reach its registry must not cost the other hosts their pull, and the
 /// failure has to say which host, which image, and what the engine
@@ -1122,16 +1339,49 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
         commands: std::sync::Mutex::new(Vec::new()),
     };
 
-    let reported =
-        refresh_host_image(&broken, &executor).expect_err("a failed pull has to reach the caller");
+    let reports = RefreshReports::default();
+    let mut last_failures = BTreeMap::new();
+
+    let reported = refresh_host_image(&broken, &executor, &reports.record())
+        .expect_err("a failed pull has to reach the caller");
     let reported = format!("{reported:#}");
     assert!(
         reported.contains("short-name resolution failed"),
         "{reported}"
     );
     assert!(reported.contains(failing_image), "{reported}");
+    record_refresh_result(
+        &mut last_failures,
+        &broken.host.label(),
+        &broken.image,
+        Some(reported.clone()),
+        &reports.record(),
+    );
 
-    refresh_host_image(&healthy, &executor).expect("the second host still refreshes");
+    refresh_host_image(&healthy, &executor, &reports.record())
+        .expect("the second host still refreshes");
+    record_refresh_result(
+        &mut last_failures,
+        &healthy.host.label(),
+        &healthy.image,
+        None,
+        &reports.record(),
+    );
+
+    let failures = reports
+        .taken()
+        .into_iter()
+        .filter(|report| matches!(report, ImageRefreshReport::Failed { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures,
+        vec![ImageRefreshReport::Failed {
+            host: "local podman".to_owned(),
+            image: failing_image.to_owned(),
+            error: reported,
+        }],
+        "only the host that could not pull is reported as failed"
+    );
 
     let commands = executor.commands.lock().unwrap();
     let ran = |program: &str, args: &[&str]| {
@@ -1149,4 +1399,84 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
         "{commands:?}"
     );
     assert!(ran("docker", &["image", "prune", "-f"]), "{commands:?}");
+}
+
+/// An unreachable host fails the same way every hour. The user hears about it
+/// once, and hears again only when something changes.
+#[test]
+fn a_failed_pull_is_reported_once_until_the_error_changes() {
+    let reports = RefreshReports::default();
+    let mut last_failures = BTreeMap::new();
+    let host = "podman on builder.example.test";
+    let image = "ghcr.io/example/dev:latest";
+    let fail = |last_failures: &mut BTreeMap<String, String>, error: &str| {
+        record_refresh_result(
+            last_failures,
+            host,
+            image,
+            Some(error.to_owned()),
+            &reports.record(),
+        );
+    };
+
+    fail(
+        &mut last_failures,
+        "ssh: connect to host builder: timed out",
+    );
+    assert_eq!(reports.taken().len(), 1, "the first failure is news");
+
+    fail(
+        &mut last_failures,
+        "ssh: connect to host builder: timed out",
+    );
+    assert!(
+        reports.taken().is_empty(),
+        "the same failure an hour later is not news"
+    );
+
+    fail(&mut last_failures, "podman: no space left on device");
+    assert_eq!(
+        reports.taken(),
+        vec![ImageRefreshReport::Failed {
+            host: host.to_owned(),
+            image: image.to_owned(),
+            error: "podman: no space left on device".to_owned(),
+        }],
+        "a different failure is news again"
+    );
+
+    // A success clears the record, so the next failure is news even if it
+    // reads exactly like the last one.
+    record_refresh_result(&mut last_failures, host, image, None, &reports.record());
+    assert!(reports.taken().is_empty(), "a success says nothing here");
+    fail(&mut last_failures, "podman: no space left on device");
+    assert_eq!(
+        reports.taken().len(),
+        1,
+        "a failure after a success is news again"
+    );
+}
+
+/// The default configuration names every local engine, installed or not. An
+/// engine that is not on the machine is skipped, not reported as a failed
+/// download; a remote host is always tried, because its engine is elsewhere.
+#[test]
+fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("podman"), "").unwrap();
+    let path = std::env::join_paths([directory.path()]).unwrap();
+
+    assert!(local_engine_installed(&ImageHost::LocalPodman, Some(&path)));
+    assert!(!local_engine_installed(
+        &ImageHost::LocalDocker,
+        Some(&path)
+    ));
+    assert!(!local_engine_installed(&ImageHost::LocalPodman, None));
+    assert!(local_engine_installed(
+        &ImageHost::SshDocker(crate::targets::SshTarget {
+            destination: "build@example".into(),
+            ssh_args: Vec::new(),
+        }),
+        None,
+    ));
 }

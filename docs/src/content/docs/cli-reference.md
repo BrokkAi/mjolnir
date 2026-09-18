@@ -18,6 +18,8 @@ mj [--instance <name>] [--workspace <name>] [command]
 | `mj` | Open or attach to the terminal dashboard. |
 | `mj --workspace <name>` | Open a particular workspace. |
 | `mj workspaces` | Open the workspace manager in the dashboard. |
+| `mj workspaces list [--json]` | List workspaces without a terminal. |
+| `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
 | `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
 Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
@@ -156,6 +158,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 ## Drive a session from another agent
 
 ```text
+mj workspaces list [--json]
+mj workspaces create <name> [--json]
 mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
        [--workspace-id <id>] [--title <text>] [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -172,6 +176,15 @@ mj resume --session <id> [--profile <id>] [--target <id>] [--workspace-id <id>]
 mj cancel-turn --session <id>
 mj api-info [--json]
 ```
+
+A session belongs to a workspace, and a fresh instance has none. `mj new` no
+longer needs one to exist: with no `--workspace-id` and no global `--workspace`,
+it uses the instance's only workspace, or the `default` workspace when the
+instance has none, so `mj -i <name> new ...` works on a brand-new instance
+without opening the terminal first. An instance with several workspaces needs
+`--workspace-id` or `--workspace`. Use `mj workspaces create` to name one
+deliberately; it selects the workspace when the name already exists, so a script
+can run it every time.
 
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints

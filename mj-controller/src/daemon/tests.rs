@@ -11,6 +11,26 @@ fn newer_daemon_protocol_requires_updating_the_client() {
 }
 
 #[test]
+fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
+    let refused = LifecycleFailure::of(
+        &anyhow::Error::new(Refusal::precondition(
+            "repository \"app\" needs a network Git remote",
+        ))
+        .context("provision the session target"),
+    );
+    let rebuilt = refused.clone().into_error();
+    assert_eq!(
+        Refusal::of(&rebuilt).map(|refusal| refusal.message().to_owned()),
+        Some("repository \"app\" needs a network Git remote".to_owned()),
+        "a waiter reading the channel must still see the reason, not a bare string"
+    );
+
+    let internal = LifecycleFailure::of(&anyhow::anyhow!("ssh host build-07 refused"));
+    assert!(internal.refusal.is_none());
+    assert!(internal.detail.contains("build-07"));
+}
+
+#[test]
 fn graceful_close_retires_worker_polling_only_during_target_teardown() {
     assert!(!lifecycle_owns_worker_target(
         LifecycleKind::Close,
@@ -2065,4 +2085,476 @@ async fn force_destruction_preemption_times_out_without_destroying() {
             .contains("did not stop after cancellation"),
         "{error:#}"
     );
+}
+
+/// A background image download belongs to the daemon, not to a session, so
+/// whichever workspace the person is looking at shows it.
+#[test]
+fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
+    let session_ids = BTreeSet::from(["018f9dd2-a3b4".to_owned()]);
+    let daemon_notice = RuntimeNotice {
+        id: 1,
+        session_id: String::new(),
+        text: "Downloading image ghcr.io/example/dev:latest for local podman\u{2026}".to_owned(),
+    };
+    let own_session = RuntimeNotice {
+        id: 2,
+        session_id: "018f9dd2-a3b4".to_owned(),
+        text: "Mounted /data read-only.".to_owned(),
+    };
+    let other_session = RuntimeNotice {
+        id: 3,
+        session_id: "018f9dd2-cccc".to_owned(),
+        text: "Mounted /data read-only.".to_owned(),
+    };
+
+    assert!(snapshot::notice_reaches_workspace(
+        &daemon_notice,
+        &session_ids
+    ));
+    assert!(snapshot::notice_reaches_workspace(
+        &own_session,
+        &session_ids
+    ));
+    assert!(!snapshot::notice_reaches_workspace(
+        &other_session,
+        &session_ids
+    ));
+}
+
+/// A view of `session-1` whose harness is ready for its first prompt.
+fn ready_startup_view() -> ManagedSessionView {
+    let materialized = mj_core::state::MaterializedSession::empty("session-1");
+    let operational = mj_core::relay::RelayOperationalState {
+        goal: Default::default(),
+        capacity_retry: None,
+        activity_turn_started_at_ms: None,
+        idle_since_ms: None,
+        store_id: None,
+        session_id: "session-1".into(),
+        execution: mj_core::relay::RelayExecutionState::Idle,
+        latest_ordinal: 0,
+        latest_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        acknowledged_through: 0,
+        acknowledged_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        recovery_floor_ordinal: 0,
+        recovery_floor_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        native_session_id: Some("native-1".into()),
+        native_continuity_lost: false,
+        checkpoint_only: false,
+        acp_ready: Some(true),
+        agent_capabilities: None,
+        agent_info: None,
+        steering_supported: None,
+        config_options: Vec::new(),
+        modes: None,
+        available_commands: Vec::new(),
+        config: BTreeMap::new(),
+        active_prompt: None,
+        queued_prompts: Vec::new(),
+        active_user_shells: Vec::new(),
+        active_agent_terminals: Vec::new(),
+        checkpoint_barrier: None,
+        checkpoint_ready: None,
+        last_acp_activity_at_ms: None,
+        current_step_started_at_ms: None,
+        foreground_tool_started_at_ms: None,
+        harness_turn: None,
+        last_harness_turn_started_ordinal: None,
+        background_commands: Vec::new(),
+        background_work_known: None,
+        tools_in_flight: Vec::new(),
+        activity: None,
+    };
+    ManagedSessionView {
+        snapshot: Some(mj_core::state::ManagedSessionSnapshot {
+            subagent_requests: Vec::new(),
+            subagent_results: Vec::new(),
+            window: mj_core::state::ProjectionWindow::of(&materialized),
+            materialized,
+            operational,
+            latest_credential_sync_signal: None,
+            worker_build: None,
+        }),
+        connected: true,
+        error: None,
+    }
+}
+
+/// Put `session-1` into the daemon's in-memory controller as a session that
+/// is still coming up, which is when a startup prompt can be queued.
+fn insert_starting_session(state: &Arc<RuntimeState>, draft: &str) {
+    let mut session = runtime_test_session("session-1", "workspace", SessionState::Provisioning);
+    draft.clone_into(&mut session.draft_input);
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .insert(session.id.clone(), session);
+}
+
+/// The smallest archived snapshot a hand-off step can carry.
+fn empty_archive_snapshot() -> mj_core::archive::CanonicalSessionSnapshot {
+    mj_core::archive::CanonicalSessionSnapshot {
+        event_frontier: 0,
+        event_frontier_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        session: mj_core::archive::CanonicalSessionState {
+            execution: mj_core::archive::CanonicalExecutionState::Idle,
+            last_activity_at_ms: None,
+            session_title: None,
+            configuration: BTreeMap::new(),
+        },
+        transcript: Vec::new(),
+        queued_prompts: Vec::new(),
+    }
+}
+
+fn queued_prompt_action(text: &str) -> DaemonAction {
+    DaemonAction::QueueStartupPrompt {
+        session_id: "session-1".into(),
+        text: text.into(),
+        inherited_draft: None,
+    }
+}
+
+fn submitted_prompt_text(command: &RelayCommand) -> String {
+    let RelayCommand::Prompt { prompt } = command else {
+        panic!("expected a prompt command, got {command:?}")
+    };
+    prompt
+        .iter()
+        .map(|block| match block {
+            agent_client_protocol::schema::v1::ContentBlock::Text(text) => text.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        })
+        .collect()
+}
+
+fn session_draft_input(state: &RuntimeState) -> String {
+    state
+        .session_record("session-1")
+        .expect("the test session is still in memory")
+        .draft_input
+}
+
+fn notice_texts(state: &RuntimeState) -> Vec<String> {
+    state
+        .notices
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|notice| notice.text.clone())
+        .collect()
+}
+
+async fn next_submit(
+    manager: &mut TestRemoteManager,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<std::result::Result<u64, String>>,
+) {
+    let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
+        .await
+        .expect("a queued prompt did not reach the session manager")
+        .expect("manager request stream ended");
+    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+        panic!("expected a submitted prompt")
+    };
+    (submitted_prompt_text(&command), reply)
+}
+
+/// The text is held until the harness reports itself ready, and queued
+/// prompts are then delivered in the order they were typed.
+#[tokio::test]
+async fn queued_startup_prompts_are_delivered_in_order_once_the_harness_is_ready() {
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    handle_action(
+        queued_prompt_action("first prompt"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the first startup prompt");
+
+    // Nothing is submitted while the published view says the session is not
+    // connected yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(600), manager.requests.recv())
+            .await
+            .is_err(),
+        "a prompt was submitted before the harness was ready"
+    );
+
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "first prompt");
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+
+    handle_action(
+        queued_prompt_action("second prompt"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the second startup prompt");
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "second prompt");
+    reply
+        .send(Ok(2))
+        .expect("the drain awaits the submit reply");
+    assert!(notice_texts(&state).is_empty(), "delivery posted a notice");
+}
+
+/// A restored session's hand-off is queued ahead of any prompt, so the prompt
+/// is never submitted before the context it is meant to read. Here the
+/// hand-off cannot be installed -- a remote session manager refuses it -- so
+/// the prompt behind it is put back into the draft instead of going out
+/// without its context.
+#[tokio::test]
+async fn a_queued_hand_off_runs_before_the_prompt_behind_it() {
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let cancellation = CancellationToken::new();
+
+    state
+        .queue_startup_step(
+            "session-1",
+            StartupStep::InstallHandoff(Box::new(empty_archive_snapshot())),
+            &cancellation,
+        )
+        .expect("queue the hand-off");
+    state
+        .queue_startup_step(
+            "session-1",
+            StartupStep::Prompt {
+                text: "after the hand-off".into(),
+                inherited_draft: None,
+            },
+            &cancellation,
+        )
+        .expect("queue the prompt behind the hand-off");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let restored = wait_for_draft(&state, "after the hand-off").await;
+    assert_eq!(restored, "after the hand-off");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), manager.requests.recv())
+            .await
+            .is_err(),
+        "the prompt was submitted even though its hand-off never was"
+    );
+    let notices = notice_texts(&state);
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("without its archived hand-off")),
+        "the dropped hand-off was not reported: {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("it is back in the composer draft")),
+        "the restored prompt was not reported: {notices:?}"
+    );
+}
+
+/// A session that stops while its prompt waits ends the wait at once, and the
+/// text joins whatever draft the session already had.
+#[tokio::test]
+async fn a_session_that_stops_returns_its_queued_prompt_to_the_draft() {
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "half-written note");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    handle_action(
+        queued_prompt_action("undelivered prompt"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the startup prompt");
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .state = SessionState::Stopped;
+
+    let draft = wait_for_draft(&state, "undelivered prompt").await;
+    assert_eq!(draft, "half-written note\n\nundelivered prompt");
+    let notices = notice_texts(&state);
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("it is back in the composer draft")),
+        "the undelivered prompt was not reported: {notices:?}"
+    );
+}
+
+/// A refused submit puts the refused text back, and the prompts still waiting
+/// behind it with it, in the order they were typed.
+#[tokio::test]
+async fn a_refused_submit_restores_the_prompt_and_the_rest_of_the_queue() {
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    for text in ["refused prompt", "prompt behind it"] {
+        handle_action(queued_prompt_action(text), &metadata, &state, &cancellation)
+            .await
+            .expect("queue a startup prompt");
+    }
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "refused prompt");
+    reply
+        .send(Err("the harness refused the prompt".into()))
+        .expect("the drain awaits the submit reply");
+
+    let draft = wait_for_draft(&state, "prompt behind it").await;
+    assert_eq!(draft, "refused prompt\n\nprompt behind it");
+}
+
+/// Shutdown cancels a drain that is still waiting for a harness and returns
+/// well inside its own bound, so quitting the daemon stays responsive.
+#[tokio::test]
+async fn cancelling_startup_prompts_returns_while_a_drain_is_waiting() {
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    handle_action(
+        queued_prompt_action("never delivered"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the startup prompt");
+
+    let started = tokio::time::Instant::now();
+    state
+        .cancel_and_join_startup_prompts()
+        .await
+        .expect("the waiting drain stopped cleanly");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "cancelling the startup queues took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(session_draft_input(&state), "never delivered");
+}
+
+/// Queueing is refused when the text is empty, when the session can no longer
+/// become ready, and when the daemon has no such session at all.
+#[tokio::test]
+async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessions() {
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    let blank = handle_action(
+        queued_prompt_action("   "),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect_err("a blank startup prompt was accepted");
+    assert!(blank.to_string().contains("needs text"), "{blank:#}");
+
+    let unknown = handle_action(
+        DaemonAction::QueueStartupPrompt {
+            session_id: "no-such-session".into(),
+            text: "hello".into(),
+            inherited_draft: None,
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect_err("a prompt for an unknown session was accepted");
+    assert!(
+        unknown.to_string().contains("unknown session"),
+        "{unknown:#}"
+    );
+
+    state
+        .controller
+        .lock()
+        .unwrap()
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let stopped = handle_action(
+        queued_prompt_action("hello"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect_err("a prompt for a stopped session was accepted");
+    assert!(
+        stopped.to_string().contains("cannot take a queued prompt"),
+        "{stopped:#}"
+    );
+}
+
+/// Wait for a failed delivery to put text back into the in-memory record.
+/// Unit tests run without a database writer, so the persisted copy fails and
+/// is reported; the in-memory record is what a surface would read.
+async fn wait_for_draft(state: &Arc<RuntimeState>, expected: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let draft = session_draft_input(state);
+        if draft.contains(expected) {
+            return draft;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no queued prompt was restored into the session draft"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }

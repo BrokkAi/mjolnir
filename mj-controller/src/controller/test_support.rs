@@ -70,6 +70,22 @@ pub(super) fn write_checkpoint_gate_archive(
     )
 }
 
+/// The same archive for a session whose harness is not Codex. Whether a resume
+/// keeps native continuity is decided by the archived harness kind, so a test
+/// about a same-harness move has to be able to name it.
+pub(super) fn write_checkpoint_gate_archive_for_harness(
+    directory: &Path,
+    session_id: &str,
+    event_frontier: u64,
+    harness_kind: mj_core::config::HarnessKind,
+    profile_id: &str,
+) -> CheckpointMetadata {
+    let mut input = checkpoint_archive_input(session_id, event_frontier, Vec::new(), Vec::new());
+    input.session.harness_kind = harness_kind;
+    input.session.profile_id = profile_id.to_owned();
+    write_checkpoint_archive_input(directory, session_id, &input)
+}
+
 /// A raw session's archive with native harness state in it, which is what a
 /// conversion has to carry across unchanged.
 pub(super) fn write_checkpoint_archive_with_native_state(
@@ -127,57 +143,72 @@ fn write_checkpoint_archive(
     repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
     native_artifacts: Vec<mj_checkpoint::archive::NativeArtifact>,
 ) -> CheckpointMetadata {
+    let input =
+        checkpoint_archive_input(session_id, event_frontier, repositories, native_artifacts);
+    write_checkpoint_archive_input(directory, session_id, &input)
+}
+
+fn write_checkpoint_archive_input(
+    directory: &Path,
+    session_id: &str,
+    input: &ArchiveInput,
+) -> CheckpointMetadata {
     let archive_path = directory.join(format!("{session_id}.hel.zip"));
-    let verified = write_archive_atomic(
-        &archive_path,
-        &ArchiveInput {
-            session: SessionManifest {
-                id: session_id.into(),
-                title: "checkpoint gate".into(),
-                harness_kind: mj_core::config::HarnessKind::Codex,
-                profile_id: "codex".into(),
-                native_session_id: "native-session".into(),
-                created_at: "2026-08-12T00:00:00Z".into(),
-                checkpointed_at: "2026-08-14T12:00:00Z".into(),
-                hel_version: "test".into(),
-                relay_version: "test".into(),
-                adapter_version: "test".into(),
-            },
-            target: TargetManifest {
-                template_id: "local".into(),
-                target_kind: "local-bare".into(),
-                details: BTreeMap::new(),
-            },
-            bundle: BundleManifest {
-                id: "project".into(),
-                primary_repository: "project".into(),
-            },
-            canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
-                event_frontier,
-                event_frontier_digest: if event_frontier == 0 {
-                    mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into()
-                } else {
-                    "a".repeat(64)
-                },
-                session: mj_checkpoint::archive::CanonicalSessionState {
-                    execution: mj_checkpoint::archive::CanonicalExecutionState::Idle,
-                    last_activity_at_ms: (event_frontier > 0).then_some(1_234),
-                    session_title: None,
-                    configuration: BTreeMap::new(),
-                },
-                transcript: Vec::new(),
-                queued_prompts: Vec::new(),
-            },
-            native_artifacts,
-            repositories,
-        },
-    )
-    .unwrap();
+    let verified = write_archive_atomic(&archive_path, input).unwrap();
     CheckpointMetadata {
         archive_path,
         sha256: verified.archive_sha256,
         created_at: "2026-08-14T12:00:00Z".into(),
-        event_frontier,
+        event_frontier: input.canonical_session.event_frontier,
+    }
+}
+
+fn checkpoint_archive_input(
+    session_id: &str,
+    event_frontier: u64,
+    repositories: Vec<mj_checkpoint::archive::RepositorySnapshot>,
+    native_artifacts: Vec<mj_checkpoint::archive::NativeArtifact>,
+) -> ArchiveInput {
+    ArchiveInput {
+        session: SessionManifest {
+            id: session_id.into(),
+            title: "checkpoint gate".into(),
+            harness_kind: mj_core::config::HarnessKind::Codex,
+            profile_id: "codex".into(),
+            native_session_id: "native-session".into(),
+            created_at: "2026-08-12T00:00:00Z".into(),
+            checkpointed_at: "2026-08-14T12:00:00Z".into(),
+            hel_version: "test".into(),
+            relay_version: "test".into(),
+            adapter_version: "test".into(),
+        },
+        target: TargetManifest {
+            template_id: "local".into(),
+            target_kind: "local-bare".into(),
+            details: BTreeMap::new(),
+        },
+        bundle: BundleManifest {
+            id: "project".into(),
+            primary_repository: "project".into(),
+        },
+        canonical_session: mj_checkpoint::archive::CanonicalSessionSnapshot {
+            event_frontier,
+            event_frontier_digest: if event_frontier == 0 {
+                mj_checkpoint::archive::EVENT_FRONTIER_GENESIS_DIGEST.into()
+            } else {
+                "a".repeat(64)
+            },
+            session: mj_checkpoint::archive::CanonicalSessionState {
+                execution: mj_checkpoint::archive::CanonicalExecutionState::Idle,
+                last_activity_at_ms: (event_frontier > 0).then_some(1_234),
+                session_title: None,
+                configuration: BTreeMap::new(),
+            },
+            transcript: Vec::new(),
+            queued_prompts: Vec::new(),
+        },
+        native_artifacts,
+        repositories,
     }
 }
 

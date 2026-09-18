@@ -1758,6 +1758,7 @@ fn claude_lookup_by_id_finds_a_session_the_picker_hides() {
     assert_eq!(located.jsonl_path, rollout);
 }
 
+#[cfg(unix)]
 #[test]
 fn claude_lookup_by_id_reports_a_symlinked_transcript() {
     let directory = tempfile::tempdir().unwrap();
@@ -2337,6 +2338,7 @@ fn codex_lookup_by_id_finds_a_session_the_picker_hides() {
     assert_eq!(located.jsonl_path, rollout);
 }
 
+#[cfg(unix)]
 #[test]
 fn codex_lookup_by_id_reports_a_symlinked_rollout() {
     let directory = tempfile::tempdir().unwrap();
@@ -2409,6 +2411,7 @@ fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
     assert_eq!(located.cwd, PathBuf::from("/work/app"));
 }
 
+#[cfg(unix)]
 #[test]
 fn kimi_lookup_by_id_reports_a_symlinked_session_directory() {
     let directory = tempfile::tempdir().unwrap();
@@ -2447,6 +2450,7 @@ fn kimi_lookup_by_id_still_reports_a_missing_session_as_not_found() {
     assert!(error.contains("was not found"), "{error}");
 }
 
+#[cfg(unix)]
 #[test]
 fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
     let directory = tempfile::tempdir().unwrap();

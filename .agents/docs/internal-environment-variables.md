@@ -11,16 +11,30 @@ in `docs/` deliberately leaves them out. The documented settings are in
   Read in `mj-worker/src/worker_runtime/unix.rs`.
 - `MJ_TURN_STALL_TIMEOUT_MS`: how long a running turn may go with nothing
   arriving from the harness *and no tool call open* before the worker fails
-  the turn. Default 600000 (ten minutes); `0` disables the watchdog. Read in
+  the turn with the stop reason `harness_inactive`. **Off by default.** Unset,
+  empty, `0` and anything that does not parse all mean no bound; only a
+  positive number of milliseconds arms one. Read in
   `mj-worker/src/acp/drive.rs`.
 - `MJ_TURN_TOOL_STALL_TIMEOUT_MS`: how long one tool call may run before the
-  worker fails the turn. Default 14400000 (four hours); `0` removes the bound.
-  While a tool call is open this is the only bound that applies, because a
-  harness blocked in a long build sends nothing at all and failing it loses
-  real work. The bound exists only to catch a bridge that died leaving a tool
-  card open; a bridge process that exits is detected at once and separately,
-  by the `child.wait()` arm of the select in `mj-worker/src/acp.rs`.
-  Read in `mj-worker/src/acp/drive.rs`.
+  worker fails the turn, with the same reason and the same parsing rule.
+  **Off by default.** While a tool call is open this is the only bound that
+  applies, because a harness blocked in a long build sends nothing at all.
+  A bridge *process* that exits is detected at once and separately, by the
+  `child.wait()` arm of the select in `mj-worker/src/acp.rs`, and never waits
+  for this. Read in `mj-worker/src/acp/drive.rs`.
+
+Both bounds are opt-in, and they were not always. Until #1017 the silence bound
+defaulted to ten minutes for the harnesses that do not mark their own turn ends
+and was withheld from Codex and Claude, which was wrong twice over: silence is
+not evidence that a turn is dead, so the default failed healthy turns (#1020),
+and no harness ends the turn Mjolnir reports without the `session/prompt`
+reply, so the exemption had no basis. Mjolnir now ends a turn on its own only
+when something deterministic says so — the bridge process exited, the transport
+closed, the worker restarted — and publishes the silence age as a fact instead
+of guessing from it. See `mj_core::activity::silent_for_ms` and
+`mj_core::activity::silence_note`, which `mj wait`, `mj sessions --session`,
+the TUI and the web viewer all read. An operator who wants an automatic ending
+sets one of these knobs; it then applies to every harness.
 
 Both turn bounds are read from the worker's own process environment. A
 container target can set them for every session on it through

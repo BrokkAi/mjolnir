@@ -13,6 +13,7 @@ mod api_activity;
 mod profile_catalog;
 
 use mj_core::config::{Config, HarnessProfile, PhoneConfig, is_bare_project_target};
+use mj_core::refusal::Refusal;
 use mj_core::remote_git::{default_branch, display_url, resolve_repository};
 use mj_core::state::{MaterializedSession, ProjectSourceIdentity, SessionRecord, State};
 

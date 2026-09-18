@@ -14,7 +14,7 @@ use mj_core::state::{
 };
 
 use crate::targets::{
-    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost,
+    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
     ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
@@ -555,32 +555,23 @@ pub(super) fn backend_target(
     })
 }
 
-/// Every container image a background refresh keeps current, once per
+/// Every container image the daemon downloads in the background, once per
 /// (host, image, platform).
 ///
-/// Targets the host can already satisfy are left out: digest pins, versioned
-/// tags, and the explicit `missing` and `never` policies. Apple's `container`
-/// engine is left out too; it still refreshes its image during provisioning.
-/// Several targets often share one image on one host, and that needs one pull.
+/// Every container target is covered, including Apple's `container` engine.
+/// A `never` policy is the one opt-out. The rest differ only in when they
+/// download: `always` and `newer` pull on every refresh, while the others
+/// pull only when the host has no copy of the image.
+///
+/// Several targets often share one image on one host, and that needs one
+/// download. When two such targets disagree about when to pull, the merged
+/// entry takes the more eager of the two.
 pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
     let mut plan: Vec<ImageRefresh> = Vec::new();
     for target in config.targets.values() {
-        let (host, container) = match target {
-            TargetTemplate::LocalPodman { container } => (ImageHost::LocalPodman, container),
-            TargetTemplate::LocalDocker { container } => (ImageHost::LocalDocker, container),
-            TargetTemplate::SshPodman { ssh, container } => {
-                (ImageHost::SshPodman(SshTarget::from(ssh)), container)
-            }
-            TargetTemplate::SshDocker { ssh, container } => {
-                (ImageHost::SshDocker(SshTarget::from(ssh)), container)
-            }
-            TargetTemplate::LocalBare
-            | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::AwsEc2 { .. }
-            | TargetTemplate::SshBare { .. } => continue,
+        let Some((host, container)) = target.image_host() else {
+            continue;
         };
-        // Commands are decided by the host, the image, and the platform alone,
-        // so equal refreshes are exactly the duplicates worth collapsing.
         let Some(refresh) = targets::image_refresh(
             host,
             &container.image,
@@ -589,9 +580,17 @@ pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
         ) else {
             continue;
         };
-        if !plan.contains(&refresh) {
-            plan.push(refresh);
+        // Commands are decided by the host, the image, and the platform alone,
+        // so those three identify the duplicates worth collapsing.
+        if let Some(existing) = plan.iter_mut().find(|entry| {
+            entry.host == refresh.host
+                && entry.image == refresh.image
+                && entry.platform == refresh.platform
+        }) {
+            existing.when = existing.when.max(refresh.when);
+            continue;
         }
+        plan.push(refresh);
     }
     plan
 }

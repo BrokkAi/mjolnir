@@ -836,3 +836,30 @@ test('shipped viewer source comments use Mjolnir terminology', () => {
     assert.doesNotMatch(source, /\bHel\b|`hel`|\bhel publishes\b/);
   }
 });
+
+// A turn the harness ended without answering offers its prompt back rather
+// than resending it (#970).
+test('an unanswered turn offers the prompt that was running', () => {
+  const context = vm.createContext({});
+  vm.runInContext(
+    sourceBetween("const PROMPT_UNANSWERED_MARKER", "\nfunction paintEntry("),
+    context,
+  );
+  vm.runInContext(
+    sourceBetween('/// The prompt an unanswered-turn row offers', '\nfunction renderEntries('),
+    context,
+  );
+  const warning = {
+    role: 'system',
+    lines: ['warning: ACP prompt returned no session updates: Claude Code ended the turn'],
+  };
+  assert.equal(
+    vm.runInContext('unansweredPromptFor', context)(warning, 'rename the module'),
+    'rename the module',
+  );
+  assert.equal(
+    vm.runInContext('unansweredPromptFor', context)({ role: 'agent', lines: ['done'] }, 'x'),
+    null,
+  );
+  assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
+});

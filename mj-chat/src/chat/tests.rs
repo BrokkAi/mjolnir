@@ -39,10 +39,12 @@ fn activity_animation_stops_when_foreground_and_background_work_settle() {
 }
 
 /// A standby composer edits exactly like the attached one — the readline
-/// chords, paste with normalized line endings — but Enter keeps the draft
-/// and explains instead of sending, and command completion stays closed.
+/// chords, paste with normalized line endings — and Enter on a plain prompt
+/// queues it: the input clears, the text becomes a preview, and the host gets
+/// a `Prompt` action. A command keeps the draft and explains, and command
+/// completion stays closed.
 #[test]
-fn a_standby_composer_edits_like_the_real_one_but_never_sends() {
+fn a_standby_composer_edits_like_the_real_one_and_queues_its_prompt() {
     let config: Config = serde_json::from_str(r#"{"version": 0}"#).expect("default config");
     let mut chat = ChatState::standby(
         "session-1",
@@ -63,13 +65,24 @@ fn a_standby_composer_edits_like_the_real_one_but_never_sends() {
     chat.paste("…\r\nsecond");
     assert_eq!(chat.input, "alpha beta…\nsecond");
 
+    // A command cannot be answered while the session is offline, so it is
+    // consumed with an explanation and the draft stays put.
+    chat.set_input("/help".into());
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.notice().is_some());
+    assert_eq!(chat.draft(), "/help");
+    assert!(chat.queued_prompt_texts().is_empty());
+
+    chat.set_input("alpha beta…\nsecond".into());
     assert_eq!(
         chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::None,
-        "Enter must not produce a prompt while no session is attached"
+        ChatAction::Prompt("alpha beta…\nsecond".into()),
+        "Enter must hand a plain prompt to the host"
     );
-    assert!(chat.notice().is_some());
-    assert_eq!(chat.draft(), "alpha beta…\nsecond");
+    assert_eq!(chat.draft(), "");
+    assert_eq!(chat.queued_prompt_texts(), vec!["alpha beta…\nsecond"]);
+    assert!(chat.remove_queued_prompt_text("alpha beta…\nsecond"));
+    assert!(chat.queued_prompt_texts().is_empty());
 
     chat.set_input("/mod".into());
     chat.update_autocomplete();
@@ -2315,4 +2328,70 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
         chat.entries[0].tool_diffstats,
         ["/workspace/src/lib.rs  +1 −0"]
     );
+}
+
+/// A prompt the harness ended without answering keeps its text where
+/// Ctrl-Alt-R can put it back, and says so in the transcript (#970).
+#[test]
+fn an_unanswered_prompt_is_marked_and_stays_restorable() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("1234567890");
+    session.applied_event_ordinal = 9;
+    session.transcript.push(
+        TranscriptItem {
+            stable_id: "user:1".into(),
+            position: 4,
+            latest_content_event_ordinal: None,
+            created_at_ms: 10,
+            last_changed_at_ms: 10,
+            body: TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "rename the module"})],
+            },
+        }
+        .into(),
+    );
+    session.last_turn_outcome = Some(unanswered_outcome(
+        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
+    ));
+    chat.apply_materialized(&session, &[], &[]);
+    // The same projection arriving again must not stack a second record.
+    chat.apply_materialized(&session, &[], &[]);
+    assert_eq!(chat.unsent_prompts.len(), 1);
+    assert_eq!(chat.unsent_prompts[0].kind, UnsentKind::Unanswered);
+    assert_eq!(
+        chat.unsent_prompts[0].kind.headline(),
+        "Prompt was not answered"
+    );
+
+    chat.restore_latest_unsent_prompt();
+    assert_eq!(
+        chat.draft_payload(),
+        PromptPayload::text("rename the module")
+    );
+}
+
+/// A turn that ended normally leaves nothing to restore.
+#[test]
+fn a_finished_turn_is_not_offered_for_restore() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut session = MaterializedSession::empty("1234567890");
+    session.applied_event_ordinal = 9;
+    session.last_turn_outcome = Some(unanswered_outcome("EndTurn"));
+    chat.apply_materialized(&session, &[], &[]);
+    assert!(chat.unsent_prompts.is_empty());
+}
+
+fn unanswered_outcome(stop_reason: &str) -> mj_core::state::MaterializedTurnOutcome {
+    mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt-1".into(),
+        accepted_ordinal: Some(3),
+        turn_start_position: Some(4),
+        completed_ordinal: 8,
+        completed_at_ms: 20,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: stop_reason.into(),
+        },
+    }
 }

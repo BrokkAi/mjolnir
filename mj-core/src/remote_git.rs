@@ -50,10 +50,16 @@ pub fn resolve_repository(
         }
         (None, Some(path)) => {
             {
-                crate::local_git::resolve_local_repository(path, executor)
-                    .with_context(|| format!("repository {:?} needs valid default network Git remotes for an isolated session; configure a remote or use a raw local session", repository.id))
+                // A missing remote is the person's to fix, so the reason is
+                // marked as a refusal and travels to whoever asked for the
+                // session instead of stopping at the daemon log.
+                crate::local_git::resolve_local_repository(path, executor).with_context(|| {
+                    crate::refusal::Refusal::precondition(format!(
+                        "repository {:?} needs valid default network Git remotes for an isolated session; configure a remote or use a raw local session",
+                        repository.id
+                    ))
+                })
             }
-
         }
         (None, None) => bail!(
             "repository {:?} has no configured Git source",

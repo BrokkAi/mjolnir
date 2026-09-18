@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::hex::lower_hex;
 use sha2::{Digest, Sha256};
 
+use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
 
 fn mutation_holds() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
@@ -51,6 +52,19 @@ pub fn restore_move_queue_hold(operation: &MoveOperation) {
         holds.insert(operation.selection.session_id.clone());
     } else {
         holds.remove(&operation.selection.session_id);
+    }
+}
+
+/// What a recovered, interrupted source stop tells the person.
+///
+/// An in-place move promised to keep the environment; a recovery that tears it
+/// down has broken that promise, so the message says so instead of leaving the
+/// person to infer it from an unchanged "retry" line.
+fn interrupted_source_stop_message(recovered: &str, in_place: bool) -> String {
+    if in_place {
+        format!("{recovered}; the in-place swap was interrupted; the environment was released")
+    } else {
+        recovered.to_owned()
     }
 }
 
@@ -289,7 +303,10 @@ impl Controller {
         ))?;
         Ok((active, queued, fingerprint))
     }
-    fn move_configuration_fingerprint(&self, selection: &MoveSelection) -> Result<String> {
+    pub(super) fn move_configuration_fingerprint(
+        &self,
+        selection: &MoveSelection,
+    ) -> Result<String> {
         let profile = self
             .config
             .profiles
@@ -515,6 +532,12 @@ impl Controller {
             .unwrap_or(new_command_id("move")?);
         Ok(MovePreparation {
             source_unavailable: false,
+            in_place: in_place_move_eligible(
+                source,
+                &selection,
+                self.state.subagents.contains_key(&source.id),
+                retry,
+            ),
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -632,6 +655,12 @@ impl Controller {
             }
             None => MoveOperation {
                 source_checkpoint_only: false,
+                in_place: in_place_move_eligible(
+                    &source,
+                    &checked.selection,
+                    self.state.subagents.contains_key(&id),
+                    false,
+                ),
                 operation_id: prepared.operation_id.clone(),
                 selection: checked.selection.clone(),
                 source_profile_id: source.last_profile.clone(),
@@ -742,7 +771,10 @@ impl Controller {
                 if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                     self.cleanup_stopped_target(&id, &cleanup)?;
                 }
-                bail!("Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings");
+                bail!("{}", interrupted_source_stop_message(
+                    "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
+                    operation.in_place,
+                ));
             }
             match operation.phase {
                 MovePhase::Preparing => bail!("Move preparation was interrupted; source retained. Prepare Move again."),
@@ -764,7 +796,10 @@ impl Controller {
                 }
                 MovePhase::ResumingDestination => {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
-                    let error = self.rollback_failed_resume(&id, previous, false,
+                    // An in-place swap still owns the checkout the source was
+                    // using, so the rollback retires it exactly as a resume
+                    // that recreated one.
+                    let error = self.rollback_failed_resume(&id, previous, operation.in_place,
                         anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry"), executor)?;
                     Err(error)
                 }
@@ -776,7 +811,10 @@ impl Controller {
                     if self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                         self.cleanup_stopped_target(&id, executor)?;
                     }
-                    bail!("source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings")
+                    bail!("{}", interrupted_source_stop_message(
+                        "source stop was recovered; verified checkpoint retained. Retry move or Resume with previous settings",
+                        operation.in_place,
+                    ))
                 }
                 _ => bail!("Move requires an explicit retry after the daemon restarted"),
             }
@@ -813,8 +851,17 @@ impl Controller {
                         Some("Move was cancelled before the source was sealed".into());
                     crate::database::save_lifecycle_session(record)?;
                 } else {
-                    self.close_session_for_move(&id, executor, manager, operation, None)
-                        .await?;
+                    // A recovered source stop always tears its target down: an
+                    // interrupted in-place swap falls back to the fresh path.
+                    self.close_session_for_move(
+                        &id,
+                        executor,
+                        manager,
+                        operation,
+                        None,
+                        SourceTargetDisposition::Destroy,
+                    )
+                    .await?;
                 }
                 return Ok(());
             }
@@ -867,10 +914,28 @@ impl Controller {
                 operation.phase = MovePhase::ClosingSource;
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
-                self.close_session_for_move(&id, executor, manager, operation, preparation)
-                    .await?;
+                // An eligible move keeps its environment: the close stops at
+                // the sealed relay and the record keeps its target for
+                // `restore_session_in_place`.
+                let disposition = if operation.in_place {
+                    SourceTargetDisposition::RetainForInPlaceSwap
+                } else {
+                    SourceTargetDisposition::Destroy
+                };
+                self.close_session_for_move(
+                    &id,
+                    executor,
+                    manager,
+                    operation,
+                    preparation,
+                    disposition,
+                )
+                .await?;
             }
-            if self.state.sessions[&id].state == SessionState::Stopped
+            // An in-place move never reaches `Stopped` with a target: its
+            // source stays `Closing` in the environment the destination reuses.
+            if !operation.in_place
+                && self.state.sessions[&id].state == SessionState::Stopped
                 && self.state.sessions[&id].target.is_some()
             {
                 executor.notify_notice("Cleaning up source");
@@ -894,25 +959,37 @@ impl Controller {
             operation.updated_at = now();
             crate::database::save_move_operation(operation)?;
             executor.notify_notice("Preparing destination");
-            if operation.selection.clear_resource_allocation {
-                let session = self.state.sessions.get_mut(&id).unwrap();
-                session.resource_allocation = None;
-                session.container_cpus = None;
-                session.container_memory = None;
-                crate::database::save_session(session)?;
+            if operation.in_place {
+                // The environment is kept, so there is nothing to provision and
+                // no allocation to clear: eligibility already required the
+                // allocation to be unchanged.
+                self.restore_session_in_place(
+                    &id,
+                    operation.selection.profile_id.as_deref().unwrap(),
+                    executor,
+                )
+                .await?;
+            } else {
+                if operation.selection.clear_resource_allocation {
+                    let session = self.state.sessions.get_mut(&id).unwrap();
+                    session.resource_allocation = None;
+                    session.container_cpus = None;
+                    session.container_memory = None;
+                    crate::database::save_session(session)?;
+                }
+                self.resume_session_controlled(
+                    &id,
+                    operation.selection.profile_id.as_deref().unwrap(),
+                    operation.selection.target_template_id.as_deref().unwrap(),
+                    SessionResumeOptions {
+                        additional_mounts: operation.selection.additional_mounts.clone(),
+                        resource_allocation: operation.selection.resource_allocation.clone(),
+                        discard_queue: true,
+                    },
+                    executor,
+                )
+                .await?;
             }
-            self.resume_session_controlled(
-                &id,
-                operation.selection.profile_id.as_deref().unwrap(),
-                operation.selection.target_template_id.as_deref().unwrap(),
-                SessionResumeOptions {
-                    additional_mounts: operation.selection.additional_mounts.clone(),
-                    resource_allocation: operation.selection.resource_allocation.clone(),
-                    discard_queue: true,
-                },
-                executor,
-            )
-            .await?;
             let destination = &self.state.sessions[&id];
             operation.destination_target = destination.target.clone();
             operation.destination_native_session_id = destination.native_session_id.clone();
@@ -999,12 +1076,32 @@ impl Controller {
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
-        relay.submit(format!("{}-notice", operation.operation_id), RelayCommand::RecordNotice {
-            text: format!("Moved from {} / {} to {} / {} in a fresh environment. {} The interrupted prompt was not replayed.",
-                operation.source_profile_id, operation.source_target_template_id,
-                operation.selection.profile_id.as_deref().unwrap(), operation.selection.target_template_id.as_deref().unwrap(),
-                if operation.queue == ResumeQueueDisposition::Discard { "Queued work was discarded; ready and idle." } else { "Queued work was accepted." }),
-        }).await?;
+        let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
+            "Queued work was discarded; ready and idle."
+        } else {
+            "Queued work was accepted."
+        };
+        let source_profile = &operation.source_profile_id;
+        let source_target = &operation.source_target_template_id;
+        let destination_profile = operation.selection.profile_id.as_deref().unwrap();
+        let destination_target = operation.selection.target_template_id.as_deref().unwrap();
+        // The two moves are different events for the person reading the
+        // conversation: one rebuilt the environment, the other kept it.
+        let text = if operation.in_place {
+            format!(
+                "Switched from {source_profile} / {source_target} to {destination_profile} / {destination_target} in place; the workspace and environment were kept. {queue_sentence} The interrupted prompt was not replayed."
+            )
+        } else {
+            format!(
+                "Moved from {source_profile} / {source_target} to {destination_profile} / {destination_target} in a fresh environment. {queue_sentence} The interrupted prompt was not replayed."
+            )
+        };
+        relay
+            .submit(
+                format!("{}-notice", operation.operation_id),
+                RelayCommand::RecordNotice { text },
+            )
+            .await?;
         Ok(())
     }
 
@@ -1089,6 +1186,31 @@ fn validate_preserved_configuration(
         );
     }
     Ok(())
+}
+
+/// Whether this move can replace only the harness inside the source target.
+///
+/// The environment is kept only when nothing about it changes: the same target
+/// template, the same attached mounts, and the same resource allocation. A
+/// retry starts from a torn-down or unknown source, and a sub-agent never owns
+/// its own target, so both take the full fresh-environment path.
+pub(super) fn in_place_move_eligible(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+    is_subagent: bool,
+    retry: bool,
+) -> bool {
+    !retry
+        && !is_subagent
+        && source.target.is_some()
+        && matches!(
+            source.state,
+            SessionState::Running | SessionState::Disconnected
+        )
+        && Some(&source.target_template_id) == selection.target_template_id.as_ref()
+        && Some(&source.additional_mounts) == selection.additional_mounts.as_ref()
+        && source.resource_allocation == selection.resource_allocation
+        && !selection.clear_resource_allocation
 }
 
 fn outcome(

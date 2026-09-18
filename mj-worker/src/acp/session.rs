@@ -10,7 +10,7 @@ pub(super) async fn serve_session(
     pending_elicitations: &PendingElicitations,
     plan_implementation_slot: &PlanImplementationSlot,
     opened: Arc<Mutex<Option<OpenedSession>>>,
-    session_update_count: &AtomicU64,
+    agent_output_count: &AgentOutputCount,
     session_updates_enabled: &AtomicBool,
     resume_required: Arc<AtomicBool>,
     native_session_used: Arc<AtomicBool>,
@@ -443,7 +443,13 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
-                let mut updates_before = session_update_count.load(Ordering::Acquire);
+                let mut updates_before = agent_output_count.get();
+                // A prompt asking the harness to compact its context is
+                // answered by compacting, and the bridges report that with
+                // banners rather than with agent output. Judging such a turn
+                // as unanswered would report the compaction that was asked for
+                // as a failure (#970).
+                let mut asked_to_compact = mj_core::acp::prompt_requests_compaction(&prompt);
                 // Mark before sending: even a failed reply cannot prove the
                 // agent did not receive and persist this prompt.
                 let mut first_use = false;
@@ -467,16 +473,11 @@ pub(super) async fn serve_session(
                 // Start the stall clock at send time so the watchdog measures
                 // silence within this turn, not idle time carried from before.
                 spec.acp_activity.mark();
-                // Claude and Codex mark their own turn ends, so a lost reply
-                // cannot hang them and the watchdog stays out of their way.
-                let stall_policy = if turn_ends_only_on_prompt_reply(spec.harness) {
-                    spec.stall_policy.unwrap_or_else(turn_stall_policy)
-                } else {
-                    mj_core::activity::StallPolicy {
-                        silence: None,
-                        tool_call: None,
-                    }
-                };
+                // One policy for every harness, off unless the operator set a
+                // bound. No harness ends the turn Mjolnir reports without the
+                // `session/prompt` reply, so there is no harness that is safe
+                // to exempt and nothing left to special-case.
+                let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -575,20 +576,39 @@ pub(super) async fn serve_session(
                                             }).await?,
                                         }
                                     }
-                                    if prompt_returned_without_updates(
-                                        &response.stop_reason,
-                                        updates_before,
-                                        session_update_count.load(Ordering::Acquire),
-                                    ) {
+                                    if !asked_to_compact
+                                        && prompt_returned_without_updates(
+                                            &response.stop_reason,
+                                            updates_before,
+                                            agent_output_count.get(),
+                                        )
+                                    {
+                                        // The harness called this a successful
+                                        // turn but produced nothing at all, so
+                                        // reporting it as finished would tell
+                                        // the person and every waiting script
+                                        // that work happened (#970). Fail the
+                                        // turn under its own stop reason, and
+                                        // leave the session serving so the
+                                        // prompt can be resent by hand.
+                                        let message = prompt_unanswered_message(spec.harness);
                                         emit_runtime_event(
                                             events,
                                             RuntimeEvent::Warning {
-                                                message: PROMPT_EMPTY_RESPONSE_MARKER.to_owned(),
+                                                message: message.clone(),
                                             },
                                         )
                                         .await?;
+                                        diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+                                            message,
+                                            code: Some(PROMPT_UNANSWERED_STOP_REASON.to_owned()),
+                                            http_status: None,
+                                            reset_at: None,
+                                        });
+                                        PROMPT_UNANSWERED_STOP_REASON.to_owned()
+                                    } else {
+                                        format!("{:?}", response.stop_reason)
                                     }
-                                    format!("{:?}", response.stop_reason)
                                 }
                                 Err(error) => {
                                     grok_usage.clear();
@@ -936,7 +956,8 @@ pub(super) async fn serve_session(
                                     emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
                                     let plan = state.plan;
                                     let continuation = format!("The user approved the following plan. Implement it now; the preceding permission cancellation was mj's mode-transition handling.\n\n{plan}");
-                                    updates_before = session_update_count.load(Ordering::Acquire);
+                                    updates_before = agent_output_count.get();
+                                    asked_to_compact = false;
                                     spec.step_clock.begin_turn();
                                     prompt = Box::pin(connection.send_request(PromptRequest::new(session_id.clone(), vec![ContentBlock::Text(TextContent::new(continuation))])).block_task());
                                     prompt_running = true;

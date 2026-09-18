@@ -354,6 +354,29 @@ impl ChatState {
         }
     }
 
+    /// The texts of the queued-prompt previews, oldest first.
+    pub fn queued_prompt_texts(&self) -> Vec<String> {
+        self.queued_prompts
+            .iter()
+            .map(|queued| queued.text.clone())
+            .collect()
+    }
+
+    /// Removes the oldest queued-prompt preview with this text and says
+    /// whether one was there. Used when a queued prompt could not be handed
+    /// to the daemon and its text goes back into the draft.
+    pub fn remove_queued_prompt_text(&mut self, text: &str) -> bool {
+        let Some(index) = self
+            .queued_prompts
+            .iter()
+            .position(|queued| queued.text == text)
+        else {
+            return false;
+        };
+        self.queued_prompts.remove(index);
+        true
+    }
+
     pub(crate) fn submit_input(&mut self) -> ChatAction {
         let prompt = self.input.trim().to_owned();
         let command_input = if self.input_images.is_empty() {
@@ -367,12 +390,26 @@ impl ChatState {
         if prompt.is_empty() && self.input_images.is_empty() {
             return ChatAction::None;
         }
-        // No session is attached, so nothing can be sent. Keep the draft and
-        // say so; it becomes the attached composer's input when the chat
-        // opens.
+        // No session is attached yet. A plain prompt is handed to the host,
+        // which asks the daemon to deliver it once the session is live, and
+        // stays visible here as a queued preview. Commands need a live
+        // session to answer them, so they keep the draft and say so.
         if self.standby {
-            self.set_notice("Sending opens when the session is live; the draft is kept.");
-            return ChatAction::None;
+            if prompt.is_empty() || parsed_command.is_some() || command_input.starts_with('!') {
+                self.set_notice("Commands open when the session is live; the draft is kept.");
+                return ChatAction::None;
+            }
+            let id = mj_client::session::new_command_id("standby")
+                .unwrap_or_else(|_| format!("standby-{}", self.queued_prompts.len()));
+            self.clear_input();
+            self.queued_prompts.push_back(QueuedPrompt {
+                id,
+                text: prompt.clone(),
+                kind: QueuedCommandKind::Prompt,
+                images: Vec::new(),
+                attachments_unsupported: false,
+            });
+            return ChatAction::Prompt(prompt);
         }
         if self.plan_command_pending
             && !matches!(parsed_command, Some((LocalCommand::GoalControl(_), _)))

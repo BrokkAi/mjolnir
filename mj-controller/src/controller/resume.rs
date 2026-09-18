@@ -436,6 +436,413 @@ impl Controller {
 /// The resume preflight and the browser's resume card both need this answer
 /// before a person confirms, and neither owns a [`Controller`] at that point,
 /// so it takes the record and the configuration directly.
+/// How a restore prepares the worker root it is about to install into.
+pub(super) enum WorkerRootReset {
+    /// Today's behaviour for a freshly provisioned target: clear leftover relay
+    /// state on a bare target, then make sure the worker root exists.
+    FreshTarget,
+    /// The environment is being kept and only the harness replaced. Stop the
+    /// live daemon, clear relay state, unlink the installed worker files, and
+    /// remove the previous per-session profile home. Runs on every locator.
+    InPlace {
+        /// The profile home to delete, or `None` when the session ran straight
+        /// out of the user's own profile directory.
+        previous_profile_root: Option<String>,
+    },
+}
+
+/// Everything the restore tail of a resume needs, once the destination target
+/// is ready and the session record already describes the destination.
+///
+/// The head of a resume differs a great deal between a fresh environment and an
+/// in-place harness swap; from here on the two are the same work.
+pub(super) struct RestoreIntoTarget<'a> {
+    /// The destination profile, which decides the harness home inside the target.
+    pub profile: &'a mj_core::config::HarnessProfile,
+    pub archive: &'a VerifiedResumeArchive,
+    /// The archive the target actually restores: the conversion's own archive
+    /// when a resume wrote one, otherwise the verified checkpoint.
+    pub restored_archive: &'a Path,
+    pub resumed_project_directory: Option<PathBuf>,
+    pub resumed_container_workspace: Option<PathBuf>,
+    pub restore_repositories: bool,
+    /// True when this resume converted a checkout, which is the only case where
+    /// the restored harness session is pointed at a directory the archive could
+    /// not have named.
+    pub primary_repository_root_from_conversion: bool,
+    pub native_continuity: bool,
+    pub discard_queued_prompts: bool,
+    /// Whether the archived queue is resubmitted to a fresh native session.
+    pub replay_queue: bool,
+    /// The compacted handoff a cross-harness restore installs as its first
+    /// prompt context. Required whenever `native_continuity` is false.
+    pub utility_handoff: Option<String>,
+    pub projection_build: Option<tokio::task::JoinHandle<Result<MaterializedSession>>>,
+    /// Conversation lines to record once the destination answers.
+    pub resume_notices: Vec<String>,
+    pub install_attached_resources: bool,
+    pub worker_root_reset: WorkerRootReset,
+    /// A managed checkout to retire once, and only once, the restore succeeded.
+    pub retire_after_ready: Option<&'a mj_core::state::ManagedWorktree>,
+}
+
+impl Controller {
+    /// Install the worker, restore the archive into the target, start the
+    /// harness, and report the projection the destination answers with.
+    pub(super) async fn restore_into_target(
+        &mut self,
+        session_id: &str,
+        restore: RestoreIntoTarget<'_>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<MaterializedSession> {
+        let RestoreIntoTarget {
+            profile,
+            archive,
+            restored_archive,
+            resumed_project_directory,
+            resumed_container_workspace,
+            restore_repositories,
+            primary_repository_root_from_conversion,
+            native_continuity,
+            discard_queued_prompts,
+            replay_queue,
+            utility_handoff,
+            projection_build,
+            mut resume_notices,
+            install_attached_resources: should_install_attached_resources,
+            worker_root_reset,
+            retire_after_ready,
+        } = restore;
+        let archive_manifest = &archive.manifest;
+        let canonical_session = &archive.canonical_session;
+        let (backend, worker_root) = self.worker_placement(session_id)?;
+        let harness_home = target_profile_home(&backend, session_id, profile);
+        let workspace_root = if let Some(project_directory) = &resumed_project_directory {
+            project_directory
+                .parent()
+                .context("bare project directory has no parent")?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
+        };
+        let target_path = |path: &str| match &backend {
+            targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. }
+                if !path.starts_with('/') =>
+            {
+                PathBuf::from(format!("~/{path}"))
+            }
+            _ => PathBuf::from(path),
+        };
+        let remote_archive = format!("{worker_root}/restore.hel.zip");
+        let remote_spec = format!("{worker_root}/restore-spec.json");
+        let restore = CheckpointRestoreSpec {
+            archive_path: restore_archive_path(
+                &backend,
+                restored_archive,
+                &target_path(&remote_archive),
+            ),
+            workspace_root: target_path(&workspace_root),
+            relay_root: target_path(&worker_root),
+            harness_home: target_path(&harness_home),
+            // A local checkout converting into a workspace arrives as a
+            // fresh clone of its own remote, and the conversion archive
+            // carries the commits, dirty files, and branch that go over it.
+            // An in-place managed checkout recreated from its retained
+            // branch still needs the archive's dirty state.
+            restore_repositories,
+            restore_native: native_continuity,
+            // A move onto a checkout puts it somewhere the archive could
+            // not have named, so the restored harness session is pointed at
+            // the real working directory instead of the archived one. A
+            // move into a target has no host directory left, and the
+            // conversion archive already names the destination under
+            // `/workspace`, so this stays empty there.
+            primary_repository_root: primary_repository_root_from_conversion
+                .then(|| resumed_project_directory.clone())
+                .flatten()
+                .map(|directory| target_path(&directory.to_string_lossy())),
+            discard_queued_prompts,
+        };
+        // Prepare the worker root before the worker binary is installed:
+        // a surviving daemon still holds the old binary open, and the
+        // install would land on a running executable.
+        {
+            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+            match &worker_root_reset {
+                // A bare target keeps the closed session's worker root on
+                // the host. Stop anything still writing there and clear the
+                // leftover relay state, or the restore's seed loses to a
+                // stale snapshot whose frontier no journal can support.
+                WorkerRootReset::FreshTarget => {
+                    if let Some(command) = targets::clear_relay_state_plan(&backend, session_id)? {
+                        execute_checked(syncing, command)?;
+                    }
+                    // Both lanes below write into the worker root, so it
+                    // exists first.
+                    execute_checked(
+                        syncing,
+                        targets::command_on_locator(
+                            &backend,
+                            session_id,
+                            vec!["mkdir".into(), "-p".into(), worker_root.clone()],
+                            "create the session worker root",
+                        )?,
+                    )?;
+                }
+                // The environment survives this restore, so the old
+                // harness has to be taken out of it: its daemon, its relay
+                // state, the installed worker files, and its profile home.
+                // The same command recreates the worker root.
+                WorkerRootReset::InPlace {
+                    previous_profile_root,
+                } => {
+                    execute_checked(
+                        syncing,
+                        targets::in_place_worker_reset_plan(
+                            &backend,
+                            session_id,
+                            previous_profile_root.as_deref(),
+                        )?,
+                    )?;
+                }
+            }
+        }
+        let staging = tempfile::tempdir().context("create restore staging")?;
+        let local_spec = staging.path().join("restore-spec.json");
+        std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
+        // Two independent lanes into the target. The checkpoint transfer
+        // needs nothing from the worker install, and the worker install
+        // is independent of archive upload, so both run concurrently.
+        let controller = &*self;
+        let backend_ref = &backend;
+        let worker_root_ref = worker_root.as_str();
+        let local_spec_ref = local_spec.as_path();
+        execute_concurrent_lanes(
+            || {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                controller.prepare_worker_files(
+                    session_id,
+                    backend_ref,
+                    worker_root_ref,
+                    syncing,
+                )?;
+                super::provisioning::install_inherited_git_settings(
+                    syncing,
+                    backend_ref,
+                    session_id,
+                )?;
+                Ok(())
+            },
+            || {
+                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                if should_upload_restore_archive(&backend) {
+                    upload_checkpoint_spec(
+                        restoring,
+                        backend_ref,
+                        session_id,
+                        restored_archive,
+                        &remote_archive,
+                    )?;
+                }
+                upload_checkpoint_spec(
+                    restoring,
+                    backend_ref,
+                    session_id,
+                    local_spec_ref,
+                    &remote_spec,
+                )
+            },
+        )?;
+        {
+            let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+            execute_checked(
+                restoring,
+                restore_command(&backend, session_id, &remote_spec)?,
+            )?;
+        }
+        if should_install_attached_resources {
+            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+            install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
+        }
+        match projection_build {
+            Some(build) => {
+                let mut restored_projection = build
+                    .await
+                    .context("rebuild the restored projection")?
+                    .context("rebuild the restored projection")?;
+                if discard_queued_prompts {
+                    restored_projection.queued_prompts.clear();
+                }
+                crate::database::save_materialized_session(&restored_projection)?;
+            }
+            // The stored projection already is the archived one. Only the
+            // queue can still need changing.
+            None if discard_queued_prompts => {
+                crate::database::replace_materialized_queued_prompts(session_id, &[])?;
+            }
+            None => {}
+        }
+        let readiness_stage = bridge_readiness_stage(profile);
+        let spec = self.reconnect_command(session_id)?;
+        let readiness = async {
+            let mut relay = {
+                let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                start_worker(executor, &backend, &worker_root)?;
+                connect_started_worker(&spec, session_id, executor, &backend, &worker_root).await?
+            };
+            let native_session_id =
+                wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+            Ok::<_, anyhow::Error>((relay, native_session_id))
+        }
+        .await;
+        let (mut relay, native_session_id) = readiness
+            .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
+        if native_continuity {
+            if native_session_id != archive_manifest.session.native_session_id {
+                bail!(
+                    "ACP loaded native session {native_session_id}, expected {}",
+                    archive_manifest.session.native_session_id
+                );
+            }
+        } else {
+            relay
+                .install_prompt_context(
+                    utility_handoff
+                        .clone()
+                        .context("a resume into a fresh native session has no handoff")?,
+                )
+                .await?;
+            if replay_queue {
+                for prompt in &canonical_session.queued_prompts {
+                    // A queued configuration change is replayed as itself;
+                    // rebuilding it as a prompt would send `/model x` to
+                    // the agent as text.
+                    let command = match &prompt.kind {
+                        CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
+                            prompt: prompt
+                                .content
+                                .iter()
+                                .cloned()
+                                .map(serde_json::from_value)
+                                .collect::<serde_json::Result<Vec<ContentBlock>>>()?,
+                        },
+                        CanonicalQueuedCommandKind::SetConfig { key, value } => {
+                            RelayCommand::SetConfig {
+                                key: key.clone(),
+                                value: value.clone(),
+                            }
+                        }
+                    };
+                    relay.submit(prompt.command_id.clone(), command).await?;
+                }
+            }
+        }
+        // Last, and only once the resume has otherwise succeeded: a failure
+        // before this point rolls the record back to a session whose
+        // worktree still has to be there.
+        if let Some(worktree) = retire_after_ready
+            && let Err(error) = retire_managed_worktree(executor, worktree)
+        {
+            tracing::warn!(
+                session_id,
+                worktree = %worktree.worktree_root.display(),
+                error = format!("{error:#}"),
+                "could not retire the old managed worktree after resume"
+            );
+            resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
+        }
+        for notice in &resume_notices {
+            let submitted = async {
+                let command_id = new_command_id("resume-notice")?;
+                relay
+                    .submit(
+                        command_id,
+                        RelayCommand::RecordNotice {
+                            text: notice.clone(),
+                        },
+                    )
+                    .await
+            }
+            .await;
+            // The conversation line is a courtesy. A relay that refuses it
+            // has not damaged the resume, so report and carry on.
+            if let Err(error) = submitted {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "could not record a resume notice in the conversation"
+                );
+            }
+        }
+        self.mark_worker_connected(session_id, Some(native_session_id))?;
+        Ok(relay.sync().await?.materialized)
+    }
+}
+
+/// One checkpoint archive that has been read end to end and proved to be the
+/// one the session record names.
+///
+/// The canonical snapshot is shared behind an `Arc`: on a long session it is
+/// tens of megabytes, and a resume reads it from several places that would
+/// otherwise hold private copies.
+pub(super) struct VerifiedResumeArchive {
+    /// The archive's absolute, canonical path. A LocalBare worker shares the
+    /// controller's filesystem, so it can consume this file directly instead of
+    /// receiving a second large copy in its worker root.
+    pub archive_path: PathBuf,
+    pub manifest: mj_checkpoint::archive::ArchiveManifest,
+    pub canonical_session: Arc<CanonicalSessionSnapshot>,
+}
+
+/// Read and verify the archive a stopped session will be restored from.
+///
+/// Canonicalizing first keeps one exact absolute path for the restore. The
+/// digest and session id must both match the record, and a legacy host-bridge
+/// archive is refused here rather than part way through a restore.
+pub(super) fn verify_resume_checkpoint(
+    session_id: &str,
+    checkpoint: &mj_core::state::CheckpointMetadata,
+) -> Result<VerifiedResumeArchive> {
+    let archive_path = {
+        let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
+        checkpoint.archive_path.canonicalize().with_context(|| {
+            format!(
+                "resolve checkpoint archive {}",
+                checkpoint.archive_path.display()
+            )
+        })?
+    };
+    ensure!(
+        archive_path.is_absolute() && archive_path.is_file(),
+        "checkpoint archive path is not an absolute regular file: {}",
+        archive_path.display()
+    );
+    let mj_checkpoint::archive::VerifiedArchiveMetadata {
+        manifest,
+        canonical_session,
+        archive_sha256,
+    } = {
+        let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
+        verify_archive_streaming(&archive_path)?
+    };
+    if archive_sha256 != checkpoint.sha256 || manifest.session.id != session_id {
+        bail!("persisted checkpoint verification failed");
+    }
+    ensure!(
+        manifest.repositories.iter().all(|repository| {
+            !repository.metadata.origin.starts_with("mj-local:")
+                && !repository.metadata.origin.starts_with("ext::")
+        }),
+        "resuming legacy host-bridge sessions is not supported; start a new network-backed session"
+    );
+    Ok(VerifiedResumeArchive {
+        archive_path,
+        manifest,
+        canonical_session: Arc::new(canonical_session),
+    })
+}
+
 pub fn raw_conversion_preview_for(
     session: &SessionRecord,
     config: &Config,
@@ -760,46 +1167,10 @@ impl Controller {
                 );
             }
         }
-        // Canonicalize before verification and keep this exact absolute path
-        // for the restore. A LocalBare worker shares the controller's
-        // filesystem, so it can consume the verified archive directly instead
-        // of copying a second large file into its worker root.
-        let archive_path = {
-            let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive");
-            checkpoint.archive_path.canonicalize().with_context(|| {
-                format!(
-                    "resolve checkpoint archive {}",
-                    checkpoint.archive_path.display()
-                )
-            })?
-        };
-        ensure!(
-            archive_path.is_absolute() && archive_path.is_file(),
-            "checkpoint archive path is not an absolute regular file: {}",
-            archive_path.display()
-        );
-        // Take the snapshot out of the verified metadata and share it behind an
-        // `Arc`: on a long session it is tens of megabytes, and resume reads it
-        // from three places that used to hold private copies.
-        let mj_checkpoint::archive::VerifiedArchiveMetadata {
-            manifest: archive_manifest,
-            canonical_session,
-            archive_sha256,
-        } = {
-            let _phase = ResumePhaseTimer::new(session_id, "verify checkpoint archive contents");
-            verify_archive_streaming(&archive_path)?
-        };
-        if archive_sha256 != checkpoint.sha256 || archive_manifest.session.id != session_id {
-            bail!("persisted checkpoint verification failed");
-        }
-        ensure!(
-            archive_manifest.repositories.iter().all(|repository| {
-                !repository.metadata.origin.starts_with("mj-local:")
-                    && !repository.metadata.origin.starts_with("ext::")
-            }),
-            "resuming legacy host-bridge sessions is not supported; start a new network-backed session"
-        );
-        let canonical_session = Arc::new(canonical_session);
+        let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
+        let archive_path = verified_archive.archive_path.clone();
+        let archive_manifest = &verified_archive.manifest;
+        let canonical_session = Arc::clone(&verified_archive.canonical_session);
         let profile = self
             .config
             .profiles
@@ -828,7 +1199,7 @@ impl Controller {
         if !mj_core::config::is_bare_project_target(&target_template)
             && plan != ResumePlan::RawToWorkspace
         {
-            super::network_git::bundle_from_manifest(&archive_manifest)?;
+            super::network_git::bundle_from_manifest(archive_manifest)?;
         }
         if plan == ResumePlan::InPlace
             && previous.managed_worktree.is_none()
@@ -1195,28 +1566,10 @@ impl Controller {
                     None
                 }
             };
-            let (backend, worker_root) = self.worker_placement(session_id)?;
-            let harness_home = target_profile_home(&backend, session_id, &profile);
-            let workspace_root = if let Some(project_directory) = &resumed_project_directory {
-                project_directory
-                    .parent()
-                    .context("bare project directory has no parent")?
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
-            };
-            let target_path = |path: &str| match &backend {
-                targets::TargetLocator::AwsEc2 { .. }
-                | targets::TargetLocator::SshBare { .. }
-                    if !path.starts_with('/') =>
-                {
-                    PathBuf::from(format!("~/{path}"))
-                }
-                _ => PathBuf::from(path),
-            };
-            let remote_archive = format!("{worker_root}/restore.hel.zip");
-            let remote_spec = format!("{worker_root}/restore-spec.json");
+            let restore_repositories = (resumed_project_directory.is_none()
+                && conversion.is_none())
+                || plan == ResumePlan::RawToWorkspace
+                || (recreated_managed_worktree && plan == ResumePlan::InPlace);
             // A conversion restores the archive it just wrote, not the raw one
             // the session was stopped with.
             let restored_archive = conversion_checkpoint_written
@@ -1224,240 +1577,32 @@ impl Controller {
                 .map_or(archive_path.as_path(), |checkpoint| {
                     checkpoint.archive_path.as_path()
                 });
-            let restore = CheckpointRestoreSpec {
-                archive_path: restore_archive_path(
-                    &backend,
+            self.restore_into_target(
+                session_id,
+                RestoreIntoTarget {
+                    profile: &profile,
+                    archive: &verified_archive,
                     restored_archive,
-                    &target_path(&remote_archive),
-                ),
-                workspace_root: target_path(&workspace_root),
-                relay_root: target_path(&worker_root),
-                harness_home: target_path(&harness_home),
-                // A local checkout converting into a workspace arrives as a
-                // fresh clone of its own remote, and the conversion archive
-                // carries the commits, dirty files, and branch that go over it.
-                // An in-place managed checkout recreated from its retained
-                // branch still needs the archive's dirty state.
-                restore_repositories: (resumed_project_directory.is_none()
-                    && conversion.is_none())
-                    || plan == ResumePlan::RawToWorkspace
-                    || (recreated_managed_worktree && plan == ResumePlan::InPlace),
-                restore_native: native_continuity,
-                // A move onto a checkout puts it somewhere the archive could
-                // not have named, so the restored harness session is pointed at
-                // the real working directory instead of the archived one. A
-                // move into a target has no host directory left, and the
-                // conversion archive already names the destination under
-                // `/workspace`, so this stays empty there.
-                primary_repository_root: conversion
-                    .is_some()
-                    .then(|| resumed_project_directory.clone())
-                    .flatten()
-                    .map(|directory| target_path(&directory.to_string_lossy())),
-                discard_queued_prompts,
-            };
-            // A bare target keeps the closed session's worker root on the host.
-            // Stop anything still writing there and clear the leftover relay
-            // state, or the restore's seed loses to a stale snapshot whose
-            // frontier no journal can support. This runs before the worker
-            // binary is installed: a surviving daemon still holds the old one
-            // open, and the install would land on a running executable.
-            {
-                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                if let Some(command) = targets::clear_relay_state_plan(&backend, session_id)? {
-                    execute_checked(syncing, command)?;
-                }
-                // Both lanes below write into the worker root, so it exists first.
-                execute_checked(
-                    syncing,
-                    targets::command_on_locator(
-                        &backend,
-                        session_id,
-                        vec!["mkdir".into(), "-p".into(), worker_root.clone()],
-                        "create the session worker root",
-                    )?,
-                )?;
-            }
-            let staging = tempfile::tempdir().context("create restore staging")?;
-            let local_spec = staging.path().join("restore-spec.json");
-            std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
-            // Two independent lanes into the target. The checkpoint transfer
-            // needs nothing from the worker install, and the worker install
-            // is independent of archive upload, so both run concurrently.
-            let controller = &*self;
-            let backend_ref = &backend;
-            let worker_root_ref = worker_root.as_str();
-            let local_spec_ref = local_spec.as_path();
-            execute_concurrent_lanes(
-                || {
-                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                    controller.prepare_worker_files(
-                        session_id,
-                        backend_ref,
-                        worker_root_ref,
-                        syncing,
-                    )?;
-                    super::provisioning::install_inherited_git_settings(
-                        syncing,
-                        backend_ref,
-                        session_id,
-                    )?;
-                    Ok(())
+                    resumed_project_directory,
+                    resumed_container_workspace,
+                    restore_repositories,
+                    primary_repository_root_from_conversion: conversion.is_some(),
+                    native_continuity,
+                    discard_queued_prompts,
+                    replay_queue: !discard_queue,
+                    utility_handoff,
+                    projection_build,
+                    resume_notices,
+                    install_attached_resources: true,
+                    worker_root_reset: WorkerRootReset::FreshTarget,
+                    retire_after_ready: conversion
+                        .as_ref()
+                        .and_then(ResumeConversion::raw_to_workspace)
+                        .and_then(|plan| plan.retire.as_ref()),
                 },
-                || {
-                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                    if should_upload_restore_archive(&backend) {
-                        upload_checkpoint_spec(
-                            restoring,
-                            backend_ref,
-                            session_id,
-                            restored_archive,
-                            &remote_archive,
-                        )?;
-                    }
-                    upload_checkpoint_spec(
-                        restoring,
-                        backend_ref,
-                        session_id,
-                        local_spec_ref,
-                        &remote_spec,
-                    )
-                },
-            )?;
-            {
-                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                execute_checked(
-                    restoring,
-                    restore_command(&backend, session_id, &remote_spec)?,
-                )?;
-            }
-            {
-                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                install_attached_resources(
-                    &self.state,
-                    session_id,
-                    &backend,
-                    &worker_root,
-                    syncing,
-                )?;
-
-            }
-            match projection_build {
-                Some(build) => {
-                    let mut restored_projection = build
-                        .await
-                        .context("rebuild the restored projection")?
-                        .context("rebuild the restored projection")?;
-                    if discard_queued_prompts {
-                        restored_projection.queued_prompts.clear();
-                    }
-                    crate::database::save_materialized_session(&restored_projection)?;
-                }
-                // The stored projection already is the archived one. Only the
-                // queue can still need changing.
-                None if discard_queued_prompts => {
-                    crate::database::replace_materialized_queued_prompts(session_id, &[])?;
-                }
-                None => {}
-            }
-            let readiness_stage = bridge_readiness_stage(&profile);
-            let spec = self.reconnect_command(session_id)?;
-            let readiness = async {
-                let mut relay = {
-                    let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-                    start_worker(executor, &backend, &worker_root)?;
-                    connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
-                        .await?
-                };
-                let native_session_id =
-                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
-                Ok::<_, anyhow::Error>((relay, native_session_id))
-            }
-            .await;
-            let (mut relay, native_session_id) = readiness
-                .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
-            if native_continuity {
-                if native_session_id != archive_manifest.session.native_session_id {
-                    bail!(
-                        "ACP loaded native session {native_session_id}, expected {}",
-                        archive_manifest.session.native_session_id
-                    );
-                }
-            } else {
-                relay
-                    .install_prompt_context(
-                        utility_handoff
-                            .clone()
-                            .context("a resume into a fresh native session has no handoff")?,
-                    )
-                    .await?;
-                if !discard_queue {
-                    for prompt in &canonical_session.queued_prompts {
-                        // A queued configuration change is replayed as itself;
-                        // rebuilding it as a prompt would send `/model x` to
-                        // the agent as text.
-                        let command = match &prompt.kind {
-                            CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
-                                prompt: prompt
-                                    .content
-                                    .iter()
-                                    .cloned()
-                                    .map(serde_json::from_value)
-                                    .collect::<serde_json::Result<Vec<ContentBlock>>>()?,
-                            },
-                            CanonicalQueuedCommandKind::SetConfig { key, value } => {
-                                RelayCommand::SetConfig {
-                                    key: key.clone(),
-                                    value: value.clone(),
-                                }
-                            }
-                        };
-                        relay.submit(prompt.command_id.clone(), command).await?;
-                    }
-                }
-            }
-            // Last, and only once the resume has otherwise succeeded: a failure
-            // before this point rolls the record back to a session whose
-            // worktree still has to be there.
-            if let Some(worktree) = conversion
-                .as_ref()
-                .and_then(ResumeConversion::raw_to_workspace)
-                .and_then(|plan| plan.retire.as_ref())
-                && let Err(error) = retire_managed_worktree(executor, worktree)
-            {
-                tracing::warn!(
-                    session_id,
-                    worktree = %worktree.worktree_root.display(),
-                    error = format!("{error:#}"),
-                    "could not retire the old managed worktree after resume"
-                );
-                resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
-            }
-            for notice in &resume_notices {
-                let submitted = async {
-                    let command_id = new_command_id("resume-notice")?;
-                    relay
-                        .submit(
-                            command_id,
-                            RelayCommand::RecordNotice {
-                                text: notice.clone(),
-                            },
-                        )
-                        .await
-                }
-                .await;
-                // The conversation line is a courtesy. A relay that refuses it
-                // has not damaged the resume, so report and carry on.
-                if let Err(error) = submitted {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{error:#}"),
-                        "could not record a resume notice in the conversation"
-                    );
-                }
-            }
-            self.mark_worker_connected(session_id, Some(native_session_id))?;
-            Ok::<_, anyhow::Error>(relay.sync().await?.materialized)
+                executor,
+            )
+            .await
         }
         .await;
         match result {
@@ -1997,6 +2142,8 @@ async fn utility_handoff_while_cancellable(
         }
     }
 }
+
+mod in_place;
 
 #[cfg(test)]
 mod tests;

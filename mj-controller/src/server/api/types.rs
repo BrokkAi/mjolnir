@@ -95,6 +95,27 @@ pub struct SessionListResponse {
     pub sessions: Vec<ApiSession>,
 }
 
+/// The workspaces the daemon holds, newest opening first, exactly as the
+/// terminal's workspace tabs and the viewer's list see them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListResponse {
+    pub workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
+}
+
+/// Name the workspace to work in. The name is the identity: it is trimmed, at
+/// most 64 characters, and unique case-insensitively, so naming one that
+/// already exists returns it rather than making a second.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateWorkspaceResponse {
+    pub workspace: mj_core::workspace::WorkspaceRecord,
+}
+
 /// Create a session and, optionally, send its first prompt. Served in M2.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

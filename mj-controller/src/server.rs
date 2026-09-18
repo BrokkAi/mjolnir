@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use mj_core::attachment::{AttachmentRef, AttachmentStore, MAX_IMAGE_BYTES, MAX_IMAGES};
 use mj_core::config::{Config, TargetTemplate, project_history_host, validate_id};
 use mj_core::elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITATION_BYTES};
+use mj_core::refusal::{Refusal, RefusalKind};
 use mj_core::state::{
     MoveOperation, MovePhase, MovePreparation, MoveSelection, MoveSessionRequest,
     ProjectSourceIdentity, SessionResourceAllocation, SessionState, SessionTransitionKind,
