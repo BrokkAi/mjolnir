@@ -618,6 +618,7 @@ fn tailscale_listener_preserves_the_configured_port() {
 fn controller_with_profiles(ids: &[&str]) -> Controller {
     Controller {
         config: Config {
+            keys: Default::default(),
             build_cache: Default::default(),
             subagents: Default::default(),
             version: CONFIG_VERSION,

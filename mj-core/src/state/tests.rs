@@ -181,6 +181,7 @@ fn sample_state() -> State {
 fn sample_config() -> Config {
     Config {
         build_cache: Default::default(),
+        keys: Default::default(),
         advanced: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),

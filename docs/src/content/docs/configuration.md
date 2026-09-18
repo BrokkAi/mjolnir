@@ -57,7 +57,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 10
+version = 11
 ```
 
 The only accepted top-level keys are:
@@ -529,7 +529,7 @@ This example contains the sections most installations need. Add other target
 kinds from the examples above rather than mixing fields between variants.
 
 ```toml
-version = 10
+version = 11
 
 [phone]
 enabled = true

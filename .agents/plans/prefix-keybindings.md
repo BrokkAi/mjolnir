@@ -22,7 +22,7 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
 ## Progress
 
 - [x] (2026-09-17) M0: plan committed at `.agents/plans/prefix-keybindings.md`.
-- [ ] M1: `mj-core` key-string parser, `KeysConfig`, `Keybinds`, defaults, validation, unit tests; `Config.keys` wired; Settings modal hides the section.
+- [x] (2026-09-17) M1: `mj-core` key-string parser, `KeysConfig`, `Keybinds`, defaults, validation, unit tests; `Config.keys` wired; Settings modal hides the section.
 - [ ] M2: registry rewritten around `pane_keys` + `action`; prefix router on `DashboardState`; mj-cli event loop uses the router; footer and help overlay read live bindings and show the `PREFIX` banner; all Alt/F-key defaults gone; existing tests rewritten; PTY test updated.
 - [ ] M3: `Alt-T` and `Alt-V` leave the composer and become the `ToggleTranscriptRendering` and `ToggleDictation` commands.
 - [ ] M4: shared list navigation gains `j`/`k`, `G`, `ctrl+d`/`ctrl+u`; local aliases collapse onto it; help overlay gains `/` filter.
@@ -35,6 +35,12 @@ to `config.toml`, wait a second, and observe that `ctrl+b` is backward-character
   Evidence: `mj-core/Cargo.toml` dependency list. Consequence: key combos in the config layer are described with mj's own small enum, and `mj-tui` converts crossterm events to it.
 - Observation: the footer fitting code protects the help and palette hints by matching the literal text `"F1 "` and `"F2 "`.
   Evidence: `mj-chat/src/theme.rs:275-283`. Consequence: it needs a caller-supplied predicate once those keys are gone.
+- Observation: adding a field to `Config` breaks nine `Config { .. }` struct literals outside `mj-core`, not only the version literals the plan asked to grep for.
+  Evidence: `cargo clippy --all-targets` reported `missing field `keys`` in `mj-core/src/config/tests.rs`, `mj-core/src/state/tests.rs`, `mj-tui/src/test_support.rs`, `mj-tui/src/dialogs/tests.rs`, three files under `mj-controller/src`, and four literals in `mj-cli/tests/import_e2e.rs`. Consequence: each gained `keys: Default::default()`.
+- Observation: no test hard-codes the config version; only the documentation does.
+  Evidence: grepping the workspace for `version = 10` and `"version": 10` matched `docs/src/content/docs/configuration.md` twice and nothing else; every test formats `CONFIG_VERSION`. Consequence: the bump to 11 touched only that file outside `mj-core`.
+- Observation: `keys` must sit among the other table-valued fields in `Config`, because TOML cannot write a bare value after a table.
+  Evidence: the field is declared after `build_cache` and before `profiles`; `keys_section_is_omitted_from_serialized_defaults` round-trips a non-default `[keys]` through `save_to`/`load_from`.
 - Observation: on macOS the test helper `ctrl_key` produces `SUPER`, and the dashboard remaps `SUPER` to `CONTROL` for accelerators.
   Evidence: `mj-tui/src/test_support.rs:85-96`, `mj-tui/src/lib.rs:894-916`. Consequence: the prefix is matched as literal `CONTROL` on every platform and tests build it with a dedicated helper.
 
@@ -274,6 +280,14 @@ Acceptance is behavioural: with a default config, every command listed in the M1
 Every step is an ordinary source edit under git; re-running a milestone is safe. If a milestone is abandoned part-way, `git checkout -- <files>` restores the tree; commits are per milestone so a later milestone can be reverted alone. The config version bump means a `config.toml` written by the new binary is refused by an older one with a clear "newer version" error, which is the existing behaviour for every version bump; no data migration is involved.
 
 ## Artifacts and Notes
+
+M1, `cargo test -p brokk-mj-core` (dev profile, outside the sandbox):
+
+    test result: ok. 371 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+M1 validation error text for the conflicting-bindings example (`help` and `pane_preset` both `"prefix+space"`):
+
+    keys.pane_preset = "prefix+space": already bound by keys.help
 
 Record here, as the work proceeds: the final footer string at full width, the help overlay text with defaults, a `cargo test` summary line per milestone, and the validation error text produced by the conflicting-bindings example.
 
