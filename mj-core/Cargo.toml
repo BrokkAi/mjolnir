@@ -12,6 +12,8 @@ include = [
     "src/**/*.rs",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
+    # Mjolnir-authored skills embedded with `include_str!`.
+    "assets/skills/**/SKILL.md",
     "Cargo.toml",
     "Cargo.lock",
     "/README.md",
