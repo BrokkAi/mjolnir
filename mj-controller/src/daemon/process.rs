@@ -154,6 +154,11 @@ pub(super) async fn run_daemon_runtime(
     owner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
     recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // How often the harness readiness wait is looked at. The wait itself is
+    // minutes long, so this only bounds how late a failure is noticed, and it
+    // reads in-memory state rather than the store.
+    let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
+    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut interrupted_close_cancellations = Vec::new();
     let mut interrupted_close_tasks = Vec::new();
@@ -289,6 +294,18 @@ pub(super) async fn run_daemon_runtime(
                     }
                     while let Some(result) = worker_upgrades.try_result() {
                         report_worker_upgrade(&state, &result);
+                    }
+                }
+                _ = readiness_tick.tick() => {
+                    // A live session whose harness never advertised itself
+                    // takes no prompt and reports no failure, so nothing else
+                    // ever ends its wait (#1090). The store write runs off
+                    // this loop.
+                    for unready in state.sessions_without_a_usable_harness() {
+                        let state = state.clone();
+                        client_tasks.spawn(async move {
+                            state.fail_unready_session(unready).await;
+                        });
                     }
                 }
                 completed = interrupted_close_rx.recv() => {

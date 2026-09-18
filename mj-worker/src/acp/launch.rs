@@ -200,11 +200,14 @@ pub(super) fn new_session_request(
 pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSessionRequest {
     LoadSessionRequest::new(session_id, spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
-        // Loading must preserve the native session's original MCP set. Adding
-        // Hel's current project-memory server here mutates an existing Codex
-        // session and can make its history replay emit updates for tools whose
-        // creation was never part of this relay stream. New sessions receive
-        // the server above; resumed sessions keep whatever they began with.
+        // The servers Mjolnir owns travel on every launch, because a bridge
+        // that opens the session again is a new harness process: Codex builds
+        // the resumed thread's MCP set from this request and recovers nothing
+        // it was not given (#1085). Project memory stays out: adding Hel's
+        // current memory server to an existing session mutates it, and its
+        // history replay can then emit updates for tools whose creation was
+        // never part of this relay stream.
+        .mcp_servers(extra_mcp(spec))
         .meta(session_request_meta(spec))
 }
 
@@ -214,8 +217,8 @@ pub(super) fn resume_session_request(
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
-        // Resuming must preserve the native session's original MCP set, just
-        // like loading it. The adapter only needs the session context here;
-        // future live updates are delivered on this connection.
+        // Same rule as loading: state Mjolnir's own servers again, leave
+        // project memory to new sessions.
+        .mcp_servers(extra_mcp(spec))
         .meta(session_request_meta(spec))
 }

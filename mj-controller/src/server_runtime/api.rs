@@ -1017,9 +1017,53 @@ async fn export_layout(session_id: String) -> Result<SessionExportLayout, Export
     .await
 }
 
-/// The directory on the target holding the session's primary repository.
-fn primary_repository_path(layout: &SessionExportLayout) -> Result<String, ExportError> {
-    let repository = layout
+/// Checkpoint a session in a task that owns the work to the end.
+///
+/// A checkpoint marks the session `Checkpointing` in the database before it
+/// starts and holds a barrier on the worker while it runs. Awaiting it inline
+/// in an HTTP handler meant a client that gave up part-way dropped the handler
+/// future and abandoned the capture there, leaving the session marked busy
+/// with nothing left to finish or fail it, so every retry was refused for
+/// minutes (#1010). The spawned task keeps running whether or not anyone is
+/// still waiting for its answer, and the guard it holds is released when it
+/// ends. The outer task reports a failure no requester is left to receive.
+async fn supervised_checkpoint(
+    exports: Arc<dyn ExportRuntime>,
+    session_id: String,
+) -> Result<mj_core::state::CheckpointMetadata> {
+    let checkpoint = tokio::spawn(async move { exports.checkpoint_now(session_id).await });
+    tokio::spawn(async move {
+        let result = match checkpoint.await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow!("the session checkpoint task failed: {error}")),
+        };
+        if let Err(error) = &result {
+            tracing::warn!(?error, "API bundle export checkpoint failed");
+        }
+        result
+    })
+    .await
+    .unwrap_or_else(|error| Err(anyhow!("the session checkpoint task failed: {error}")))
+}
+
+/// The directory on the target the session's agent runs in.
+///
+/// It is the primary repository's directory for every target kind: a bundle
+/// session's harness is launched in `<workspace root>/<primary destination>`,
+/// and a bare project session's in its selected project directory, whose
+/// parent is the layout's workspace root. A relative export path resolves
+/// here so it means what it meant to the agent that wrote the file (#1079).
+fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, ExportError> {
+    Ok(target_join(
+        &layout.workspace_root,
+        &primary_repository(layout)?.relative_destination,
+    ))
+}
+
+fn primary_repository(
+    layout: &SessionExportLayout,
+) -> Result<&mj_checkpoint::checkpoint::CheckpointRepositorySpec, ExportError> {
+    layout
         .repositories
         .iter()
         .find(|repository| repository.id == layout.primary_repository)
@@ -1028,11 +1072,86 @@ fn primary_repository_path(layout: &SessionExportLayout) -> Result<String, Expor
                 "session workspace has no repository {:?}",
                 layout.primary_repository
             ))
-        })?;
-    Ok(target_join(
-        &layout.workspace_root,
-        &repository.relative_destination,
-    ))
+        })
+}
+
+/// The root a file export hands the target, and the path to look up inside it.
+///
+/// A path resolves in the directory the agent runs in, so a plain `secret.txt`
+/// means the file the agent wrote (#1079). What bounds it depends on the
+/// layout:
+///
+/// - With more than one repository, the others sit beside the primary one under
+///   the workspace root, so `..` has to reach them. `../other/file` names what
+///   `other/file` named when paths resolved at the workspace root, and the
+///   workspace root is the boundary.
+/// - With one repository there is no sibling to reach, and the workspace root
+///   is not a boundary Hel owns: for a bare project session it is the parent
+///   directory holding the user's other projects. The agent's own directory is
+///   the boundary there, so `../other-project/.env` is refused.
+///
+/// The returned path carries no `..` of its own, so the target-side read keeps
+/// both its own refusal of a path that tries to leave the root it is handed and
+/// its canonicalizing check against symlinks out of that root. Nothing on the
+/// target has to know about this, which keeps older installed workers working.
+fn export_root_and_path(
+    layout: &SessionExportLayout,
+    relative: &Path,
+) -> Result<(String, String), ExportError> {
+    let primary = primary_repository(layout)?;
+    let agent_directory = target_join(&layout.workspace_root, &primary.relative_destination);
+    let (root, mut resolved) = if layout.repositories.len() > 1 {
+        let prefix = primary
+            .relative_destination
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        (layout.workspace_root.clone(), prefix)
+    } else {
+        (agent_directory.clone(), Vec::new())
+    };
+    // Naming both only helps when they differ; for a single repository the
+    // boundary is the directory the path resolved in.
+    let climbed = || {
+        if root == agent_directory {
+            format!(
+                "{} climbs above {agent_directory}, the directory the agent runs in",
+                relative.display()
+            )
+        } else {
+            format!(
+                "{} climbs above the session workspace {root}; it was resolved in {agent_directory}",
+                relative.display()
+            )
+        }
+    };
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => resolved.push(part.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return Err(ExportError::Refused(climbed()));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(ExportError::Refused(format!(
+                    "{} must be relative to {agent_directory}",
+                    relative.display()
+                )));
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return Err(ExportError::Refused(format!(
+            "{} names {root} itself, not a file in it",
+            relative.display()
+        )));
+    }
+    Ok((root, resolved.join("/")))
 }
 
 /// Join a relative path onto a target-side root.
@@ -1067,6 +1186,9 @@ async fn write_workspace_file(
         .await
         .map_err(|e| ExportError::Refused(format!("{e:#}")))?;
     let layout = export_layout(session_id.clone()).await?;
+    // An upload lands where a read of the same relative path finds it: resolved
+    // in the directory the agent runs in, under the same boundary (#1079).
+    let (root, relative) = export_root_and_path(&layout, &path)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(ExportError::Refused("file upload cancelled".into()));
     }
@@ -1089,9 +1211,9 @@ async fn write_workspace_file(
             "--length".into(),
             bytes.len().to_string(),
             "--root".into(),
-            layout.workspace_root,
+            root,
             "--path".into(),
-            target_join("", &path).trim_start_matches('/').into(),
+            relative,
         ];
         if overwrite {
             argv.push("--overwrite".into());
@@ -1491,7 +1613,7 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = primary_repository_path(&layout)?;
+            let repository = agent_working_directory(&layout)?;
             let mut arguments = vec!["diff".to_owned(), "--repository".to_owned(), repository];
             if let Some(worktree) = &layout.managed_worktree {
                 match &worktree.base_commit {
@@ -1522,12 +1644,16 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
+            // The path resolves in the agent's directory; how far `..` may
+            // reach depends on whether the layout has a sibling repository to
+            // reach (#1079).
+            let (root, relative) = export_root_and_path(&layout, &path)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
-                layout.workspace_root.clone(),
+                root,
                 "--path".to_owned(),
-                target_join("", &path).trim_start_matches('/').to_owned(),
+                relative,
             ];
             worker_command(layout, session_id, arguments, "session file read").await
         })
@@ -1541,7 +1667,7 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             let layout = export_layout(session_id.clone()).await?;
-            let root = primary_repository_path(&layout)?;
+            let root = agent_working_directory(&layout)?;
             let arguments = vec![
                 "read-file".to_owned(),
                 "--root".to_owned(),
@@ -1603,7 +1729,7 @@ impl SubagentBackend for ApiBackend {
             self.require_live_target(&session_id)?;
             self.require_idle_turn(&session_id).await?;
             let layout = export_layout(session_id.clone()).await?;
-            let repository = primary_repository_path(&layout)?;
+            let repository = agent_working_directory(&layout)?;
             let arguments = vec![
                 "push-branch".to_owned(),
                 "--root".to_owned(),
@@ -1639,7 +1765,9 @@ impl SubagentBackend for ApiBackend {
             // checkpointed, so take a fresh checkpoint; a stopped session's
             // last checkpoint already holds everything it did.
             let archive_path = match record.target {
-                Some(_) => match self.exports.checkpoint_now(session_id.clone()).await {
+                Some(_) => match supervised_checkpoint(self.exports.clone(), session_id.clone())
+                    .await
+                {
                     Ok(checkpoint) => checkpoint.archive_path,
                     // The session has its own lifecycle operation in flight
                     // (resume/close/move); a fresh checkpoint would fight it, so
@@ -1654,8 +1782,7 @@ impl SubagentBackend for ApiBackend {
                             .checkpoint
                             .ok_or_else(|| {
                                 ExportError::Refused(format!(
-                                    "session {session_id} is busy with a lifecycle operation and \
-                                     has no earlier checkpoint to export a bundle from"
+                                    "{error}, and has no earlier checkpoint to export a bundle from"
                                 ))
                             })?
                             .archive_path

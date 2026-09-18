@@ -10,6 +10,28 @@ pub(super) async fn diff(
     Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
 }
 
+/// Reject a file path this API can never resolve, before it costs a round trip
+/// to the target.
+///
+/// An absolute path is always a mistake worth naming here. A `..` is not: it is
+/// how a multi-repo bundle names a sibling repository, now that a path resolves
+/// in the directory the agent runs in rather than at the workspace root
+/// (#1079). How far `..` may climb depends on the session's layout, which only
+/// the daemon holds, so that is refused there and answers 409.
+fn validate_session_file_path(path: &std::path::Path) -> Result<(), ApiFailure> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+    {
+        return Err(ApiFailure::bad_request(
+            "path must be relative to the directory the session's agent runs in",
+        ));
+    }
+    Ok(())
+}
+
 /// One file from the session's workspace, as bytes.
 ///
 /// The path is checked here as well as on the target: a caller that spells an
@@ -34,8 +56,7 @@ pub(super) async fn write_file(
     Query(query): Query<WriteFileQuery>,
     bytes: axum::body::Bytes,
 ) -> Result<Json<WriteFileResponse>, ApiFailure> {
-    mj_core::config::validate_relative_destination(&query.path)
-        .map_err(|error| ApiFailure::bad_request(format!("{error:#}")))?;
+    validate_session_file_path(&query.path)?;
     {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
@@ -94,17 +115,8 @@ pub(super) async fn read_file(
     Query(query): Query<FileQuery>,
 ) -> Result<Response, ApiFailure> {
     let backend = backend(&state)?.clone();
-    let path = PathBuf::from(&query.path);
-    if query.path.trim().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-    {
-        return Err(ApiFailure::bad_request(
-            "path must be relative to the session workspace and must not contain '..'",
-        ));
-    }
+    let path = PathBuf::from(query.path.trim());
+    validate_session_file_path(&path)?;
     let bytes = backend.read_file(session_id, path).await?;
     Ok(([(CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
 }

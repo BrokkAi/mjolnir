@@ -60,6 +60,7 @@ impl RuntimeState {
             workspaces_tx,
             session_manager,
             lifecycle: Mutex::new(BTreeMap::new()),
+            harness_readiness: Mutex::new(HarnessReadinessWatch::default()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             close_requested: Mutex::new(BTreeSet::new()),
             controller: Mutex::new(controller),

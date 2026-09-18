@@ -1585,14 +1585,14 @@ fn kimi_uses_runtime_aware_memory_delivery_only_on_staged_targets() {
 struct IsolatedCatalogCache(std::path::PathBuf);
 
 impl CatalogCache for IsolatedCatalogCache {
-    fn load(&self, profile_id: &str, fingerprint: &str) -> Option<String> {
-        crate::database::load_profile_config_cache_from(&self.0, profile_id, "", fingerprint)
+    fn load(&self, profile_id: &str, key: &str) -> Option<String> {
+        crate::database::load_profile_config_cache_from(&self.0, profile_id, key, key)
             .ok()
             .flatten()
     }
 
-    fn store(&self, profile_id: &str, fingerprint: &str, body: &str) {
-        crate::database::save_profile_config_cache_at(&self.0, profile_id, "", fingerprint, body)
+    fn store(&self, profile_id: &str, key: &str, body: &str) {
+        crate::database::save_profile_config_cache_at(&self.0, profile_id, key, key, body)
             .expect("write the isolated catalog cache");
     }
 }
@@ -1734,6 +1734,46 @@ fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
     .to_string();
     assert!(error.contains("glm"), "{error}");
     assert!(error.contains("https://api.z.ai/api/v1/models"), "{error}");
+}
+
+#[test]
+fn caching_a_catalog_keeps_the_discovered_configuration_of_the_default_model() {
+    let home = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let path = store.path().join("cache.sqlite3");
+    let profile = zai_profile(home.path());
+    // What `mj models` answers for the profile's default model: the discovered
+    // configuration is kept under the empty model key.
+    crate::database::save_profile_config_cache_at(
+        &path,
+        "glm",
+        "",
+        "profile-key",
+        "{\"discovered\":true}",
+    )
+    .unwrap();
+
+    stage_codex_catalog(
+        "glm",
+        &profile,
+        staged.path(),
+        &|_, _| Ok(ZAI_CATALOG.as_bytes().to_vec()),
+        &IsolatedCatalogCache(path.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::database::load_profile_config_cache_from(&path, "glm", "", "profile-key").unwrap(),
+        Some("{\"discovered\":true}".to_owned()),
+        "a staged catalog must not evict the discovered configuration",
+    );
+    assert!(
+        IsolatedCatalogCache(path)
+            .load("glm", &catalog_cache_key("https://api.z.ai/api/v1"))
+            .is_some(),
+        "the catalog must still be there to fall back on",
+    );
 }
 
 const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\

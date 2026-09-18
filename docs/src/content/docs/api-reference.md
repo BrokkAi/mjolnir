@@ -472,10 +472,15 @@ POST /api/v1/sessions/{session_id}/export
 against the commit it started from, committed and uncommitted work alike,
 including files the agent never told git about.
 
-`files` answers `application/octet-stream`. The path is relative to the session
-workspace; an absolute path or one containing `..` is `400`, a path that leaves
-the workspace through a symlink is `409`, and a file over 16 MiB is `409` — take
-the bundle instead.
+`files` answers `application/octet-stream`. The path is relative to the
+directory the session's agent runs in — the primary repository's directory,
+whatever the target kind — so a path the agent would use means the same here.
+A `..` reaches a sibling repository of a multi-repo bundle, as in
+`../other/src/main.rs`, and stops at the workspace root those repositories
+share. A session with a single repository has no sibling to reach, so there
+`..` stops at the agent's own directory. An absolute path is `400`; a path that
+climbs past the boundary is `409`, as is one that leaves it through a symlink,
+and a file over 16 MiB is `409` — take the bundle instead.
 
 `export` takes the form you want:
 
@@ -749,11 +754,13 @@ printed `seq` as `--after-seq`.
 
 ## Upload files and answer structured questions
 
-`PUT /api/v1/sessions/{id}/files?path=project/input.json` accepts a raw binary
-body up to 16 MiB and returns `{ "path": "project/input.json", "bytes": 123 }`.
-The path is relative to the session workspace, as with file reads. Parent
-directories are created. Absolute paths, traversal, and symlink paths are
-refused. Existing files require `overwrite=true`; publication is atomic.
+`PUT /api/v1/sessions/{id}/files?path=input.json` accepts a raw binary
+body up to 16 MiB and returns `{ "path": "input.json", "bytes": 123 }`.
+The path is relative to the agent's directory, as with file reads, so an
+upload lands where a read of the same path finds it, and a `..` stops at the
+same boundary. Parent directories are created. Absolute paths, paths past the
+boundary, and symlink paths are refused. Existing files require
+`overwrite=true`; publication is atomic.
 The worker verifies the expected byte count before publication, so interrupted
 transfers cannot publish truncated files.
 

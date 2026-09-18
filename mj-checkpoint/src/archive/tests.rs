@@ -2274,6 +2274,23 @@ fn a_session_file_read_stays_inside_the_workspace() {
     }
 }
 
+/// A person who asked for the wrong path has to be able to see where the read
+/// looked, because the directory differs per target kind (#1079).
+#[test]
+fn a_missing_session_file_refusal_names_the_directory_it_searched() {
+    let root = tempfile::tempdir().unwrap();
+    let error = read_session_file(root.path(), Path::new("secret.txt")).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("secret.txt is not in the session workspace"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains(&root.path().display().to_string()),
+        "the refusal names the directory it searched: {message}"
+    );
+}
+
 #[test]
 fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
     let repository = tempfile::tempdir().unwrap();

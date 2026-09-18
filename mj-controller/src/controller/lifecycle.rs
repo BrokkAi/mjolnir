@@ -367,6 +367,55 @@ impl Controller {
         Ok(true)
     }
 
+    /// Record that a live session's harness never became usable, so a driver
+    /// can close it and provision a replacement instead of waiting on a
+    /// session that will never take a prompt (#1090).
+    ///
+    /// Only a record that still looks exactly as the daemon observed it is
+    /// failed: a lifecycle operation that started after the observation owns
+    /// the session, and its own outcome must not be overwritten by this one.
+    /// Returns whether anything changed.
+    pub fn fail_unready_session(
+        &mut self,
+        session_id: &str,
+        cause: &str,
+        observed_updated_at: &str,
+    ) -> Result<bool> {
+        self.fail_unready_session_with(
+            session_id,
+            cause,
+            observed_updated_at,
+            crate::database::save_lifecycle_session,
+        )
+    }
+
+    fn fail_unready_session_with(
+        &mut self,
+        session_id: &str,
+        cause: &str,
+        observed_updated_at: &str,
+        persist: impl Fn(&SessionRecord) -> Result<()>,
+    ) -> Result<bool> {
+        let Some(record) = self.state.sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+        if record.state != SessionState::Running || record.updated_at != observed_updated_at {
+            return Ok(false);
+        }
+        let previous = record.clone();
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        record.last_error = Some(cause.to_owned());
+        persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist a session whose harness never became usable",
+            &persist,
+        )?;
+        Ok(true)
+    }
+
     /// Record why a close failed on a session the close left in its earlier
     /// state, so the person who asked for it learns that it did not finish.
     ///

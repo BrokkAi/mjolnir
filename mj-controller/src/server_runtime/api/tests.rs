@@ -805,3 +805,186 @@ async fn prompt_reports_a_session_the_manager_does_not_hold() {
         "unexpected error: {error:#}"
     );
 }
+
+/// A checkpoint that finishes only after its requester has given up, so a
+/// dropped request can be told apart from a cancelled checkpoint.
+struct SlowCheckpoint {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ExportRuntime for SlowCheckpoint {
+    fn session_record(&self, _session_id: &str) -> Option<SessionRecord> {
+        None
+    }
+    fn checkpoint_now(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+        use std::sync::atomic::Ordering;
+        Box::pin(async move {
+            self.started.store(true, Ordering::Release);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.finished.store(true, Ordering::Release);
+            bail!("the archive is not built in this test")
+        })
+    }
+}
+
+/// A client that times out drops the request future. The checkpoint behind a
+/// bundle export must run to its end anyway: it has already marked the session
+/// `Checkpointing` and holds a barrier on the worker, so abandoning it midway
+/// left the session busy with nothing to finish or fail it, and every retry
+/// refused for minutes (#1010).
+#[tokio::test]
+async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
+    use std::sync::atomic::Ordering;
+
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exports = Arc::new(SlowCheckpoint {
+        started: started.clone(),
+        finished: finished.clone(),
+    });
+
+    let request = supervised_checkpoint(exports, "session-1".into());
+    // Let the checkpoint start, then abandon the request the way a timed-out
+    // client does.
+    let abandoned = tokio::time::timeout(Duration::from_millis(5), request).await;
+    assert!(abandoned.is_err(), "the checkpoint should still be running");
+    assert!(started.load(Ordering::Acquire), "the checkpoint started");
+    assert!(
+        !finished.load(Ordering::Acquire),
+        "the checkpoint was still running when the request was dropped"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        finished.load(Ordering::Acquire),
+        "the supervised checkpoint ran to its end without its requester"
+    );
+}
+
+/// A relative export path resolves against the directory the agent runs in,
+/// not the workspace root above it. For a bare project session those differ by
+/// one level, which is why a file the agent had just written was refused as
+/// "not in the session workspace" (#1079).
+#[test]
+fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
+    use mj_checkpoint::checkpoint::{CheckpointRepositoryCapture, CheckpointRepositorySpec};
+
+    // The shape `session_export_layout` builds for a bare project session whose
+    // agent is launched in `/home/dev/project`.
+    let bare = SessionExportLayout {
+        backend: targets::TargetLocator::LocalBare {
+            worker_root: "/home/dev/.local/share/hel/workers/session".into(),
+        },
+        workspace_root: "/home/dev".into(),
+        primary_repository: "project".into(),
+        repositories: vec![CheckpointRepositorySpec {
+            id: "project".into(),
+            relative_destination: PathBuf::from("project"),
+            capture: CheckpointRepositoryCapture::MetadataOnly,
+            origin_override: None,
+        }],
+        managed_worktree: None,
+    };
+    assert_eq!(
+        agent_working_directory(&bare).unwrap(),
+        "/home/dev/project",
+        "the workspace root is the project's parent, not where the agent runs"
+    );
+
+    // The shape it builds for a bundle session, whose agent is launched in the
+    // primary repository under the target's workspace directory.
+    let bundle = SessionExportLayout {
+        backend: targets::TargetLocator::LocalPodman {
+            container_id: "hel-session".into(),
+            workspace_storage: Default::default(),
+            borrowed_from: None,
+        },
+        workspace_root: "/workspace".into(),
+        primary_repository: "app".into(),
+        repositories: vec![
+            CheckpointRepositorySpec {
+                id: "app".into(),
+                relative_destination: PathBuf::from("app"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+            CheckpointRepositorySpec {
+                id: "lib".into(),
+                relative_destination: PathBuf::from("lib"),
+                capture: CheckpointRepositoryCapture::RemoteWorkspace,
+                origin_override: None,
+            },
+        ],
+        managed_worktree: None,
+    };
+    assert_eq!(agent_working_directory(&bundle).unwrap(), "/workspace/app");
+
+    // What the target is actually asked to read. The one-repository layout is
+    // bounded by the agent's own directory, so the path it is handed is the one
+    // the caller typed.
+    assert_eq!(
+        export_root_and_path(&bare, Path::new("secret.txt")).unwrap(),
+        ("/home/dev/project".to_owned(), "secret.txt".to_owned())
+    );
+    // The bundle is bounded by the workspace root the repositories share, so
+    // the path is rewritten to start at the primary repository.
+    assert_eq!(
+        export_root_and_path(&bundle, Path::new("src/main.rs")).unwrap(),
+        ("/workspace".to_owned(), "app/src/main.rs".to_owned())
+    );
+
+    // A secondary repository sits beside the primary one under the workspace
+    // root, so `..` reaches it. Before paths resolved in the agent's directory
+    // this was `lib/README.md`; it must not have become unreachable (#1079).
+    assert_eq!(
+        export_root_and_path(&bundle, Path::new("../lib/README.md")).unwrap(),
+        ("/workspace".to_owned(), "lib/README.md".to_owned())
+    );
+    assert_eq!(
+        export_root_and_path(&bundle, Path::new("./src/../src/main.rs")).unwrap(),
+        ("/workspace".to_owned(), "app/src/main.rs".to_owned())
+    );
+
+    // Above the workspace root is refused, and the refusal names both the
+    // boundary and the directory the path was resolved in.
+    for escape in ["../../etc/passwd", "../.."] {
+        let ExportError::Refused(message) =
+            export_root_and_path(&bundle, Path::new(escape)).unwrap_err()
+        else {
+            panic!("{escape} must be refused, not attempted");
+        };
+        assert!(
+            message.contains("/workspace") && message.contains("/workspace/app"),
+            "the refusal names the boundary and the directory searched: {message}"
+        );
+    }
+
+    // A one-repository layout has no sibling to reach, and its workspace root
+    // is the parent directory holding the user's other projects, not a boundary
+    // Hel owns. `..` stops at the agent's directory there.
+    let ExportError::Refused(message) =
+        export_root_and_path(&bare, Path::new("../other-project/.env")).unwrap_err()
+    else {
+        panic!("a single-repository layout must not reach outside its own directory");
+    };
+    assert!(
+        message.contains("/home/dev/project"),
+        "the refusal names the boundary: {message}"
+    );
+    assert!(
+        !message.contains("/home/dev/other-project"),
+        "the refusal does not suggest the path was looked for: {message}"
+    );
+
+    // The boundary itself is not a file inside it.
+    for (layout, path) in [(&bundle, ".."), (&bare, ".")] {
+        assert!(matches!(
+            export_root_and_path(layout, Path::new(path)),
+            Err(ExportError::Refused(_))
+        ));
+    }
+}

@@ -114,6 +114,9 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
+    /// The bounded wait for each live session's harness to become usable.
+    /// Driven only by the daemon's background readiness sweep.
+    harness_readiness: Mutex<HarnessReadinessWatch>,
     /// Work waiting for one session's harness to become ready: the prompts a
     /// person typed while it started, and the hand-off a restored session
     /// carries. One ordered queue per session, each drained by one task.
@@ -208,6 +211,24 @@ enum LifecycleKind {
     ArchiveStopped,
     ForceDestroy,
     Cleanup,
+}
+
+impl LifecycleKind {
+    /// What a refusal calls this operation, so a person told that a session is
+    /// busy learns which operation is holding it (#1010).
+    fn label(self) -> &'static str {
+        match self {
+            LifecycleKind::Create => "create",
+            LifecycleKind::Close => "close",
+            LifecycleKind::Resume => "resume",
+            LifecycleKind::Move => "move",
+            LifecycleKind::ForceStop => "force stop",
+            LifecycleKind::DestroyStopped => "destroy",
+            LifecycleKind::ArchiveStopped => "archive",
+            LifecycleKind::ForceDestroy => "force destroy",
+            LifecycleKind::Cleanup => "cleanup",
+        }
+    }
 }
 
 /// Whether a lifecycle has exclusive ownership of the worker target, so the
@@ -428,6 +449,8 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 
 mod close;
 mod create;
+mod readiness;
+use readiness::{HarnessReadinessWatch, ReadinessObservation, UnreadySession};
 mod lifecycle;
 mod resume;
 mod snapshot;

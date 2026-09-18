@@ -277,6 +277,68 @@ pub(super) fn validate_action(
     action: &ControllerAction,
     snapshot: &ViewerSnapshot,
 ) -> Result<(), ApiError> {
+    validate_action_against(action, snapshot, None)
+}
+
+/// The configuration options the running session reports right now, or `None`
+/// when no live session actor can answer.
+///
+/// The controller snapshot is republished asynchronously, so it still lists the
+/// previous model's choices for a few seconds after a model change. Validating
+/// a dependent selector against it refuses an effort the new model does offer.
+pub(super) async fn live_session_config_options(
+    state: &ServerState,
+    session_id: &str,
+    harness: mj_core::config::HarnessKind,
+) -> Option<Vec<ViewerConfigOption>> {
+    let backend = state.subagent.as_ref()?;
+    let handle = backend.session_handle(session_id.to_owned()).await.ok()??;
+    let snapshot = handle.view().snapshot?;
+    let options = session_config_view(harness, &snapshot.operational);
+    // An empty list is the absence of an answer, not an agent that offers
+    // nothing, so it must not become the authority the request is refused by.
+    (!options.is_empty()).then_some(options)
+}
+
+/// Validate an action against the live session where that matters.
+///
+/// Only `SetConfig` depends on choices the session can change mid-flight, so
+/// only it pays for the extra lookup; everything else validates against the
+/// snapshot exactly as before.
+pub(super) async fn validate_action_live(
+    state: &ServerState,
+    action: &ControllerAction,
+) -> Result<(), ApiError> {
+    let live = match action {
+        ControllerAction::SetConfig { session_id, .. } => {
+            let harness = {
+                let snapshot = state.snapshot_rx.borrow();
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+                    .and_then(|session| {
+                        session
+                            .harness_kind
+                            .parse::<mj_core::config::HarnessKind>()
+                            .ok()
+                    })
+            };
+            match harness {
+                Some(harness) => live_session_config_options(state, session_id, harness).await,
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())
+}
+
+fn validate_action_against(
+    action: &ControllerAction,
+    snapshot: &ViewerSnapshot,
+    live_config_options: Option<&[ViewerConfigOption]>,
+) -> Result<(), ApiError> {
     match action {
         ControllerAction::New {
             workspace_id,
@@ -432,8 +494,12 @@ pub(super) fn validate_action(
             // The harness decides what it accepts. Forwarding a key it never
             // advertised, or a value outside the ones it offered, asks it to
             // refuse something the viewer should not have offered.
-            let option = session
-                .config_options
+            //
+            // The live session's own list wins when there is one: a model
+            // change replaces the effort catalogue immediately, while the
+            // snapshot still carries the previous model's choices.
+            let option = live_config_options
+                .unwrap_or(&session.config_options)
                 .iter()
                 .find(|option| option.key == *key)
                 .ok_or_else(|| ApiError::bad_request("this agent does not offer that setting"))?;

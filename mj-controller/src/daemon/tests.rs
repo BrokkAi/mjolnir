@@ -340,7 +340,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             create_control: None,
             kind: LifecycleKind::Resume,
             cancelled: Arc::new(AtomicBool::new(false)),
-            started_at_epoch_seconds: 1,
+            started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
             resume_workspace_id: None,
             resume_destination: None,
@@ -353,8 +353,24 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     );
     // An unrelated session's operation must not block another session's
     // checkpoint; only the session's own operation does (#1010).
-    assert!(!state.session_lifecycle_active("session-a"));
-    assert!(state.session_lifecycle_active("session-b"));
+    assert!(state.session_lifecycle_busy("session-a").is_none());
+    let busy = state
+        .session_lifecycle_busy("session-b")
+        .expect("session-b is running its own operation");
+    // A refusal has to say which operation is in the way and for how long, so
+    // a person can wait for it or cancel it instead of retrying blind (#1010).
+    assert_eq!(busy.operation, "resume");
+    assert!(
+        (45..60).contains(&busy.age_seconds),
+        "the age is the operation's, not the clock's: {busy}"
+    );
+    let rename = ensure_no_active_lifecycle(&state).unwrap_err();
+    let message = format!("{rename:#}");
+    assert!(
+        message
+            .contains("cannot rename configuration while session session-b is busy with a resume"),
+        "the rename refusal names the operation: {message}"
+    );
 }
 
 #[cfg(target_os = "macos")]

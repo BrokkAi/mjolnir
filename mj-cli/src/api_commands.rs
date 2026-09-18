@@ -290,7 +290,8 @@ pub(crate) struct ExportArgs {
     /// Branch to push, required by `--kind branch`.
     #[arg(long)]
     branch: Option<String>,
-    /// File to read out of the session workspace, required by `--kind file`.
+    /// File to read, relative to the directory the agent runs in, required by
+    /// `--kind file`.
     #[arg(long)]
     path: Option<String>,
     /// Write the export here instead of standard output.
@@ -676,7 +677,7 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
             let path = args
                 .path
                 .as_deref()
-                .context("`--kind file` needs --path, relative to the session workspace")?;
+                .context("`--kind file` needs --path, relative to the agent's directory")?;
             let bytes = client.read_file(&args.session, path).await?;
             return write_bytes(&bytes, args.out.as_deref());
         }

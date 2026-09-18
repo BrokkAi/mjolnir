@@ -1231,3 +1231,55 @@ fn force_destroy_tolerates_a_missing_archive() {
 
     assert!(!controller.state.sessions.contains_key(session_id));
 }
+
+/// A live session whose harness never advertised itself ends in `Error` with a
+/// reason a driver can act on, and a record that has moved since the daemon
+/// observed it is left alone (#1090).
+#[test]
+fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Running;
+    session.updated_at = "2026-09-18T15:28:35Z".into();
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: BTreeMap::from([(session_id.into(), session)]),
+            ..State::default()
+        },
+    };
+    let persisted = RefCell::new(Vec::new());
+    let persist = |record: &mj_core::state::SessionRecord| {
+        persisted
+            .borrow_mut()
+            .push((record.state, record.last_error.clone()));
+        Ok(())
+    };
+    let cause = "the harness never advertised its configuration within 300s";
+
+    assert!(
+        !controller
+            .fail_unready_session_with(session_id, cause, "2026-09-18T15:20:00Z", persist)
+            .unwrap(),
+        "a record that has moved since the observation belongs to whatever moved it"
+    );
+    assert!(persisted.borrow().is_empty());
+
+    assert!(
+        controller
+            .fail_unready_session_with(session_id, cause, "2026-09-18T15:28:35Z", persist)
+            .unwrap()
+    );
+    assert_eq!(
+        persisted.borrow().as_slice(),
+        &[(SessionState::Error, Some(cause.to_owned()))],
+        "the reason reaches the store, not just memory"
+    );
+    let failed = &controller.state.sessions[session_id];
+    assert_eq!(failed.state, SessionState::Error);
+    assert_eq!(failed.last_error.as_deref(), Some(cause));
+    assert_ne!(
+        failed.updated_at, "2026-09-18T15:28:35Z",
+        "the failure is a state change of its own"
+    );
+}

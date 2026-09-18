@@ -568,6 +568,73 @@ mod tests {
         })
     }
 
+    /// Read one API route over a fresh connection, the way a CLI client and
+    /// `probe_api` do. A stalled listener shows up here as a timeout, because
+    /// a new connection has to be accepted before anything can answer.
+    async fn api_response(address: SocketAddr, deadline: Duration) -> String {
+        tokio::time::timeout(deadline, async {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(
+                    b"GET /api/v1/sessions HTTP/1.1\r\nHost: localhost\r\n\
+                      Authorization: Bearer test-api-token\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        })
+        .await
+        .expect("the API did not answer while the control loop was busy")
+    }
+
+    /// The phone server runs its control loop beside this listener. The loop
+    /// takes long turns — it builds snapshots, waits on the daemon's locks,
+    /// and follows every session — and while it does, a cheap read must still
+    /// be answered. `run_server` therefore puts the listener on its own task
+    /// through `ViewerServer` instead of polling it in the loop's `select!`,
+    /// which is what left `GET /api/v1/sessions` unanswered past the client's
+    /// ten-second timeout during a remote provisioning run (issue 1061).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_api_answers_while_the_control_loop_takes_a_long_turn() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut options = options(address);
+        options.set_api_token("test-api-token".to_owned());
+        let cancel = options.shutdown.clone();
+        let mut server =
+            crate::server_runtime::ViewerServer::spawn(crate::server::run_server_on_listener(
+                options, listener,
+            ));
+
+        let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+        // A turn that occupies its task for far longer than the client waits.
+        let control = async move {
+            let _ = busy_tx.send(());
+            std::thread::sleep(Duration::from_secs(3));
+            Ok::<(), anyhow::Error>(())
+        };
+        let request = tokio::spawn(async move {
+            busy_rx.await.unwrap();
+            api_response(address, Duration::from_secs(1)).await
+        });
+
+        // The same composition `run_server` uses: whatever the control loop is
+        // doing, the server keeps its own schedule.
+        tokio::select! {
+            result = server.stopped() => panic!("the viewer stopped early: {result:?}"),
+            result = control => result.unwrap(),
+        }
+        let response = request.await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "the sessions list must answer during a long control-loop turn: {response}"
+        );
+        assert!(response.contains("\"sessions\""), "{response}");
+        cancel.cancel();
+    }
+
     #[tokio::test]
     async fn occupied_port_can_recover_on_another_reserved_port_and_serve_http() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
