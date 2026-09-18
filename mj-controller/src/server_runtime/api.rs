@@ -807,9 +807,9 @@ fn still_starting(
             .session_record(session_id)
             .and_then(|record| record.last_error)
         {
-            Some(cause) => bail!(
-                "session {session_id} is {state:?} and will not take a first prompt: {cause}"
-            ),
+            Some(cause) => {
+                bail!("session {session_id} is {state:?} and will not take a first prompt: {cause}")
+            }
             None => {
                 bail!("session {session_id} is {state:?} and will not take a first prompt")
             }

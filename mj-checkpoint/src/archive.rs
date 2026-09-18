@@ -1747,9 +1747,9 @@ pub use git::{
     GitHistoryMode, GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV,
     NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
     SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
-    collect_git_metadata_snapshot, collect_git_snapshot,
-    collect_git_snapshot_with_progress, diff_between_trees, empty_tree_id, has_origin_refs,
-    pin_review_tree, push_branch, remote_workspace_base, restore_git_snapshot, session_diff,
+    collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
+    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
+    remote_workspace_base, restore_git_snapshot, session_diff,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
