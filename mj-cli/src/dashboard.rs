@@ -14,7 +14,7 @@ pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
 pub(crate) mod io;
-mod pane_sizes;
+mod workspace_settings;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -41,11 +41,14 @@ use mj_controller::session_manager::{
 };
 use mj_controller::targets::DeploymentCapacityTarget;
 use mj_controller::worker_client::CredentialSyncCoordinator;
+use mj_core::workspace::{ConversationLayout, PaneSizes};
+use mj_tui::tile_layout::PaneId;
 use mj_tui::{
     CommandId, DashboardAction, DashboardState, ImportProfileOption, KeyRoute,
     PreparedMaterializedSessionDetail, SessionOperationKind, render_combined,
     resume_profile_placeholders,
 };
+use ratatui::layout::Direction;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio_stream::StreamExt as _;
@@ -127,6 +130,12 @@ impl StartupSession {
     /// The user acted, so the choice is theirs now.
     fn cancel(&mut self) {
         self.open_pending = false;
+    }
+
+    /// Whether the pick is still to come. While it is, nothing else may open a
+    /// conversation on the surface's behalf.
+    fn pick_pending(&self) -> bool {
+        self.open_pending
     }
 
     /// Whether the pick should run now. Answering `true` once retires the
@@ -221,17 +230,22 @@ pub(crate) struct DashboardContext {
     pub(crate) workspace_id: String,
     pub(crate) client_id: String,
     pub(crate) dashboard: DashboardState,
-    pane_size_persistence: pane_sizes::PaneSizePersistence,
+    pane_size_persistence: workspace_settings::WorkspaceSettingPersistence<PaneSizes>,
+    layout_persistence: workspace_settings::WorkspaceSettingPersistence<ConversationLayout>,
     known_workspace_layouts: BTreeSet<String>,
+    /// The conversation pane arrangement loaded for each workspace. M4 hands
+    /// these to the terminal UI; until then they are only stored and saved.
+    workspace_layouts: BTreeMap<String, ConversationLayout>,
     /// One notifications bar for the whole process: the dashboard and every
     /// chat view opened from it report through this shared handle.
     notices: mj_chat::chat::Notices,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
-    /// The conversation on screen. One chat stays warm at a time; its feeds
-    /// keep running while another pane has the keyboard, so switching back is
-    /// a redraw rather than a rebuild.
-    pub(crate) active_chat: Option<mj_chat::chat::ActiveChat>,
+    /// Every warm conversation, keyed by session id: one for each pane that
+    /// shows a session. All of them are pumped on every loop iteration, so a
+    /// conversation stays current whether or not it is the one with the
+    /// keyboard, and moving between panes is a redraw rather than a rebuild.
+    pub(crate) chats: BTreeMap<String, mj_chat::chat::ActiveChat>,
     /// In-memory form drafts for sessions that are not currently attached.
     /// Each value retains its complete request identity (and may contain one
     /// primary and one deferred reviewer form), so an id reused by a changed
@@ -244,9 +258,19 @@ pub(crate) struct DashboardContext {
     /// Retain save failures so quitting cannot erase their notice before it is read.
     draft_save_failures: BTreeMap<String, String>,
     /// Session-manager attachment is asynchronous: an actor may need to
-    /// answer from a worker or relay before a chat can be built.
-    pub(crate) opening_chat_session: Option<String>,
-    attachment: attachment::SessionAttachment,
+    /// answer from a worker or relay before a chat can be built. Each pane
+    /// runs its own attach, so opening one conversation never cancels
+    /// another.
+    pub(crate) opening_chat_sessions: BTreeMap<PaneId, String>,
+    /// What each pane showed before its current session. The Sessions
+    /// selection replaces the focused pane's conversation, so this is what
+    /// "open this beside what I was reading" has to put back.
+    pub(crate) previous_pane_sessions: BTreeMap<PaneId, String>,
+    attachments: BTreeMap<PaneId, attachment::SessionAttachment>,
+    /// The sessions the last frame drew a conversation for. Read receipts
+    /// follow what was on screen, which is one pane today and every drawn
+    /// pane once the panes render themselves.
+    drawn_chat_sessions: Vec<String>,
     /// Which conversation the surface opens on, and whether it is still the
     /// surface's choice to make.
     startup: StartupSession,
@@ -512,6 +536,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         // below batch whatever is queued behind it, so one wakeup is one draw.
         tokio::select! {
             () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {}
+            () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {}
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
@@ -543,7 +568,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                     {
                         context.draw()?;
                     }
-                    if opening_cancel_event(&event, context.opening_chat_session.is_some(), context.dashboard.modal_open()) {
+                    if opening_cancel_event(&event, context.focused_pane_is_opening(), context.dashboard.modal_open()) {
                         context.cancel_chat_open();
                         context.dashboard.focus_sessions();
                         context.dashboard.set_notice("Session opening cancelled. Press Enter in Sessions to retry.");
@@ -626,10 +651,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = mj_chat::chat::ActiveChat::pump(context.active_chat.as_mut()) => {
+            () = pump_chats(&mut context.chats) => {
                 // A warm chat may be hidden by another tab or selection.
-                // Only visible conversation updates advance its read receipt.
-                context.acknowledge_visible_chat();
+                // Only conversations that were on screen advance their read
+                // receipts.
+                context.acknowledge_visible_chats();
             }
             update = context.quota.wait(), if context.quota.is_open() => {
                 context.quota.accept(update);
@@ -733,6 +759,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 .pane_size_persistence
                 .update(workspace_id, context.dashboard.pane_sizes());
         }
+        context.save_active_workspace_layout();
         if !context.shutdown_requested {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
@@ -765,6 +792,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         tracing::warn!(%error, "workspace pane-size final flush failed");
         eprintln!("{error:#}");
     }
+    if let Err(error) = context.layout_persistence.finish().await {
+        tracing::warn!(%error, "workspace layout final flush failed");
+        eprintln!("{error:#}");
+    }
     if let Some(shutdown) = context.worker_shutdown.take() {
         shutdown
             .shutdown()
@@ -793,6 +824,219 @@ impl DashboardContext {
         }
     }
 
+    /// The conversation the focused pane holds, whether or not it is on
+    /// screen. Per-pane bookkeeping uses this; the keyboard and the drawn
+    /// conversation use [`Self::visible_chat`], which also answers for the
+    /// standby composers that stand in front of a session.
+    pub(crate) fn focused_chat(&self) -> Option<&mj_chat::chat::ActiveChat> {
+        self.chats.get(self.dashboard.current_session_id()?)
+    }
+
+    pub(crate) fn focused_chat_mut(&mut self) -> Option<&mut mj_chat::chat::ActiveChat> {
+        let Self {
+            chats, dashboard, ..
+        } = self;
+        chats.get_mut(dashboard.current_session_id()?)
+    }
+
+    /// Whether the focused pane is still waiting for an attach, which is what
+    /// Escape cancels.
+    fn focused_pane_is_opening(&self) -> bool {
+        self.opening_chat_sessions
+            .contains_key(&self.dashboard.focused_pane())
+    }
+
+    /// Keeps the dashboard's single in-flight-attach report on the focused
+    /// pane, which is the pane whose empty conversation is drawn.
+    pub(crate) fn sync_opening_session(&mut self) {
+        let opening = self
+            .opening_chat_sessions
+            .get(&self.dashboard.focused_pane())
+            .cloned();
+        self.dashboard.set_opening_session(opening.as_deref());
+    }
+
+    /// Stop the attach a pane is running for `session_id`, if one is.
+    fn cancel_chat_open_for(&mut self, session_id: &str) {
+        for pane in self.panes_opening(session_id) {
+            self.opening_chat_sessions.remove(&pane);
+            if let Some(attachment) = self.attachments.get_mut(&pane) {
+                attachment.cancel();
+            }
+        }
+        self.sync_opening_session();
+    }
+
+    /// Give up the attach a pane is running for `session_id` in a way that
+    /// allows one fresh attempt once whatever owns the session is done.
+    fn defer_chat_open_for(&mut self, session_id: &str) {
+        for pane in self.panes_opening(session_id) {
+            self.opening_chat_sessions.remove(&pane);
+            if let Some(attachment) = self.attachments.get_mut(&pane) {
+                attachment.defer();
+            }
+        }
+        self.sync_opening_session();
+    }
+
+    fn panes_opening(&self, session_id: &str) -> Vec<PaneId> {
+        self.opening_chat_sessions
+            .iter()
+            .filter(|(_, opening)| opening.as_str() == session_id)
+            .map(|(pane, _)| *pane)
+            .collect()
+    }
+
+    pub(crate) fn defer_all_chat_opens(&mut self) {
+        for attachment in self.attachments.values_mut() {
+            attachment.defer();
+        }
+        self.opening_chat_sessions.clear();
+        self.dashboard.set_opening_session(None);
+    }
+
+    /// Persists how far a warm chat has been read and the draft it holds.
+    pub(crate) fn record_chat_detach(&mut self, session_id: &str) {
+        let Some(ordinal) = self
+            .chats
+            .get(session_id)
+            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
+        else {
+            return;
+        };
+        self.record_detach(session_id, ordinal);
+    }
+
+    /// Drops the warm chats no pane shows any more, saving each one first.
+    pub(crate) fn retire_chats_outside_the_layout(&mut self) {
+        let shown = self.dashboard.pane_session_ids();
+        for session_id in self
+            .chats
+            .keys()
+            .filter(|session_id| !shown.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.record_chat_detach(&session_id);
+            self.chats.remove(&session_id);
+        }
+    }
+
+    /// Opens a session in a new pane beside the focused one.
+    ///
+    /// Selecting a session row already moves that conversation into the
+    /// focused pane, so by the time this runs the session usually sits in the
+    /// pane the user wanted it moved out of. The split then gives it the new
+    /// pane and returns the pane it came from to the conversation it was
+    /// showing before the selection followed. A session open in a different
+    /// pane moves the focus there instead of appearing twice, and a
+    /// conversation area with no room for two panes says so.
+    pub(crate) fn open_session_in_split(&mut self, session_id: &str, direction: Direction) {
+        let focused = self.dashboard.focused_pane();
+        if let Some(pane) = self.dashboard.pane_for_session(session_id)
+            && pane != focused
+        {
+            self.dashboard.focus_pane(pane);
+            self.sync_opening_session();
+            self.save_active_workspace_layout();
+            return;
+        }
+        let moving = self.dashboard.pane_session(focused) == Some(session_id);
+        let displaced = moving
+            .then(|| self.previous_pane_sessions.get(&focused).cloned())
+            .flatten();
+        let Some(new_pane) = self.dashboard.split_focused_pane(direction, None) else {
+            self.dashboard.set_notice("Not enough room to split");
+            return;
+        };
+        if moving {
+            // The conversation is where the selection put it, not where the
+            // user asked for it. Take it out of that pane first; opening it
+            // in the new one reuses it when it is warm and restarts an attach
+            // still in flight for the pane that now owns it.
+            self.dashboard.focus_pane(focused);
+            self.dashboard.set_current_session(None);
+            self.cancel_chat_open();
+            self.previous_pane_sessions.remove(&focused);
+        }
+        // The pane the user came from goes back first, so the Sessions
+        // selection ends on the session they asked to split out — which is
+        // what the focused pane shows.
+        if let Some(previous) = displaced {
+            self.dashboard.focus_pane(focused);
+            self.open_chat_session(&previous);
+        }
+        self.dashboard.focus_pane(new_pane);
+        self.open_chat_session(session_id);
+        self.sync_opening_session();
+        self.save_active_workspace_layout();
+    }
+
+    /// Splits the focused pane and leaves the new pane empty, which is what
+    /// the split keys do when the Sessions list has nothing selected.
+    pub(crate) fn split_empty_pane(&mut self, direction: Direction) {
+        if self.dashboard.split_focused_pane(direction, None).is_none() {
+            self.dashboard.set_notice("Not enough room to split");
+            return;
+        }
+        self.selection.clear();
+        self.sync_opening_session();
+        self.save_active_workspace_layout();
+    }
+
+    /// Moves the keyboard into one conversation pane and its composer. The
+    /// arrangement is saved, because which pane has the focus is part of it.
+    pub(crate) fn focus_conversation_pane(&mut self, pane: PaneId) {
+        if self.dashboard.focused_pane() != pane {
+            self.dashboard.focus_pane(pane);
+            self.selection.clear();
+            self.sync_opening_session();
+            self.save_active_workspace_layout();
+        }
+        self.dashboard.focus_prompt();
+    }
+
+    /// Closes the focused pane, saving and dropping the conversation it held.
+    /// The last pane is emptied rather than removed.
+    pub(crate) fn close_focused_pane(&mut self) {
+        let pane = self.dashboard.focused_pane();
+        self.opening_chat_sessions.remove(&pane);
+        self.previous_pane_sessions.remove(&pane);
+        self.attachments.remove(&pane);
+        if let Some(session_id) = self.dashboard.close_focused_pane() {
+            self.record_chat_detach(&session_id);
+            self.chats.remove(&session_id);
+            self.selection.clear();
+        }
+        self.sync_opening_session();
+        self.save_active_workspace_layout();
+    }
+
+    /// Queues the active workspace's arrangement for saving once this client
+    /// has changed it.
+    pub(crate) fn save_active_workspace_layout(&mut self) {
+        let Some(workspace_id) = self.dashboard.active_workspace_id().map(str::to_owned) else {
+            return;
+        };
+        if !self.known_workspace_layouts.contains(&workspace_id)
+            || !self.dashboard.workspace_layout_modified(&workspace_id)
+        {
+            return;
+        }
+        let layout = self.dashboard.conversation_layout_for(&workspace_id);
+        self.set_workspace_layout(&workspace_id, layout);
+    }
+
+    /// Record a workspace's conversation pane arrangement and queue its save.
+    pub(crate) fn set_workspace_layout(&mut self, workspace_id: &str, layout: ConversationLayout) {
+        if self.workspace_layouts.get(workspace_id) == Some(&layout) {
+            return;
+        }
+        self.workspace_layouts
+            .insert(workspace_id.to_owned(), layout.clone());
+        self.layout_persistence.update(workspace_id, layout);
+    }
+
     pub(crate) fn request_shutdown(&mut self) {
         self.begin_shutdown(true);
     }
@@ -808,16 +1052,27 @@ impl DashboardContext {
             self.pane_size_persistence
                 .update(id, self.dashboard.pane_sizes());
         }
-        self.acknowledge_visible_chat();
-        self.capture_active_composer_draft();
-        self.save_active_question_draft();
+        if let Some(id) = self.dashboard.active_workspace_id().map(str::to_owned)
+            && self.known_workspace_layouts.contains(&id)
+            && self.dashboard.workspace_layout_modified(&id)
+        {
+            let layout = self.dashboard.conversation_layout_for(&id);
+            self.set_workspace_layout(&id, layout);
+        }
+        self.acknowledge_visible_chats();
+        for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
+            self.capture_composer_draft(&session_id);
+            self.save_question_draft(&session_id);
+        }
         self.cancel_startup_session();
-        self.defer_chat_open();
+        self.defer_all_chat_opens();
         self.workspace_id = workspace_id.clone().unwrap_or_default();
         self.selection.clear();
         self.dashboard.set_active_workspace(workspace_id);
         self.go_selection_requested = None;
-        self.dashboard.set_current_session(None);
+        // The tab switch swapped in the other workspace's arrangement, so
+        // the conversations the previous one held are no longer in any pane.
+        self.retire_chats_outside_the_layout();
         self.follow_selected_session();
     }
 
@@ -835,15 +1090,12 @@ impl DashboardContext {
         if self.shutdown_requested {
             return;
         }
-        // The warm chat may be hidden while another session opens. Every
-        // shutdown path must save it, including global quit and workspace
-        // switching, before the process-local composer cache goes away.
-        if let Some(ordinal) = self
-            .active_chat
-            .as_ref()
-            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
-        {
-            self.record_detach(ordinal);
+        // A warm chat may be hidden while another session opens. Every
+        // shutdown path must save every one of them, including global quit
+        // and workspace switching, before the process-local composer cache
+        // goes away.
+        for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
+            self.record_chat_detach(&session_id);
         }
         self.shutdown_requested = true;
         self.web_request_cancel = None;
@@ -865,13 +1117,30 @@ impl DashboardContext {
         }
     }
 
-    pub(super) fn acknowledge_visible_chat(&mut self) {
-        let Some((session_id, through)) = self
-            .visible_chat()
-            .map(|chat| (chat.session_id().to_owned(), chat.latest_event_ordinal()))
+    /// Advances the read receipt of every conversation that was on screen.
+    /// The frame records which those were; before the first frame it is the
+    /// one the focused pane would draw.
+    pub(super) fn acknowledge_visible_chats(&mut self) {
+        let mut sessions = self.drawn_chat_sessions.clone();
+        if let Some(session_id) = self.visible_chat().map(|chat| chat.session_id().to_owned())
+            && !sessions.contains(&session_id)
+        {
+            sessions.push(session_id);
+        }
+        for session_id in sessions {
+            self.acknowledge_chat(&session_id);
+        }
+    }
+
+    fn acknowledge_chat(&mut self, session_id: &str) {
+        let Some(through) = self
+            .chats
+            .get(session_id)
+            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
         else {
             return;
         };
+        let session_id = session_id.to_owned();
         let Some(session) = self.controller.state.sessions.get_mut(&session_id) else {
             return;
         };
@@ -970,6 +1239,13 @@ impl DashboardContext {
                     .map(|sizes| (workspace.id.clone(), sizes))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let conversation_layouts = workspaces
+            .iter()
+            .map(|workspace| {
+                mj_controller::database::load_workspace_layout(&workspace.id)
+                    .map(|layout| (workspace.id.clone(), layout))
+            })
+            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
         let mut dashboard = DashboardState::new(
             controller.config.clone(),
             controller.state.clone(),
@@ -978,6 +1254,9 @@ impl DashboardContext {
         dashboard.set_workspace_names(workspace_names);
         for (id, sizes) in &layouts {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
+        }
+        for (id, layout) in &conversation_layouts {
+            dashboard.cache_workspace_layout(id, layout.clone());
         }
         dashboard.set_active_workspace(Some(workspace_id.to_owned()));
         let notices = mj_chat::chat::Notices::default();
@@ -1048,7 +1327,14 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<DashboardIoUpdate>();
         let known_workspace_layouts = layouts.keys().cloned().collect();
         let pane_size_persistence =
-            pane_sizes::PaneSizePersistence::start(layouts, notices.clone());
+            workspace_settings::WorkspaceSettingPersistence::start_pane_sizes(
+                layouts,
+                notices.clone(),
+            );
+        let layout_persistence = workspace_settings::WorkspaceSettingPersistence::start_layouts(
+            conversation_layouts.clone(),
+            notices.clone(),
+        );
 
         let mut context = Self {
             terminal,
@@ -1057,15 +1343,19 @@ impl DashboardContext {
             client_id: client_id.to_owned(),
             dashboard,
             pane_size_persistence,
+            layout_persistence,
             known_workspace_layouts,
+            workspace_layouts: conversation_layouts,
             notices,
             events: Some(event::EventStream::new()),
-            active_chat: None,
+            chats: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
             draft_save_failures: BTreeMap::new(),
-            opening_chat_session: None,
-            attachment: attachment::SessionAttachment::default(),
+            opening_chat_sessions: BTreeMap::new(),
+            previous_pane_sessions: BTreeMap::new(),
+            attachments: BTreeMap::new(),
+            drawn_chat_sessions: Vec::new(),
             startup: StartupSession::idle(),
             go_context_refresh: None,
             go_context_in_flight: false,
@@ -1303,6 +1593,22 @@ fn opening_cancel_event(event: &Event, opening: bool, modal: bool) -> bool {
 /// Only an attach for a *different* session hides it. An attach for the chat
 /// already loaded is a reattach of the same conversation, and blanking the
 /// transcript for that would be a flicker rather than a correction.
+/// Waits for the next background message of any warm conversation.
+///
+/// [`mj_chat::chat::ActiveChat::pump`] is cancel safe, so the futures that
+/// lose this race are dropped without losing what they were waiting for. With
+/// no warm chat there is nothing to wait for, and the arm never fires.
+async fn pump_chats(chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>) {
+    if chats.is_empty() {
+        return std::future::pending().await;
+    }
+    let pumps = chats
+        .values_mut()
+        .map(|chat| Box::pin(mj_chat::chat::ActiveChat::pump(Some(chat))))
+        .collect::<Vec<_>>();
+    futures::future::select_all(pumps).await;
+}
+
 fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
     !matches!(opening, Some(opening) if opening != chat_session_id)
 }
@@ -1336,13 +1642,18 @@ fn dispatch_event(
         && (chat_modal
             || match &event {
                 Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-                    let over_chat = context
+                    let over_pane = context
                         .dashboard
                         .chat_region_contains(mouse.column, mouse.row);
-                    if over_chat && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        context.dashboard.focus_prompt();
+                    if let Some(pane) = over_pane
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    {
+                        // A click in a pane takes the keyboard there before
+                        // the event reaches a conversation, so it reaches the
+                        // conversation the user just pointed at.
+                        context.focus_conversation_pane(pane);
                     }
-                    over_chat
+                    over_pane.is_some()
                         || context
                             .visible_chat()
                             .is_some_and(|chat| chat.component_handles_mouse(*mouse))

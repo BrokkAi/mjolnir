@@ -8,11 +8,11 @@ impl DashboardContext {
     ///
     /// Cache pending question forms from the warm chat before it is replaced.
     /// The composer itself is tracked by [`ComposerDraftCache`].
-    pub(crate) fn save_active_question_draft(&mut self) {
-        let Some(chat) = self.active_chat.as_ref() else {
+    pub(crate) fn save_question_draft(&mut self, session_id: &str) {
+        let Some(chat) = self.chats.get(session_id) else {
             return;
         };
-        let session_id = chat.session_id().to_owned();
+        let session_id = session_id.to_owned();
         let drafts = chat.elicitation_drafts();
         if !drafts.is_empty() {
             let captured_event_ordinal = chat.latest_event_ordinal();
@@ -79,23 +79,47 @@ impl DashboardContext {
         chat.restore_elicitation_drafts(drafts.into_iter().map(|cached| cached.draft).collect());
     }
 
+    /// Opens a session in the focused pane.
+    ///
+    /// A session already open in another pane moves the focus there instead
+    /// of drawing the same conversation twice. Otherwise the pane changes
+    /// what it shows: the conversation leaving it is saved and dropped, and
+    /// the new one is attached in the background.
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
         if !self.session_in_active_workspace(session_id) {
             return;
         }
-        if self
-            .active_chat
-            .as_ref()
-            .is_some_and(|chat| chat.session_id() != session_id)
+        let pane = self.dashboard.focused_pane();
+        if let Some(other) = self.dashboard.pane_for_session(session_id)
+            && other != pane
         {
+            self.dashboard.focus_pane(other);
+            self.sync_opening_session();
             self.selection.clear();
+            return;
         }
-        // The warm chat remains alive while another session attaches. Capture
-        // its current composer before any background snapshot can arrive.
-        self.capture_active_composer_draft();
+        let outgoing = self
+            .dashboard
+            .pane_session(pane)
+            .filter(|session| *session != session_id)
+            .map(str::to_owned);
+        if let Some(outgoing) = outgoing {
+            self.selection.clear();
+            self.previous_pane_sessions.insert(pane, outgoing.clone());
+            // The pane is changing session. Save what the conversation
+            // leaving it holds, then drop it unless another pane shows it —
+            // which it cannot, since a session is in at most one pane.
+            self.capture_composer_draft(&outgoing);
+            self.save_question_draft(&outgoing);
+            self.record_chat_detach(&outgoing);
+            if self.dashboard.pane_for_session(&outgoing) == Some(pane) {
+                self.chats.remove(&outgoing);
+            }
+        }
+        self.capture_composer_draft(session_id);
         self.dashboard.select_active_session(session_id);
-        self.attachment.select(session_id);
-        self.save_active_question_draft();
+        self.attachments.entry(pane).or_default().select(session_id);
+        self.save_question_draft(session_id);
         // A lifecycle owns the row's conversation until its authoritative
         // completion. Do not start an attach that can arrive after Stop/Move
         // and put a retiring chat back on screen.
@@ -107,16 +131,16 @@ impl DashboardContext {
             return;
         }
         if self
-            .active_chat
-            .as_ref()
-            .is_some_and(|chat| chat.session_id() == session_id && chat.session_feed_open())
+            .chats
+            .get(session_id)
+            .is_some_and(mj_chat::chat::ActiveChat::session_feed_open)
         {
             self.cancel_chat_open();
             self.dashboard.set_current_session(Some(session_id));
-            self.acknowledge_visible_chat();
+            self.acknowledge_visible_chats();
             return;
         }
-        if self.opening_chat_session.as_deref() == Some(session_id) {
+        if self.opening_chat_sessions.get(&pane).map(String::as_str) == Some(session_id) {
             return;
         }
         self.cancel_chat_open();
@@ -224,10 +248,10 @@ impl DashboardContext {
                 }
             }
         });
-        self.opening_chat_session = Some(session_id.clone());
+        self.opening_chat_sessions.insert(pane, session_id.clone());
         self.dashboard.set_current_session(Some(&session_id));
         self.dashboard.select_active_session(&session_id);
-        self.dashboard.set_opening_session(Some(&session_id));
+        self.sync_opening_session();
         let detach = self
             .dashboard
             .first_key_label(mj_tui::CommandId::QuitDetach)
@@ -238,7 +262,7 @@ impl DashboardContext {
         ));
         let reported_session_id = session_id.clone();
         let attachment_session_id = session_id.clone();
-        self.attachment.spawn(
+        self.attachments.entry(pane).or_default().spawn(
             &attachment_session_id,
             attachment::ATTACH_TIMEOUT,
             async move {
@@ -273,6 +297,7 @@ impl DashboardContext {
                     &updates,
                     DashboardIoUpdate::ChatOpened {
                         generation,
+                        pane,
                         session_id: reported_session_id.clone(),
                         result: Box::new(result),
                     },

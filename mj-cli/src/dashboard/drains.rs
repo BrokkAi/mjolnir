@@ -94,7 +94,7 @@ impl DashboardContext {
             .collect();
         self.dashboard
             .set_session_reviews(self.runtime_review_views.values().cloned());
-        self.apply_runtime_review_to_active_chat();
+        self.apply_runtime_reviews_to_chats();
     }
 
     /// Report each background notice the daemon published since the last one
@@ -119,13 +119,21 @@ impl DashboardContext {
         }
     }
 
-    /// Applies the retained daemon projection whenever a chat becomes active.
-    /// Absence is meaningful: it closes a review the previous projection held.
-    pub(crate) fn apply_runtime_review_to_active_chat(&mut self) {
-        let Some(chat) = self.active_chat.as_mut() else {
+    /// Applies the retained daemon projection to every warm chat. Absence is
+    /// meaningful: it closes a review the previous projection held.
+    pub(crate) fn apply_runtime_reviews_to_chats(&mut self) {
+        for chat in self.chats.values_mut() {
+            let review = self.runtime_review_views.get(chat.session_id()).cloned();
+            chat.apply_review_view(review);
+        }
+    }
+
+    /// The same for one conversation, for a chat that has just opened.
+    pub(crate) fn apply_runtime_review_to_chat(&mut self, session_id: &str) {
+        let Some(chat) = self.chats.get_mut(session_id) else {
             return;
         };
-        let review = self.runtime_review_views.get(chat.session_id()).cloned();
+        let review = self.runtime_review_views.get(session_id).cloned();
         chat.apply_review_view(review);
     }
 
@@ -133,12 +141,14 @@ impl DashboardContext {
     /// second opinion. Turn reviews come from `runtime_review_views` and are
     /// projected independently, including for sessions without an open chat.
     pub(crate) fn refresh_open_review(&mut self) {
-        let Some(chat) = self.active_chat.as_ref() else {
-            return;
-        };
-        let session_id = chat.session_id().to_owned();
-        self.dashboard
-            .set_session_review_open(&session_id, chat.has_open_review());
+        for (session_id, open) in self
+            .chats
+            .values()
+            .map(|chat| (chat.session_id().to_owned(), chat.has_open_review()))
+            .collect::<Vec<_>>()
+        {
+            self.dashboard.set_session_review_open(&session_id, open);
+        }
     }
 
     pub(crate) fn drain_quota_updates(&mut self) {
@@ -258,6 +268,8 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for id in removed_layouts {
             self.pane_size_persistence.forget(&id);
+            self.layout_persistence.forget(&id);
+            self.workspace_layouts.remove(&id);
             self.known_workspace_layouts.remove(&id);
         }
         let new_layouts = update
@@ -269,7 +281,8 @@ impl DashboardContext {
         if !new_layouts.is_empty() {
             self.known_workspace_layouts
                 .extend(new_layouts.iter().cloned());
-            io::spawn_workspace_pane_sizes_load(new_layouts, self.dashboard_io_tx.clone());
+            io::spawn_workspace_pane_sizes_load(new_layouts.clone(), self.dashboard_io_tx.clone());
+            io::spawn_workspace_layouts_load(new_layouts, self.dashboard_io_tx.clone());
         }
         let next_workspace = if self
             .dashboard
@@ -312,7 +325,7 @@ impl DashboardContext {
         for lifecycle in lifecycles {
             let kind = lifecycle_kind(lifecycle.kind);
             mark_active_chat_retiring_for_remote_lifecycle(
-                self.active_chat.as_mut(),
+                self.chats.get_mut(&lifecycle.session_id),
                 &lifecycle.session_id,
                 kind,
             );
@@ -368,26 +381,30 @@ impl DashboardContext {
     /// without this a long-lived chat would keep offering reviewer profiles
     /// that a config reload has since renamed or removed.
     pub(crate) fn refresh_chat_context(&mut self) {
-        let Some(chat) = self.active_chat.as_mut() else {
-            return;
-        };
-        let record = self.controller.state.sessions.get(chat.session_id());
-        chat.refresh_context(
-            &self.controller.config,
-            record,
-            record.map(|session| self.controller.state.project_identity_session(session)),
-        );
-        if self.dashboard.go_mode().is_some() {
-            chat.set_display_title(self.dashboard.go_conversation_title(chat.session_id()));
+        let Self {
+            chats,
+            controller,
+            dashboard,
+            ..
+        } = self;
+        for chat in chats.values_mut() {
+            let record = controller.state.sessions.get(chat.session_id());
+            chat.refresh_context(
+                &controller.config,
+                record,
+                record.map(|session| controller.state.project_identity_session(session)),
+            );
+            if dashboard.go_mode().is_some() {
+                chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
+            }
+            let count = controller
+                .state
+                .subagents
+                .values()
+                .filter(|record| record.parent_session_id == chat.session_id())
+                .count();
+            chat.set_subagent_count(count);
         }
-        let count = self
-            .controller
-            .state
-            .subagents
-            .values()
-            .filter(|record| record.parent_session_id == chat.session_id())
-            .count();
-        chat.set_subagent_count(count);
     }
 
     pub(crate) fn drain_runtime_config(&mut self) {
@@ -401,7 +418,7 @@ impl DashboardContext {
         // The chat's copy of `[review]` follows the daemon's, so `/review
         // status` and the composer's armed indicator report what is actually
         // running rather than what this process last read from disk.
-        if let Some(chat) = self.active_chat.as_mut() {
+        for chat in self.chats.values_mut() {
             chat.set_review_config(config.review.clone());
         }
         if config == self.controller.config || self.config_reload_in_flight {
@@ -440,7 +457,10 @@ impl DashboardContext {
             .into_iter()
             .map(|subagent| (subagent.child_session_id.clone(), subagent))
             .collect();
-        if let Some(chat) = self.active_chat.as_mut() {
+        let Self {
+            chats, dashboard, ..
+        } = self;
+        for chat in chats.values_mut() {
             let feed_expected = sessions
                 .get(chat.session_id())
                 .is_some_and(session_target_is_pollable);
@@ -449,15 +469,14 @@ impl DashboardContext {
             // will close and the chat must not chase a replacement actor.
             let retiring = !feed_expected
                 || matches!(
-                    self.dashboard.session_operation_kind(chat.session_id()),
+                    dashboard.session_operation_kind(chat.session_id()),
                     Some(
                         SessionOperationKind::Stopping
                             | SessionOperationKind::Destroying
                             | SessionOperationKind::Moving,
                     )
                 )
-                || self
-                    .dashboard
+                || dashboard
                     .transition_failure_kind(chat.session_id())
                     .is_some();
             chat.set_session_retiring(retiring);

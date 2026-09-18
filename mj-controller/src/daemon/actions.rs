@@ -155,6 +155,13 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::SaveWorkspaceLayout {
+            workspace_id,
+            layout,
+        } => {
+            blocking(move || crate::database::save_workspace_layout(&workspace_id, layout)).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::PersistImportedSession { session } => {
             blocking(move || crate::import::persist_imported_session_locally(&session)).await?;
             refresh_runtime_controller(state).await;

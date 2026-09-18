@@ -3170,6 +3170,153 @@ fn malformed_persisted_pane_size_is_reported_on_read() {
     assert!(error.to_string().contains("unknown pane size"), "{error:#}");
 }
 
+fn workspace_layout_row_count(path: &Path, workspace_id: &str) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM workspace_layouts WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn split_layout(first_session: &str, second_session: &str) -> ConversationLayout {
+    use mj_core::workspace::{LayoutNode, SplitAxis};
+    ConversationLayout {
+        root: LayoutNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.6,
+            first: Box::new(LayoutNode::Pane { id: 1 }),
+            second: Box::new(LayoutNode::Pane { id: 2 }),
+        },
+        focus: 2,
+        sessions: BTreeMap::from([
+            (1, first_session.to_owned()),
+            (2, second_session.to_owned()),
+        ]),
+    }
+}
+
+#[test]
+fn workspace_layout_defaults_without_creating_an_absent_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Defaults").unwrap();
+
+    assert_eq!(workspace_layout_row_count(&database, &workspace.id), 0);
+    assert_eq!(
+        load_workspace_layout_from(&database, &workspace.id).unwrap(),
+        ConversationLayout::default()
+    );
+    assert_eq!(
+        workspace_layout_row_count(&database, &workspace.id),
+        0,
+        "loading the default layout must not create a settings row"
+    );
+}
+
+#[test]
+fn workspace_layout_round_trips_after_reopening_the_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
+    let layout = split_layout("session-1", "session-2");
+
+    save_workspace_layout_to(&database, &workspace.id, &layout).unwrap();
+    drop(open(&database).unwrap());
+    forget_verified_schema(&database);
+
+    assert_eq!(
+        load_workspace_layout_from(&database, &workspace.id).unwrap(),
+        layout
+    );
+}
+
+#[test]
+fn workspace_layouts_are_isolated_between_workspaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let first = create_workspace_at(&database, "First").unwrap();
+    let second = create_workspace_at(&database, "Second").unwrap();
+    let first_layout = split_layout("session-1", "session-2");
+    let second_layout = ConversationLayout {
+        focus: 1,
+        sessions: BTreeMap::from([(1, "session-3".to_owned())]),
+        ..ConversationLayout::default()
+    };
+
+    save_workspace_layout_to(&database, &first.id, &first_layout).unwrap();
+    save_workspace_layout_to(&database, &second.id, &second_layout).unwrap();
+
+    assert_eq!(
+        load_workspace_layout_from(&database, &first.id).unwrap(),
+        first_layout
+    );
+    assert_eq!(
+        load_workspace_layout_from(&database, &second.id).unwrap(),
+        second_layout
+    );
+}
+
+#[test]
+fn workspace_layouts_cascade_through_both_deletions() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let deleted = create_workspace_at(&database, "Deleted").unwrap();
+    save_workspace_layout_to(&database, &deleted.id, &split_layout("a", "b")).unwrap();
+    delete_workspace_at(&database, &deleted.id).unwrap();
+    assert_eq!(workspace_layout_row_count(&database, &deleted.id), 0);
+
+    let force_deleted = create_workspace_at(&database, "Force").unwrap();
+    save_workspace_layout_to(&database, &force_deleted.id, &split_layout("c", "d")).unwrap();
+    force_delete_workspace_at(&database, &force_deleted.id).unwrap();
+    assert_eq!(workspace_layout_row_count(&database, &force_deleted.id), 0);
+}
+
+#[test]
+fn invalid_layout_save_preserves_the_previous_row_and_unknown_workspaces_fail() {
+    use mj_core::workspace::LayoutNode;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Validated").unwrap();
+    let previous = split_layout("session-1", "session-2");
+    save_workspace_layout_to(&database, &workspace.id, &previous).unwrap();
+
+    let mut invalid = previous.clone();
+    invalid.root = LayoutNode::Pane { id: 1 };
+    assert!(
+        save_workspace_layout_to(&database, &workspace.id, &invalid).is_err(),
+        "a session recorded for a pane outside the tree must be refused"
+    );
+    assert_eq!(
+        load_workspace_layout_from(&database, &workspace.id).unwrap(),
+        previous
+    );
+    assert!(load_workspace_layout_from(&database, "missing-workspace").is_err());
+    assert!(save_workspace_layout_to(&database, "missing-workspace", &previous).is_err());
+}
+
+#[test]
+fn malformed_persisted_layout_is_reported_on_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Malformed").unwrap();
+    save_workspace_layout_to(&database, &workspace.id, &split_layout("a", "b")).unwrap();
+
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE workspace_layouts SET layout = '{\"root\":{\"kind\":\"pane\",\"id\":1},\
+             \"focus\":9,\"sessions\":{}}' WHERE workspace_id = ?1",
+            [&workspace.id],
+        )
+        .unwrap();
+
+    let error = load_workspace_layout_from(&database, &workspace.id).unwrap_err();
+    assert!(error.to_string().contains("focused pane 9"), "{error:#}");
+}
+
 #[test]
 fn workspace_crud_preserves_history_and_blocks_active_sessions_and_drafts() {
     let directory = tempfile::tempdir().unwrap();

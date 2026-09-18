@@ -135,9 +135,11 @@ fn account_path_apply_expands_home_before_config_and_quota_use() {
     let profile = &config.profiles["codex-1"];
     assert_eq!(profile.home, expected);
     let mut environment = profile.environment.clone();
-    profile
-        .kind
-        .configure_home_environment(&profile.home, &mut environment);
+    profile.kind.configure_home_environment(
+        &profile.home,
+        mj_core::config::HarnessHost::current(),
+        &mut environment,
+    );
     assert_eq!(environment["CODEX_HOME"], expected.to_string_lossy());
 }
 

@@ -1079,6 +1079,32 @@ fn default_session_workspace_id() -> String {
 /// place and read in one place, so the tag cannot drift.
 pub const CLOSE_FAILURE_PREFIX: &str = "the close did not finish";
 
+/// How a target is named beside a session, wherever a surface shows one.
+///
+/// A bare target (`local-bare`, `ssh-bare`) opens a project directory directly,
+/// so the target alone does not say what the session was working on and the
+/// project's own folder name is appended. Every other kind names a provisioned
+/// environment that already identifies itself, so the target id stands alone.
+/// A target id the configuration no longer holds is shown verbatim, because its
+/// kind is no longer known.
+///
+/// Shared so the live session summary and the Resume dialog's archived rows
+/// cannot drift apart: [`SessionRecord::project_target`] calls this, and so
+/// does the archived row built from the SessionWiki index.
+#[must_use]
+pub fn target_label(config: &Config, target_id: &str, project: Option<&Path>) -> String {
+    if !matches!(
+        config.targets.get(target_id),
+        Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
+    ) {
+        return target_id.to_owned();
+    }
+    project.and_then(Path::file_name).map_or_else(
+        || target_id.to_owned(),
+        |directory| format!("{target_id}/{}", directory.to_string_lossy()),
+    )
+}
+
 impl SessionRecord {
     /// The recorded failure that is safe to publish whatever state this
     /// session is in, because the controller wrote it for the person rather
@@ -1153,21 +1179,12 @@ impl SessionRecord {
     /// the project directory they open directly; workspace targets already
     /// identify the provisioned environment on their own.
     pub fn project_target(&self, config: &Config, target_id: &str) -> String {
-        if !matches!(
-            config.targets.get(target_id),
-            Some(TargetTemplate::LocalBare | TargetTemplate::SshBare { .. })
-        ) {
-            return target_id.to_owned();
-        }
-        self.managed_worktree
+        let project = self
+            .managed_worktree
             .as_ref()
             .map(|worktree| &worktree.source_project_directory)
-            .or(self.project_directory.as_ref())
-            .and_then(|path| path.file_name())
-            .map_or_else(
-                || target_id.to_owned(),
-                |directory| format!("{target_id}/{}", directory.to_string_lossy()),
-            )
+            .or(self.project_directory.as_ref());
+        target_label(config, target_id, project.map(PathBuf::as_path))
     }
 
     /// Stable source identity used to group sessions. Managed worktrees point

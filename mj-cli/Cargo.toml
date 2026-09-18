@@ -32,6 +32,8 @@ chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true, features = ["osc52"] }
 dirs.workspace = true
+# The event loop waits on every warm conversation at once through select_all.
+futures = "0.3"
 libc.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["json", "query"] }

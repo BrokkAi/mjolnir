@@ -709,7 +709,7 @@ mod tests {
         open_palette(&mut dashboard);
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
 
-        let lines = drawn(&mut dashboard, 120, 44);
+        let lines = drawn(&mut dashboard, 120, 60);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
         let settings = row_of(&lines, "Settings").expect("the settings heading");
@@ -800,7 +800,9 @@ mod tests {
         // the dashboard, so the palette has to arrive through the prefix.
         open_palette(&mut dashboard);
 
-        let lines = drawn(&mut dashboard, 120, 44);
+        // Tall enough to hold the whole list: the Anywhere group is last,
+        // and the list now runs past 44 rows.
+        let lines = drawn(&mut dashboard, 120, 90);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let stop = row_of(&lines, "Stop session").expect("Stop session");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");

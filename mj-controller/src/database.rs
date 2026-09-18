@@ -27,11 +27,11 @@ use mj_core::subagent::SubagentRecord;
 
 use crate::targets::{AdditionalMount, MountAccess};
 use mj_core::workspace::{
-    DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord, new_workspace_id,
-    normalize_workspace_name,
+    ConversationLayout, DEFAULT_WORKSPACE_ID, DetachedDraft, PaneSize, PaneSizes, WorkspaceRecord,
+    new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 37;
+const SCHEMA_VERSION: i64 = 38;
 
 mod session_move;
 pub use session_move::*;

@@ -125,6 +125,15 @@ pub struct WorkerLaunchConfig {
     #[serde(default)]
     pub seed_image_environment: bool,
     pub harness: HarnessKind,
+    /// The harness home this session reads and writes inside the target.
+    ///
+    /// The worker locates credentials and skills through it, so it is stated
+    /// rather than read back out of `environment`: a harness whose home cannot
+    /// be scoped by environment sets no home variable at all. Configs
+    /// persisted by older releases omit the field; the worker then falls back
+    /// to the harness's home variable, which those releases always set.
+    #[serde(default)]
+    pub harness_home: PathBuf,
     /// File name inside the staged harness home that proves authentication.
     /// An API-key profile is proven by its harness configuration file rather
     /// than a credential file, so the controller decides the name and the

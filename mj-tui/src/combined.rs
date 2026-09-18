@@ -5,6 +5,8 @@
 //! summaries under it, with a shared one-row footer. There is no second screen
 //! to switch to, so nothing is ever hidden behind a navigation step.
 
+use std::collections::BTreeMap;
+
 use mj_chat::chat::{ActiveChat, ChatFooter, ChatRegions, ChatState};
 use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
 use mj_chat::{spinner, theme};
@@ -23,6 +25,7 @@ use crate::render::{
     render_sessions, render_terminal_too_small, sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
+use crate::tile_layout::PaneId;
 use crate::widgets::bordered_content;
 use crate::workspaces::render_workspace_tabs;
 use crate::{DashboardState, Focus, Mode, PaneSize, SupportPane};
@@ -304,32 +307,41 @@ fn support_panes_fit(content_width: u16, dashboard: &DashboardState) -> bool {
 /// Draws the whole combined surface: Sessions, the conversation, Prompt,
 /// Targets, Quota, the footer, and any modal over the top.
 ///
-/// `chat` is the conversation on screen, or `None` when the workspace has no
-/// live session. `transcript_selected` says the selection engine still owns a
-/// selection on the transcript, so its row space has to stay frozen for this
-/// frame.
+/// `chats` holds every warm conversation, keyed by session id; the panes of
+/// the conversation layout pick the ones on screen out of it.
+/// `opening_panes` says which pane is waiting for which session's attach, so
+/// a pane draws nothing for a session it has not finished opening.
+/// `transcript_selected` says the selection engine still owns a selection on
+/// the transcript, so its row space has to stay frozen for this frame.
+///
+/// Reports the sessions whose conversations this frame actually drew, which
+/// is what the read receipts follow.
 pub fn render_combined(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
-    chat: Option<&mut ActiveChat>,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
-) {
+) -> Vec<String> {
     theme::with_theme(dashboard.config.theme, || {
-        render_combined_themed(frame, dashboard, chat, transcript_selected);
-    });
+        render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected)
+    })
 }
 
 fn render_combined_themed(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
-    mut chat: Option<&mut ActiveChat>,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
-) {
+) -> Vec<String> {
     dashboard.rebuild_palette_entries();
     dashboard.reset_component_geometry();
     dashboard.begin_surface_frame();
-    if let Some(chat) = chat.as_deref_mut() {
-        chat.reset_component_geometry();
+    for session_id in dashboard.pane_session_ids() {
+        if let Some(chat) = chats.get_mut(&session_id) {
+            chat.reset_component_geometry();
+        }
     }
     dashboard.pane_areas = None;
     dashboard.clear_workspace_tab_areas();
@@ -338,8 +350,8 @@ fn render_combined_themed(
     dashboard.project_heading_areas.clear();
     dashboard.pane_size_control_areas.clear();
     dashboard.frame_surfaces.clear();
-    dashboard.chat_transcript_area = None;
-    dashboard.chat_prompt_area = None;
+    dashboard.conversation_pane_areas.clear();
+    dashboard.conversation_area = None;
     let mut area = frame.area();
     frame.render_widget(Block::default().style(theme::base()), area);
     if dashboard.go.is_some() {
@@ -363,7 +375,7 @@ fn render_combined_themed(
             TerminalSizeRequirement::Width(MINIMUM_TERMINAL_WIDTH),
         );
         dashboard.end_surface_frame();
-        return;
+        return Vec::new();
     }
     dashboard.resume_sessions_area = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => Some(resume_sessions_pane(
@@ -374,7 +386,7 @@ fn render_combined_themed(
     };
     if dashboard.config_is_empty() && dashboard.state.sessions.is_empty() {
         render_onboarding_surface(frame, dashboard);
-        return;
+        return Vec::new();
     }
 
     let sidebar_width =
@@ -426,6 +438,26 @@ fn render_combined_themed(
     // composer in the band (the standby prompt), whose height grows with the
     // wrapped draft exactly like an attached chat's.
     let selected_session_id = dashboard.selected_session_id().map(str::to_owned);
+    // Pane widths do not depend on the band's height, so they can be measured
+    // before the bands are allocated — which is what the composer heights the
+    // allocation needs are measured against.
+    let focused_pane = dashboard.focused_pane();
+    let pane_widths = dashboard
+        .conversation_layout
+        .panes(Rect::new(
+            content_area.x,
+            content_area.y,
+            content_area.width,
+            area.height,
+        ))
+        .into_iter()
+        .map(|pane| (pane.id, pane.rect.width))
+        .collect::<BTreeMap<_, _>>();
+    let focused_width = pane_widths
+        .get(&focused_pane)
+        .copied()
+        .unwrap_or(content_area.width);
+    let focused_chat_session = focused_chat_on_screen(dashboard, chats, opening_panes);
     let standby_drawn = match &selected_transition {
         Some((_, kind, failed)) => {
             !failed
@@ -435,7 +467,7 @@ fn render_combined_themed(
                 )
         }
         None => {
-            chat.is_none()
+            focused_chat_session.is_none()
                 && selected_session_id
                     .as_deref()
                     .is_some_and(|session_id| dashboard.opening_session() == Some(session_id))
@@ -446,24 +478,41 @@ fn render_combined_themed(
     // fills the band instead and asks for the same room.
     let launch_standby_drawn =
         selected_transition.is_none() && dashboard.launch_standby_capturing();
-    let desired_prompt = if launch_standby_drawn {
+    let focused_desired_prompt = if launch_standby_drawn {
         dashboard
             .launch_standby
             .as_ref()
             .map_or(PROMPT_MINIMUM, |standby| {
-                standby.desired_prompt_height(content_area.width)
+                standby.desired_prompt_height(focused_width)
             })
     } else if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
         dashboard
             .standby_prompt_mut(session_id)
-            .desired_prompt_height(content_area.width)
+            .desired_prompt_height(focused_width)
     } else if selected_transition.is_some() {
         PROMPT_MINIMUM
     } else {
-        chat.as_ref().map_or(EMPTY_PROMPT_HEIGHT, |chat| {
-            chat.desired_prompt_height(content_area.width)
-        })
+        focused_chat_session
+            .as_deref()
+            .and_then(|session_id| chats.get(session_id))
+            .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+                chat.desired_prompt_height(focused_width)
+            })
     };
+    // The band has to hold the tallest composer the panes want, because every
+    // pane's prompt is carved out of the one band.
+    let desired_prompt = dashboard
+        .pane_sessions
+        .iter()
+        .filter(|(pane, _)| **pane != focused_pane)
+        .filter_map(|(pane, session_id)| {
+            Some(
+                chats
+                    .get(session_id)?
+                    .desired_prompt_height(*pane_widths.get(pane)?),
+            )
+        })
+        .fold(focused_desired_prompt, u16::max);
     let sizes = [
         (
             SupportPane::Sessions,
@@ -545,7 +594,7 @@ fn render_combined_themed(
                 TerminalSizeRequirement::Height(required_frame_height),
             );
             dashboard.end_surface_frame();
-            return;
+            return Vec::new();
         }
     };
 
@@ -563,19 +612,51 @@ fn render_combined_themed(
         sessions_area.width,
         sessions_height,
     );
-    let upper_bands = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(heights.transcript),
-            Constraint::Length(heights.prompt),
-        ])
-        .split(Rect::new(
-            content_area.x,
-            content_area.y,
-            content_area.width,
-            upper_content_height,
-        ));
-    let (transcript_area, prompt_area) = (upper_bands[0], upper_bands[1]);
+    // The whole conversation band, before it is divided into a transcript
+    // and a prompt. The tiled panes are laid out in this rectangle, so it is
+    // what a split or a directional pane move is measured against.
+    let conversation_area = Rect::new(
+        content_area.x,
+        content_area.y,
+        content_area.width,
+        upper_content_height,
+    );
+    dashboard.conversation_area = Some(conversation_area);
+    let panes = dashboard.conversation_layout.panes(conversation_area);
+    // One pane keeps the band heights the allocator computed for the whole
+    // frame. Several panes each carve their own leaf, because a pane's
+    // composer is as tall as that pane's draft needs and no taller.
+    let pane_bands = panes
+        .iter()
+        .map(|pane| {
+            if panes.len() == 1 {
+                let bands = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(heights.transcript),
+                        Constraint::Length(heights.prompt),
+                    ])
+                    .split(pane.rect);
+                return (pane.id, pane.rect, pane.is_focused, bands[0], bands[1]);
+            }
+            let desired = if pane.is_focused {
+                focused_desired_prompt
+            } else {
+                dashboard
+                    .pane_session(pane.id)
+                    .and_then(|session_id| chats.get(session_id))
+                    .map_or(EMPTY_PROMPT_HEIGHT, |chat| {
+                        chat.desired_prompt_height(pane.rect.width)
+                    })
+            };
+            let (transcript, prompt) = leaf_bands(pane.rect, desired);
+            (pane.id, pane.rect, pane.is_focused, transcript, prompt)
+        })
+        .collect::<Vec<_>>();
+    dashboard.conversation_pane_areas = pane_bands
+        .iter()
+        .map(|(id, _, _, transcript, prompt)| (*id, *transcript, *prompt))
+        .collect();
     let support_area = Rect::new(
         if supports_adjacent {
             content_area.x
@@ -687,111 +768,242 @@ fn render_combined_themed(
         quota_content,
     ));
 
-    dashboard.chat_transcript_area = Some(transcript_area);
-    dashboard.chat_prompt_area = Some(prompt_area);
     let prompt_focused = dashboard.prompt_has_focus();
-    let chat_drew_footer = if launch_standby_drawn {
-        render_launch_standby_surface(frame, transcript_area, prompt_area, dashboard);
-        false
-    } else if let Some((session_id, transition, failed)) = selected_transition {
-        render_transition_surface(
-            frame,
-            transcript_area,
-            prompt_area,
-            dashboard,
-            &session_id,
-            transition,
-            failed,
-        );
-        false
-    } else {
-        match chat {
-            Some(chat) => {
-                let chords =
-                    crate::render::footer_commands(dashboard, crate::actions::FooterGroup::Chord);
-                let commands = chords.clone();
-                let chords = chords
-                    .iter()
-                    .map(|(_, text)| text.as_str())
-                    .collect::<Vec<_>>();
-                let banner = dashboard
-                    .prefix_pending()
-                    .then(|| crate::render::prefix_banner_line(dashboard));
-                chat.draw_in(
+    let mut drawn_sessions = Vec::new();
+    let mut chat_drew_footer = false;
+    // The focused pane draws last: its conversation may open an overlay over
+    // the whole frame, and that overlay belongs on top of its neighbours.
+    for (pane_id, pane_rect, pane_focused, transcript_area, prompt_area) in pane_bands
+        .iter()
+        .filter(|(_, _, focused, _, _)| !focused)
+        .chain(pane_bands.iter().filter(|(_, _, focused, _, _)| *focused))
+        .copied()
+        .collect::<Vec<_>>()
+    {
+        if !pane_focused {
+            // An unfocused pane answers only for the session it holds: the
+            // Sessions selection and the launch standby belong to the pane
+            // with the keyboard.
+            let pane_session = dashboard.pane_session(pane_id).map(str::to_owned);
+            let pane_transition = pane_session.as_deref().and_then(|session_id| {
+                dashboard
+                    .transition_kind(session_id)
+                    .map(|kind| (session_id.to_owned(), kind, false))
+                    .or_else(|| {
+                        dashboard
+                            .transition_failure_kind(session_id)
+                            .map(|kind| (session_id.to_owned(), kind, true))
+                    })
+            });
+            let opening = opening_panes.get(&pane_id).map(String::as_str);
+            let chat = pane_session
+                .as_deref()
+                .filter(|session_id| {
+                    pane_transition.is_none() && chat_shows_in_pane(opening, session_id)
+                })
+                .and_then(|session_id| chats.get_mut(session_id));
+            match (chat, pane_transition) {
+                (_, Some((session_id, transition, failed))) => render_transition_surface(
                     frame,
-                    ChatRegions {
-                        transcript: transcript_area,
-                        prompt: prompt_area,
-                        footer: prompt_focused.then_some(ChatFooter {
-                            area: footer_area,
-                            chords: &chords,
-                            functions: &[],
-                            banner: banner.as_ref(),
-                        }),
-                        overlay: area,
-                    },
-                    prompt_focused,
-                    transcript_selected,
-                );
-                if prompt_focused {
-                    for (index, command_area) in chat.footer_command_areas() {
-                        if let Some((id, text)) = commands.get(index) {
-                            crate::surface_controls::render_footer_command(
-                                frame,
-                                command_area,
-                                dashboard,
-                                *id,
-                                text,
-                            );
-                        }
-                    }
-                }
-                // A chat-local modal may own the frame's interaction. Questions
-                // deliberately leave this flag clear so the navigator and other
-                // dashboard panes remain selectable beside the question area.
-                if chat.frame_surfaces_exclusive() {
-                    dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
-                } else {
-                    dashboard.frame_surfaces.append(chat.frame_surfaces());
-                }
-                prompt_focused
-            }
-            None => {
-                let opening = dashboard.opening_session().is_some();
-                let reason = if opening {
-                    EmptyConversation::Opening
-                } else if dashboard.ordered_sessions().is_empty() {
-                    EmptyConversation::NoLiveSession
-                } else {
-                    EmptyConversation::NoConversationOpen
-                };
-                render_empty_transcript(frame, transcript_area, reason, dashboard.config.spinner);
-                if opening {
-                    // The real composer parks in the prompt band while the
-                    // attach runs, so anything typed lands in the chat that
-                    // opens.
-                    if let Some(session_id) = selected_session_id.as_deref() {
-                        draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
-                    }
-                } else {
-                    render_empty_prompt_advice(
+                    transcript_area,
+                    prompt_area,
+                    dashboard,
+                    &session_id,
+                    transition,
+                    failed,
+                ),
+                (Some(chat), None) => {
+                    drawn_sessions.push(chat.session_id().to_owned());
+                    chat.draw_in(
                         frame,
-                        prompt_area,
-                        prompt_focused,
-                        reason,
-                        dashboard,
+                        ChatRegions {
+                            transcript: transcript_area,
+                            prompt: prompt_area,
+                            footer: None,
+                            overlay: pane_rect,
+                        },
+                        false,
+                        false,
                     );
                 }
-                false
+                (None, None) => {
+                    let reason = if opening.is_some() {
+                        EmptyConversation::Opening
+                    } else {
+                        EmptyConversation::NoConversationOpen
+                    };
+                    render_empty_transcript(
+                        frame,
+                        transcript_area,
+                        reason,
+                        dashboard.config.spinner,
+                    );
+                    render_empty_prompt_advice(frame, prompt_area, false, reason, dashboard);
+                }
             }
+            continue;
         }
-    };
+        chat_drew_footer = if launch_standby_drawn {
+            render_launch_standby_surface(frame, transcript_area, prompt_area, dashboard);
+            false
+        } else if let Some((session_id, transition, failed)) = selected_transition.clone() {
+            render_transition_surface(
+                frame,
+                transcript_area,
+                prompt_area,
+                dashboard,
+                &session_id,
+                transition,
+                failed,
+            );
+            false
+        } else {
+            match focused_chat_session
+                .as_deref()
+                .and_then(|session_id| chats.get_mut(session_id))
+            {
+                Some(chat) => {
+                    if !dashboard.launch_standby_capturing() {
+                        drawn_sessions.push(chat.session_id().to_owned());
+                    }
+                    let chords = crate::render::footer_commands(
+                        dashboard,
+                        crate::actions::FooterGroup::Chord,
+                    );
+                    let commands = chords.clone();
+                    let chords = chords
+                        .iter()
+                        .map(|(_, text)| text.as_str())
+                        .collect::<Vec<_>>();
+                    let banner = dashboard
+                        .prefix_pending()
+                        .then(|| crate::render::prefix_banner_line(dashboard));
+                    chat.draw_in(
+                        frame,
+                        ChatRegions {
+                            transcript: transcript_area,
+                            prompt: prompt_area,
+                            footer: prompt_focused.then_some(ChatFooter {
+                                area: footer_area,
+                                chords: &chords,
+                                functions: &[],
+                                banner: banner.as_ref(),
+                            }),
+                            overlay: area,
+                        },
+                        prompt_focused,
+                        transcript_selected,
+                    );
+                    if prompt_focused {
+                        for (index, command_area) in chat.footer_command_areas() {
+                            if let Some((id, text)) = commands.get(index) {
+                                crate::surface_controls::render_footer_command(
+                                    frame,
+                                    command_area,
+                                    dashboard,
+                                    *id,
+                                    text,
+                                );
+                            }
+                        }
+                    }
+                    // A chat-local modal may own the frame's interaction. Questions
+                    // deliberately leave this flag clear so the navigator and other
+                    // dashboard panes remain selectable beside the question area.
+                    if chat.frame_surfaces_exclusive() {
+                        dashboard.frame_surfaces.replace_with(chat.frame_surfaces());
+                    } else {
+                        dashboard.frame_surfaces.append(chat.frame_surfaces());
+                    }
+                    prompt_focused
+                }
+                None => {
+                    let opening = dashboard.opening_session().is_some();
+                    let reason = if opening {
+                        EmptyConversation::Opening
+                    } else if dashboard.ordered_sessions().is_empty() {
+                        EmptyConversation::NoLiveSession
+                    } else {
+                        EmptyConversation::NoConversationOpen
+                    };
+                    render_empty_transcript(
+                        frame,
+                        transcript_area,
+                        reason,
+                        dashboard.config.spinner,
+                    );
+                    if opening {
+                        // The real composer parks in the prompt band while the
+                        // attach runs, so anything typed lands in the chat that
+                        // opens.
+                        if let Some(session_id) = selected_session_id.as_deref() {
+                            draw_standby_prompt(frame, prompt_area, dashboard, session_id, None);
+                        }
+                    } else {
+                        render_empty_prompt_advice(
+                            frame,
+                            prompt_area,
+                            prompt_focused,
+                            reason,
+                            dashboard,
+                        );
+                    }
+                    false
+                }
+            }
+        };
+    }
 
     if !chat_drew_footer {
         render_footer(frame, footer_area, dashboard);
     }
     dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
+    drawn_sessions
+}
+
+/// How one pane's leaf divides into a transcript and a composer. The composer
+/// takes what its draft asks for, within the same bounds the single band uses:
+/// never under [`PROMPT_MINIMUM`] and never over a third of the pane.
+fn leaf_bands(rect: Rect, desired_prompt: u16) -> (Rect, Rect) {
+    let prompt = prompt_target(desired_prompt, rect.height).min(rect.height);
+    let transcript_height = rect.height.saturating_sub(prompt);
+    (
+        Rect::new(rect.x, rect.y, rect.width, transcript_height),
+        Rect::new(
+            rect.x,
+            rect.y.saturating_add(transcript_height),
+            rect.width,
+            prompt,
+        ),
+    )
+}
+
+/// Whether a pane shows the conversation it holds, or hides it because the
+/// pane is still attaching to a different session.
+fn chat_shows_in_pane(opening: Option<&str>, session_id: &str) -> bool {
+    !matches!(opening, Some(opening) if opening != session_id)
+}
+
+/// The session the focused pane's conversation is drawn for, if it has one on
+/// screen. A conversation stays off screen while its pane is attaching to
+/// another session, while the session it belongs to is in a transition, and
+/// while the Sessions selection names a different row: the transcript must
+/// never belong to a row other than the highlighted one.
+fn focused_chat_on_screen(
+    dashboard: &DashboardState,
+    chats: &BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+) -> Option<String> {
+    let pane = dashboard.focused_pane();
+    let session_id = dashboard.pane_session(pane)?;
+    let opening = opening_panes.get(&pane).map(String::as_str);
+    (chats.contains_key(session_id)
+        && chat_shows_in_pane(opening, session_id)
+        && dashboard.transition_kind(session_id).is_none()
+        && dashboard.transition_failure_kind(session_id).is_none()
+        && dashboard.selected_session_id() == Some(session_id))
+    .then(|| session_id.to_owned())
 }
 
 /// Why the conversation band is empty, which is what decides the advice it
@@ -1211,10 +1423,14 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .draw(|frame| {
+                crate::render::render(frame, &mut dashboard);
+            })
             .unwrap();
 
-        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let prompt = dashboard
+            .focused_prompt_area()
+            .expect("prompt pane rendered");
         let lines = buffer_lines(terminal.backend().buffer());
         // The draft is editable text inside the pane...
         let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
@@ -1264,10 +1480,14 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .draw(|frame| {
+                crate::render::render(frame, &mut dashboard);
+            })
             .unwrap();
 
-        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let prompt = dashboard
+            .focused_prompt_area()
+            .expect("prompt pane rendered");
         let lines = buffer_lines(terminal.backend().buffer());
         assert!(
             lines
@@ -1293,10 +1513,14 @@ mod tests {
         dashboard.focus_prompt();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .draw(|frame| {
+                crate::render::render(frame, &mut dashboard);
+            })
             .unwrap();
 
-        let prompt = dashboard.chat_prompt_area.expect("prompt pane rendered");
+        let prompt = dashboard
+            .focused_prompt_area()
+            .expect("prompt pane rendered");
         let lines = buffer_lines(terminal.backend().buffer());
         let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
         assert!(
@@ -1315,7 +1539,9 @@ mod tests {
         dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+            .draw(|frame| {
+                crate::render::render(frame, &mut dashboard);
+            })
             .unwrap();
 
         let lines = buffer_lines(terminal.backend().buffer());
@@ -1470,7 +1696,9 @@ mod tests {
                 ] {
                     let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
                     terminal
-                        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+                        .draw(|frame| {
+                            crate::render::render(frame, &mut dashboard);
+                        })
                         .unwrap();
                     let [sessions, targets, quota] = dashboard.pane_areas.expect("rendered panes");
                     assert_eq!(targets.x, quota.x);
@@ -1512,7 +1740,9 @@ mod tests {
             ] {
                 dashboard.set_pane_size(SupportPane::Sessions, size);
                 terminal
-                    .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+                    .draw(|frame| {
+                        crate::render::render(frame, &mut dashboard);
+                    })
                     .unwrap();
                 let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
                 assert_eq!(targets.x, quota.x);

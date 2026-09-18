@@ -189,6 +189,12 @@ pub(crate) struct ResumeRow {
     /// rows that have one, in this order, so the index's ranking is what the
     /// dialog shows.
     pub(crate) wiki_rank: Option<usize>,
+    /// The harness profile the index says an archived session ran under, when
+    /// it carries one. Restore opens the wizard on it.
+    pub(crate) wiki_profile: Option<String>,
+    /// The target template the index says an archived session ran on, when it
+    /// carries one. Restore opens the wizard on it.
+    pub(crate) wiki_target: Option<String>,
 }
 
 impl ResumeRow {
@@ -504,6 +510,15 @@ fn relative_time(value: i64, unit: &str) -> String {
 ///
 /// Dedupe rule: a Hel record whose `native_session_id` matches a scanned native
 /// session of the same harness replaces that native row entirely.
+/// The harness an indexed row ran, from the SessionWiki tool name or, for a
+/// Mjolnir row, from the harness kind the index carries.
+///
+/// A Mjolnir row's tool name is `mjolnir`, which names no harness of its own;
+/// the kind comes from the `mj-harness:` tag the sync writes instead.
+fn harness_of_hit(hit: &WikiRow) -> Option<HarnessKind> {
+    harness_of_tool(&hit.tool).or_else(|| hit.harness.as_deref()?.parse().ok())
+}
+
 /// The Mjolnir harness a SessionWiki tool name stands for, when one does.
 /// Tools Mjolnir cannot run have no harness and are never deduplicated against
 /// an import row.
@@ -559,6 +574,8 @@ pub(crate) fn merged_resume_rows(
             move_recovery: None,
             wiki_match: None,
             wiki_rank: None,
+            wiki_profile: None,
+            wiki_target: None,
         });
     }
     for profile in profiles {
@@ -580,6 +597,8 @@ pub(crate) fn merged_resume_rows(
                 move_recovery: None,
                 wiki_match: None,
                 wiki_rank: None,
+                wiki_profile: None,
+                wiki_target: None,
             });
         }
     }
@@ -591,7 +610,7 @@ pub(crate) fn merged_resume_rows(
         let native = hit
             .native_id
             .as_deref()
-            .zip(harness_of_tool(&hit.tool))
+            .zip(harness_of_hit(hit))
             .map(|(native_id, harness)| ResumeRowKey::Native(harness, native_id.to_owned()));
         let existing = hit
             .hel_session_id
@@ -614,13 +633,15 @@ pub(crate) fn merged_resume_rows(
         }
         rows.push(ResumeRow {
             key: ResumeRowKey::Archive(hit.id.clone()),
-            profile_id: hit.tool.clone(),
+            // The index carries the profile for a Mjolnir row. Every other
+            // row has only the tool that wrote it.
+            profile_id: hit.profile.clone().unwrap_or_else(|| hit.tool.clone()),
             title: if hit.title.trim().is_empty() {
                 hit.id.clone()
             } else {
                 hit.title.clone()
             },
-            origin: archive_origin(&hit.project),
+            origin: archive_origin_of(config, hit),
             details: archive_details(hit),
             last_activity_ms: hit
                 .started
@@ -633,6 +654,8 @@ pub(crate) fn merged_resume_rows(
             move_recovery: None,
             wiki_match: Some(hit.id.clone()),
             wiki_rank: Some(rank),
+            wiki_profile: hit.profile.clone(),
+            wiki_target: hit.target.clone(),
         });
     }
     // Newest first across the whole merged list; the key breaks ties so the
@@ -658,6 +681,22 @@ fn snippet_text(hit: &WikiRow) -> Option<String> {
 }
 
 /// Where an archived session ran, in the same shape the other tabs use.
+///
+/// The index carries the real target for a Mjolnir session, so the row can name
+/// it the way the live session summary does. Without one there is nothing to go
+/// on but the project path, which is shown as a local origin.
+fn archive_origin_of(config: &Config, hit: &WikiRow) -> String {
+    let Some(target_id) = hit.target.as_deref() else {
+        return archive_origin(&hit.project);
+    };
+    let project = std::path::Path::new(&hit.project);
+    mj_core::state::target_label(
+        config,
+        target_id,
+        (!hit.project.trim().is_empty()).then_some(project),
+    )
+}
+
 fn archive_origin(project: &str) -> String {
     std::path::Path::new(project).file_name().map_or_else(
         || LOCAL_ORIGIN.to_owned(),
@@ -1406,7 +1445,12 @@ impl DashboardState {
             }
             ResumeRowKey::Archive(wiki_id) => {
                 self.cancel_modal();
-                self.begin_archive_restore(wiki_id, row.title)
+                self.begin_archive_restore(
+                    wiki_id,
+                    row.title,
+                    row.wiki_profile.as_deref(),
+                    row.wiki_target.as_deref(),
+                )
             }
             ResumeRowKey::Native(_, native_session_id) => {
                 let profile_id = row.profile_id;

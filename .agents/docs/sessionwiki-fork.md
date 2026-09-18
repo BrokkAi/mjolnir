@@ -24,6 +24,28 @@ it changes, and what has to happen before a Mjolnir release.
 A tag is created once and never moved after Mjolnir's `Cargo.lock` references
 it in a commit. A further library change gets a new `-mj.N` tag.
 
+## Session metadata needs no fork change
+
+Mjolnir stores each indexed session's target, profile and harness in the index
+as tags (`mj-target:`, `mj-profile:`, `mj-harness:`), written and read by
+`mj-controller/src/sessionwiki/tags.rs`. That needs nothing from the fork.
+
+The reason is that `tags` is one of SessionWiki's *durable* tables. `index::open`
+drops only the derived cache -- `msgs`, `messages`, `touched`, `files`, `edits`
+-- when the file's `user_version` differs from the version the binary was built
+with, and never touches `tags`, `notes`, `summaries` or `archive`. So the
+metadata survives a schema bump, which a new column on `files` would not: adding
+one would need a fork release and a `SCHEMA_VERSION` bump, and a bump re-indexes
+every user's whole corpus.
+
+Mjolnir uses its own SQL rather than the crate's `add_tag` and `remove_tag`,
+because `norm_tag` lowercases every tag and Mjolnir ids may be mixed case, and
+because the crate cannot find a stale `mj-target:` tag without reading every tag
+back. `tags.rs` has a round-trip test against a real index opened through
+`sessionwiki::index::open`, so an upstream change to the table fails a test
+rather than a user. If upstream ever accepts a `Session.metadata` field, that
+module is the only place that has to change.
+
 ## The library changes
 
 1. `src/index.rs`: `pub fn sync_with(conn, adapters, since)` holds what was the

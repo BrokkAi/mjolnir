@@ -61,6 +61,101 @@ impl PaneSizes {
     }
 }
 
+/// Which way a split divides its pane.
+///
+/// `Horizontal` means the two children sit side by side, so the divider drawn
+/// between them is vertical. This matches ratatui's `Direction::Horizontal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// One node of the conversation area's binary space partition: either a pane
+/// or a split holding two children.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutNode {
+    Pane {
+        id: u32,
+    },
+    Split {
+        axis: SplitAxis,
+        /// The first child's share of the split, between 0.1 and 0.9.
+        ratio: f32,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+
+impl LayoutNode {
+    /// Collect every pane id in tree order, reporting the first duplicate.
+    fn collect_pane_ids(&self, found: &mut Vec<u32>) -> Result<()> {
+        match self {
+            Self::Pane { id } => {
+                if found.contains(id) {
+                    bail!("pane id {id} appears more than once in the layout");
+                }
+                found.push(*id);
+            }
+            Self::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                if !ratio.is_finite() {
+                    bail!("split ratio {ratio} is not a finite number");
+                }
+                if !(0.1..=0.9).contains(ratio) {
+                    bail!("split ratio {ratio} is outside 0.1..=0.9");
+                }
+                first.collect_pane_ids(found)?;
+                second.collect_pane_ids(found)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The persisted arrangement of the dashboard's conversation area for one
+/// workspace: the pane tree, the focused pane, and the session each pane
+/// shows. A pane with no entry in `sessions` is empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationLayout {
+    pub root: LayoutNode,
+    pub focus: u32,
+    pub sessions: std::collections::BTreeMap<u32, String>,
+}
+
+impl Default for ConversationLayout {
+    fn default() -> Self {
+        Self {
+            root: LayoutNode::Pane { id: 1 },
+            focus: 1,
+            sessions: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl ConversationLayout {
+    /// Validate a layout before applying or storing it.
+    pub fn validate(&self) -> Result<()> {
+        let mut ids = Vec::new();
+        self.root.collect_pane_ids(&mut ids)?;
+        if !ids.contains(&self.focus) {
+            bail!("focused pane {} is not in the layout", self.focus);
+        }
+        for pane in self.sessions.keys() {
+            if !ids.contains(pane) {
+                bail!("session is recorded for pane {pane}, which is not in the layout");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRecord {
@@ -164,5 +259,83 @@ mod tests {
         };
         assert!(invalid.validate().is_err());
         assert!(PaneSizes::default().validate().is_ok());
+    }
+
+    fn two_pane_layout() -> ConversationLayout {
+        ConversationLayout {
+            root: LayoutNode::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Pane { id: 1 }),
+                second: Box::new(LayoutNode::Pane { id: 2 }),
+            },
+            focus: 2,
+            sessions: std::collections::BTreeMap::from([(2, "session-b".to_owned())]),
+        }
+    }
+
+    #[test]
+    fn conversation_layout_round_trips_with_tagged_snake_case_nodes() {
+        let layout = two_pane_layout();
+        let encoded = serde_json::to_value(&layout).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "root": {
+                    "kind": "split",
+                    "axis": "horizontal",
+                    "ratio": 0.5,
+                    "first": { "kind": "pane", "id": 1 },
+                    "second": { "kind": "pane", "id": 2 },
+                },
+                "focus": 2,
+                "sessions": { "2": "session-b" },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConversationLayout>(encoded).unwrap(),
+            layout
+        );
+    }
+
+    #[test]
+    fn the_default_conversation_layout_is_one_empty_focused_pane() {
+        let layout = ConversationLayout::default();
+        assert_eq!(layout.root, LayoutNode::Pane { id: 1 });
+        assert_eq!(layout.focus, 1);
+        assert!(layout.sessions.is_empty());
+        assert!(layout.validate().is_ok());
+        assert!(two_pane_layout().validate().is_ok());
+    }
+
+    #[test]
+    fn conversation_layouts_reject_duplicate_panes_bad_focus_ratios_and_sessions() {
+        let mut duplicate = two_pane_layout();
+        duplicate.root = LayoutNode::Split {
+            axis: SplitAxis::Vertical,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Pane { id: 2 }),
+            second: Box::new(LayoutNode::Pane { id: 2 }),
+        };
+        assert!(duplicate.validate().is_err());
+
+        let mut missing_focus = two_pane_layout();
+        missing_focus.focus = 7;
+        assert!(missing_focus.validate().is_err());
+
+        for ratio in [f32::NAN, 0.0, 0.05, 0.95, 1.0] {
+            let mut bad_ratio = two_pane_layout();
+            if let LayoutNode::Split { ratio: stored, .. } = &mut bad_ratio.root {
+                *stored = ratio;
+            }
+            assert!(
+                bad_ratio.validate().is_err(),
+                "ratio {ratio} must be rejected"
+            );
+        }
+
+        let mut unknown_session = two_pane_layout();
+        unknown_session.sessions.insert(9, "session-c".to_owned());
+        assert!(unknown_session.validate().is_err());
     }
 }

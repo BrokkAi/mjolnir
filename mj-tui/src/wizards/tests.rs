@@ -2076,7 +2076,8 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
 #[test]
 fn restoring_an_archive_names_the_step_and_the_archived_session() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    let action = dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into());
+    let action =
+        dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into(), None, None);
     assert_eq!(action, crate::DashboardAction::None);
     let backend = TestBackend::new(120, 24);
     let mut terminal = Terminal::new(backend).expect("terminal");

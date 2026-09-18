@@ -75,6 +75,21 @@ pub struct WikiRow {
     pub snippet: Option<String>,
     /// The live Mjolnir session this row describes, when this daemon has it.
     pub hel_session_id: Option<String>,
+    /// The Mjolnir target template the session ran under, when the index
+    /// carries it. Only Mjolnir's own rows have one: the daemon writes it into
+    /// the index as an `mj-target:` tag while the session is still known, so an
+    /// archived row can still say where it ran.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The Mjolnir harness profile the session last ran under, from the index's
+    /// `mj-profile:` tag. Only Mjolnir's own rows have one.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// The harness kind the session ran (`codex`, `claude`, `kimi`, `grok`,
+    /// `muse`), from the index's `mj-harness:` tag. It stays meaningful after
+    /// the profile id has been removed from the configuration.
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 /// How far along the daemon's SessionWiki index is when a search answers.
@@ -380,6 +395,10 @@ pub enum DaemonAction {
     SaveWorkspacePaneSizes {
         workspace_id: String,
         sizes: mj_core::workspace::PaneSizes,
+    },
+    SaveWorkspaceLayout {
+        workspace_id: String,
+        layout: mj_core::workspace::ConversationLayout,
     },
     PersistImportedSession {
         session: Box<SessionRecord>,
@@ -1086,6 +1105,23 @@ impl DaemonClient {
         }
     }
 
+    pub async fn save_workspace_layout(
+        &mut self,
+        workspace_id: String,
+        layout: mj_core::workspace::ConversationLayout,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SaveWorkspaceLayout {
+                workspace_id,
+                layout,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected layout save reply {reply:?}"),
+        }
+    }
+
     pub async fn persist_imported_session(&mut self, session: SessionRecord) -> Result<()> {
         match self
             .request(DaemonAction::PersistImportedSession {
@@ -1643,7 +1679,7 @@ pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
     );
     Ok(())
 }
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

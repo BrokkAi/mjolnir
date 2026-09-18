@@ -315,8 +315,16 @@ fn claude_status_checks_a_custom_home_without_a_marker() {
     let directory = tempfile::tempdir().unwrap();
     let claude = directory.path().join("claude-custom");
     fs::create_dir_all(&claude).unwrap();
-    let executor =
-        RuntimeProbeExecutor::new([ok(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#)]);
+    // Where CLAUDE_CONFIG_DIR scopes a home, the CLI answers for that home.
+    // On macOS every home shares one Keychain item, so the Keychain is the
+    // only thing worth asking and the CLI would only report the default
+    // profile back.
+    let on_macos = cfg!(target_os = "macos");
+    let executor = RuntimeProbeExecutor::new([if on_macos {
+        ok(br#"{"claudeAiOauth":{"accessToken":"access","refreshToken":"refresh"}}"#)
+    } else {
+        ok(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#)
+    }]);
 
     let homes = discover_harness_homes_with_executor(
         None,
@@ -334,12 +342,17 @@ fn claude_status_checks_a_custom_home_without_a_marker() {
     );
     let commands = executor.commands.borrow();
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].program, "claude");
-    assert_eq!(commands[0].args, ["auth", "status", "--json"]);
-    assert_eq!(
-        commands[0].env.get("CLAUDE_CONFIG_DIR"),
-        Some(&claude.to_string_lossy().into_owned())
-    );
+    if on_macos {
+        assert_eq!(commands[0].program, "security");
+        assert!(commands[0].env.is_empty(), "{:?}", commands[0].env);
+    } else {
+        assert_eq!(commands[0].program, "claude");
+        assert_eq!(commands[0].args, ["auth", "status", "--json"]);
+        assert_eq!(
+            commands[0].env.get("CLAUDE_CONFIG_DIR"),
+            Some(&claude.to_string_lossy().into_owned())
+        );
+    }
 }
 
 #[test]

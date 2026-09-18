@@ -21,7 +21,7 @@ impl DashboardState {
             .values()
             .find(|record| record.parent_session_id == parent_id)
             .map(|record| record.child_session_id.clone());
-        self.current_session_id = None;
+        self.set_current_session(None);
         self.focus = Focus::Sessions;
         self.clamp_selections();
     }
@@ -31,7 +31,7 @@ impl DashboardState {
             return;
         };
         self.selected_session_id = Some(parent_id);
-        self.current_session_id = None;
+        self.set_current_session(None);
         self.clamp_selections();
     }
 
@@ -76,7 +76,6 @@ impl DashboardState {
             .as_deref()
             .map(|id| self.workspace_display_name(id).to_owned())
             .unwrap_or_default();
-        self.current_session_id = None;
         self.opening_session = None;
         if let Some(workspace_id) = workspace_id {
             if let Some(view) = self.workspace_views.get(&workspace_id).cloned() {
@@ -87,6 +86,7 @@ impl DashboardState {
                 self.capacity_index = view.capacity_index;
                 self.quota_index = view.quota_index;
                 self.pane_sizes = view.pane_sizes;
+                self.restore_conversation_layout(&view.conversation_layout);
                 self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
@@ -100,6 +100,7 @@ impl DashboardState {
                 self.capacity_index = 0;
                 self.quota_index = 0;
                 self.pane_sizes = PaneSizes::default();
+                self.reset_conversation_layout();
                 self.collapsed_project_keys.clear();
                 self.focus = Focus::Sessions;
             }
@@ -111,6 +112,7 @@ impl DashboardState {
             self.capacity_index = 0;
             self.quota_index = 0;
             self.pane_sizes = PaneSizes::default();
+            self.reset_conversation_layout();
             self.collapsed_project_keys.clear();
             self.focus = Focus::Sessions;
         }
@@ -140,6 +142,7 @@ impl DashboardState {
                 capacity_index: 0,
                 quota_index: 0,
                 pane_sizes: sizes,
+                conversation_layout: mj_core::workspace::ConversationLayout::default(),
                 collapsed_project_keys: BTreeSet::new(),
                 focus: Focus::Sessions,
             })

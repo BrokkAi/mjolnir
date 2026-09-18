@@ -10,6 +10,7 @@
 //! this adapter to parse the ones whose checkpoint changed.
 
 mod harness_adapters;
+pub mod tags;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -120,6 +121,35 @@ impl MjolnirAdapter {
             reload: true,
             ..Self::from_state(state)
         }
+    }
+
+    /// Mjolnir's own metadata for every session this adapter knows about, to
+    /// be stored in the index beside the transcripts.
+    ///
+    /// Read from the adapter's own snapshot rather than from the controller
+    /// state the sync loaded, because [`MjolnirAdapter::reloading`] replaces
+    /// that snapshot when the indexer reaches this adapter. A session that
+    /// closed during a long first pass is indexed from the reloaded state, so
+    /// its metadata has to come from the same state that produced its row.
+    pub fn indexed_tags(&self) -> BTreeMap<String, tags::MjTags> {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions
+            .records
+            .iter()
+            .map(|(session_id, record)| {
+                (
+                    session_id.clone(),
+                    tags::MjTags {
+                        target: Some(record.target_template_id.clone()).filter(|id| !id.is_empty()),
+                        profile: Some(record.last_profile.clone()).filter(|id| !id.is_empty()),
+                        harness: Some(record.harness_kind.id().to_owned()),
+                    },
+                )
+            })
+            .collect()
     }
 
     fn reload(&self) {
@@ -432,6 +462,45 @@ impl Adapter for MjolnirAdapter {
     }
 }
 
+/// The Mjolnir adapter handed to the indexer while the sync keeps its own
+/// handle on it.
+///
+/// The indexer takes `Box<dyn Adapter>` and consumes the list, but the sync has
+/// to ask the same adapter for its final session snapshot once the walk is over
+/// (see [`MjolnirAdapter::indexed_tags`]). Sharing the adapter is the only way
+/// both can hold it.
+struct SharedMjolnirAdapter(Arc<MjolnirAdapter>);
+
+impl Adapter for SharedMjolnirAdapter {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn root(&self) -> Option<PathBuf> {
+        self.0.root()
+    }
+
+    fn discover(&self) -> Discovered {
+        self.0.discover()
+    }
+
+    fn parse(&self, path: &Path) -> Result<Session> {
+        self.0.parse(path)
+    }
+
+    fn store(&self) -> Option<Store> {
+        self.0.store()
+    }
+
+    fn parse_key(&self, key: &str) -> Result<Session> {
+        self.0.parse_key(key)
+    }
+
+    fn reconcile_scope(&self) -> Option<String> {
+        self.0.reconcile_scope()
+    }
+}
+
 /// The daemon's SessionWiki sync job.
 ///
 /// Triggers coalesce: a request while a sync is running marks a rerun instead
@@ -579,12 +648,15 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
         Controller::load().context("load controller state for the SessionWiki sync")?;
     // Mjolnir's own sessions go first: a cold index walks every other tool's
     // store for many minutes, and a just-closed session should not wait on it.
+    let mjolnir = Arc::new(MjolnirAdapter::reloading(&controller.state));
     let mut adapters: Vec<Box<dyn sessionwiki::adapters::Adapter>> =
-        vec![Box::new(MjolnirAdapter::reloading(&controller.state))];
+        vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
     adapters.extend(native_adapters(&controller.config));
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
     sessionwiki::index::sync_with(&mut connection, &adapters, since)
         .context("sync the SessionWiki index")?;
+    write_session_tags(&mut connection, &mjolnir.indexed_tags())
+        .context("store Mjolnir's session metadata in the SessionWiki index")?;
     if since.is_none() {
         // A full pass has walked every store, so the index is complete enough
         // for a search to be trusted. The marker is what a later daemon reads
@@ -592,6 +664,37 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
         record_first_build();
     }
     Ok(true)
+}
+
+/// Store each session's target, profile and harness in the index, in one
+/// transaction.
+///
+/// Every session is written on every sync rather than only the changed ones:
+/// the write is a delete and three inserts, which is nothing beside the
+/// transcript indexing in the same pass, and it is what makes a Move or a
+/// profile switch show up without tracking which records changed. It is also
+/// what gives sessions indexed before this existed their metadata, with no
+/// migration and no re-index.
+fn write_session_tags(
+    connection: &mut rusqlite::Connection,
+    session_tags: &BTreeMap<String, tags::MjTags>,
+) -> Result<()> {
+    if session_tags.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction()
+        .context("open a transaction for the session metadata")?;
+    for (session_id, session) in session_tags {
+        if session.is_empty() {
+            continue;
+        }
+        tags::write(&transaction, session_id, session)?;
+    }
+    transaction
+        .commit()
+        .context("commit the session metadata")?;
+    Ok(())
 }
 
 /// The non-Mjolnir adapters this install indexes.
@@ -809,10 +912,12 @@ pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<
     if query.is_empty() {
         let rows = sessionwiki::index::recent(&connection, limit, None, None, None, false)
             .context("list recent SessionWiki sessions")?;
-        return Ok(rows
+        let mut rows: Vec<WikiRow> = rows
             .into_iter()
             .map(|row| wiki_row(row, None, live))
-            .collect());
+            .collect();
+        fill_session_tags(&connection, &mut rows)?;
+        return Ok(rows);
     }
     let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
         sessionwiki::index::search_like(&connection, query, limit, None, None)
@@ -837,7 +942,31 @@ pub fn query_rows(query: &str, limit: usize, live: &BTreeSet<String>) -> Result<
         }
         rows.push(wiki_row(row, None, live));
     }
+    fill_session_tags(&connection, &mut rows)?;
     Ok(rows)
+}
+
+/// Fill in the target, profile and harness of every Mjolnir row on this page
+/// from the index's own tags, in one query.
+///
+/// Only Mjolnir writes those tags, so a row from another tool keeps `None` and
+/// is not even asked about.
+fn fill_session_tags(connection: &rusqlite::Connection, rows: &mut [WikiRow]) -> Result<()> {
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.tool == TOOL)
+        .map(|row| row.id.as_str())
+        .collect();
+    let found = tags::read(connection, &ids).context("read the indexed session metadata")?;
+    for row in rows.iter_mut().filter(|row| row.tool == TOOL) {
+        let Some(session) = found.get(&row.id) else {
+            continue;
+        };
+        row.target = session.target.clone();
+        row.profile = session.profile.clone();
+        row.harness = session.harness.clone();
+    }
+    Ok(())
 }
 
 /// How far back a title or project match looks. Those columns have no index of
@@ -1321,6 +1450,11 @@ fn wiki_row(
         native_id,
         snippet,
         hel_session_id,
+        // Filled in by `fill_session_tags` from the index's own tags; the row
+        // itself does not carry them.
+        target: None,
+        profile: None,
+        harness: None,
     }
 }
 
@@ -2353,5 +2487,43 @@ mod tests {
             roots.iter().any(|(name, _)| *name == "gemini"),
             "the other built-in adapters are kept: {roots:?}"
         );
+    }
+
+    /// A Mjolnir row carries the target, profile and harness the sync stored
+    /// in the index; a row from another tool carries none, because only
+    /// Mjolnir writes those tags.
+    #[test]
+    fn query_rows_returns_the_indexed_target_profile_and_harness() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        tags::testing::index_row(&connection, "mj-session", TOOL);
+        tags::testing::index_row(&connection, "codex-session", "codex");
+        tags::write(
+            &connection,
+            "mj-session",
+            &tags::MjTags {
+                target: Some("Prod-Box".into()),
+                profile: Some("codex-Main".into()),
+                harness: Some("codex".into()),
+            },
+        )
+        .expect("write the session metadata");
+
+        let rows = query_rows("", 10, &BTreeSet::new()).expect("query the index");
+        let mjolnir = rows
+            .iter()
+            .find(|row| row.id == "mj-session")
+            .expect("the Mjolnir row is returned");
+        assert_eq!(mjolnir.target.as_deref(), Some("Prod-Box"));
+        assert_eq!(mjolnir.profile.as_deref(), Some("codex-Main"));
+        assert_eq!(mjolnir.harness.as_deref(), Some("codex"));
+
+        let codex = rows
+            .iter()
+            .find(|row| row.id == "codex-session")
+            .expect("the Codex row is returned");
+        assert_eq!(codex.target, None);
+        assert_eq!(codex.profile, None);
+        assert_eq!(codex.harness, None);
     }
 }

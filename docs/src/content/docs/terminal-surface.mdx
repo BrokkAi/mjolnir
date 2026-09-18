@@ -139,6 +139,51 @@ Targets and Quota stay together. When both full tables fit beside a maximized si
 
 `prefix+b` toggles a dashboard preset. When all panes are standard, it minimizes Sessions, Targets, and Quota. When sizes have been customized, it restores all three to standard. `Tab` changes only focus and never changes a pane's size.
 
+## Conversation panes
+
+The conversation area can hold more than one conversation at a time. Open a
+session row's **⋯** menu and choose **Open in split right** or **Open in split
+below**. The area divides in two, the chosen session opens in the new pane, and
+the keyboard moves there. Selecting a row already moves that conversation into
+the pane you are in, so the split puts it in the new pane and returns the pane
+you came from to the conversation it was showing.
+
+Every open conversation keeps running whether or not it is the one you are
+typing into, so a pane's transcript advances as its agent replies.
+
+The pane you are typing into is the focused pane. It draws the focused border
+and its keys fill the footer. Click any pane to move the keyboard to it. The
+Sessions highlight follows the focused pane, so the highlighted row is always
+the conversation you are in.
+
+The keys follow herdr and tmux. They run from the composer and from the
+Sessions list:
+
+| Key | Action |
+| --- | --- |
+| `prefix+v` | Split beside: open the selected session to the right |
+| `prefix+minus` | Split below: open the selected session underneath |
+| `prefix+x` | Close the pane you are in, saving what it held |
+| `prefix+h` / `prefix+j` / `prefix+k` / `prefix+l` | Move the keyboard to the pane left, below, above, or right |
+
+`prefix+v` and `prefix+minus` act on the Sessions selection, the same as the
+**⋯** menu entries. With nothing selected the new pane is empty and waits for a
+session. Closing the last pane empties it rather than removing it.
+
+The command palette (`prefix+:`) carries the same commands plus **Resize pane
+left / down / up / right**, which moves the pane's border one step. The resize
+commands have no key by default; bind `resize_pane_left` and its three
+companions under `[keys]` to give them one.
+
+A split is refused when either half would be under 40 columns or 8 rows; the
+dashboard says "Not enough room to split" and nothing changes. Pressing `Enter`
+on a session that another pane already shows moves the keyboard to that pane
+instead of opening a second copy.
+
+The arrangement is saved per workspace, so the panes, their sessions, and which
+pane had the keyboard come back when you restart `mj` or switch back to that
+workspace.
+
 ## Prefix key
 
 Mjolnir uses a tmux-style prefix key instead of one direct chord per command: press the prefix, release it, then press a second key. The footer shows a `PREFIX` banner while a prefix press is pending. The default prefix is `ctrl+b`, the same as tmux and [herdr](https://github.com/herdrdev/herdr), so the same muscle memory carries over. `Esc` cancels a pending prefix without sending anything; an unbound key after the prefix shows a footer notice instead of doing nothing silently.
@@ -169,6 +214,10 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+t` | Toggle the transcript between rendered and raw text |
 | `prefix+d` | List the selected session's changed files, branch, and distance from upstream |
 | `prefix+m` | Start or stop dictation when voice input is available |
+| `prefix+v` | Open the selected session in a pane beside this one |
+| `prefix+minus` | Open the selected session in a pane below this one |
+| `prefix+x` | Close the conversation pane you are in |
+| `prefix+h` / `prefix+j` / `prefix+k` / `prefix+l` | Move the keyboard to the conversation pane left, below, above, or right |
 | `prefix+q` | Detach this terminal while the daemon and sessions continue |
 
 `Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `prefix+shift+c` is different: it cancels a lifecycle operation such as launch or resume. Stop, Restart, Move, Delete session, container settings, and managing profiles or targets have no default key; run them from the command palette so a mis-hit key cannot act on a live session.

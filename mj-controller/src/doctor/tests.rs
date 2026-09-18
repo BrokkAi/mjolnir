@@ -947,11 +947,11 @@ fn worker_check_for_an_ssh_docker_target_hints_at_remote_architecture() {
 #[test]
 fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("claude-home");
+    let home = directory.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     let profile = HarnessProfile {
         enabled: true,
-        kind: HarnessKind::Claude,
+        kind: HarnessKind::Codex,
         home,
         environment: std::collections::BTreeMap::new(),
         context_window_bytes: None,
@@ -979,6 +979,98 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
         remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
         "{remediation}"
     );
+}
+
+#[cfg(target_os = "macos")]
+fn claude_config_with_home<const N: usize>(
+    home: &std::path::Path,
+    targets: [(&str, TargetTemplate); N],
+) -> Config {
+    Config {
+        profiles: [(
+            "work".to_owned(),
+            HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Claude,
+                home: home.to_path_buf(),
+                environment: std::collections::BTreeMap::new(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        targets: targets
+            .into_iter()
+            .map(|(id, target)| (id.to_owned(), target))
+            .collect(),
+        ..Config::default()
+    }
+}
+
+/// A home Mjolnir cannot point the harness at must be reported, not used
+/// silently. Only macOS has such a case today, so only macOS asserts it.
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_reports_a_claude_home_macos_cannot_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("claude-work");
+    std::fs::create_dir_all(&home).unwrap();
+    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
+
+    let executor = FakeExecutor::new([]);
+    let checks = harness_checks(Some(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    assert!(
+        checks[0]
+            .detail
+            .contains("is ignored by a session on this machine")
+            && checks[0].detail.contains("CLAUDE_CONFIG_DIR"),
+        "{}",
+        checks[0].detail
+    );
+    let default_home = dirs::home_dir().unwrap().join(".claude");
+    assert!(
+        checks[0]
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains(&default_home.to_string_lossy().into_owned()),
+        "{:?}",
+        checks[0].remediation
+    );
+}
+
+/// The variable still scopes a home on a container or SSH target, so a profile
+/// that only runs there is correct as configured and must not be told to
+/// repoint its home at `~/.claude`.
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_accepts_a_scoped_claude_home_used_only_off_this_machine() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("claude-work");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".credentials.json"), b"{}").unwrap();
+    let config = claude_config_with_home(
+        &home,
+        [(
+            "builder",
+            serde_json::from_value(serde_json::json!({
+                "kind": "ssh-bare",
+                "host": "builder",
+                "permissions": "guardian",
+            }))
+            .unwrap(),
+        )],
+    );
+
+    let executor = FakeExecutor::new([]);
+    let checks = harness_checks(Some(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Ready, "{:?}", checks[0]);
 }
 
 #[test]

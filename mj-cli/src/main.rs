@@ -1120,9 +1120,11 @@ async fn login(args: LoginArgs) -> Result<()> {
         profile.home.display()
     );
     let mut environment = profile.environment.clone();
-    profile
-        .kind
-        .configure_home_environment(&profile.home, &mut environment);
+    profile.kind.configure_home_environment(
+        &profile.home,
+        mj_core::config::HarnessHost::current(),
+        &mut environment,
+    );
     let status = tokio::process::Command::new(&program)
         .args(&arguments)
         .envs(&environment)
@@ -1176,15 +1178,19 @@ async fn store_claude_setup_token(
         "Running `claude setup-token` against {}.",
         profile.home.display()
     );
-    let environment = profile.environment.clone();
-    let home = profile.home.clone();
-    let output = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("claude");
-        command
-            .arg("setup-token")
-            .envs(&environment)
-            .env(HarnessKind::Claude.home_env(), &home);
-        mj_core::subprocess::run_capturing_stdout(&mut command)
+    let mut environment = profile.environment.clone();
+    profile.kind.configure_home_environment(
+        &profile.home,
+        mj_core::config::HarnessHost::current(),
+        &mut environment,
+    );
+    let output = tokio::task::spawn_blocking({
+        let environment = environment.clone();
+        move || {
+            let mut command = std::process::Command::new("claude");
+            command.arg("setup-token").envs(&environment);
+            mj_core::subprocess::run_capturing_stdout(&mut command)
+        }
     })
     .await
     .context("run `claude setup-token`")??;
@@ -1202,15 +1208,12 @@ async fn store_claude_setup_token(
     })?;
     mj_core::credentials::write_claude_oauth_token(&token_path, token.as_bytes())?;
 
-    let environment = profile.environment.clone();
-    let home = profile.home.clone();
     let verify_token = token.clone();
     let verified = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new("claude");
         command
             .args(["auth", "status"])
             .envs(&environment)
-            .env(HarnessKind::Claude.home_env(), &home)
             .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
         mj_core::subprocess::run_capturing_stdout(&mut command)
     })

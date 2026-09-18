@@ -50,34 +50,30 @@ impl DashboardContext {
         let Self {
             terminal,
             dashboard,
-            active_chat,
-            opening_chat_session,
+            chats,
+            opening_chat_sessions,
             selection,
             selection_text,
             ..
         } = self;
-        let opening = opening_chat_session.as_deref();
-        let selected_session = dashboard.selected_session_id().map(str::to_owned);
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
+        // The renderer decides which pane draws which conversation and reports
+        // back what it drew; that list is what the read receipts follow.
+        let mut drawn = Vec::new();
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
         terminal.terminal.draw(|frame| {
-            render_combined(
+            drawn = render_combined(
                 frame,
                 dashboard,
-                active_chat.as_mut().filter(|chat| {
-                    chat_is_visible(opening, chat.session_id())
-                        && dashboard.transition_kind(chat.session_id()).is_none()
-                        && dashboard
-                            .transition_failure_kind(chat.session_id())
-                            .is_none()
-                        && selected_session.as_deref() == Some(chat.session_id())
-                }),
+                chats,
+                opening_chat_sessions,
                 transcript_selected,
             );
             *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })?;
+        self.drawn_chat_sessions = drawn;
         self.dashboard.acknowledge_render();
         if let Some(chat) = self.visible_chat() {
             chat.acknowledge_render();
@@ -149,7 +145,7 @@ impl DashboardContext {
         let Some((surface, direction)) = self.autoscroll_request() else {
             return Ok(());
         };
-        let Some(chat) = self.active_chat.as_mut() else {
+        let Some(chat) = self.focused_chat_mut() else {
             return Ok(());
         };
         chat.autoscroll_selection(surface, direction);
@@ -201,18 +197,15 @@ impl DashboardContext {
         self.draw()?;
         let extracted = match surface {
             SurfaceId::Transcript => self
-                .active_chat
-                .as_mut()
+                .focused_chat_mut()
                 .and_then(|chat| chat.transcript_selection_text(&range)),
             SurfaceId::ElicitationMessage => self
-                .active_chat
-                .as_ref()
+                .focused_chat()
                 .and_then(|chat| chat.elicitation_selection_text(&range)),
             // The reviewer pane scrolls its own rows, so the text a selection
             // covers comes out of that pane rather than off this frame.
             SurfaceId::ReviewerTranscript => self
-                .active_chat
-                .as_ref()
+                .focused_chat()
                 .and_then(|chat| chat.reviewer_selection_text(&range)),
             _ => self.selection_text.take(),
         };
@@ -301,28 +294,22 @@ impl DashboardContext {
     /// often on a different profile. Keeping the old view would redraw a
     /// Closing/Closed snapshot and refuse prompts.
     pub(crate) fn drop_warm_chat_for(&mut self, session_id: &str) {
-        if self.opening_chat_session.as_deref() == Some(session_id) {
-            self.defer_chat_open();
-        } else {
-            self.attachment.retire(session_id);
-        }
-        if self
-            .active_chat
-            .as_ref()
-            .is_some_and(|chat| chat.session_id() == session_id)
-        {
-            if let Some(ordinal) = self
-                .active_chat
-                .as_ref()
-                .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
-            {
-                // A completed lifecycle retires the warm actor without
-                // passing through the normal session-switch path. Preserve
-                // its latest composer before dropping that actor as well.
-                self.record_detach(ordinal);
+        if self.panes_opening(session_id).is_empty() {
+            for attachment in self.attachments.values_mut() {
+                attachment.retire(session_id);
             }
-            self.active_chat = None;
-            self.selection.clear();
+        } else {
+            self.defer_chat_open_for(session_id);
+        }
+        if self.chats.contains_key(session_id) {
+            // A completed lifecycle retires the warm actor without passing
+            // through the normal session-switch path. Preserve its latest
+            // composer before dropping that actor as well.
+            self.record_chat_detach(session_id);
+            self.chats.remove(session_id);
+            if self.dashboard.current_session_id() == Some(session_id) {
+                self.selection.clear();
+            }
         }
     }
 }

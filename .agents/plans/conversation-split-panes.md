@@ -1,0 +1,597 @@
+# Split the conversation area into tiled panes
+
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It is maintained according to `.agents/PLANS.md` at the repository root.
+
+## Purpose / Big Picture
+
+
+Today the terminal dashboard (`mj`) shows one conversation at a time. The conversation sits in the band between the Sessions sidebar on the left and the Targets and Quota panes below. After this change the user can split that band into several panes, side by side or stacked, each showing a different session's conversation. Every pane's transcript advances as its agent replies, the user types into the focused pane, and the arrangement is saved per workspace so it comes back after a restart.
+
+To see it working after the whole plan lands: start `mj` with at least two sessions, open the `⋯` menu on a session row in the Sessions pane, and choose "Open in split right". The conversation area now shows two conversations. Both update as their agents reply. Pressing F2 and choosing "Close pane" removes one. Quitting and restarting `mj` restores the two-pane layout with the same sessions.
+
+## Progress
+
+
+- [x] (2026-09-17) Design agreed with the user; plan written as this ExecPlan (M0).
+- [x] (2026-09-17) M1: the layout tree in `mj-tui/src/tile_layout.rs`, with unit tests (c3024ba1).
+- [x] (2026-09-17) M2: the persisted per-workspace layout: type in `mj-core`, schema migration 38, database functions, daemon action, client method, generalized save coordinator in `mj-cli`.
+- [x] (2026-09-17) M3: the model in `mj-tui` (`DashboardState` holds the tile layout and its pane sessions) and many warm chats in the controller (`mj-cli`), keyed by session id, all pumped and acknowledged. Rendering still draws only the focused pane and no command creates a split; both are M4.
+- [x] (2026-09-17) M4: rendering of several panes and the pane commands in
+  `mj-tui`, reachable from the F2 palette and the session row `⋯` menu.
+- [x] (2026-09-17) M5: prefix keybindings for the pane commands, the saved
+  focus honoured after a restart, docs and screenshots.
+
+## Surprises & Discoveries
+
+
+- M4: the end-to-end run found three defects that no unit test had reached,
+  all of them collisions with the Sessions selection or with M3's
+  single-pane assumptions. (1) An attach installed its chat with
+  `set_current_session`, which writes the *focused* pane, so a result arriving
+  while another pane had the keyboard landed in the wrong pane; it now writes
+  the pane that asked. (2) Selecting a session row already pulls that
+  conversation into the focused pane, so "Open in split right" always found the
+  session where it was about to put it. (3) Closing a pane left the highlight
+  on the closed pane's session, which the surviving pane then adopted.
+- M4: nothing enforced "a session is in at most one pane". A stored
+  arrangement could name the same session twice and the surface would draw one
+  conversation in two places. `set_pane_session` now takes a session out of any
+  other pane, and a restored arrangement keeps the first claim.
+- M4: a restarted `mj` opened only the conversation the startup picker chose,
+  so a restored two-pane arrangement came back with one pane empty. Startup now
+  opens each restored pane's session in its pane and skips the picker.
+- M4/M5: after a restart the keyboard landed in the first pane rather than the
+  pane the saved arrangement named. M5 found the cause and fixed it. Two things
+  were wrong, both upstream of the startup pick. First, the main loop calls
+  `follow_selected_session` on every iteration, and before the startup pick has
+  run the highlighted row is only where `clamp_selections` left it — the first
+  visible session. Following it opened that conversation, and because the
+  session was already in another pane, `open_chat_session` moved the keyboard
+  to that pane. `maybe_open_startup_session` then read the already-moved focus
+  as the one to restore. The follow now waits for the pick, which any user
+  input cancels, so only the automatic follow is held back. Second,
+  `restore_conversation_layout` left the Sessions highlight wherever the clamp
+  put it; it now moves it onto the focused pane's session, so the highlight and
+  the keyboard agree from the first frame.
+- M4: `Scope::Pane` already existed and already applied from every focus; it
+  is the group the support-pane size and focus commands sit in. The new pane
+  commands reuse it and gate themselves through their `available` function
+  instead, so no scope semantics changed.
+- M4: the help overlay test reads the whole registry off one drawn frame.
+  Eleven new commands pushed the last entry past 60 rows, so the test now
+  draws 90 rows. Nothing about the overlay changed; the reference simply got
+  longer.
+- M4: pane widths do not depend on the band's height, so the per-pane composer
+  heights the band allocation needs can be measured before the band exists.
+  That resolves what looked like a circular dependency between the height
+  allocation and the tiling.
+- M4: `mj-cli/src/dashboard/tests.rs` drew the surface with a bare
+  `ActiveChat`. The renderer now looks conversations up by the focused pane's
+  session, so those fixtures pass a map and point the pane and the Sessions
+  selection at it (`focused_chats`).
+
+- M3: `mj-cli/src/dashboard/tests.rs` never builds a `DashboardContext`. It
+  cannot: the context takes the terminal, starts the pollers, and talks to the
+  daemon. The M3 controller behaviours that the plan listed as `mj-cli` tests
+  are therefore tested where they are decided: the pane and session
+  bookkeeping in `mj-tui/src/tests.rs`, and the pump over many chats in
+  `mj-cli/src/dashboard/tests.rs`, which drives the real `pump_chats` future
+  with two warm chats built from `replacement_session_test_fixture`.
+- M3: nothing read `DashboardState::current_session_id()` before this
+  milestone; only `set_current_session` was called. Making it the focused
+  pane's session therefore changed no existing caller, and it is now the
+  lookup key for the focused chat in `mj-cli`.
+- M2: nothing in `mj-controller/src/database/tests.rs` pins the schema revision
+  as a literal; every test uses the `SCHEMA_VERSION` constant, so bumping it to
+  38 needed no fixture edits.
+- M2: `workspace_pane_sizes` is created by `baseline.sql`, not by a migration,
+  so migration 38 followed the shape of migrations 34-37 (a `CREATE TABLE IF
+  NOT EXISTS` in one `BEGIN IMMEDIATE` batch) while copying the foreign key and
+  `STRICT` conventions from the baseline table.
+- M2: adding a daemon action does require a protocol bump. The pane-size commit
+  (98ff2c14) raised `PROTOCOL_VERSION` with it, so this change raised it from
+  25 to 26 in `mj-client/src/daemon.rs`.
+
+## Decision Log
+
+
+- Decision: the stacked-split default is written `"prefix+-"` rather than
+  `"prefix+minus"`, and the documentation says both spellings parse.
+  Rationale: `minus` and `-` both parse, but `format_key_combo` prints `-`, and
+  `format_key_combo_round_trips_every_default_binding` requires every default
+  to be its own canonical spelling. Writing the canonical form keeps that
+  invariant and makes the help overlay's `ctrl+b -` the same string the
+  configuration holds.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: the four resize actions are bindable but unbound by default, and
+  the seven others take herdr's letters exactly.
+  Rationale: the plan reserved `v`, `minus`, `x`, `h`, `j`, `k`, `l` for this,
+  and all seven were still free in the merged table. A resize is a fine
+  adjustment with no herdr equivalent worth spending a letter on; `[keys]`
+  gives it one for anyone who wants it.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: `CONFIG_VERSION` is not bumped for the eleven new `[keys]` fields.
+  Rationale: the precedent the prefix plan set is that a new top-level *section*
+  bumps the version. The section already exists at version 11, and a bump would
+  make every existing configuration file fail its version check.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: a split key pressed with nothing selected returns a new
+  `DashboardAction::SplitPane { direction }`, which the controller answers by
+  splitting and leaving the new leaf empty.
+  Rationale: `open_session_in_split` is built around a session to move, and
+  `open_selected_session_into` returns `DashboardAction::None` with no
+  selection, so the key would have done nothing. One more action carries "split
+  with nothing in it" without teaching the session path about an absent
+  session. The `available` gate stays `selected_session_ready`, which is what
+  keeps the two commands out of the palette when there is no row to act on;
+  the prefix router dispatches without consulting it, so the key still works
+  from the composer and from an empty Sessions list.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: the automatic "follow the selection" step waits for the startup
+  pick, rather than the startup pick re-asserting the focus it wanted.
+  Rationale: fixing it at the pick would leave an attach started against the
+  wrong pane and a conversation opened that nobody asked for. The highlight
+  before the pick is not a choice, so nothing should act on it. Any key, mouse
+  or paste event cancels the pick, so a user who acts first is unaffected.
+  Date/Author: 2026-09-17, Opus implementing M5.
+
+- Decision: `render_combined` takes the whole warm-chat map plus the per-pane
+  in-flight attaches, decides for itself which pane draws which conversation,
+  and reports back the sessions it drew.
+  Rationale: The draw filter was in `mj-cli` because there was one chat and one
+  band. With one decision per pane the filter belongs where the panes are laid
+  out, and the read receipts then follow what a frame actually drew rather than
+  what the controller predicted it would draw.
+  Date/Author: 2026-09-17, Fable and Opus.
+
+- Decision: The in-flight attaches are passed to the renderer as a map rather
+  than made per pane on `DashboardState`.
+  Rationale: `DashboardState::opening_session` also feeds the standby composer,
+  the resume dialog, and the change detector. Making it per pane would touch
+  all of those for no gain; passing the map the controller already keeps is one
+  parameter.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: A single pane keeps the band heights the frame allocator computed;
+  only two or more panes carve each leaf themselves.
+  Rationale: The allocator spends the frame's surplus across six bands. Keeping
+  it authoritative for one pane means the unsplit surface draws exactly as it
+  did before this milestone, which is what the existing render tests assert.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: Focus and resize commands return
+  `DashboardAction::ConversationPanesChanged { focus_moved }` after mutating
+  the layout.
+  Rationale: The mutation belongs in `mj-tui`, but saving the arrangement and
+  re-reading which conversation the keyboard is in belong to the controller.
+  One action carries that obligation across without a second dispatch path.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: "Open in split right" moves the selected conversation into the new
+  pane and returns the pane it came from to the conversation it was showing
+  before the Sessions selection followed.
+  Rationale: The selection already moves a row's conversation into the focused
+  pane, so by the time the command runs the session is in the pane the user
+  wanted it moved out of. Without this the command could only ever be a focus
+  move, and the milestone's whole flow — open a session beside the one you are
+  reading — would not work. The controller remembers one previous session per
+  pane, which is all the restore needs.
+  Date/Author: 2026-09-17, Opus, after the end-to-end run.
+
+- Decision: A session is in at most one pane, enforced where a pane's session
+  is written rather than only documented.
+  Rationale: Two panes showing one conversation would draw the same transcript
+  twice and give two composers to one session. The plan already put that out of
+  scope; the rule now holds for stored arrangements and late attaches too.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: The focused pane draws last.
+  Rationale: Its conversation may open an overlay over the whole frame, and
+  that overlay belongs on top of its neighbours.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: M3 is the model and the controller; M4 is the view and the
+  commands. After M3 `DashboardState` holds the tile layout, its pane
+  sessions, and the per-workspace cache, and `mj-cli` holds one warm
+  `ActiveChat` per pane session, all pumped every loop iteration. Rendering
+  still draws only the focused pane's chat and no user command creates a
+  split.
+  Rationale: The two halves touch different files and the controller change is
+  what the rendering needs underneath it. Splitting them keeps each commit
+  revertible on its own.
+  Date/Author: 2026-09-17, user and Fable.
+
+- Decision: A late attach result is accepted when the pane that asked for it
+  still wants that session, rather than when the Sessions selection still
+  names it.
+  Rationale: With several panes the selection is no longer the only thing that
+  decides whether a result is still wanted. The chat installs into the pane
+  that asked; `visible_chat` still keeps it off screen while the selection is
+  elsewhere, so nothing is drawn under the wrong highlight.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: Switching workspaces swaps the whole arrangement in, and the warm
+  chats no pane shows any more are detached and dropped.
+  Rationale: The layout is per workspace, so the panes of the workspace being
+  left no longer exist. Without the sweep their chats would stay warm with
+  nothing able to close them, which is a leak the single-chat design did not
+  have. `DashboardContext::select_workspace` no longer clears the current
+  session by hand: the swap does it.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: Tile only the conversation region (transcript plus prompt). The Sessions, Workspaces, Targets, and Quota panes and the footer stay where they are.
+  Rationale: The user wants several conversations visible at once; the support panes already have their own sizing model (`PaneSizes`) and do not need to move.
+  Date/Author: 2026-09-17, user and Fable.
+
+- Decision: A split is created with a session in it. "Open in split" is an action on a session in the Sessions pane, not a bare "split" that then needs filling.
+  Rationale: The session is the unit the user thinks in; the pane is where it shows. Keyboard splits (M5) act on the Sessions selection for the same reason.
+  Date/Author: 2026-09-17, user.
+
+- Decision: Every chat in the layout stays warm: each is pumped every loop iteration and each visible one acknowledges reads.
+  Rationale: The user's model is that every conversation is a projection over events processed regardless of what is on screen. The data layer already works that way (sessions run and the controller ingests their events whether or not a chat is open); only the view instance was single.
+  Date/Author: 2026-09-17, user.
+
+- Decision: Keys follow herdr's tmux-style prefix, and the prefix router is built once in the `hel3` worktree (its plan is `.agents/plans/prefix-keybindings.md` there). This plan does not build a second router. M5 waits for that work to merge and then adds actions through its `key_actions!` macro.
+  Rationale: Two prefix routers would conflict on the same keys.
+  Date/Author: 2026-09-17, user.
+
+- Decision: Reserve herdr's pane letters in the prefix map: `v`, `minus`, `x`, `h`, `j`, `k`, `l`, and `shift+h/j/k/l`. The `hel3` letter map currently gives `prefix+v` to dictation, `prefix+x` to cancel-operation, and `prefix+j`/`prefix+k` to support-pane cycling. Before `hel3`'s second milestone lands, that map changes so those letters stay free. Proposed replacements for the `hel3` session to confirm: dictation `prefix+m`, cancel-operation `prefix+shift+x`, support-pane cycling keeps only `prefix+tab` / `prefix+shift+tab`. That change is made in the `hel3` worktree, not here.
+  Rationale: Users coming from herdr expect the same letters for pane operations.
+  Date/Author: 2026-09-17, user.
+
+- Decision: The layout persists per workspace in a new table, mirroring the existing per-workspace pane-size path end to end.
+  Rationale: The pane-size path already solves ordered background saves, failure notices, and a bounded flush on quit. Reusing it keeps one persistence design.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: M2 keeps the loaded layouts in `DashboardContext.workspace_layouts`
+  rather than caching them in `mj-tui`'s `DashboardState`.
+  Rationale: M1 is being written in a separate worktree and owns
+  `mj-tui/src/tile_layout.rs`. Keeping M2 out of `mj-tui` entirely avoids a
+  conflict; M4 moves the cache into `DashboardState` when it converts a
+  `ConversationLayout` into a `TileLayout`. `DashboardContext::set_workspace_layout`
+  is the seam M3 and M4 call, and carries an explicit `dead_code` allow until
+  they do.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: `mj-cli/src/dashboard/pane_sizes.rs` was renamed to
+  `workspace_settings.rs` when `PaneSizePersistence` became the generic
+  `WorkspaceSettingPersistence<T>`.
+  Rationale: The module no longer has anything to do with pane sizes in
+  particular, and the rename is a one-line change at the only use site.
+  Date/Author: 2026-09-17, Opus.
+
+- Decision: Pane ids are allocated per layout (a counter field), not from a process-wide atomic as in herdr.
+  Rationale: Layouts are saved and restored with their ids; a per-layout counter restores deterministically and needs no global state.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: A split is refused when either resulting pane would be under 40 columns or 8 rows. The dashboard shows the notice "Not enough room to split".
+  Rationale: A conversation pane narrower than that cannot show a usable prompt and transcript.
+  Date/Author: 2026-09-17, Fable.
+
+- Decision: Out of scope for this plan: zoom, mouse-drag resize of split borders, text selection in an unfocused pane (clicking it focuses it first), swapping panes, and the same session shown in two panes.
+  Rationale: Each is separable and none is needed for the core behaviour.
+  Date/Author: 2026-09-17, user and Fable.
+
+## Outcomes & Retrospective
+
+
+### M0 through M4 (2026-09-17)
+
+What landed. The terminal dashboard's conversation area is now a tiled set of
+panes. A session row's `⋯` menu opens a session beside or under the
+conversation you are in; every pane's transcript advances whether or not it is
+the one with the keyboard; a click moves the keyboard into a pane; and `F2`
+carries Close pane, Focus pane in four directions, and Resize pane in four
+directions. The arrangement, including which pane has the focus and what each
+one shows, is saved per workspace and restored on the next start.
+
+How it was split. M1 was the layout tree alone, with no caller. M2 was the
+stored type, the schema, the daemon action, and the save coordinator, still
+with no caller. M3 replaced the single conversation with a map of warm ones and
+moved the focused session into the layout. M4 was the view, the commands, and
+the corrections the first end-to-end run demanded.
+Each milestone was one revertible commit, and each was fully tested before the
+next started. That ordering held up: no milestone had to reach back into an
+earlier one.
+
+The end-to-end run earned its place. Every unit test passed before it, and it
+still found three defects — all of them where the single Sessions selection
+meets several panes. The lesson for M5 is that the selection, not the layout,
+is the hard part of this feature.
+
+What went well. Reusing the pane-size persistence path end to end meant M2 had
+no design left to do, only a generalization (`WorkspaceSettingPersistence<T>`).
+`ActiveChat::draw_in` already took arbitrary rectangles, so drawing several
+conversations needed no change in `mj-chat` at all — the single-conversation
+assumption lived entirely in the controller and the combined renderer.
+`ActiveChat::pump` being cancel-safe made `select_all` over every warm chat
+correct without a scheduler.
+
+What was harder than expected. The band height allocation and the tiling looked
+circular: the panes need the band, and the band's height needs the panes'
+composer heights. It is not circular, because pane widths do not depend on the
+band's height. Finding that took longer than writing it.
+
+What was left at that point. M5 (prefix keybindings) was still blocked on the
+`hel3` prefix-router work merging into this branch.
+
+### M5 and the plan as a whole (2026-09-17)
+
+What landed in M5. The eleven pane commands have keys. `prefix+v` splits
+beside, `prefix+-` splits below, `prefix+x` closes, and `prefix+h`/`j`/`k`/`l`
+move the keyboard between panes — herdr's letters, all of which the prefix plan
+had reserved. The four resize commands are bindable and unbound. The two split
+keys act on the Sessions selection from any focus, and split into an empty pane
+when nothing is selected. The saved focus is now honoured after a restart, with
+the Sessions highlight on that pane's session. `docs/src/content/docs/
+terminal-surface.mdx` and the `[keys]` reference in `configuration.md` describe
+all of it, and the command-palette screenshot was regenerated because it now
+prints the new keys.
+
+The plan as a whole. Six milestones, six commits, each revertible on its own and
+each fully validated before the next started. Nothing had to reach back into an
+earlier milestone, which is the strongest evidence that the layering — tree,
+store, model, view, keys — was cut in the right places.
+
+What the whole plan taught. The hard part of this feature was never the tiling;
+it was the single Sessions selection meeting several panes. M4's end-to-end run
+found three defects there, and M5's restart bug was a fourth of exactly the same
+shape: a piece of code that was right when "the selection" and "the conversation
+with the keyboard" were the same thing. Two of the four were invisible to unit
+tests because they needed a controller loop and a restart. Running the thing was
+not a formality in this plan; it was where half the defects came from.
+
+Waiting for the prefix router was right. Two routers fighting over `prefix+v`
+would have cost more than the wait, and when the merge came, M5 was an afternoon:
+eleven rows in one macro table, eleven `action` fields, one new action for the
+empty split, and the documentation.
+
+What is left. Zoom, drag-resizing a border, selecting text in an unfocused pane,
+swapping panes, and showing one session in two panes all remain deliberately out
+of scope.
+
+## Context and Orientation
+
+
+This repository is a Cargo workspace. The crates that matter here:
+
+- `mj-core` holds data types shared by every other crate, including the workspace model in `mj-core/src/workspace.rs`. It does not depend on the terminal UI library `ratatui`.
+- `mj-tui` is the terminal user interface. `mj-tui/src/lib.rs` defines `DashboardState`, the model behind the dashboard screen. `mj-tui/src/combined.rs` draws the whole screen in `render_combined`. `mj-tui/src/actions.rs` lists every user command as a `CommandId` with a `CommandSpec` (title, scope, help text); the F2 command palette, the F1 help screen, and the footer are all generated from that table. `mj-tui/src/palette.rs` builds the palettes, including the per-session `⋯` menu in `begin_session_palette`.
+- `mj-chat` holds `ActiveChat`, the live view of one session's conversation: its transcript, prompt composer, and the background feeds that keep it current. `ActiveChat::draw_in(ChatRegions { transcript, prompt, footer, overlay })` in `mj-chat/src/chat/active/surfaces.rs` draws into arbitrary rectangles, which is what makes several chats on one screen possible without changing `mj-chat` much. `ActiveChat::pump` in `mj-chat/src/chat/active/io.rs` awaits the chat's feeds and is cancel-safe, meaning it can be dropped mid-await and resumed later without losing anything.
+- `mj-cli` is the terminal program. `mj-cli/src/dashboard.rs` owns `DashboardContext`, the controller that runs the event loop, holds the `DashboardState` from `mj-tui`, and today holds one `active_chat: Option<ActiveChat>`. Its submodules under `mj-cli/src/dashboard/` handle drawing (`surface.rs`), attaching to a session (`attachment.rs`), chat lifecycle tasks (`chat_tasks.rs`), input (`io.rs`, `actions.rs`), and the pane-size save coordinator (`pane_sizes.rs`).
+- `mj-controller` owns the SQLite database (`mj-controller/src/database.rs` and `mj-controller/src/database/`) and the daemon, the background process that owns the database writer. The daemon's request types are in `mj-controller/src/daemon/actions.rs`; the client side is `mj-client/src/daemon.rs`.
+
+Terms used below. A "pane" is one rectangle in the conversation area that shows one session's chat or is empty. A "leaf" is the same thing seen from the layout tree. A "split" divides one pane into two, either side by side (a vertical divider; herdr calls this `prefix+v`) or stacked (a horizontal divider; `prefix+minus`). The "focused pane" is the one the user is typing into. A "warm chat" is an `ActiveChat` that exists and is pumped, whether or not it is drawn. "Binary space partition" (BSP) is the tree shape used for the layout: every inner node is a split with a first and a second child and a ratio giving the first child's share; every leaf is a pane.
+
+The sibling repository `../herdr` (Apache-2.0) has the same tiling in `../herdr/src/layout.rs`: `PaneId`, `Node`, `TileLayout`, `find_in_direction`, `split_rect`, `SplitBorder`, `NavDirection`, and a set of unit tests. mj is GPL-3.0, so the port is written fresh in mj's style rather than pasted.
+
+What is single in mj today, and where:
+
+- `DashboardContext.active_chat: Option<ActiveChat>` at `mj-cli/src/dashboard.rs:234`, one `SessionAttachment` (`mj-cli/src/dashboard/attachment.rs`), one `opening_chat_session`, and the draw filter in `mj-cli/src/dashboard/surface.rs` that hides the chat unless it matches the Sessions selection.
+- The event loop's `select!` at `mj-cli/src/dashboard.rs:590` has one arm `ActiveChat::pump(context.active_chat.as_mut())`, followed by `acknowledge_visible_chat`.
+- `render_combined` in `mj-tui/src/combined.rs` computes one transcript band and one prompt band (around line 566) and stores them in `DashboardState.chat_transcript_area` and `chat_prompt_area`.
+- The text-selection engine registers one `SurfaceId::Transcript`.
+
+The existing pane-size persistence path, which M2 mirrors:
+
+- Type: `PaneSizes` in `mj-core/src/workspace.rs` with `validate()`.
+- Schema: table `workspace_pane_sizes` created by an earlier migration in `mj-controller/src/database/schema.rs`; the current `SCHEMA_VERSION` is 37 in `mj-controller/src/database.rs:34`; the compatibility floor (the oldest schema an older build may still read and write) is 32.
+- Database functions: `load_workspace_pane_sizes(_from)` and `save_workspace_pane_sizes(_to)` in `mj-controller/src/database/workspaces.rs`, tested in `mj-controller/src/database/tests.rs` (`workspace_pane_sizes_*`).
+- Daemon: `DaemonAction::SaveWorkspacePaneSizes` in `mj-controller/src/daemon/actions.rs:150` and `mj-client/src/daemon.rs:380`, with the client method near `mj-client/src/daemon.rs:1078`.
+- Coordinator: `PaneSizePersistence` in `mj-cli/src/dashboard/pane_sizes.rs`, which keeps a `tokio::sync::watch` channel of the latest requested values, a supervised save task, failure notices, and a five-second bounded flush in `finish`. Startup loads pane sizes around `mj-cli/src/dashboard.rs:929`, and updates are sent around lines 691 and 766.
+
+## Plan of Work
+
+
+### M1: the layout tree
+
+
+Create `mj-tui/src/tile_layout.rs` and declare it in `mj-tui/src/lib.rs`. Port from `../herdr/src/layout.rs`: `PaneId(u32)` with `raw()` and `from_raw()`; `Node::{Pane(PaneId), Split { direction: ratatui::layout::Direction, ratio: f32, first: Box<Node>, second: Box<Node> }}`; `TileLayout` with `root`, `focus`, `prev_focus`, and a new `next_id: u32` field; `PaneInfo { id, rect, is_focused }` (herdr's `inner_rect`, `scrollbar_rect`, and `borders` fields are for its own chrome and are dropped); `SplitBorder`; `NavDirection`; the free functions `find_in_direction` and `split_rect`; and the tree helpers.
+
+Two behavioural changes from herdr. First, `PaneId` allocation is per layout: `TileLayout::new()` starts `next_id` at 2 after handing out id 1, `split_pane` takes the next id and increments, and `from_saved(root, focus)` sets `next_id` to one more than the largest id in the tree. Second, minimum leaf size: `TileLayout::can_split(&self, target: PaneId, direction: Direction, area: Rect) -> bool` returns false when the target is missing or when either half of the target's current rect (computed with `split_rect` at ratio 0.5) would be under 40 columns or 8 rows. `split_pane(target, direction, ratio, area)` takes the area and returns `None` when `can_split` is false. Herdr's `insert_pane_near` and `swap_panes` are not ported (swapping is out of scope).
+
+Keep the public surface: `new() -> (Self, PaneId)`, `focused()`, `pane_count()`, `panes(area) -> Vec<PaneInfo>`, `splits(area) -> Vec<SplitBorder>`, `split_pane`, `can_split`, `close_focused() -> bool`, `close_pane(id) -> bool`, `focus_pane(id)`, `set_ratio_at(path, ratio) -> bool`, `resize_focused(nav, delta, area)`, `resize_pane(id, nav, delta, area) -> bool`, `pane_ids()`, `root()`, `from_saved(root, focus)`.
+
+Tests: port herdr's tests that apply (split ratio, resize behaviours, `find_in_direction` tie-breaks, close-focus history), and add `split_is_refused_when_a_leaf_would_fall_under_the_minimum` and `restored_layouts_allocate_ids_above_the_saved_ones`.
+
+No behaviour change is visible in this milestone; the module is not yet used.
+
+### M2: persisted per-workspace layout
+
+
+In `mj-core/src/workspace.rs` add:
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SplitAxis { Horizontal, Vertical }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum LayoutNode {
+        Pane { id: u32 },
+        Split { axis: SplitAxis, ratio: f32, first: Box<LayoutNode>, second: Box<LayoutNode> },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ConversationLayout {
+        pub root: LayoutNode,
+        pub focus: u32,
+        pub sessions: BTreeMap<u32, String>,
+    }
+
+`SplitAxis::Horizontal` means the children sit side by side (a vertical divider), matching ratatui's `Direction::Horizontal`. `ConversationLayout::default()` is one pane with id 1, focus 1, no sessions. `validate()` rejects duplicate pane ids, a focus not in the tree, a ratio outside `0.1..=0.9` or not finite, and a sessions key not in the tree. `ConversationLayout` is not `Eq` because of `f32`; the coordinator in `mj-cli` compares with `PartialEq`.
+
+In `mj-controller/src/database/schema.rs` add migration 38, classified compatible: it adds table `workspace_layouts(workspace_id TEXT PRIMARY KEY REFERENCES workspaces(workspace_id) ON DELETE CASCADE, layout TEXT NOT NULL) STRICT`. Older readers never select from it; older writers never touch it; deleting a workspace cascades. The compatibility floor stays at 32. Bump `SCHEMA_VERSION` to 38 in `mj-controller/src/database.rs`. Follow the comment style of migration 37 and update any schema fixture or ledger test that pins the current version (search `database/tests.rs` for `37`).
+
+In `mj-controller/src/database/workspaces.rs` add `load_workspace_layout(workspace_id)`, `load_workspace_layout_from(path, workspace_id)`, `save_workspace_layout(workspace_id, layout)`, and `save_workspace_layout_to(path, workspace_id, layout)` beside the pane-size functions, storing the layout as JSON text. A missing row returns `ConversationLayout::default()`; an unknown workspace is an error, as for pane sizes. Loading validates before returning. Tests in `mj-controller/src/database/tests.rs` mirror the `workspace_pane_sizes_*` tests: default for a fresh workspace, round trip, independence between workspaces, cascade on delete, unknown workspace rejected, invalid layout rejected on save.
+
+In `mj-controller/src/daemon/actions.rs` add `DaemonAction::SaveWorkspaceLayout { workspace_id, layout }` handled beside `SaveWorkspacePaneSizes`, and in `mj-client/src/daemon.rs` add the matching enum variant and `save_workspace_layout` method. If the daemon protocol has a version number that changes when actions are added, bump it the way the pane-size change did (check `git log -S SaveWorkspacePaneSizes`).
+
+In `mj-cli/src/dashboard/pane_sizes.rs` generalize `PaneSizePersistence` into `WorkspaceSettingPersistence<T: Clone + PartialEq + Default + Send + Sync + 'static>` with the same watch-channel, ordered-save, failure-notice, and bounded-flush behaviour, parameterized by the save closure and a short setting name used in notices ("workspace pane sizes", "workspace layout"). Keep the existing tests passing against the pane-size instantiation and add one test that the layout instantiation saves a changed layout. Instantiate it twice in `DashboardContext`: `pane_size_persistence` and `layout_persistence`. Load layouts at startup next to pane sizes (around `mj-cli/src/dashboard.rs:929`) into a `BTreeMap<String, ConversationLayout>` and hand it to `DashboardState` through a new `cache_workspace_layout(id, layout)`; send updates next to the pane-size updates (around lines 691 and 766) whenever `dashboard.workspace_layout_modified(id)` reports a change. In M2 `DashboardState` only stores and returns the layout per workspace (`conversation_layout()` and `workspace_layout_modified()`); M4 makes it drive rendering.
+
+### M3: many warm chats in the controller
+
+
+In `mj-cli/src/dashboard.rs` replace `active_chat: Option<ActiveChat>` with `chats: BTreeMap<String, ActiveChat>` keyed by session id. Add `focused_chat()` and `focused_chat_mut()` that look up the focused pane's session (from `DashboardState::current_session_id()`, which M4 redefines as the focused pane's session) in `chats`. Most of the roughly fifty `active_chat` call sites meant "the chat the user is typing into" and become the accessor. The per-session ones (`mark_active_chat_retiring`, `drop_warm_chat_for`, `apply_runtime_review_to_active_chat`, `refresh_chat_context`) index or iterate `chats` by session id.
+
+Pump: replace the single `ActiveChat::pump` arm in the `select!` with one future built from `futures::future::select_all` over `chats.values_mut().map(|chat| Box::pin(ActiveChat::pump(Some(chat))))`, falling back to `std::future::pending()` when the map is empty. `pump` is cancel-safe, so dropping the other futures when one completes loses nothing. After the arm fires, call `acknowledge_visible_chats`.
+
+Attach: `SessionAttachment` and `opening_chat_session` become per pane, `BTreeMap<PaneId, SessionAttachment>` and `BTreeMap<PaneId, String>`. `open_chat_session(session_id)` opens into the focused pane. An attach result installs the chat into `chats` and records which pane asked; if that pane's session changed while the attach was in flight, the late result is dropped, as today. Until M4 lands, there is one pane whose id comes from `DashboardState::conversation_layout().focus`.
+
+Detach and drafts: `record_detach` in `mj-cli/src/dashboard/chat_tasks.rs` takes the session id explicitly. It runs when a pane's session is replaced, when a pane closes, and for every chat on quit.
+
+Read receipts: `acknowledge_visible_chat` becomes `acknowledge_visible_chats`, over every pane that drew a chat this frame (M4 records which; in M3 that is the single focused pane).
+
+Selection: only the focused pane registers `SurfaceId::Transcript`, `ElicitationMessage`, and `ReviewerTranscript`.
+
+Tests in `mj-cli/src/dashboard/tests.rs`: two sessions opened in two panes both receive view updates; replacing a pane's session records the outgoing draft; closing a pane retires only its chat; quitting records every chat's detach. Because M3 lands before M4's rendering, these tests drive the layout through `DashboardState` methods that M3 adds for the purpose (`split_focused_pane_with_session`, `close_focused_pane`) and that M4 wires to commands.
+
+### M4: rendering and pane commands
+
+
+In `mj-tui/src/lib.rs`, `DashboardState` gains `conversation_layout: TileLayout` and `pane_sessions: BTreeMap<PaneId, String>` (an empty pane has no key), converted from and to `mj_core::workspace::ConversationLayout` in `cache_workspace_layout` and `conversation_layout()`. `current_session_id` becomes the focused pane's session; `set_current_session` updates the focused pane's entry.
+
+In `render_combined` (`mj-tui/src/combined.rs`), keep the upper band's height allocation, using as `desired_prompt` the maximum over panes. Then `layout.panes(upper_area)` gives one rect per leaf. Each leaf splits into its own transcript and prompt using that chat's `desired_prompt_height(leaf.width)`, and draws through the same three-way choice the band uses today (launch standby, transition surface, chat, or the empty-pane advice) using that pane's session. The focused pane gets `footer`, `overlay: area`, and `prompt_focused`; other panes get `prompt_focused = false` and no footer. Record `conversation_pane_areas: Vec<(PaneId, Rect, Rect)>` in place of `chat_transcript_area` and `chat_prompt_area`; `chat_region_contains` returns the pane hit, and a click focuses that pane. Adjacent chat panels already draw their own borders, so no divider is drawn. `render_combined` receives the chats as `&mut BTreeMap<String, ActiveChat>` (or an equivalent lookup) instead of one `Option<&mut ActiveChat>`.
+
+Session and pane linkage: focusing a pane selects its session row in Sessions. `OpenSession` (Enter) opens into the focused pane, replacing what was there; if the session is already open in another pane, focus moves there instead of duplicating.
+
+New `CommandId`s in `mj-tui/src/actions.rs`, each with a `CommandSpec` so the F2 palette, F1 help, and footer pick them up:
+
+- `OpenSessionSplitRight` and `OpenSessionSplitBelow` (`Scope::Session`, so they appear in the session row's `⋯` palette via `begin_session_palette`). They split the focused pane, put the selected session in the new leaf, and focus it. When `can_split` is false they set the notice "Not enough room to split" and change nothing.
+- `ClosePane` (a new `Scope::Pane`): records detach, drops the chat, removes the leaf. Closing the last pane empties it rather than refusing.
+- `FocusPaneLeft`, `FocusPaneDown`, `FocusPaneUp`, `FocusPaneRight` via `find_in_direction`; `ResizePaneLeft`, `ResizePaneDown`, `ResizePaneUp`, `ResizePaneRight` via `resize_focused` with delta 0.05.
+
+No keys are bound in this milestone; the commands are reachable from the palettes. Every layout mutation marks the workspace layout modified so M2's coordinator saves it.
+
+Tests in `mj-tui/src/render/tests.rs` and `mj-tui/src/tests.rs`: two panes draw two `Conversation` panels in the expected rects; the focused pane alone shows the focused border and footer; a split below the minimum is refused with the notice; Enter on a session already open elsewhere moves focus instead of duplicating; the layout round-trips through `ConversationLayout`.
+
+### M5: prefix keybindings
+
+
+Blocked on the `hel3` prefix-keybindings second milestone landing in this branch. Then add to the `key_actions!` table in `mj-core/src/config/keys.rs`, with herdr's letters:
+
+    SplitVertical / split_vertical = "prefix+v"        (side by side)
+    SplitHorizontal / split_horizontal = "prefix+minus" (stacked)
+    ClosePane / close_pane = "prefix+x"
+    FocusPaneLeft / focus_pane_left = "prefix+h"
+    FocusPaneDown / focus_pane_down = "prefix+j"
+    FocusPaneUp / focus_pane_up = "prefix+k"
+    FocusPaneRight / focus_pane_right = "prefix+l"
+    ResizePane{Left,Down,Up,Right} / resize_pane_* = unbound by default
+
+`SplitVertical` and `SplitHorizontal` from the keyboard act on the Sessions selection: they split the focused pane and open the selected session in the new leaf. With nothing selected the new leaf is empty. Wire each `CommandSpec.action`, extend the test `every_key_action_maps_to_exactly_one_command`, and update `docs/src/content/docs/terminal-surface.mdx` and the config reference.
+
+## Concrete Steps
+
+
+Work in `/home/jonathan/Projects/hel4`. After each milestone's edits, run on the dev profile and outside the restricted sandbox:
+
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
+    cargo test
+
+Commit each milestone on the current branch with only the files it changed.
+
+For M2, also run the migration and workspace-layout tests with an isolated store, which the tests in `mj-controller/src/database/tests.rs` do by setting `MJ_CONFIG_DIR` and `MJ_DATA_DIR` to temporary directories.
+
+## Validation and Acceptance
+
+
+After M1: `cargo test -p mj-tui tile_layout` passes, including `split_is_refused_when_a_leaf_would_fall_under_the_minimum`.
+
+After M2: `cargo test -p mj-controller workspace_layout` passes; a fresh store reports schema 38 with floor 32; saving a two-pane layout for a workspace and loading it returns the same tree; deleting the workspace removes the row.
+
+After M3: the `mj-cli` dashboard tests listed under M3 pass; the single-pane behaviour of `mj` is unchanged when run by hand.
+
+After M4, end to end: run `mj` against the fake-harness lab (`tests/e2e/prepare-luna-lab.py`) with two sessions. From the Sessions row `⋯` menu choose "Open in split right"; both transcripts draw and both advance when their agents reply; F2 "Close pane" removes one; restart `mj` and the two-pane layout comes back with the same sessions.
+
+After M5: `ctrl+b v`, `ctrl+b -`, `ctrl+b x`, and `ctrl+b h j k l` behave as in herdr, and the F1 help lists them.
+
+## Idempotence and Recovery
+
+
+Every milestone is additive until M3, which replaces the single-chat field; M3 and M4 are each one commit that can be reverted together. Migration 38 only creates a table, so an older build opened against the migrated store keeps working. Re-running the tests is safe at any point.
+
+## Artifacts and Notes
+
+
+M5 landed in: `mj-core/src/config/keys.rs` (eleven `key_actions!` rows),
+`mj-tui/src/keybinds.rs` (`command_for_action`), `mj-tui/src/actions.rs` (the
+eleven `CommandSpec.action` fields and the split dispatch),
+`mj-tui/src/dashboard_conversation.rs` (`split_command`, and the restored
+highlight in `restore_conversation_layout`), `mj-tui/src/lib.rs`
+(`DashboardAction::SplitPane`), `mj-cli/src/dashboard.rs`
+(`split_empty_pane`, `StartupSession::pick_pending`),
+`mj-cli/src/dashboard/actions.rs`, `mj-cli/src/dashboard/session_state.rs`
+(the follow waits for the startup pick), the documentation in
+`docs/src/content/docs/terminal-surface.mdx` and
+`docs/src/content/docs/configuration.md`, and the regenerated
+`docs/src/assets/screenshots/{command-palette,setup}.svg`.
+
+M4 landed in: `mj-tui/src/dashboard_standby.rs` (`set_pane_session`),
+`mj-cli/src/dashboard/io.rs` (an attach lands in the pane that asked),
+`mj-cli/src/dashboard/session_state.rs` (startup opens every restored pane),
+`mj-tui/src/combined.rs` (the per-pane draw, the drawn-session
+report, `leaf_bands`, `focused_chat_on_screen`), `mj-tui/src/lib.rs`
+(`conversation_pane_areas`, the three new `DashboardAction` variants),
+`mj-tui/src/dashboard_input.rs` (`chat_region_contains` now reports the pane,
+and `open_selected_session_into`), `mj-tui/src/dashboard_conversation.rs` (the
+focus and resize command helpers), `mj-tui/src/actions.rs` (eleven commands),
+`mj-tui/src/render.rs`, `mj-tui/src/go.rs`, `mj-tui/src/help.rs`, and in
+`mj-cli` `dashboard/surface.rs`, `dashboard/actions.rs`, and `dashboard.rs`
+(click-to-focus). The user-facing description is in
+`docs/src/content/docs/terminal-surface.mdx` under "Conversation panes".
+
+M3 landed in: `mj-tui/src/tile_layout.rs` (conversion to and from
+`ConversationLayout`), `mj-tui/src/dashboard_conversation.rs` (the new pane
+methods on `DashboardState`), `mj-tui/src/lib.rs`,
+`mj-tui/src/dashboard_standby.rs` (a derived `current_session_id`),
+`mj-tui/src/dashboard_workspaces.rs` (the per-workspace cache),
+`mj-tui/src/combined.rs` (the recorded conversation band), and in `mj-cli`
+the `chats` map, the per-pane attachments, and the `select_all` pump across
+`dashboard.rs`, `dashboard/{drafts,drains,io,session_state,surface,chat_tasks,actions}.rs`.
+
+M2 landed in: `mj-core/src/workspace.rs` (`SplitAxis`, `LayoutNode`,
+`ConversationLayout`), `mj-controller/src/database/schema.rs` (migration 38,
+compatible), `mj-controller/src/database/workspaces.rs` (the four layout
+functions), `mj-controller/src/daemon/actions.rs` and `mj-client/src/daemon.rs`
+(`SaveWorkspaceLayout`, protocol 26), `mj-cli/src/dashboard/workspace_settings.rs`
+(the generic coordinator, renamed from `pane_sizes.rs`), and the wiring in
+`mj-cli/src/dashboard.rs`, `dashboard/drains.rs`, `dashboard/io.rs`, and
+`dashboard/io/spawn.rs`.
+
+## Interfaces and Dependencies
+
+
+In `mj-tui/src/tile_layout.rs` (M1):
+
+    pub struct PaneId(u32);
+    pub enum Node { Pane(PaneId), Split { direction: Direction, ratio: f32, first: Box<Node>, second: Box<Node> } }
+    pub struct TileLayout { /* root, focus, prev_focus, next_id */ }
+    impl TileLayout {
+        pub fn new() -> (Self, PaneId);
+        pub fn can_split(&self, target: PaneId, direction: Direction, area: Rect) -> bool;
+        pub fn split_pane(&mut self, target: PaneId, direction: Direction, ratio: f32, area: Rect) -> Option<PaneId>;
+        pub fn panes(&self, area: Rect) -> Vec<PaneInfo>;
+        pub fn from_saved(root: Node, focus: PaneId) -> Self;
+        // plus focused, pane_count, splits, close_focused, close_pane, focus_pane,
+        // set_ratio_at, resize_focused, resize_pane, pane_ids, root
+    }
+    pub fn find_in_direction(focused: &PaneInfo, direction: NavDirection, panes: &[PaneInfo]) -> Option<PaneId>;
+
+In `mj-core/src/workspace.rs` (M2): `SplitAxis`, `LayoutNode`, `ConversationLayout` with `Default` and `validate(&self) -> Result<()>`.
+
+In `mj-controller/src/database/workspaces.rs` (M2): `load_workspace_layout`, `load_workspace_layout_from`, `save_workspace_layout`, `save_workspace_layout_to`.
+
+In `mj-client/src/daemon.rs` (M2): `DaemonAction::SaveWorkspaceLayout` and `Daemon::save_workspace_layout(&self, workspace_id: String, layout: ConversationLayout) -> Result<()>`.
+
+In `mj-cli/src/dashboard/pane_sizes.rs` (M2): `WorkspaceSettingPersistence<T>` with `start`, `remember`, `forget`, `update`, `is_running`, `wait`, `finish`.
+
+In `mj-cli/src/dashboard.rs` (M3): `chats: BTreeMap<String, ActiveChat>`, `focused_chat()`, `focused_chat_mut()`, `acknowledge_visible_chats()`.
+
+In `mj-tui/src/actions.rs` (M4): `CommandId::{OpenSessionSplitRight, OpenSessionSplitBelow, ClosePane, FocusPaneLeft, FocusPaneDown, FocusPaneUp, FocusPaneRight, ResizePaneLeft, ResizePaneDown, ResizePaneUp, ResizePaneRight}` and `Scope::Pane`.

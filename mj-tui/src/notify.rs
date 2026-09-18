@@ -42,7 +42,7 @@ impl DashboardState {
     pub fn notification_events(&mut self, now_ms: u64) -> Vec<Notification> {
         let delay_ms = self.config.notify.delay_seconds.saturating_mul(1000);
         let enabled = self.config.notify.mode != NotifyMode::Off;
-        let visible = self.current_session_id.clone();
+        let visible = self.current_session_id().map(str::to_owned);
         let mut episodes = std::mem::take(&mut self.attention_episodes);
         let mut due = Vec::new();
         let ids = self

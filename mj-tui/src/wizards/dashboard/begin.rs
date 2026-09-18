@@ -137,19 +137,36 @@ impl DashboardState {
         self.resolve_all_aws_resource_options_action()
     }
 
-    /// Open the resume wizard for an archived SessionWiki session. There is no
-    /// record to read a profile or target from, so the wizard opens on the
-    /// first of each and the person chooses.
+    /// Open the resume wizard for an archived SessionWiki session.
+    ///
+    /// The Mjolnir record is gone, but the index carries the profile and target
+    /// the session ran under, so the wizard opens on them. An id the
+    /// configuration no longer has leaves that step on its first choice, which
+    /// is what a restore with nothing to go on has always done.
     pub(crate) fn begin_archive_restore(
         &mut self,
         wiki_id: String,
         title: String,
+        profile_id: Option<&str>,
+        target_id: Option<&str>,
     ) -> DashboardAction {
         if self.config.enabled_profiles().next().is_none() || self.config.targets.is_empty() {
             self.notices
                 .set("Restoring needs a profile and a target template.");
             return DashboardAction::None;
         }
+        // The same lists the wizard indexes into: `resume_wizard_profiles` for
+        // an archive source, and every configured target.
+        let profile = profile_id
+            .and_then(|wanted| {
+                self.config
+                    .enabled_profiles()
+                    .position(|(id, _)| id == wanted)
+            })
+            .unwrap_or(0);
+        let target = target_id
+            .and_then(|wanted| self.config.targets.keys().position(|id| id == wanted))
+            .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
             session_id: wiki_id,
             source: ResumeSource::Archive,
@@ -162,8 +179,8 @@ impl DashboardState {
             preparation_error: None,
             step: WizardStep::Profile,
 
-            profile: 0,
-            target: 0,
+            profile,
+            target,
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,

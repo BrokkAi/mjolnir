@@ -1331,6 +1331,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         review_capture: false,
         session_id: SESSION.into(),
         harness: HarnessKind::Codex,
+        harness_home: spec.harness_home.clone(),
         authentication_marker: None,
         bridge_command: "codex-acp".into(),
         bridge_args: Vec::new(),

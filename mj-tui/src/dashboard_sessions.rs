@@ -615,6 +615,7 @@ impl DashboardState {
                     capacity_index: 0,
                     quota_index: 0,
                     pane_sizes: PaneSizes::default(),
+                    conversation_layout: mj_core::workspace::ConversationLayout::default(),
                     collapsed_project_keys: BTreeSet::new(),
                     focus: Focus::Prompt,
                 });

@@ -425,7 +425,15 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
         terminal
-            .draw(|frame| crate::render_combined(frame, &mut dashboard, None, false))
+            .draw(|frame| {
+                crate::render_combined(
+                    frame,
+                    &mut dashboard,
+                    &mut std::collections::BTreeMap::new(),
+                    &std::collections::BTreeMap::new(),
+                    false,
+                );
+            })
             .unwrap();
         let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Source: /projects/current"));

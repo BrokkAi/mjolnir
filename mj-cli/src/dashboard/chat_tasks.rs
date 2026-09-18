@@ -92,14 +92,11 @@ impl DashboardContext {
                 self.dashboard.cycle_focus(reverse);
             }
             mj_chat::chat::ChatEventOutcome::OpenSubagents => {
-                let Some(parent_id) = self
-                    .active_chat
-                    .as_ref()
-                    .map(|chat| chat.session_id().to_owned())
+                let Some(parent_id) = self.focused_chat().map(|chat| chat.session_id().to_owned())
                 else {
                     return;
                 };
-                self.capture_active_composer_draft();
+                self.capture_composer_draft(&parent_id);
                 self.dashboard.open_subagent_workspace(parent_id);
                 if let Some(child_id) = self.dashboard.selected_session_id().map(str::to_owned) {
                     self.open_chat_session(&child_id);
@@ -111,20 +108,17 @@ impl DashboardContext {
         }
     }
 
-    /// Persists how far the warm chat has been read and the draft it holds.
+    /// Persists how far one warm chat has been read and the draft it holds.
     pub(crate) fn record_detach(
         &mut self,
+        session_id: &str,
         last_seen_event_ordinal: u64,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        self.capture_active_composer_draft();
-        let session_id = self
-            .active_chat
-            .as_ref()
-            .map(mj_chat::chat::ActiveChat::session_id)?
-            .to_owned();
+        self.capture_composer_draft(session_id);
+        let session_id = session_id.to_owned();
         let draft = self.composer_drafts.get(&session_id)?.clone();
         let last_seen_event_ordinal = detach_read_frontier(
-            self.visible_chat().is_some(),
+            self.chat_was_on_screen(&session_id),
             last_seen_event_ordinal,
             self.controller
                 .state
@@ -146,13 +140,24 @@ impl DashboardContext {
         )
     }
 
-    /// Capture the currently visible chat's composer while retaining the
-    /// first shared value it inherited. The text remains process-local until
-    /// an explicit detach persistence task archives it.
-    pub(crate) fn capture_active_composer_draft(&mut self) {
+    /// Whether a conversation was on screen, which decides whether its read
+    /// frontier may move forward when it detaches.
+    fn chat_was_on_screen(&mut self, session_id: &str) -> bool {
+        self.drawn_chat_sessions
+            .iter()
+            .any(|drawn| drawn == session_id)
+            || self
+                .visible_chat()
+                .is_some_and(|chat| chat.session_id() == session_id)
+    }
+
+    /// Capture one warm chat's composer while retaining the first shared
+    /// value it inherited. The text remains process-local until an explicit
+    /// detach persistence task archives it.
+    pub(crate) fn capture_composer_draft(&mut self, session_id: &str) {
         let Some((session_id, text)) = self
-            .active_chat
-            .as_ref()
+            .chats
+            .get(session_id)
             .map(|chat| (chat.session_id().to_owned(), chat.draft()))
         else {
             return;

@@ -166,7 +166,15 @@ fn an_unchanged_clock_tick_does_not_redraw() {
     let mut dashboard = populated_dashboard();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
-        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .draw(|frame| {
+            render_combined(
+                frame,
+                &mut dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
+        })
         .expect("draw the combined surface");
     dashboard.acknowledge_render();
     let drawn = terminal.backend().buffer().clone();
@@ -177,7 +185,15 @@ fn an_unchanged_clock_tick_does_not_redraw() {
 
     // And the frame it declines would have been the same one.
     terminal
-        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .draw(|frame| {
+            render_combined(
+                frame,
+                &mut dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
+        })
         .expect("draw the combined surface");
     assert_eq!(terminal.backend().buffer(), &drawn);
 }
@@ -190,7 +206,15 @@ fn a_feed_update_redraws_without_a_dirty_mark() {
     let mut dashboard = populated_dashboard();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
-        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .draw(|frame| {
+            render_combined(
+                frame,
+                &mut dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
+        })
         .expect("draw the combined surface");
     dashboard.acknowledge_render();
     let before = terminal.backend().buffer().clone();
@@ -211,7 +235,15 @@ fn a_feed_update_redraws_without_a_dirty_mark() {
         refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
     });
     terminal
-        .draw(|frame| render_combined(frame, &mut dashboard, None, false))
+        .draw(|frame| {
+            render_combined(
+                frame,
+                &mut dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
+        })
         .expect("draw the combined surface");
     assert_ne!(
         terminal.backend().buffer(),
@@ -249,6 +281,15 @@ async fn a_remote_stop_marks_the_open_chat_retiring_before_its_feed_closes() {
     assert!(!launched.session_retiring());
 }
 
+/// One conversation in the focused pane, with its row selected: what the
+/// renderer needs before it draws a conversation at all.
+fn focused_chats(dashboard: &mut DashboardState, chat: ActiveChat) -> BTreeMap<String, ActiveChat> {
+    let session_id = chat.session_id().to_owned();
+    dashboard.set_current_session(Some(&session_id));
+    dashboard.select_active_session(&session_id);
+    BTreeMap::from([(session_id, chat)])
+}
+
 /// Draws the combined surface exactly as the loop does, so the highlight
 /// and the extraction see the frame it just produced. No conversation is
 /// attached, which stands for a workspace whose sessions are all stopped.
@@ -260,7 +301,13 @@ fn draw_with_selection(
     let mut text = None;
     terminal
         .draw(|frame| {
-            render_combined(frame, dashboard, None, false);
+            render_combined(
+                frame,
+                dashboard,
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+            );
             text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })
         .expect("draw the combined surface");
@@ -541,7 +588,7 @@ async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
     dashboard.focus_sessions();
     let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
     let notices = Notices::default();
-    let mut chat = ActiveChat::open(
+    let chat = ActiveChat::open(
         fixture.stopped,
         "bundle-1",
         None,
@@ -551,9 +598,12 @@ async fn prompt_press_focuses_before_release_and_preserves_drag_selection() {
         notices.clone(),
     );
     notices.clear();
+    let mut chats = focused_chats(&mut dashboard, chat);
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
     terminal
-        .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+        .draw(|frame| {
+            render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+        })
         .unwrap();
     let prompt = dashboard
         .frame_surfaces()
@@ -989,7 +1039,7 @@ async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane()
         focus_on(&mut dashboard, focus);
         let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
         let notices = Notices::default();
-        let mut chat = ActiveChat::open(
+        let chat = ActiveChat::open(
             fixture.stopped,
             "bundle-1",
             None,
@@ -1001,9 +1051,12 @@ async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane()
         // The fixture has no database to restore a review from; expose
         // the hints rather than the resulting startup notice.
         notices.clear();
+        let mut chats = focused_chats(&mut dashboard, chat);
         let mut terminal = Terminal::new(TestBackend::new(240, 40)).expect("terminal");
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+            .draw(|frame| {
+                render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+            })
             .expect("draw combined surface");
         let buffer = terminal.backend().buffer();
         let footer = (0..buffer.area.width)
@@ -1026,7 +1079,9 @@ async fn advertised_web_and_setup_shortcuts_open_their_dialogs_from_every_pane()
         assert_eq!(dashboard.dispatch_command(setup), DashboardAction::None);
         assert!(dashboard.modal_open());
         terminal
-            .draw(|frame| render_combined(frame, &mut dashboard, Some(&mut chat), false))
+            .draw(|frame| {
+                render_combined(frame, &mut dashboard, &mut chats, &BTreeMap::new(), false);
+            })
             .expect("draw Setup");
         let screen = terminal
             .backend()
@@ -1375,6 +1430,30 @@ fn the_startup_pick_waits_for_its_summaries_then_gives_up() {
     assert!(stalled.ready(start + STARTUP_SESSION_WAIT));
 }
 
+/// Nothing may open a conversation on the surface's behalf until the pick has
+/// run. `follow_selected_session` reads this: before the pick, the highlighted
+/// row is only where the clamp left it, and following it would move the
+/// keyboard out of the pane a restored arrangement named.
+#[test]
+fn the_pick_holds_the_automatic_follow_back_until_it_has_run() {
+    let start = std::time::Instant::now();
+    let mut startup = StartupSession::begin(["session-a".to_owned()], start);
+
+    assert!(startup.pick_pending());
+    startup.summary_arrived("session-a");
+    assert!(startup.pick_pending(), "the pick has still to run");
+    assert!(startup.ready(start));
+    assert!(!startup.pick_pending(), "the pick has run");
+
+    // A user who acts first takes the choice, and the follow resumes at once.
+    let mut acted = StartupSession::begin(["session-a".to_owned()], start);
+    acted.cancel();
+    assert!(!acted.pick_pending());
+
+    // An empty workspace has nothing to wait for.
+    assert!(!StartupSession::begin(std::iter::empty(), start).pick_pending());
+}
+
 /// The user acting is the strongest signal there is about which
 /// conversation they want, so it takes the choice away.
 #[test]
@@ -1483,4 +1562,51 @@ fn shutdown_cancels_process_owning_critical_operations() {
     tracker.cancel_all();
 
     assert!(cancelled.load(Ordering::Acquire));
+}
+
+/// Every warm conversation is pumped on every loop iteration, not only the
+/// one the focused pane shows. Each of these chats starts on a stopped
+/// session handle and only reaches its replacement actor while it is being
+/// pumped, so both reporting the reconnection proves both were driven.
+#[tokio::test]
+async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
+    let mut fixtures = Vec::new();
+    let mut notices = Vec::new();
+    let mut chats = BTreeMap::new();
+    for session_id in ["session-1", "session-2"] {
+        let fixture = mj_client::session::replacement_session_test_fixture(session_id, 1);
+        let chat_notices = Notices::default();
+        chats.insert(
+            session_id.to_owned(),
+            ActiveChat::open(
+                fixture.stopped.clone(),
+                "bundle-1",
+                None,
+                fixture.control.clone(),
+                SessionHeaderIdentity::default(),
+                String::new(),
+                chat_notices.clone(),
+            ),
+        );
+        notices.push(chat_notices);
+        fixtures.push(fixture);
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !notices.iter().all(|notices| {
+            notices
+                .current()
+                .is_some_and(|notice| notice.contains("Reconnected"))
+        }) {
+            super::pump_chats(&mut chats).await;
+        }
+    })
+    .await
+    .expect("both warm conversations reconnected while being pumped");
+
+    assert!(
+        chats
+            .values()
+            .all(mj_chat::chat::ActiveChat::session_feed_open)
+    );
 }

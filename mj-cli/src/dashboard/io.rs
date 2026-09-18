@@ -61,6 +61,10 @@ pub(crate) enum DashboardIoUpdate {
     WorkspacePaneSizes {
         result: std::result::Result<BTreeMap<String, mj_core::workspace::PaneSizes>, String>,
     },
+    WorkspaceLayouts {
+        result:
+            std::result::Result<BTreeMap<String, mj_core::workspace::ConversationLayout>, String>,
+    },
     WorkerRecordPersistence {
         operation: WorkerRecordPersistence,
         result: std::result::Result<WorkerRecordPersistenceOutcome, String>,
@@ -84,6 +88,9 @@ pub(crate) enum DashboardIoUpdate {
     },
     ChatOpened {
         generation: u64,
+        /// The pane that asked for this conversation. A result whose pane has
+        /// since moved on to another session is dropped.
+        pane: mj_tui::tile_layout::PaneId,
         session_id: String,
         result: Box<std::result::Result<mj_chat::chat::PreparedChat, String>>,
     },
@@ -414,6 +421,23 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not load workspace pane sizes: {error}")),
             },
+            DashboardIoUpdate::WorkspaceLayouts { result } => match result {
+                Ok(layouts) => {
+                    for (workspace_id, layout) in layouts {
+                        if !self.known_workspace_layouts.contains(&workspace_id) {
+                            continue;
+                        }
+                        self.workspace_layouts
+                            .insert(workspace_id.clone(), layout.clone());
+                        self.dashboard
+                            .cache_workspace_layout(&workspace_id, layout.clone());
+                        self.layout_persistence.remember(workspace_id, layout);
+                    }
+                }
+                Err(error) => self
+                    .dashboard
+                    .set_notice(format!("Could not load workspace layouts: {error}")),
+            },
             DashboardIoUpdate::WorkspaceManagement { generation, result } => match result {
                 Ok(result) => {
                     let WorkspaceManagementResult {
@@ -433,6 +457,8 @@ impl DashboardContext {
                         .collect();
                     if let Some(deleted_workspace_id) = deleted_workspace_id.as_ref() {
                         self.pane_size_persistence.forget(deleted_workspace_id);
+                        self.layout_persistence.forget(deleted_workspace_id);
+                        self.workspace_layouts.remove(deleted_workspace_id);
                         self.known_workspace_layouts.remove(deleted_workspace_id);
                     }
                     // The TUI owns the modal generation guard. It returns
@@ -470,11 +496,7 @@ impl DashboardContext {
                 session_id,
                 message,
             } => {
-                match self
-                    .active_chat
-                    .as_mut()
-                    .filter(|chat| chat.session_id() == session_id)
-                {
+                match self.chats.get_mut(&session_id) {
                     Some(chat) => chat.report_review_refusal(message),
                     // The chat moved on; the refusal still belongs on screen.
                     None => self.dashboard.set_notice(message),
@@ -580,20 +602,23 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ChatOpened {
                 generation,
+                pane,
                 session_id,
                 result,
             } => {
-                // Ignore a late result after a newer request has taken its
-                // place (or the dashboard has shut down).
+                // Ignore a late result after the pane that asked for it moved
+                // on (or the dashboard has shut down).
                 if !self
-                    .attachment
-                    .accepts(generation, self.dashboard.selected_session_id())
-                    || self.opening_chat_session.as_deref() != Some(session_id.as_str())
+                    .attachments
+                    .get(&pane)
+                    .is_some_and(|attachment| attachment.accepts(generation, Some(&session_id)))
+                    || self.opening_chat_sessions.get(&pane).map(String::as_str)
+                        != Some(session_id.as_str())
                 {
                     return;
                 }
-                self.opening_chat_session = None;
-                self.dashboard.set_opening_session(None);
+                self.opening_chat_sessions.remove(&pane);
+                self.sync_opening_session();
                 // The attach may have crossed a lifecycle boundary while it
                 // was preparing. Keep the warm chat/draft untouched and drop
                 // the late result instead of reviving a retiring conversation.
@@ -603,23 +628,18 @@ impl DashboardContext {
                         .transition_failure_kind(&session_id)
                         .is_some()
                 {
-                    self.dashboard.set_current_session(None);
+                    self.dashboard.set_pane_session(pane, None);
                     self.defer_chat_open();
                     return;
                 }
                 match *result {
                     Ok(chat) => {
-                        // The old warm chat continued receiving feed updates
-                        // while this attach was in flight. Capture and persist
-                        // its latest local composer just before replacing it.
-                        if let Some(ordinal) = self
-                            .active_chat
-                            .as_ref()
-                            .map(mj_chat::chat::ActiveChat::latest_event_ordinal)
-                        {
-                            self.record_detach(ordinal);
-                        }
-                        self.save_active_question_draft();
+                        // A chat already warm for this session continued
+                        // receiving feed updates while the attach was in
+                        // flight. Capture and persist its latest local
+                        // composer just before replacing it.
+                        self.record_chat_detach(&session_id);
+                        self.save_question_draft(&session_id);
                         // Whatever the user typed into the standby composer
                         // while this attach ran is the newest draft, so it
                         // wins over the copy captured when the open started.
@@ -632,17 +652,19 @@ impl DashboardContext {
                         } else {
                             chat
                         };
-                        let mut chat = chat.open_replacing(self.active_chat.as_ref());
+                        let mut chat = chat.open_replacing(self.chats.get(&session_id));
                         self.restore_question_draft(&session_id, &mut chat);
-                        self.active_chat = Some(chat);
+                        self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is
                         // asynchronous; anything the surface learned while it
                         // was in flight is handed over now.
                         self.refresh_chat_context();
-                        self.apply_runtime_review_to_active_chat();
-                        self.dashboard.set_current_session(Some(&session_id));
+                        self.apply_runtime_review_to_chat(&session_id);
+                        // The chat belongs to the pane that asked for it, not
+                        // to whichever pane has the focus now.
+                        self.dashboard.set_pane_session(pane, Some(&session_id));
                         self.dashboard.clear_notice();
-                        self.acknowledge_visible_chat();
+                        self.acknowledge_visible_chats();
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
