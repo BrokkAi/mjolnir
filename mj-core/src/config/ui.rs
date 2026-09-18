@@ -150,6 +150,54 @@ pub struct AdvancedConfig {
     pub session_order: SessionOrder,
 }
 
+/// How the dashboard tells the person about a session they are not looking
+/// at: one that asked a question, failed, or finished with an unread answer.
+///
+/// `Terminal` rings the terminal bell and works over SSH and inside a
+/// multiplexer, which is why it is the default. `System` also posts a desktop
+/// notification through `osascript` on macOS or `notify-send` on Linux.
+/// `Off` reports nothing. Independently of the mode, `title` keeps the
+/// terminal window title showing how many sessions are waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    pub mode: NotifyMode,
+    /// Whether a notification also rings the terminal bell. Off leaves the
+    /// system notification alone as the only signal.
+    pub bell: bool,
+    /// How long a session must stay in need of a person before it is
+    /// reported, so a question the agent answers itself does not ring.
+    pub delay_seconds: u64,
+    /// Whether the terminal title shows the waiting and unread counts.
+    pub title: bool,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            mode: NotifyMode::Terminal,
+            bell: true,
+            delay_seconds: 2,
+            title: true,
+        }
+    }
+}
+
+impl NotifyConfig {
+    pub(super) fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMode {
+    Off,
+    #[default]
+    Terminal,
+    System,
+}
+
 /// How the Sessions pane orders its rows.
 ///
 /// `Project` groups sessions under a heading per project, in creation order,

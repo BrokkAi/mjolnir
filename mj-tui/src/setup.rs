@@ -287,7 +287,7 @@ const ROOT_GROUPS: &[(&str, &[&str])] = &[
         "Sessions",
         &["review", "subagents", "sessionwiki", "build_cache", "phone"],
     ),
-    ("Display", &["interface", "advanced"]),
+    ("Display", &["interface", "notify", "advanced"]),
 ];
 
 /// A row of a settings page. The first page puts a heading above each group

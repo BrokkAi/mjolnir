@@ -508,6 +508,11 @@ impl DashboardState {
         }
     }
 
+    /// The `[notify]` section in force, for the host that emits notifications.
+    pub fn notify_config(&self) -> &mj_core::config::NotifyConfig {
+        &self.config.notify
+    }
+
     pub fn set_config(&mut self, config: Config) {
         // Background saves return a fresh snapshot even when configuration
         // did not change. They must not close a dialog opened after submission.

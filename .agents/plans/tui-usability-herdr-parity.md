@@ -15,7 +15,7 @@ After this plan is complete a user can: press `prefix+o` from anywhere and land 
 Milestone numbers match the "Plan of Work" section.
 
 - [x] (2026-09-18 21:30Z) M1 Attention routing: `prefix+o` next-attention command, `prefix+shift+o` previous, `[advanced] session_order = "priority"`, attention badges on workspace tabs and folded project headings. Documented in terminal-surface, sessions, and configuration pages.
-- [ ] M2 Notifications: `[notify]` config (mode off/terminal/system, sound, debounce), BEL and OSC title updates from the terminal loop, macOS/Linux system notification via `osascript`/`notify-send`, suppression for the visible session.
+- [x] (2026-09-18 23:10Z) M2 Notifications: `[notify]` config (mode off/terminal/system, bell, delay, title), BEL and window title from the terminal loop after each frame, macOS/Linux desktop notification via `osascript`/`notify-send` off the loop, suppression for the visible session, Setup section under Display, documented in configuration and terminal-surface pages.
 - [ ] M3 Finding things: `/` filter in the Sessions pane with state letters, fuzzy palette ranking with recents, Create/Resume/Workspaces visible in the palette, one word per concept across panes, Setup, and commands.
 - [ ] M4 Keyboard consistency: tmux/screen prefix collision notice, letter accelerators on every confirmation, bindable Manage machines and Restart daemon, confirmation for Stop and Restart, single-Esc exit from help filter, Esc on a pane clears the notice.
 - [ ] M5 Per-session context: git branch and ahead/behind on session rows, `prefix+d` changed-files overlay, context-window usage per session when the harness reports it.
@@ -56,6 +56,8 @@ Milestone numbers match the "Plan of Work" section.
   Date/Author: 2026-09-18, Claude.
 
 ## Outcomes & Retrospective
+
+M2 landed with four notify tests; the episode model (one report per session per attention level, started when first seen) is what keeps a question the agent answers itself quiet and keeps a mode change from replaying old events. The host writes BEL and the title after the frame, so a bell never precedes the row it is about. There is no sound file support: Herdr's per-agent sounds were left out because BEL already reaches every terminal and the desktop notification carries the platform sound.
 
 M1 landed with 535 mj-tui tests passing (six new), clippy clean, and the full workspace suite green. The row symbol now reads the shared `attention_level`, so the queue, the badges, and the symbol cannot disagree. The footer hint `o next (N)` only appears while something is waiting, which doubles as a global signal on every pane.
 
@@ -214,4 +216,5 @@ No new crates are required: `crossterm` already provides `SetTitle` and `Print`,
 ## Revision notes
 
 - 2026-09-18: Plan created from the usability review comparing the dashboard with Herdr 0.9.1. All seven milestones are unstarted.
+- 2026-09-18: M2 complete. `[notify]` has `bell` rather than Herdr's sound-file fields, and the title is independent of the mode.
 - 2026-09-18: M1 complete. Added the `Failed` attention level and the saved-view mechanism for cross-workspace jumps; moved per-feature documentation into each milestone.

@@ -380,6 +380,7 @@ fn sample_config() -> Config {
         keys: Default::default(),
         sessions_side: Default::default(),
         advanced: Default::default(),
+        notify: Default::default(),
         show_stopped_sessions: false,
         spinner: SpinnerStyle::default(),
         theme: Default::default(),

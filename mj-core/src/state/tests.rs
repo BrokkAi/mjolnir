@@ -183,6 +183,7 @@ fn sample_config() -> Config {
         build_cache: Default::default(),
         keys: Default::default(),
         advanced: Default::default(),
+        notify: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
         show_stopped_sessions: false,

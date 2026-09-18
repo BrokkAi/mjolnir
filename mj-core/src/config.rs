@@ -351,6 +351,7 @@ pub struct Config {
     pub show_stopped_sessions: bool,
     pub sessions_side: SessionsSide,
     pub advanced: AdvancedConfig,
+    pub notify: NotifyConfig,
     pub version: u32,
     /// Client-side activity animation; omitted configurations retain the classic scan.
     pub spinner: SpinnerStyle,
@@ -380,6 +381,8 @@ struct StoredConfig {
     sessions_side: SessionsSide,
     #[serde(default, skip_serializing_if = "AdvancedConfig::is_default")]
     advanced: AdvancedConfig,
+    #[serde(default, skip_serializing_if = "NotifyConfig::is_default")]
+    notify: NotifyConfig,
     version: u32,
     #[serde(default, skip_serializing_if = "SpinnerStyle::is_default")]
     spinner: SpinnerStyle,
@@ -496,6 +499,7 @@ impl TryFrom<StoredConfig> for Config {
             show_stopped_sessions,
             sessions_side,
             advanced,
+            notify,
             version,
             spinner,
             theme,
@@ -532,6 +536,7 @@ impl TryFrom<StoredConfig> for Config {
             show_stopped_sessions,
             sessions_side,
             advanced,
+            notify,
             // Versions 1 through 11 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes.
@@ -574,6 +579,7 @@ impl From<Config> for StoredConfig {
             show_stopped_sessions: config.show_stopped_sessions,
             sessions_side: config.sessions_side,
             advanced: config.advanced,
+            notify: config.notify,
             version: config.version,
             spinner: config.spinner,
             theme: config.theme,
@@ -597,6 +603,7 @@ impl Default for Config {
         Self {
             sessions_side: SessionsSide::default(),
             advanced: AdvancedConfig::default(),
+            notify: NotifyConfig::default(),
             show_stopped_sessions: false,
             version: CONFIG_VERSION,
             spinner: SpinnerStyle::default(),

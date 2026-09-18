@@ -71,6 +71,7 @@ The only accepted top-level keys are:
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, or `high-contrast`. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
+| `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Independent turn-review settings. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
@@ -224,6 +225,30 @@ a key another command defaults to is the normal way to move a key.
 This key-string syntax matches [herdr](https://github.com/herdrdev/herdr)'s
 own `[keys]` table, so a line can be copied between the two configuration
 files unchanged.
+
+## Notifications `[notify]`
+
+The optional `[notify]` table controls how the terminal dashboard reports a
+session you are not looking at when it asks a question, fails, or finishes
+with an answer you have not read. The session whose conversation is on
+screen never notifies.
+
+```toml
+[notify]
+mode = "terminal"
+bell = true
+delay_seconds = 2
+title = true
+```
+
+| Field | TOML type | Default | Behavior |
+| --- | --- | --- | --- |
+| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS or `notify-send` on Linux. `off` reports nothing. |
+| `bell` | boolean | `true` | Whether each notification rings the terminal bell. Turn it off with `mode = "system"` for silent desktop notifications. |
+| `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
+| `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |
+
+The terminal Setup screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 

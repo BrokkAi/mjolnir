@@ -5,13 +5,16 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
             json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project"})
+        }
+        "notify" => {
+            json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
             json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
@@ -135,6 +138,11 @@ pub(super) fn label(key: &str) -> String {
         "detailed_activity_clocks" => "Detailed activity clocks",
         "show_stopped_sessions" => "Show stopped sessions",
         "session_order" => "Session order",
+        "notify" => "Notifications",
+        "mode" => "Notify through",
+        "bell" => "Ring the terminal bell",
+        "delay_seconds" => "Delay before notifying (seconds)",
+        "title" => "Show counts in the terminal title",
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
@@ -283,6 +291,11 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
                 count => format!("{count} on{order}"),
             }
         }
+        "notify" => match section["mode"].as_str() {
+            Some("off") => "Off".to_owned(),
+            Some("system") => "Desktop and terminal".to_owned(),
+            _ => "Terminal".to_owned(),
+        },
         "profiles" | "machines" | "targets" | "bundles" => named_entries(section),
         "phone" => {
             if section["enabled"] == Value::Bool(false) {
@@ -411,6 +424,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let values: &[&str] = match key {
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
+        "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "tier" => &["quick", "extended"],
         "permissions" => &["guardian", "yolo"],
@@ -489,6 +503,19 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
         "advanced" => "Optional diagnostics and display details for the activity surface.",
+        "notify" => {
+            "How to be told when a session you are not looking at asks a question, fails, or finishes."
+        }
+        "mode" if path.first().is_some_and(|key| key == "notify") => {
+            "Terminal rings the bell and works over SSH. System also posts a desktop notification through osascript or notify-send."
+        }
+        "bell" => "Ring the terminal bell with each notification.",
+        "delay_seconds" => {
+            "Wait this long before notifying, so a question the agent answers itself stays quiet."
+        }
+        "title" => {
+            "Keep the terminal window title showing how many sessions are waiting or unread."
+        }
         "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
         "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
         "session_order" => {

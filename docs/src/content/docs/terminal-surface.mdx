@@ -172,6 +172,13 @@ Each workspace tab carries the same count: `!2` for two sessions waiting or
 failed, or `✓3` for three unread sessions when none is waiting. A folded
 project heading carries the count for its hidden rows.
 
+When a session you are not looking at starts needing you, Mjolnir rings the
+terminal bell after a short delay and keeps the terminal window title at
+`mj · 2 waiting · 1 unread`, so a background tab or a tmux window shows the
+count without switching to it. **Setup → Notifications** turns the bell off,
+adds a desktop notification, or changes the delay; see
+[Configuration](/configuration/#notifications-notify).
+
 **Setup → Advanced → Session order** changes how the Sessions pane sorts.
 `project` (the default) groups sessions under a heading per project in
 creation order. `priority` drops the headings and lists sessions by attention

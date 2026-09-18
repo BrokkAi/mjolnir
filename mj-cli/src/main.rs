@@ -1429,6 +1429,9 @@ pub(crate) use mj_core::state::short_id;
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<io::Stdout>>,
     keyboard_enhancement: bool,
+    /// The window title last written, so it is only rewritten when it
+    /// changes and cleared on exit only if it was ever set.
+    title: Option<String>,
 }
 
 impl TerminalGuard {
@@ -1464,7 +1467,30 @@ impl TerminalGuard {
         Ok(Self {
             terminal,
             keyboard_enhancement,
+            title: None,
         })
+    }
+
+    /// Rings the terminal bell. Terminals, multiplexers, and SSH clients
+    /// pass BEL through, which is what makes it the one signal that works
+    /// everywhere.
+    pub(crate) fn ring_bell(&mut self) -> Result<()> {
+        execute!(self.terminal.backend_mut(), crossterm::style::Print("\x07"))
+            .context("ring the terminal bell")
+    }
+
+    /// Sets the terminal window title, writing only when it changed.
+    pub(crate) fn set_title(&mut self, title: &str) -> Result<()> {
+        if self.title.as_deref() == Some(title) {
+            return Ok(());
+        }
+        execute!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::SetTitle(title)
+        )
+        .context("set the terminal title")?;
+        self.title = Some(title.to_owned());
+        Ok(())
     }
 
     /// Hands `text` to the terminal's own clipboard with OSC 52.
@@ -1482,6 +1508,15 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // A title this process set would otherwise outlive it in the tab.
+        if self.title.is_some()
+            && let Err(error) = execute!(
+                self.terminal.backend_mut(),
+                crossterm::terminal::SetTitle("")
+            )
+        {
+            tracing::warn!(%error, "could not clear the terminal title");
+        }
         if self.keyboard_enhancement
             && let Err(error) = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)
         {

@@ -1,5 +1,43 @@
 use super::*;
 
+/// Posts one desktop notification with the platform's own helper. Output is
+/// piped and discarded so a helper's stderr cannot reach the terminal that
+/// the dashboard is drawing on.
+fn post_system_notification(notification: &mj_tui::Notification) -> Result<()> {
+    let title = format!("mj: {}", notification.session_title);
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("osascript");
+        command.arg("-e").arg(format!(
+            "display notification {} with title {}",
+            applescript_string(&notification.body),
+            applescript_string(&title)
+        ));
+        command
+    } else {
+        let mut command = std::process::Command::new("notify-send");
+        command
+            .arg("--app-name=mj")
+            .arg(&title)
+            .arg(&notification.body);
+        command
+    };
+    let output = mj_core::subprocess::run_with_input(&mut command, b"")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} exited with {}: {}",
+            command.get_program().to_string_lossy(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// An AppleScript string literal: double quotes and backslashes escaped.
+fn applescript_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 impl DashboardContext {
     /// Rebuilds the view on screen.
     ///
@@ -54,6 +92,37 @@ impl DashboardContext {
             .is_some_and(|chat| chat.transcript_selection_invalidated());
         if invalidated && self.selection.active_surface() == Some(SurfaceId::Transcript) {
             self.selection.clear();
+        }
+        Ok(())
+    }
+
+    /// Reports sessions that started needing a person since the last frame:
+    /// the terminal title, the bell, and a desktop notification, by the
+    /// `[notify]` configuration. The dashboard decides what is due; this only
+    /// writes it out. A desktop notification runs its helper off the loop.
+    pub(crate) fn emit_notifications(&mut self) -> Result<()> {
+        if let Some(title) = self.dashboard.terminal_title() {
+            self.terminal.set_title(&title)?;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+        let due = self.dashboard.notification_events(now_ms);
+        if due.is_empty() {
+            return Ok(());
+        }
+        let notify = self.dashboard.notify_config().clone();
+        if notify.bell {
+            self.terminal.ring_bell()?;
+        }
+        if notify.mode == mj_core::config::NotifyMode::System {
+            for notification in due {
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = post_system_notification(&notification) {
+                        tracing::warn!(%error, session = %notification.session_id, "desktop notification failed");
+                    }
+                });
+            }
         }
         Ok(())
     }

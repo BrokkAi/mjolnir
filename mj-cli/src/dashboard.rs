@@ -482,6 +482,8 @@ pub(crate) async fn run_dashboard_for_workspace(
         if redraw {
             context.draw()?;
         }
+        // After the frame, so a bell never precedes the row it is about.
+        context.emit_notifications()?;
         redraw = true;
         let mut action = DashboardAction::None;
         let mut chat_outcome = mj_chat::chat::ChatEventOutcome::None;
