@@ -943,27 +943,8 @@ pub(super) fn salvage_tool_call_update(update: &serde_json::Value) -> Option<Ses
     .ok()
 }
 
-/// How long a prompt may run with no ACP activity before the worker gives up on
-/// it. `MJ_TURN_STALL_TIMEOUT_MS` overrides the default; `0` disables the
-/// watchdog. Ten minutes clears a slow first token (seen at ~6 minutes) while
-/// still catching an adapter that stops relaying a turn it has completed.
-///
-/// This bound applies only while nothing is in flight. A turn with a tool call
-/// open is bounded by [`DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS`] instead.
-pub(super) const DEFAULT_TURN_STALL_TIMEOUT_MS: u64 = 600_000;
-
-/// How long one tool call may run before the worker gives up on the turn.
-/// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] overrides it; `0` removes the bound.
-///
-/// Four hours, because failing a healthy long tool call loses work silently:
-/// the run in issue #1020 was ninety-seven minutes in, and evaluation lanes
-/// routinely block on a single build or test suite for tens of minutes. A
-/// bound that is too long only delays a failure the user can already end with
-/// `mj cancel`. It exists at all because a bridge that dies with a tool card
-/// left open would otherwise hold the turn open forever; a bridge *process*
-/// that exits is detected separately and at once, by the `child.wait()` arm of
-/// the select in `mj-worker/src/acp.rs`, and does not wait for this.
-pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
+/// The name of the silence bound's override, in one place.
+pub(super) const TURN_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_STALL_TIMEOUT_MS";
 
 /// The name of the tool-call bound's override, in one place.
 ///
@@ -974,35 +955,46 @@ pub(super) const DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1_000;
 /// message and the lookup agree.
 pub(super) const TOOL_CALL_STALL_TIMEOUT_VARIABLE: &str = "MJ_TURN_TOOL_STALL_TIMEOUT_MS";
 
-fn timeout_from_environment(name: &str, default_ms: u64) -> Option<Duration> {
-    let millis = match std::env::var(name) {
-        Ok(value) => value.trim().parse::<u64>().unwrap_or(default_ms),
-        Err(_) => default_ms,
-    };
+/// A stall bound from the text of its environment variable.
+///
+/// Both bounds are opt-in. Unset, empty, unparseable and `0` all mean "no
+/// bound"; only a positive number of milliseconds arms one. The permissive
+/// parse is deliberate: a typo must not silently arm a watchdog that ends
+/// turns. Pure so the rule can be tested without touching process-wide state.
+pub(super) fn parse_stall_timeout(value: Option<&str>) -> Option<Duration> {
+    let millis = value?.trim().parse::<u64>().unwrap_or_default();
     (millis > 0).then(|| Duration::from_millis(millis))
 }
 
-/// The two bounds a running turn is held to.
+fn timeout_from_environment(name: &str) -> Option<Duration> {
+    parse_stall_timeout(std::env::var(name).ok().as_deref())
+}
+
+/// The bounds a running turn is held to, both off unless configured.
+///
+/// Mjolnir does not guess that a quiet turn is a dead turn. Silence is not
+/// evidence: a turn waiting on a slow first token or a twenty-minute build
+/// sends nothing at all, and failing it destroys real work (#1020). Every
+/// ending Mjolnir decides on its own is deterministic instead — the bridge
+/// process exited, the transport closed, the worker restarted — and the
+/// silence age is published as a fact for a person or an orchestrator to act
+/// on (`mj_core::activity::ActivityState::silent_for_ms`).
+///
+/// An operator who wants an automatic ending opts in per session, through the
+/// worker's environment, by setting [`TURN_STALL_TIMEOUT_VARIABLE`] or
+/// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] to a positive number of milliseconds.
+/// The bound then applies to every harness: none of them ends a turn Mjolnir
+/// reports without the `session/prompt` reply, so none of them is a safe
+/// exception.
 pub(super) fn turn_stall_policy() -> mj_core::activity::StallPolicy {
     mj_core::activity::StallPolicy {
         silence: turn_stall_timeout(),
-        tool_call: timeout_from_environment(
-            TOOL_CALL_STALL_TIMEOUT_VARIABLE,
-            DEFAULT_TOOL_CALL_STALL_TIMEOUT_MS,
-        ),
+        tool_call: timeout_from_environment(TOOL_CALL_STALL_TIMEOUT_VARIABLE),
     }
 }
 
 pub(super) fn turn_stall_timeout() -> Option<Duration> {
-    timeout_from_environment("MJ_TURN_STALL_TIMEOUT_MS", DEFAULT_TURN_STALL_TIMEOUT_MS)
-}
-
-/// Whether a harness's turn ends only when the `session/prompt` reply arrives.
-/// Claude and Codex mark their own turns; every other harness (Muse included)
-/// leaves the turn Running until the reply, so a lost reply hangs it forever
-/// unless the watchdog steps in.
-pub(super) fn turn_ends_only_on_prompt_reply(harness: HarnessKind) -> bool {
-    !harness.marks_own_turn_end()
+    timeout_from_environment(TURN_STALL_TIMEOUT_VARIABLE)
 }
 
 /// What the watchdog knows about the running turn right now.
@@ -1025,18 +1017,6 @@ pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::Activity
 /// nothing has to learn this string to keep working.
 pub(super) const TURN_STALLED_STOP_REASON: &str = "harness_inactive";
 
-/// How long something took, in the coarsest unit that still tells the truth.
-///
-/// A bound shortened for a test trips in seconds, and reporting that as "about
-/// 1 minute" makes the message read like a bug in itself.
-fn stall_duration(millis: u64) -> String {
-    let seconds = millis / 1_000;
-    if seconds < 90 {
-        return format!("{seconds} second(s)");
-    }
-    format!("about {} minute(s)", seconds / 60)
-}
-
 /// The transcript message shown when a turn is failed for going silent. It says
 /// what happened and what the user can do, because the work may already be
 /// finished in the container even though mj never received it.
@@ -1049,7 +1029,7 @@ pub(super) fn turn_stall_message(
         mj_core::activity::StallVerdict::Silent { silent_ms } => format!(
             "mj received no activity from the harness for {} while a turn was running and no \
              tool call was open, so it failed the turn",
-            stall_duration(*silent_ms),
+            mj_core::activity::describe_duration(*silent_ms),
         ),
         mj_core::activity::StallVerdict::ToolCall {
             tool_call_id,
@@ -1060,8 +1040,8 @@ pub(super) fn turn_stall_message(
              which is past the limit on a single tool call, so mj failed the turn. Raise or \
              remove that limit with {TOOL_CALL_STALL_TIMEOUT_VARIABLE} (milliseconds, 0 removes \
              it)",
-            stall_duration(*running_ms),
-            stall_duration(*silent_ms),
+            mj_core::activity::describe_duration(*running_ms),
+            mj_core::activity::describe_duration(*silent_ms),
         ),
     };
     turn_stall_transcript_message(harness, &reason)

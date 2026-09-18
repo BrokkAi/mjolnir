@@ -62,6 +62,14 @@ The prompt surface also understands:
 
 Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. Use `Alt+X` only for a lifecycle operation such as launch, resume, or stop.
 
+### When a turn goes quiet
+
+A turn ends when the harness answers. Mjolnir ends one on its own only when something deterministic says the turn cannot finish: the harness bridge process exited, its connection closed, or the worker was restarted. Each of those appears within seconds as a failed turn with the reason in `mj wait` and in the transcript.
+
+Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Mjolnir does not guess: it reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minute(s)`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj cancel-turn` or `Esc`.
+
+There is one case Mjolnir cannot recover from: an adapter that finished the work — wrote its final message, made its commit — and then failed to send the reply. That work exists in the workspace and in the harness's own session files, but never reaches Mjolnir's transcript, so the turn stays running until you end it. If you would rather have Mjolnir end such turns automatically, set `MJ_TURN_STALL_TIMEOUT_MS` to a number of milliseconds of silence to allow; the turn then fails with the reason `harness_inactive`. It is off by default because the same setting will also end healthy turns that are merely slow.
+
 ## Detach and reattach
 
 `Alt+Q` detaches the current terminal client. Active turns, shell commands, and queued prompts keep running under the daemon.
