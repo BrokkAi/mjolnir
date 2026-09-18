@@ -189,6 +189,12 @@ dashboard says "Not enough room to split" and nothing changes. Pressing `Enter`
 on a session that another pane already shows moves the keyboard to that pane
 instead of opening a second copy.
 
+Asking to split out a session that is already on screen never leaves a blank
+pane behind. When the session is in another pane, the keyboard moves there and
+the dashboard says "Already open in another pane; the keyboard moved there";
+when it is in the pane you are already in, the dashboard says "Already open in
+this pane" and the panes stay as they are.
+
 The arrangement is saved per workspace, so the panes, their sessions, and which
 pane had the keyboard come back when you restart `mj` or switch back to that
 workspace.

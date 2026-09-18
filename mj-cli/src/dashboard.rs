@@ -937,6 +937,8 @@ impl DashboardContext {
             && pane != focused
         {
             self.dashboard.focus_pane(pane);
+            self.dashboard
+                .set_notice("Already open in another pane; the keyboard moved there");
             self.sync_opening_session();
             self.save_active_workspace_layout();
             return;
@@ -945,6 +947,12 @@ impl DashboardContext {
         let displaced = moving
             .then(|| self.previous_pane_sessions.get(&focused).cloned())
             .flatten();
+        if moving && displaced.is_none() {
+            // Nothing came before it in this pane, so a split would only add a
+            // blank pane beside the conversation the user is already in.
+            self.dashboard.set_notice("Already open in this pane");
+            return;
+        }
         let Some(new_pane) = self.dashboard.split_focused_pane(direction, None) else {
             self.dashboard.set_notice("Not enough room to split");
             return;

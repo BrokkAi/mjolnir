@@ -17,7 +17,7 @@ To see it working: start `mj` against the fake-harness lab (`tests/e2e/prepare-l
 
 - [x] M0: this ExecPlan written and committed (2026-09-18, ac500d28).
 - [x] M1: close a pane by id; a `×` chip on every conversation pane's title row. Done 2026-09-18T10:48-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
-- [ ] M2: split-open notices for a session that is already open.
+- [x] M2: split-open notices for a session that is already open. Done 2026-09-18T11:34-05:00; `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - [ ] M3: wheel routes to the pane under the pointer; focused transcript border.
 - [ ] M4: zoom on `prefix+z` (`pane_size` moves to `prefix+shift+z`).
 - [ ] M5: last pane on `prefix+;`.
@@ -38,6 +38,13 @@ right. The close chip sits at the outer right edge, so on a split it lands on
 the reviewer half's title row and the reserved columns are taken out of the
 primary title instead. It costs three cells of a title that is usually short;
 M1 leaves it alone rather than teaching `mj-chat` about host chips per half.
+
+M2's "already in this pane" case is narrower than it first reads. `moving` is
+true whenever the focused pane shows the session, and a row selection sets
+`previous_pane_sessions` for that pane, so `displaced` is `Some` on the ordinary
+selection-then-split path. The notice therefore fires only when the session was
+already in the focused pane with no earlier conversation to put back — a
+`⋯` menu split on the pane you are already in, or a repeated split key.
 
 `cargo build --workspace` fails in this checkout because `mj-desktop` needs
 GTK development packages that are not installed. The workspace's
