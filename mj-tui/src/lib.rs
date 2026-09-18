@@ -56,6 +56,7 @@ mod resume;
 mod review_settings;
 mod setup;
 mod surface_controls;
+pub mod tile_layout;
 mod widgets;
 mod wizards;
 pub(crate) mod workspaces;
