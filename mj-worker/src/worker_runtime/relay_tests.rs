@@ -5565,6 +5565,11 @@ async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
 /// path a clean filter that sleeps. This is how a working tree with hundreds
 /// of thousands of untracked files behaves for a review capture, at a size a
 /// test can hold.
+///
+/// The tracked file is left modified on purpose. A capture only runs the clean
+/// filter over the dirty tracked paths it stages, so a fixture whose tracked
+/// files are all clean blocks only when Git happens to re-hash a racily-clean
+/// entry, and the wait it is supposed to prove disappears on a fast machine.
 fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path();
@@ -5587,6 +5592,11 @@ fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
     );
     std::fs::write(repository.join(".gitattributes"), "* filter=slow\n").unwrap();
     std::fs::write(repository.join("untracked.txt"), "untracked\n").unwrap();
+    std::fs::write(
+        repository.join("tracked.txt"),
+        "tracked, and edited since\n",
+    )
+    .unwrap();
     temp
 }
 

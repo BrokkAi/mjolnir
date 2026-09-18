@@ -7,8 +7,14 @@
 //! answered from the operating system instead, and answered in one place
 //! because the restart path, `mj daemon status` and `mj doctor` all ask it.
 
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::PathBuf;
+
+// Only the Linux and macOS answers inspect files; Windows returns "unknown".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use anyhow::Context as _;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::Path;
 
 /// A file, identified by what it is rather than by what it is called.
 ///

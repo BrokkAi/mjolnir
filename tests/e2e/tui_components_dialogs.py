@@ -323,13 +323,15 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
     """Switch Resume to Import, search, and cancel without importing."""
 
     del lab
-    tmux.send_key("M-s")
+    # Resume moved to the prefix chord: ctrl+b arms, then g opens the picker.
+    tmux.send_key("C-b")
+    tmux.send_key("g")
     resume = _wait(tmux, "Resume a session", "resume dialog")
     _record(
         evidence,
         tmux,
         "dialog-resume-open",
-        "press Alt-S",
+        "press ctrl+b then g",
         "resume tab and standard Cancel control are visible",
         resume,
     )

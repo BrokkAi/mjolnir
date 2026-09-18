@@ -790,22 +790,65 @@ kind = "bare"
         assert isinstance(sessions, list)
         return next((item for item in sessions if item.get("id") == session_id), None)
 
-    def owned_pids(self) -> list[int]:
-        owned: list[int] = []
+    def owned_processes(self) -> list[tuple[int, str]]:
+        """This run's own Mjolnir processes, each with the command it runs.
+
+        Inheriting the environment is not the same as being ours. A container
+        engine started from the daemon's startup image pull leaves background
+        helpers of its own behind — rootless Podman's pause process is one —
+        and those keep the daemon's environment while belonging to the engine,
+        not to this run. So ownership is decided by what a process runs: the
+        binary under test, or something under this run's runtime root.
+        """
+        owned: list[tuple[int, str]] = []
         expected = {
             f"MJ_CONFIG_DIR={self.config}".encode(),
             f"MJ_DATA_DIR={self.data}".encode(),
         }
+        runtime = f"{self.runtime_root}{os.sep}"
         for entry in pathlib.Path("/proc").iterdir():
             if not entry.name.isdigit() or int(entry.name) == os.getpid():
                 continue
             try:
                 environment = set((entry / "environ").read_bytes().split(b"\0"))
+                if not expected.issubset(environment):
+                    continue
+                command = (
+                    (entry / "cmdline")
+                    .read_bytes()
+                    .decode("utf-8", "replace")
+                    .replace("\0", " ")
+                    .strip()
+                )
             except (FileNotFoundError, PermissionError, ProcessLookupError):
                 continue
-            if expected.issubset(environment):
-                owned.append(int(entry.name))
+            executable = ""
+            with contextlib.suppress(OSError):
+                executable = os.readlink(entry / "exe")
+            ours = (
+                executable == str(self.hel)
+                or executable.startswith(runtime)
+                or str(self.runtime_root) in command
+            )
+            if ours:
+                owned.append((int(entry.name), f"exe={executable} cmd={command}"))
         return sorted(owned)
+
+    def owned_pids(self) -> list[int]:
+        return [pid for pid, _ in self.owned_processes()]
+
+    def leak_report(self) -> str | None:
+        """The failure sentence for processes that outlived cleanup, or None.
+
+        The command line travels with the pid: a leak is diagnosed from the
+        run's own evidence, and by the time anything else looks the process is
+        gone.
+        """
+        owned = self.owned_processes()
+        if not owned:
+            return None
+        listed = ", ".join(f"{pid} ({description})" for pid, description in owned)
+        return f"owned processes remained after cleanup: {listed}"
 
     def capture_process_tree(self) -> None:
         result = subprocess.run(
@@ -1001,9 +1044,9 @@ kind = "bare"
         self.record_action("dashboards-quit", tui_1_seconds=quit_one, tui_2_seconds=quit_two)
         self.stop_daemon()
         self.integrity()
-        leaks = self.owned_pids()
+        leaks = self.leak_report()
         if leaks:
-            raise ScenarioFailure(f"owned processes remained after cleanup: {leaks}")
+            raise ScenarioFailure(leaks)
         self.capture_process_tree()
         self.trace["finished_at"] = self.timestamp()
         self.trace["outcome"] = "passed"
@@ -1144,9 +1187,9 @@ kind = "bare"
         self.record_process("stopped", "tui-1", client.process.pid)
         self.stop_daemon()
         self.integrity()
-        leaks = self.owned_pids()
+        leaks = self.leak_report()
         if leaks:
-            raise ScenarioFailure(f"owned processes remained after active Stop: {leaks}")
+            raise ScenarioFailure(leaks.replace("after cleanup", "after active Stop"))
         self.capture_process_tree()
         self.trace["finished_at"] = self.timestamp()
         self.trace["outcome"] = "passed"
@@ -1231,9 +1274,9 @@ kind = "bare"
         self.record_process("stopped", "tui-1", client.process.pid)
         self.stop_daemon()
         self.integrity()
-        leaks = self.owned_pids()
+        leaks = self.leak_report()
         if leaks:
-            raise ScenarioFailure(f"owned processes remained after cleanup: {leaks}")
+            raise ScenarioFailure(leaks)
         self.capture_process_tree()
         self.trace["finished_at"] = self.timestamp()
         self.trace["outcome"] = "passed"
@@ -1287,6 +1330,8 @@ def main() -> int:
         else:
             lab.run()
     except BaseException as error:
+        # Before cleanup, not after: cleanup kills whatever leaked, and a tree
+        # captured then shows a tidy machine and explains nothing.
         lab.capture_process_tree()
         lab.trace["finished_at"] = lab.timestamp()
         lab.trace["outcome"] = "failed"
@@ -1304,8 +1349,6 @@ def main() -> int:
         lab.preserve_runtime()
         lab.remove_runtime()
         return 1
-    finally:
-        lab.capture_process_tree()
     lab.preserve_runtime()
     lab.remove_runtime()
     print(
