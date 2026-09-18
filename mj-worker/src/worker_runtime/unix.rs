@@ -279,6 +279,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         .await;
     }
 
+    super::record_startup_step(&root, "login-resolve");
     let base_environment = mj_core::login_environment::resolve().await?;
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
@@ -291,6 +292,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    super::record_startup_step(&root, "harness-resolve");
     let managed_harness = super::harness::resolve(
         config.harness_runtime,
         config.harness,
@@ -423,6 +425,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             tools_in_flight,
             stall_policy: None,
         };
+        super::record_startup_step(&root, "bridge-start");
         let mut acp_task = tokio::spawn(acp::run(acp_spec, acp_commands_rx, acp_events_tx));
 
         let event_relay = relay.clone();

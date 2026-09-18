@@ -252,6 +252,7 @@ pub(crate) fn record_runtime_event(
             steering_supported,
             ..
         } => {
+            crate::worker_runtime::record_startup_step(relay.root(), "acp-initialized");
             relay.record_observation(RelayObservation::AgentInitialized {
                 protocol_version,
                 capabilities,
@@ -270,6 +271,7 @@ pub(crate) fn record_runtime_event(
             native_continuity_lost,
             ..
         } => {
+            crate::worker_runtime::record_startup_step(relay.root(), "acp-session-open");
             relay.record_observation(RelayObservation::SessionOpened {
                 native_session_id,
                 resumed,
