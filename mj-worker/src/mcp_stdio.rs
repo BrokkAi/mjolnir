@@ -344,9 +344,9 @@ mod tests {
         }
     }
 
-    /// Serve one request with a tool that sleeps for `work`, reporting
-    /// progress on every tick, and return everything the server wrote.
-    fn serve_a_slow_call(request: Value, interval: Duration, work: Duration) -> Vec<Value> {
+    /// Serve one request with a fixed number of progress ticks, independent of
+    /// scheduler delays, and return everything the server wrote.
+    fn serve_a_slow_call(request: Value, interval: Duration, ticks: u64) -> Vec<Value> {
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let input = format!("{request}\n");
         serve(
@@ -359,10 +359,9 @@ mod tests {
                 dispatch: Dispatch::Concurrent,
                 progress_interval: interval,
                 call: move |_params: Option<&Value>, progress: &Progress| {
-                    let started = Instant::now();
-                    while started.elapsed() < work {
+                    for tick in 0..ticks {
                         std::thread::sleep(progress.interval());
-                        progress.notify(started.elapsed().as_secs(), Some(60), "still working");
+                        progress.notify(tick, Some(60), "still working");
                     }
                     Ok((json!({"done": true}), false))
                 },
@@ -388,7 +387,7 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                    "params":{"name":"slow","arguments":{},"_meta":{"progressToken":"tok-7"}}}),
             Duration::from_millis(20),
-            Duration::from_millis(120),
+            3,
         );
         let notifications = lines
             .iter()
@@ -413,7 +412,7 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                    "params":{"name":"slow","arguments":{}}}),
             Duration::from_millis(20),
-            Duration::from_millis(80),
+            3,
         );
         assert!(
             lines.iter().all(|line| line["method"].is_null()),
