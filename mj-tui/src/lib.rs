@@ -638,6 +638,12 @@ pub struct DashboardState {
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: BTreeMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
+    /// The build stamped on the workspace pane, as `v2.11.0`. It is a field
+    /// rather than the compiled constant so the documentation capture can pin
+    /// a placeholder: those screenshots are committed, and a version read from
+    /// the binary would make every one of them wrong the moment the next
+    /// release goes out.
+    pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
     /// Selection anchor for the Sessions pane, by id rather than position: the
@@ -826,6 +832,7 @@ impl DashboardState {
             launch_standby_anchor: None,
             move_operations: BTreeMap::new(),
             capacity_details: BTreeMap::new(),
+            version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
             selected_session_id: None,

@@ -871,8 +871,6 @@ pub(crate) fn workspace_tab_click(
 }
 
 const WORKSPACES_TITLE: &str = " Workspaces ";
-/// The running Mjolnir build, drawn on the workspace pane's border.
-const VERSION_TITLE: &str = concat!(" v", env!("CARGO_PKG_VERSION"), " ");
 /// The two rounded corners a bordered title row cannot draw into.
 const BORDER_CORNER_CELLS: usize = 2;
 
@@ -891,12 +889,14 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     // The pane sits at the top of every dashboard, so its border is where the
     // build number costs nothing and is always in view. A sidebar too narrow
     // to hold both drops it rather than overlap the pane's own title.
-    if usize::from(area.width) >= WORKSPACES_TITLE.len() + VERSION_TITLE.len() + BORDER_CORNER_CELLS
+    let version = format!(" {} ", dashboard.version_label);
+    if usize::from(area.width)
+        >= Line::raw(WORKSPACES_TITLE).width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
     {
         // The pane's own title style is bold; a build number is a stamp, not a
         // heading, so it drops back out of bold here.
         let style = theme::muted().remove_modifier(Modifier::BOLD);
-        block = block.title(Line::styled(VERSION_TITLE, style).right_aligned());
+        block = block.title(Line::styled(version, style).right_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);

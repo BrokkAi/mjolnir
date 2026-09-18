@@ -38,13 +38,13 @@
     <text x="311" y="28" fill="#34465e">─</text>
     <text x="320" y="28" fill="#34465e">─</text>
     <text x="329" y="28" fill="#34465e">─</text>
-    <text x="347" y="28" fill="#8596ad">v</text>
-    <text x="356" y="28" fill="#8596ad">2</text>
-    <text x="365" y="28" fill="#8596ad">.</text>
-    <text x="374" y="28" fill="#8596ad">1</text>
-    <text x="383" y="28" fill="#8596ad">1</text>
+    <text x="338" y="28" fill="#34465e">─</text>
+    <text x="356" y="28" fill="#8596ad">v</text>
+    <text x="365" y="28" fill="#8596ad">X</text>
+    <text x="374" y="28" fill="#8596ad">.</text>
+    <text x="383" y="28" fill="#8596ad">Y</text>
     <text x="392" y="28" fill="#8596ad">.</text>
-    <text x="401" y="28" fill="#8596ad">0</text>
+    <text x="401" y="28" fill="#8596ad">Z</text>
     <text x="419" y="28" fill="#34465e">╮</text>
     <text x="428" y="28" fill="#34465e">╭</text>
     <text x="446" y="28" fill="#dfebf4" font-weight="700">C</text>
