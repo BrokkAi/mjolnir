@@ -27,6 +27,20 @@ impl CommandExecutor for FakeExecutor {
     }
 }
 
+/// Answers every command with a plain failure, for a whole-run test whose
+/// subject is the reporting rather than any external tool.
+struct AlwaysFailingExecutor;
+
+impl CommandExecutor for AlwaysFailingExecutor {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        Ok(CommandOutput {
+            status: 1,
+            stdout: vec![],
+            stderr: vec![],
+        })
+    }
+}
+
 fn output(stdout: impl AsRef<[u8]>) -> CommandOutput {
     CommandOutput {
         status: 0,
@@ -120,13 +134,71 @@ fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
 
     let (config, checks) = configuration_checks(&path);
 
-    assert!(config.is_none());
+    assert_eq!(
+        config.err(),
+        Some(ConfigGap::NewerVersion(mj_core::config::CONFIG_VERSION + 1))
+    );
     let check = checks.iter().find(|check| check.id == "config").unwrap();
     assert_eq!(check.status, CheckStatus::Fixable);
     assert!(check.detail.contains("newer Mjolnir"), "{}", check.detail);
     let remediation = check.remediation.as_deref().unwrap_or_default();
     assert!(remediation.contains("Update Mjolnir"), "{remediation}");
     assert!(!remediation.contains("mj setup"), "{remediation}");
+}
+
+/// A newer build's configuration is the one case doctor cannot read and the
+/// user cannot repair in the file, so no check in the run may send them to fix
+/// TOML; the checks that depend on a configuration skip and say why.
+#[test]
+fn a_newer_builds_config_never_asks_the_user_to_fix_config_toml() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let newer = mj_core::config::CONFIG_VERSION + 1;
+    std::fs::write(
+        &path,
+        format!("version = {newer}\n\n[targets.localhost]\nkind = \"local-bare\"\n"),
+    )
+    .unwrap();
+
+    let checks = run_with_config_path(
+        &path,
+        &AlwaysFailingExecutor,
+        ApplePlatform::Linux,
+        DoctorOptions { smoke: false },
+    );
+
+    for check in &checks {
+        let text = format!(
+            "{} {}",
+            check.detail,
+            check.remediation.as_deref().unwrap_or_default()
+        );
+        assert!(
+            !text.contains("config.toml is valid") && !text.contains("Fix config.toml"),
+            "{} advises fixing a config that is not broken: {text}",
+            check.id
+        );
+    }
+    for id in [
+        "harness.profiles",
+        "runtime.podman",
+        "runtime.docker",
+        "worker.containers",
+    ] {
+        let check = checks
+            .iter()
+            .find(|check| check.id == id)
+            .unwrap_or_else(|| panic!("{id} is reported"));
+        assert_eq!(check.status, CheckStatus::Unsupported, "{id}");
+        assert_eq!(check.remediation, None, "{id}");
+        assert!(
+            check
+                .detail
+                .contains(&format!("newer Mjolnir (config version {newer}")),
+            "{id}: {}",
+            check.detail
+        );
+    }
 }
 
 fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>) -> Config {
@@ -147,7 +219,7 @@ fn runtime_ssh() -> RuntimeSshTarget {
 fn podman_check_is_unsupported_without_a_valid_config() {
     let executor = FakeExecutor::new([]);
 
-    let check = podman_check(None, &executor);
+    let check = podman_check(Err(ConfigGap::Unreadable), &executor);
 
     assert_eq!(check.status, CheckStatus::Unsupported);
     assert_eq!(
@@ -167,7 +239,7 @@ fn podman_check_is_unsupported_without_a_local_podman_target() {
         },
     )]);
 
-    let check = podman_check(Some(&config), &executor);
+    let check = podman_check(Ok(&config), &executor);
 
     assert_eq!(check.status, CheckStatus::Unsupported);
     assert_eq!(check.detail, "No local-podman target is configured.");
@@ -184,7 +256,7 @@ fn podman_check_probes_the_host_when_a_local_podman_target_exists() {
         },
     )]);
 
-    let check = podman_check(Some(&config), &executor);
+    let check = podman_check(Ok(&config), &executor);
 
     assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("Podman 5.4.2"));
@@ -201,7 +273,7 @@ fn podman_check_is_fixable_with_an_upgrade_remediation_for_an_old_runtime() {
         },
     )]);
 
-    let check = podman_check(Some(&config), &executor);
+    let check = podman_check(Ok(&config), &executor);
 
     assert_eq!(check.status, CheckStatus::Fixable);
     assert!(
@@ -277,7 +349,7 @@ fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
         },
     )]);
 
-    let checks = podman_checks(Some(&config), &executor, false);
+    let checks = podman_checks(Ok(&config), &executor, false);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.podman");
@@ -304,7 +376,7 @@ fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
         ),
     ]);
 
-    let checks = podman_checks(Some(&config), &executor, false);
+    let checks = podman_checks(Ok(&config), &executor, false);
 
     assert_eq!(
         checks
@@ -334,7 +406,7 @@ fn docker_checks_probe_the_daemon_then_the_configured_image() {
         },
     )]);
 
-    let checks = docker_checks(Some(&config), &executor, false);
+    let checks = docker_checks(Ok(&config), &executor, false);
 
     assert_eq!(
         checks
@@ -588,7 +660,7 @@ fn ssh_podman_checks_report_host_limits_after_the_podman_check() {
         },
     )]);
 
-    let checks = ssh_podman_checks(Some(&config), &executor, false);
+    let checks = ssh_podman_checks(Ok(&config), &executor, false);
 
     assert_eq!(checks.len(), 2);
     assert_eq!(checks[0].id, "runtime.ssh-podman.remote");
@@ -623,7 +695,7 @@ fn ssh_podman_checks_skip_host_limits_when_the_host_is_unreachable() {
         },
     )]);
 
-    let checks = ssh_podman_checks(Some(&config), &executor, false);
+    let checks = ssh_podman_checks(Ok(&config), &executor, false);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.ssh-podman.remote");
@@ -706,7 +778,7 @@ fn ssh_docker_check_smoke_runs_overlay_on_the_remote_host() {
 fn ssh_podman_checks_are_skipped_without_a_valid_config() {
     let executor = FakeExecutor::new([]);
 
-    assert!(ssh_podman_checks(None, &executor, false).is_empty());
+    assert!(ssh_podman_checks(Err(ConfigGap::Unreadable), &executor, false).is_empty());
     assert!(executor.commands.borrow().is_empty());
 }
 
@@ -730,7 +802,7 @@ fn ssh_bare_config() -> Config {
 fn ssh_bare_check_is_ready_when_the_batch_mode_probe_succeeds() {
     let executor = FakeExecutor::new([Ok(output(b""))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.ssh-bare.builder");
@@ -751,7 +823,7 @@ fn ssh_bare_check_permission_denied_recommends_ssh_copy_id_with_the_identity() {
         b"dev@example.test: Permission denied (publickey).",
     ))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks[0].status, CheckStatus::Fixable);
     assert_eq!(
@@ -768,7 +840,7 @@ fn ssh_bare_check_host_key_failure_recommends_keyscan_with_a_fingerprint_caution
         b"Host key verification failed.\nNo ECDSA host key is known for example.test",
     ))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks[0].status, CheckStatus::Fixable);
     let remediation = checks[0].remediation.as_deref().unwrap();
@@ -789,7 +861,7 @@ fn ssh_bare_check_without_an_ssh_client_recommends_installing_openssh() {
     ))
     .context("run ssh for verify SSH connectivity"))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks[0].status, CheckStatus::Fixable);
     assert_eq!(
@@ -806,7 +878,7 @@ fn ssh_bare_check_probe_timeout_recommends_checking_the_host_is_reachable() {
         timeout: std::time::Duration::from_secs(15),
     }))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks[0].status, CheckStatus::Fixable);
     let remediation = checks[0].remediation.as_deref().unwrap();
@@ -830,7 +902,7 @@ fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
         b"ssh: connect to host example.test port 22: Connection timed out",
     ))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     let remediation = checks[0].remediation.as_deref().unwrap();
     assert!(
@@ -845,7 +917,7 @@ fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
         b"kex_exchange_identification: read: Connection reset by peer",
     ))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     let remediation = checks[0].remediation.as_deref().unwrap();
     assert!(
@@ -864,7 +936,7 @@ fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
         "operation cancelled while verify SSH connectivity"
     ))]);
 
-    let checks = ssh_bare_checks(Some(&ssh_bare_config()), &executor);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
 
     assert_eq!(checks[0].status, CheckStatus::Fixable);
     let remediation = checks[0].remediation.as_deref().unwrap();
@@ -879,7 +951,7 @@ fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
 fn ssh_bare_checks_are_skipped_without_a_valid_config() {
     let executor = FakeExecutor::new([]);
 
-    assert!(ssh_bare_checks(None, &executor).is_empty());
+    assert!(ssh_bare_checks(Err(ConfigGap::Unreadable), &executor).is_empty());
     assert!(executor.commands.borrow().is_empty());
 }
 
@@ -893,7 +965,7 @@ fn worker_check_for_an_ssh_podman_target_without_platform_is_unsupported() {
         },
     )]);
 
-    let checks = worker_binary_checks(Some(&config));
+    let checks = worker_binary_checks(Ok(&config));
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "worker.remote");
@@ -916,7 +988,7 @@ fn worker_check_for_an_ssh_podman_target_with_platform_uses_the_normal_check() {
         },
     )]);
 
-    let checks = worker_binary_checks(Some(&config));
+    let checks = worker_binary_checks(Ok(&config));
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "worker.remote");
@@ -934,7 +1006,7 @@ fn worker_check_for_an_ssh_docker_target_hints_at_remote_architecture() {
         },
     )]);
 
-    let checks = worker_binary_checks(Some(&config));
+    let checks = worker_binary_checks(Ok(&config));
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Unsupported);
@@ -963,7 +1035,7 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
     };
 
     let executor = FakeExecutor::new([Ok(output(br#"{"loggedIn":false}"#))]);
-    let checks = harness_checks(Some(&config), &executor);
+    let checks = harness_checks(Ok(&config), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Fixable);
@@ -1019,7 +1091,7 @@ fn doctor_reports_a_claude_home_macos_cannot_scope() {
     let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
 
     let executor = FakeExecutor::new([]);
-    let checks = harness_checks(Some(&config), &executor);
+    let checks = harness_checks(Ok(&config), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Fixable);
@@ -1067,7 +1139,7 @@ fn doctor_accepts_a_scoped_claude_home_used_only_off_this_machine() {
     );
 
     let executor = FakeExecutor::new([]);
-    let checks = harness_checks(Some(&config), &executor);
+    let checks = harness_checks(Ok(&config), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Ready, "{:?}", checks[0]);
@@ -1089,7 +1161,7 @@ fn doctor_reports_disabled_profiles_without_probing_them() {
     };
     let executor = FakeExecutor::new([]);
 
-    let checks = harness_checks(Some(&config), &executor);
+    let checks = harness_checks(Ok(&config), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].status, CheckStatus::Ready);
@@ -1289,7 +1361,7 @@ fn aws_check_is_ready_after_the_cli_credential_and_launch_template_probes() {
     ]);
     let config = config_with([("aws", aws_target("hel-runson"))]);
 
-    let checks = aws_checks(Some(&config), &executor);
+    let checks = aws_checks(Ok(&config), &executor);
 
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].id, "runtime.aws-ec2.aws");
@@ -1379,8 +1451,8 @@ fn aws_checks_are_skipped_for_configs_without_an_aws_target() {
         },
     )]);
 
-    assert!(aws_checks(Some(&config), &executor).is_empty());
-    assert!(aws_checks(None, &executor).is_empty());
+    assert!(aws_checks(Ok(&config), &executor).is_empty());
+    assert!(aws_checks(Err(ConfigGap::Unreadable), &executor).is_empty());
     assert!(executor.commands.borrow().is_empty());
 }
 
@@ -1469,14 +1541,14 @@ fn every_configured_container_architecture_is_checked_once() {
         ),
     ]);
 
-    let mut architectures = container_worker_architectures(Some(&config));
+    let mut architectures = container_worker_architectures(Ok(&config));
     architectures.sort();
     assert_eq!(
         architectures,
         vec!["aarch64".to_owned(), "x86_64".to_owned()],
         "each architecture is reported once, and a non-container target adds none"
     );
-    assert!(container_worker_architectures(None).is_empty());
+    assert!(container_worker_architectures(Err(ConfigGap::Unreadable)).is_empty());
 }
 
 #[test]
