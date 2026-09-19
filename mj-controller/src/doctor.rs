@@ -1723,10 +1723,11 @@ fn daemon_build_check() -> DoctorCheck {
             ID,
             TITLE,
             format!(
-                "Daemon {pid} runs {}, while this client runs {}. Both report version {}, so the version alone cannot tell them apart. Code rebuilt since that daemon started is not running.",
-                describe_executable(mj_client::executable::process_executable_path(pid)),
-                describe_executable(mj_client::executable::running_executable_path()),
-                metadata.build_version,
+                "{}. Two builds can report the same version, so the files are what tell them apart. Code rebuilt since that daemon started is not running.",
+                mj_client::executable::describe_running_daemon_and_client_builds(
+                    pid,
+                    &metadata.build_version,
+                ),
             ),
             "Run `mj daemon restart` from this build. It now fails rather than reporting success if another client's build wins.",
         ),
@@ -1744,13 +1745,6 @@ fn daemon_build_check() -> DoctorCheck {
             "Run `mj daemon restart` from this build if rebuilt code is not taking effect.",
         ),
     }
-}
-
-fn describe_executable(path: Option<std::path::PathBuf>) -> String {
-    path.map_or_else(
-        || "an unknown file".to_owned(),
-        |path| path.display().to_string(),
-    )
 }
 
 /// Whether a new session would run the worker binary as it is on disk now.

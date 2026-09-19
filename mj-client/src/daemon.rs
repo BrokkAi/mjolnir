@@ -1,4 +1,5 @@
 //! Authenticated local daemon protocol and client transport.
+use crate::executable::describe_running_daemon_and_client_builds;
 use crate::review::RuntimeReviewView;
 use crate::session::{ManagedSessionView, ViewError};
 use anyhow::{Context, Result, bail, ensure};
@@ -1726,12 +1727,32 @@ pub async fn connect_management() -> Result<ManagementClient> {
     })
 }
 
-pub fn ensure_supported_daemon_protocol(version: u32) -> Result<()> {
+/// Refuse to speak to a daemon whose protocol this build does not know.
+///
+/// The two protocol numbers alone do not say which `mj` ran. The usual cause is
+/// a second installation: a `cargo install`ed client sits earlier on PATH than
+/// the build whose daemon is running, so every command fails here while the
+/// other binary works, and nothing in the message says where either lives. It
+/// therefore names both executables and both versions.
+pub fn ensure_supported_daemon_protocol(metadata: &DaemonMetadata) -> Result<()> {
     ensure!(
-        version <= PROTOCOL_VERSION,
-        "the daemon uses a newer protocol ({version}) than this client ({PROTOCOL_VERSION}); restart this client with the updated mj binary"
+        metadata.protocol_version <= PROTOCOL_VERSION,
+        "{}",
+        unsupported_daemon_protocol_message(
+            metadata.protocol_version,
+            &describe_running_daemon_and_client_builds(metadata.pid, &metadata.build_version),
+        )
     );
     Ok(())
+}
+
+/// The message [`ensure_supported_daemon_protocol`] fails with, given the
+/// sentence that names both builds, so it can be read without a daemon.
+fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> String {
+    format!(
+        "the daemon uses a newer protocol ({daemon_protocol}) than this client ({PROTOCOL_VERSION}). {builds}. \
+         Put the daemon's directory first on PATH, or reinstall this client from that build."
+    )
 }
 pub const PROTOCOL_VERSION: u32 = 26;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -1765,5 +1786,66 @@ impl DaemonClient {
             DaemonReply::MoveOutcome(outcome) => Ok(outcome),
             _ => bail!("daemon returned an unexpected move reply"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
+    use std::path::Path;
+
+    #[test]
+    fn unsupported_protocol_message_names_both_binaries_and_versions() {
+        let message = unsupported_daemon_protocol_message(
+            PROTOCOL_VERSION + 5,
+            &describe_daemon_and_client_builds(
+                4242,
+                BuildDescription {
+                    executable: Some(Path::new("/home/dev/mj/target/release/mj")),
+                    version: "2.14.0",
+                },
+                BuildDescription {
+                    executable: Some(Path::new("/home/dev/.cargo/bin/mj")),
+                    version: "2.9.0",
+                },
+            ),
+        );
+        assert_eq!(
+            message,
+            format!(
+                "the daemon uses a newer protocol ({}) than this client ({PROTOCOL_VERSION}). \
+                 Daemon 4242 runs /home/dev/mj/target/release/mj (version 2.14.0), \
+                 while this client runs /home/dev/.cargo/bin/mj (version 2.9.0). \
+                 Put the daemon's directory first on PATH, or reinstall this client from that build.",
+                PROTOCOL_VERSION + 5
+            )
+        );
+    }
+
+    #[test]
+    fn unsupported_protocol_message_still_names_the_client_when_the_daemon_file_is_unknown() {
+        let message = unsupported_daemon_protocol_message(
+            PROTOCOL_VERSION + 1,
+            &describe_daemon_and_client_builds(
+                4242,
+                BuildDescription {
+                    executable: None,
+                    version: "2.14.0",
+                },
+                BuildDescription {
+                    executable: Some(Path::new("/home/dev/.cargo/bin/mj")),
+                    version: "2.9.0",
+                },
+            ),
+        );
+        assert!(
+            message.contains("Daemon 4242 runs an unknown file (version 2.14.0)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
+            "{message}"
+        );
     }
 }

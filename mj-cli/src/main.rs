@@ -1031,11 +1031,6 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
     Ok("workspace-1".to_owned())
 }
 
-/// Name an executable for a person, or say plainly that it is unknown.
-fn describe_executable(path: Option<std::path::PathBuf>) -> String {
-    path.map_or_else(|| "unknown".to_owned(), |path| path.display().to_string())
-}
-
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Status => {
@@ -1065,8 +1060,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                     "This daemon runs a different executable ({}) than this client ({}); \
                      commands work, but code you rebuilt is not running. \
                      Run `mj daemon restart` from this build.",
-                    describe_executable(daemon::process_executable_path(status.pid)),
-                    describe_executable(daemon::running_executable_path()),
+                    daemon::describe_executable(
+                        daemon::process_executable_path(status.pid).as_deref()
+                    ),
+                    daemon::describe_executable(daemon::running_executable_path().as_deref()),
                 ),
                 None => {}
             }
