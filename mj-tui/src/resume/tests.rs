@@ -1337,6 +1337,11 @@ fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
         "the unread answer is the done one"
     );
     assert_eq!(
+        dashboard.selected_session_id(),
+        Some("live-alpha"),
+        "the letters move the dialog's own cursor, not the conversation the pane has open"
+    );
+    assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('a'))),
         DashboardAction::None
     );

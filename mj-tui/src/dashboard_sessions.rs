@@ -1001,6 +1001,35 @@ impl DashboardState {
         }
     }
 
+    /// Whether the state letter, rather than the end of the session itself, is
+    /// what took the selected row off screen.
+    ///
+    /// The surface opens whatever the selection names, and opening a
+    /// conversation reads its answer. A state letter that re-pointed the
+    /// selection at the first row it admits would therefore read that answer,
+    /// and `d` admits exactly the sessions holding an unread answer: it would
+    /// hide the row it had just found. The state letters narrow the list and
+    /// leave the selection on the session the person chose, with no row
+    /// highlighted while they hide it. A typed query selects on names, which
+    /// opening a conversation cannot change, so it still carries the selection
+    /// to what it finds.
+    fn selection_is_hidden_by_state(&self) -> bool {
+        let Some(state) = self
+            .sessions_filter
+            .as_ref()
+            .and_then(|filter| filter.state)
+        else {
+            return false;
+        };
+        let Some(selected) = self.selected_session_id.as_deref() else {
+            return false;
+        };
+        self.ordered_sessions_unfiltered()
+            .into_iter()
+            .any(|session| session.id == selected)
+            && !state.admits(self.attention_level(selected))
+    }
+
     pub(crate) fn clamp_selections(&mut self) {
         // The selection is anchored by id, so it survives the list changing
         // under it; it only moves when the session it named stopped being on
@@ -1015,6 +1044,7 @@ impl DashboardState {
             .selected_session_id
             .as_ref()
             .is_some_and(|id| visible.contains(id))
+            && !self.selection_is_hidden_by_state()
         {
             self.selected_session_id = visible.into_iter().next();
         }

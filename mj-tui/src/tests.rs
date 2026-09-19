@@ -5,7 +5,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use mj_core::config::{ProjectBundle, ProjectRepository};
-use mj_core::state::{STATE_VERSION, SessionState, State};
+use mj_core::state::{
+    MaterializedExecutionState, STATE_VERSION, SessionState, State, TranscriptBody,
+};
 
 use super::*;
 use crate::test_support::*;
@@ -3705,6 +3707,86 @@ fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
         }
     );
     assert!(dashboard.sessions_filter.is_none());
+}
+
+/// Two running sessions, `alpha` open in the conversation pane and selected,
+/// and a reply that has landed for `beta` while it was off screen. The reply
+/// arrives the way the host delivers one: a materialized projection whose
+/// agent message sits past the read frontier the pane left behind.
+fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
+    let mut alpha = running_session();
+    alpha.id = "alpha".into();
+    alpha.session_title_override = Some("alpha".into());
+    alpha.created_at = "2026-08-01T00:00:00Z".into();
+    let mut beta = running_session();
+    beta.id = "beta".into();
+    beta.session_title_override = Some("beta".into());
+    beta.created_at = "2026-08-02T00:00:00Z".into();
+    // The pane read `beta` through its own prompt before it was left for
+    // `alpha`; the answer that follows is the unread one.
+    beta.viewed_through_event_ordinal = 3;
+    let mut dashboard = dashboard_with_session(alpha);
+    dashboard.state.sessions.insert("beta".into(), beta);
+    let state = dashboard.state.clone();
+    dashboard.set_state(state);
+    dashboard.select_active_session("beta");
+    dashboard.set_current_session(Some("beta"));
+    dashboard.select_active_session("alpha");
+    dashboard.set_current_session(Some("alpha"));
+    let mut reply = materialized_session_for(
+        "beta",
+        vec![
+            transcript_item(
+                3,
+                TranscriptBody::User {
+                    content: vec![serde_json::json!({"type": "text", "text": "beta prompt"})],
+                },
+            ),
+            agent_message(4, "reliability reply: beta prompt"),
+        ],
+    );
+    reply.execution = MaterializedExecutionState::Idle;
+    dashboard.apply_materialized_session(&reply);
+    dashboard
+}
+
+/// The `d` filter has to keep the row it found, and the row it found is the one
+/// drawn with the done glyph.
+///
+/// The Sessions selection is what the host opens, and opening a conversation
+/// marks its answer read. A filter that moved the selection onto the row it had
+/// just found therefore read that answer, dropped the row out of the filter,
+/// and left `d` reporting that nothing matches a row still drawn with `✓`. A
+/// filter is a view: it hides rows without choosing a conversation.
+#[test]
+fn the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone() {
+    let mut dashboard = dashboard_with_an_unread_reply_off_screen();
+    let lines = drawn(&mut dashboard, 120, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("beta"))
+        .expect("beta has a row");
+    assert!(
+        row.contains(mj_chat::theme::glyphs().unread),
+        "the row says the answer is unread: {lines:#?}"
+    );
+    dashboard.focus_sessions();
+
+    dashboard.handle_key(key(KeyCode::Char('d')));
+
+    assert_eq!(
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        ["beta"]
+    );
+    assert_eq!(
+        dashboard.selected_session_id(),
+        Some("alpha"),
+        "the filter must not hand the host a different conversation to open"
+    );
 }
 
 /// A letter that hides every row leaves the pane with no row to select, so the
