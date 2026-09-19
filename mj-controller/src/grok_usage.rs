@@ -446,7 +446,7 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_grok(directory: &Path, script: &str) -> PathBuf {
-        crate::controller::test_support::install_fake_command(directory, "grok", script);
+        mj_core::test_hooks::install_fake_command(directory, "grok", script);
         directory.join("grok")
     }
 

@@ -87,7 +87,7 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         )
     };
     let write_tool = |name: &str, body: &str| {
-        crate::controller::test_support::install_fake_command(
+        mj_core::test_hooks::install_fake_command(
             directory.path(),
             name,
             &format!("#!/bin/sh\n{body}\n"),

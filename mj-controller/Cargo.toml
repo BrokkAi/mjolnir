@@ -62,6 +62,7 @@ zip.workspace = true
 anvil-client.workspace = true
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
 http-body-util = "0.1"

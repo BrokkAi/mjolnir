@@ -466,7 +466,7 @@ mod tests {
         temp: &tempfile::TempDir,
         script: &str,
     ) -> (HashMap<String, String>, PathBuf) {
-        crate::controller::test_support::install_fake_command(temp.path(), "codex", script);
+        mj_core::test_hooks::install_fake_command(temp.path(), "codex", script);
 
         let log = temp.path().join("requests.jsonl");
         let env = HashMap::from([

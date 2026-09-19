@@ -15,7 +15,6 @@ struct PushFixture {
 
 impl PushFixture {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("worker with spaces");
         let repository = directory.path().join("repository");
@@ -65,9 +64,9 @@ impl PushFixture {
         config.write(&fixture.root.join("launch.json")).unwrap();
         mj_worker::worker_runtime::configure_github_cli(&fixture.root, &mut environment).unwrap();
         mj_core::credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
-        let gh = bin.join("gh");
-        std::fs::write(
-            &gh,
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "gh",
             r#"#!/bin/sh
 set -eu
 [ "$1" = auth ] && [ "$2" = git-credential ]
@@ -76,9 +75,7 @@ if [ "${3-}" = get ] && [ -n "${GH_TOKEN:-}" ]; then
     printf 'username=x-access-token\npassword=%s\n' "$GH_TOKEN"
 fi
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         fixture.git(&fixture.repository, &["init", "-q"]);
         fixture.git(
             fixture.remote.parent().unwrap(),
@@ -128,8 +125,7 @@ test "$credentials" = "$(printf 'protocol=https\nhost=github.com\nusername=x-acc
                     .unwrap()
             )
         );
-        std::fs::write(&hook, script).unwrap();
-        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        mj_core::test_hooks::install_fake_command(hook.parent().unwrap(), "pre-push", &script);
         fixture
     }
 
@@ -288,7 +284,6 @@ fn branch_export_reports_missing_or_invalid_session_setup() {
 
 #[test]
 fn branch_export_preserves_local_and_explicit_ssh_pushes_without_a_token() {
-    use std::os::unix::fs::PermissionsExt;
     let fixture = PushFixture::new();
     std::fs::remove_file(fixture.repository.join(".git/hooks/pre-push")).unwrap();
     let output = fixture.push("review/local");
@@ -302,16 +297,15 @@ fn branch_export_preserves_local_and_explicit_ssh_pushes_without_a_token() {
     // Exercise Git's SSH transport with a local receive-pack instead of a server.
     let ssh = fixture.directory.path().join("fixture ssh");
     let quote = mj_core::targets::posix_quote;
-    std::fs::write(
-        &ssh,
-        format!(
+    mj_core::test_hooks::install_fake_command(
+        fixture.directory.path(),
+        "fixture ssh",
+        &format!(
             "#!/bin/sh\nexec {} receive-pack {}\n",
             quote(&fixture.git),
             quote(fixture.remote.to_str().unwrap())
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let config_path = fixture.root.join("launch.json");
     let mut config = mj_core::worker_launch::WorkerLaunchConfig::read(&config_path).unwrap();
     config

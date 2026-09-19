@@ -1,11 +1,11 @@
 use super::*;
-#[cfg(unix)]
-use crate::controller::test_support::install_fake_command;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(unix)]
+use mj_core::test_hooks::install_fake_command;
 use std::sync::{Arc, Mutex};
 
 fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
