@@ -2614,8 +2614,10 @@ async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout
     let dirty_id = "fedcba9876543210fedcba9876543210";
     let mut lost = Vec::new();
     for session_id in [clean_id, dirty_id] {
-        let mut session =
-            crate::controller::test_support::managed_worktree_session(repository.path(), session_id);
+        let mut session = crate::controller::test_support::managed_worktree_session(
+            repository.path(),
+            session_id,
+        );
         session.state = SessionState::Lost;
         session.checkpoint = None;
         session.last_error = Some("working directory is gone".into());
@@ -2709,7 +2711,11 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
 fn startup_selects_every_record_that_is_only_a_tombstone() {
     let sessions = [
         runtime_test_session("lost", "workspace", SessionState::Lost),
-        runtime_test_session("data-loss", "workspace", SessionState::DestroyedWithDataLoss),
+        runtime_test_session(
+            "data-loss",
+            "workspace",
+            SessionState::DestroyedWithDataLoss,
+        ),
         runtime_test_session("stopped", "workspace", SessionState::Stopped),
         runtime_test_session("running", "workspace", SessionState::Running),
         runtime_test_session("failed", "workspace", SessionState::Error),
