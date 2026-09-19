@@ -336,6 +336,17 @@ impl ResumeDialog {
         form.end_frame(Sessions);
     }
 
+    /// Whether an arrow key pressed in the search box has no caret movement
+    /// left to make, so it belongs to the tab strip instead. An empty box sits
+    /// at both ends at once.
+    fn search_caret_at_edge(&self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Left => self.search.cursor() == 0,
+            KeyCode::Right => self.search.cursor() == self.search.value().len(),
+            _ => false,
+        }
+    }
+
     /// Whether the search box accepts typing. On the history tabs search is the
     /// index's answer, so there is nothing to type into until the index can
     /// answer. The Live tab matches names itself and can answer at once.
@@ -470,6 +481,16 @@ impl ResumeDialog {
 /// reload can shrink the list under a selection that was valid a moment ago.
 fn selected_index(dialog: &ResumeDialog, len: usize) -> Option<usize> {
     (len > 0).then(|| dialog.row_index.min(len - 1))
+}
+
+/// How far along the tab strip one arrow key moves, counted forward so the
+/// caller's `%` wraps `Left` around the left end of the strip.
+fn tab_step(code: KeyCode) -> Option<usize> {
+    match code {
+        KeyCode::Left => Some(ResumeTab::COUNT - 1),
+        KeyCode::Right => Some(1),
+        _ => None,
+    }
 }
 
 /// Epoch milliseconds for an RFC 3339 timestamp, or `None` when it cannot be
@@ -1311,20 +1332,75 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return DashboardAction::None;
         };
-        let leaving_live_query = dialog.tab == ResumeTab::Live
-            && tab != ResumeTab::Live
-            && !dialog.search.is_empty();
+        let leaving_live_query =
+            dialog.tab == ResumeTab::Live && tab != ResumeTab::Live && !dialog.search.is_empty();
         if dialog.tab != tab {
             dialog.tab = tab;
             dialog.selected = None;
             dialog.row_index = 0;
             self.rebuild_resume_rows();
             self.resync_resume_selection();
+            self.settle_resume_focus();
         }
         if leaving_live_query {
             return self.wiki_search_action();
         }
         self.next_wiki_preview()
+    }
+
+    /// Puts the keyboard where the new tab's keys work: on the list, or on the
+    /// tab strip when the list has no row to hold the focus.
+    ///
+    /// Without this a tab reached by arrow leaves the focus on the strip, where
+    /// Enter is spent moving to the list rather than opening the selected row,
+    /// and an empty list hands the focus to whichever button comes next. A
+    /// person typing in the search box keeps it.
+    fn settle_resume_focus(&mut self) {
+        let target = self.resume_focus_outside_search();
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return;
+        };
+        let mut form = dialog.form.borrow_mut();
+        if form.is_focused(ResumeFocus::Search) {
+            return;
+        }
+        form.focus(target);
+    }
+
+    /// Where the keyboard belongs once it leaves the search box: the list, or
+    /// the tab strip when the list has no row that could take the focus. Asking
+    /// a disabled list for it would leave the box holding the keyboard instead.
+    fn resume_focus_outside_search(&self) -> ResumeFocus {
+        if self.resume_rows().is_empty() {
+            ResumeFocus::Tabs
+        } else {
+            ResumeFocus::Sessions
+        }
+    }
+
+    /// Moves the dialog `step` tabs along the strip, wrapping around it.
+    fn step_resume_tab(&mut self, step: usize) -> DashboardAction {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
+            return DashboardAction::None;
+        };
+        let next = ResumeTab::from_index((dialog.tab.index() + step) % ResumeTab::COUNT);
+        self.switch_resume_tab(next)
+    }
+
+    /// Empties the search box and puts the unfiltered list back, the same
+    /// rebuild deleting the last character would do.
+    fn clear_resume_search(&mut self) -> DashboardAction {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        dialog.search.clear();
+        let live = dialog.tab == ResumeTab::Live;
+        self.rebuild_resume_rows();
+        self.select_resume_row(0);
+        if live {
+            return DashboardAction::None;
+        }
+        self.wiki_search_action()
     }
 
     pub(crate) fn select_resume_row(&mut self, index: usize) {
@@ -1449,11 +1525,42 @@ impl DashboardState {
             && key.kind == KeyEventKind::Press
             && key.modifiers.is_empty()
         {
-            if focused == Search && key.code == KeyCode::Down {
-                dialog.form.get_mut().focus(Sessions);
-                return DashboardAction::None;
+            // Escape peels one layer at a time: the query first, then the box's
+            // hold on the keyboard, and only then the dialog. This is the order
+            // the help overlay and the Sessions pane's own filter already use.
+            if key.code == KeyCode::Esc {
+                if !dialog.search.is_empty() {
+                    return self.clear_resume_search();
+                }
+                if focused == Search {
+                    let target = self.resume_focus_outside_search();
+                    let Mode::ResumeDialog(dialog) = &mut self.mode else {
+                        return DashboardAction::None;
+                    };
+                    dialog.form.get_mut().focus(target);
+                    return DashboardAction::None;
+                }
             }
-            if focused != Search {
+            if focused == Search {
+                if key.code == KeyCode::Down {
+                    dialog.form.get_mut().focus(Sessions);
+                    return DashboardAction::None;
+                }
+                // Readline first: the arrows walk the caret through the query,
+                // and reach the tab strip only when pressed against the end the
+                // caret is already sitting on.
+                if let Some(step) = tab_step(key.code)
+                    && dialog.search_caret_at_edge(key.code)
+                {
+                    return self.step_resume_tab(step);
+                }
+            } else {
+                // Outside the box the strip is the dialog's left-to-right axis,
+                // so the arrows reach it from the list, the strip and the
+                // buttons alike, including from a list too empty to hold focus.
+                if let Some(step) = tab_step(key.code) {
+                    return self.step_resume_tab(step);
+                }
                 match key.code {
                     KeyCode::Char('/') => {
                         // A disabled box cannot take the focus, and asking for
@@ -1465,17 +1572,6 @@ impl DashboardState {
                     }
                     KeyCode::Delete if focused == Sessions => {
                         return self.destroy_selected_resume_row();
-                    }
-                    // Keep list navigation shortcuts; arrows in fields belong to editing.
-                    KeyCode::Left | KeyCode::Right if focused == Sessions => {
-                        let step = if key.code == KeyCode::Left {
-                            ResumeTab::COUNT - 1
-                        } else {
-                            1
-                        };
-                        let next =
-                            ResumeTab::from_index((dialog.tab.index() + step) % ResumeTab::COUNT);
-                        return self.switch_resume_tab(next);
                     }
                     // The state letters narrow what is running, so they belong
                     // to the Live tab alone: the other tabs list sessions that
@@ -1905,9 +2001,7 @@ pub(crate) fn render_resume_dialog(
     }
     footer.push(Line::styled(
         match dialog.tab {
-            ResumeTab::Live => {
-                "Enter opens · ←/→ tabs · / searches · Tab moves · a/b/w/i/d filter"
-            }
+            ResumeTab::Live => "Enter opens · ←/→ tabs · / searches · Tab moves · a/b/w/i/d filter",
             ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Archive => "Enter restores · ←/→ tabs · / searches · Tab moves",
@@ -2016,10 +2110,11 @@ fn resume_list_title(
         spans.push(Span::raw(" Searching…"));
     } else if dialog.wiki_status.topping_up && rows > 0 {
         spans.push(Span::raw(format!(
-            "{rows} matches · index syncing, more may arrive"
+            "{} · index syncing, more may arrive",
+            match_count(rows)
         )));
     } else {
-        spans.push(Span::raw(format!("{rows} matches")));
+        spans.push(Span::raw(match_count(rows)));
     }
     if dialog.tab == ResumeTab::Import && dialog.is_scanning() {
         let (scanned, total) = dialog.scan_progress();
@@ -2032,6 +2127,11 @@ fn resume_list_title(
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
+}
+
+/// How many rows the query matched, counted in the reader's own grammar.
+fn match_count(rows: usize) -> String {
+    format!("{rows} match{}", if rows == 1 { "" } else { "es" })
 }
 
 /// What an empty list says while a query is running: where the query's hits

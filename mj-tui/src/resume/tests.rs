@@ -1135,6 +1135,43 @@ fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
     );
 }
 
+/// Enter on the focused Mjolnir row starts its resume, which is what the tab's
+/// own hint promises and what the Resume button already does.
+#[test]
+fn enter_on_a_focused_mjolnir_row_begins_its_resume() {
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+    let mut hit = wiki_row("wiki-1", false);
+    hit.hel_session_id = Some("session-1".into());
+    apply_ready_rows(&mut dashboard, vec![hit]);
+    // Drawing registers the dialog's controls, so the keys land where they do in
+    // the running dashboard. Live is empty here: the only session is stopped.
+    drawn(&mut dashboard, 120, 40);
+    assert!(rows(&dashboard).is_empty(), "no session is running");
+
+    dashboard.handle_key(key(KeyCode::Right));
+    drawn(&mut dashboard, 120, 40);
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Hel);
+    assert_eq!(rows(&dashboard).len(), 1, "the stopped session is listed");
+
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(dashboard.mode, Mode::Resume(_)),
+        "Enter on the row opens the resume wizard"
+    );
+}
+
 /// Two running sessions in the active workspace and one in `other`, each with
 /// its own title so a name search can pick one out.
 fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
@@ -1326,8 +1363,8 @@ fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
     }
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 
-    // Down leaves the box for the list, where the arrows walk the tab strip.
-    dashboard.handle_key(key(KeyCode::Down));
+    // The caret sits at the end of what was typed, so Right has no query left
+    // to walk and belongs to the tab strip.
     let action = dashboard.handle_key(key(KeyCode::Right));
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
@@ -1340,6 +1377,188 @@ fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
         ),
         "{action:?}"
     );
+}
+
+/// The arrows go on walking the strip after landing on a tab with nothing in
+/// it, which is every history tab while all of a dashboard's sessions run.
+#[test]
+fn the_arrows_walk_the_strip_across_a_tab_whose_list_is_empty() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
+
+    dashboard.handle_key(key(KeyCode::Right));
+    drawn(&mut dashboard, 120, 40);
+    assert!(rows(&dashboard).is_empty(), "nothing is stopped");
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Hel);
+    assert_eq!(
+        dialog.focused(),
+        ResumeFocus::Tabs,
+        "an empty list cannot hold the keyboard, so the strip keeps it"
+    );
+
+    dashboard.handle_key(key(KeyCode::Right));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Import, "the arrows are still live");
+
+    dashboard.handle_key(key(KeyCode::Left));
+    dashboard.handle_key(key(KeyCode::Left));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.tab,
+        ResumeTab::Live,
+        "and Left comes all the way back"
+    );
+    assert_eq!(
+        dialog.focused(),
+        ResumeFocus::Sessions,
+        "a tab with rows hands the keyboard back to them"
+    );
+}
+
+/// In the search box the arrows belong to the caret, as readline has them, and
+/// they reach the tab strip only from the end they are pressed against.
+#[test]
+fn the_search_arrows_reach_the_strip_only_from_the_end_of_the_query() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    apply_ready_rows(&mut dashboard, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_paste("mast");
+
+    dashboard.handle_key(key(KeyCode::Left));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.search.cursor(), 3, "the caret moved, not the tab");
+    assert_eq!(dialog.tab, ResumeTab::Live);
+
+    dashboard.handle_key(key(KeyCode::Right));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.search.cursor(), 4, "the caret reached the end");
+    assert_eq!(dialog.tab, ResumeTab::Live);
+
+    dashboard.handle_key(key(KeyCode::Right));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(
+        dialog.tab,
+        ResumeTab::Hel,
+        "pressed against the end it tabs"
+    );
+    assert_eq!(dialog.search.value(), "mast", "the query comes along");
+    assert_eq!(
+        dialog.focused(),
+        ResumeFocus::Search,
+        "a person still typing keeps the box"
+    );
+
+    dashboard.handle_key(key(KeyCode::Left));
+    dashboard.handle_key(key(KeyCode::Left));
+    dashboard.handle_key(key(KeyCode::Left));
+    dashboard.handle_key(key(KeyCode::Left));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.search.cursor(), 0);
+    assert_eq!(dialog.tab, ResumeTab::Hel, "four Lefts only walk the query");
+
+    dashboard.handle_key(key(KeyCode::Left));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Live, "the fifth reaches the strip");
+}
+
+/// Escape takes the query before it takes the dialog, then hands the keyboard
+/// back to the list, matching the help overlay and the Sessions pane's filter.
+#[test]
+fn escape_clears_the_query_then_leaves_the_box_then_closes_the_dialog() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_paste("mast");
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(rows(&dashboard).len(), 3, "the whole list is back");
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("the dialog stays open while there is a query to clear");
+    };
+    assert!(dialog.search.is_empty(), "the query went, not the dialog");
+    assert_eq!(
+        dialog.focused(),
+        ResumeFocus::Search,
+        "clearing the box does not move the keyboard out of it"
+    );
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        dialog_focus(&dashboard),
+        ResumeFocus::Sessions,
+        "an empty box gives the list back"
+    );
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "with nothing left to peel, Escape closes the dialog"
+    );
+}
+
+/// Escape still reaches the dialog from a tab with an empty list, where there
+/// is no row for the box's focus to be handed to.
+#[test]
+fn escape_closes_the_dialog_from_a_tab_with_nothing_in_it() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    apply_ready_rows(&mut dashboard, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Right));
+    drawn(&mut dashboard, 120, 40);
+    assert!(rows(&dashboard).is_empty(), "nothing is stopped");
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Search);
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        dialog_focus(&dashboard),
+        ResumeFocus::Tabs,
+        "with no row to take it, the strip takes the keyboard"
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+/// One match is not "1 matches". The heading counts in the reader's grammar.
+#[test]
+fn the_search_heading_counts_a_single_match_in_the_singular() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    // A still-building index says so in the heading instead of counting.
+    apply_ready_rows(&mut dashboard, Vec::new());
+    replace_search(&mut dashboard, "mast");
+    let lines = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(lines.contains(" 1 match "), "{lines}");
+    assert!(!lines.contains("1 matches"), "{lines}");
+
+    // The plural survives; only the count of one was wrong.
+    replace_search(&mut dashboard, "Default");
+    let lines = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(lines.contains(" 2 matches "), "{lines}");
 }
 
 /// The dashboard lists live sessions; the dialog lists the rest. Nothing
