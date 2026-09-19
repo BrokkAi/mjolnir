@@ -10,6 +10,8 @@ publish = true
 readme.workspace = true
 include = [
     "src/**/*.rs",
+    # Turn-classifier questions shared with the hosted proxy.
+    "src/activity/verdict_questions.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.

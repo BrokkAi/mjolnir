@@ -59,11 +59,13 @@ Test-only hooks (`MJ_TEST_*`, `MJ_CHAOS_ISOLATED`) live behind the
 `test-hooks` cargo feature in `mj-core/src/test_hooks.rs` and are not part of
 the default build.
 
-`TYPESAFE_API_KEY` enables Jev turn classification automatically. Shared lookup
+Jev turn classification uses the public Cloudflare proxy by default.
+`TYPESAFE_API_KEY` selects direct TypeSafe requests instead. Shared lookup
 in `mj_core::activity::verdict::api_key` prefers a nonempty environment value,
 then the trimmed `$HOME/.secrets/typesafe_api_key` file. The daemon forwards its
 resolved key to workers through `target_environment`, including container and
-SSH targets. There is no configuration toggle. Without a key or a confident
+SSH targets. There is no configuration toggle. Without a key, workers send
+evidence without authentication to the hosted proxy. Without a confident
 successful response, existing behavior is preserved. Requests contain bounded
 recent user and assistant text, tool titles and activity facts. Running-turn
 questions produce `awaiting_input`; completed replies awaiting background work

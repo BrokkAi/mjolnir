@@ -33,7 +33,7 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -152,7 +152,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -221,7 +221,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -281,7 +281,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -498,7 +498,7 @@ fn resumed_session_request_keeps_load_context() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -660,7 +660,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -1216,7 +1216,7 @@ async fn answer_to_ext_request(
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -1383,7 +1383,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -1786,7 +1786,7 @@ async fn config_change_request(
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -1966,7 +1966,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -2053,7 +2053,7 @@ async fn policy_is_enforced_before_session_is_reported(
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -2244,7 +2244,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -2352,7 +2352,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -2676,7 +2676,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -3136,7 +3136,7 @@ async fn exercise_image_steering(with_images: bool) {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -3276,7 +3276,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -3412,7 +3412,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -3501,7 +3501,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -3833,7 +3833,7 @@ mod terminals {
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -4349,7 +4349,7 @@ for line in sys.stdin:
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -4511,7 +4511,7 @@ for line in sys.stdin:
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -4661,7 +4661,7 @@ while True:
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -4797,7 +4797,7 @@ while True:
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -4905,7 +4905,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -4980,7 +4980,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -5279,7 +5279,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -5358,7 +5358,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),
@@ -5492,7 +5492,7 @@ fn missing_native_session_spec(
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -5669,7 +5669,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         silence: None,
         tool_call: None,
     });
-    spec.verdict = Some(VerdictSource {
+    spec.verdict = Some(VerdictSource::Direct {
         key: "test-key".into(),
         endpoint,
     });

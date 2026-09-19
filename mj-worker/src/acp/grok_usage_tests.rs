@@ -23,7 +23,7 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),

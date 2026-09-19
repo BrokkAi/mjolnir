@@ -45,7 +45,7 @@ pub(crate) async fn native_muse_turn(
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
         turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource {
+        verdict: Some(crate::acp::VerdictSource::Direct {
             key: String::new(),
             endpoint: String::new(),
         }),
@@ -178,7 +178,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource {
+            verdict: Some(crate::acp::VerdictSource::Direct {
                 key: String::new(),
                 endpoint: String::new(),
             }),

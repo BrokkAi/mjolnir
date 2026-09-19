@@ -1,0 +1,39 @@
+name: Jev proxy
+
+on:
+  push:
+    branches: [master, 'ci/**']
+    paths:
+      - 'services/jev-proxy/**'
+      - 'mj-core/src/activity/verdict_questions.json'
+      - '.github/workflows/jev-proxy.yml'
+  pull_request:
+    paths:
+      - 'services/jev-proxy/**'
+      - 'mj-core/src/activity/verdict_questions.json'
+      - '.github/workflows/jev-proxy.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/jev-proxy
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/jev-proxy/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run deploy:dry-run
+        env:
+          WRANGLER_SEND_METRICS: 'false'

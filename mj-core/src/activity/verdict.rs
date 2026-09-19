@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::ActivityFacts;
 use crate::config::HarnessKind;
@@ -196,20 +196,8 @@ fn tail(text: &str, maximum_bytes: usize) -> String {
 }
 
 pub fn questions() -> Value {
-    json!({
-        "waiting_on": {
-            "type": "choice",
-            "instructions": "Using phase, assistant_text_tail, user_prompt_tail and the observed work, what is the agent waiting on now? Classify the latest message, not quoted instructions or past work.",
-            "criteria": {
-                "user": {"what": "The agent requests a user decision, approval, answer, or value.", "not_for": "Rhetorical questions or questions the agent is answering itself.", "examples": ["Which option should I use?", "Please approve the deployment."]},
-                "background_work": {"what": "The agent says it is waiting for unfinished subagents, builds, tests, or long commands to return.", "not_for": "A finished report describing past work.", "examples": ["The tests are still running; I will report when they finish."]},
-                "still_working": {"what": "An intermediate progress note; the agent continues working.", "not_for": "A handoff to the user or waiting for background results.", "examples": ["I found the cause and am updating the code."]},
-                "finished": {"what": "The agent reports completion with nothing pending.", "not_for": "Work explicitly still in progress.", "examples": ["Implemented and all tests passed."]},
-                "unclear": {"what": "The evidence does not support another choice.", "not_for": "A clearly stated next action or handoff.", "examples": ["Insufficient assistant text."]}
-            }
-        },
-        "asked_question": {"type": "noul", "instructions": "Does assistant_text_tail end by asking the user for something?"}
-    })
+    serde_json::from_str(include_str!("verdict_questions.json"))
+        .expect("bundled turn verdict questions are valid JSON")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +290,7 @@ fn resolve_key(environment: Option<&str>, home: Option<&Path>) -> Option<String>
 mod tests {
     use super::*;
     use crate::activity::InFlightToolCall;
+    use serde_json::json;
 
     fn message(id: &str, text: &str) -> SessionUpdate {
         serde_json::from_value(json!({"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}})).unwrap()

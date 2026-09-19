@@ -3,16 +3,44 @@ use anyhow::{Context, Result, ensure};
 use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
+const HOSTED_VERDICT_ENDPOINT: &str =
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/turn-verdict";
+const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+
 #[derive(Clone)]
-pub struct VerdictSource {
-    pub key: String,
-    pub endpoint: String,
+pub enum VerdictSource {
+    /// An explicit blank key disables classification for isolated tests.
+    Direct {
+        key: String,
+        endpoint: String,
+    },
+    Hosted {
+        endpoint: String,
+    },
+}
+
+impl VerdictSource {
+    fn for_key(key: Option<String>) -> Self {
+        match key {
+            Some(key) => Self::Direct {
+                key,
+                endpoint: TYPESAFE_ENDPOINT.into(),
+            },
+            None => Self::Hosted {
+                endpoint: HOSTED_VERDICT_ENDPOINT.into(),
+            },
+        }
+    }
 }
 
 impl std::fmt::Debug for VerdictSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerdictSource")
-            .field("endpoint", &self.endpoint)
+        let (name, endpoint) = match self {
+            Self::Direct { endpoint, .. } => ("Direct", endpoint),
+            Self::Hosted { endpoint } => ("Hosted", endpoint),
+        };
+        f.debug_struct(name)
+            .field("endpoint", endpoint)
             .finish_non_exhaustive()
     }
 }
@@ -36,13 +64,8 @@ impl VerdictClient {
     }
 
     fn resolve_blocking(source: Option<VerdictSource>) -> Option<Self> {
-        let source = source.or_else(|| {
-            api_key().map(|key| VerdictSource {
-                key,
-                endpoint: "https://api.typesafe.ai/v1/systemone".into(),
-            })
-        })?;
-        if source.key.trim().is_empty() {
+        let source = source.unwrap_or_else(|| VerdictSource::for_key(api_key()));
+        if matches!(&source, VerdictSource::Direct { key, .. } if key.trim().is_empty()) {
             return None;
         }
         match Self::new(source) {
@@ -67,11 +90,18 @@ impl VerdictClient {
 
     pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-        let mut response = self.client.post(&self.source.endpoint)
-            .bearer_auth(&self.source.key)
-            .json(&serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()}))
-            .send().await.context("request turn verdict")?
-            .error_for_status().context("turn verdict HTTP status")?;
+        let request = match &self.source {
+            VerdictSource::Direct { key, endpoint } => self.client.post(endpoint)
+                .bearer_auth(key)
+                .json(&serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()})),
+            VerdictSource::Hosted { endpoint } => self.client.post(endpoint).json(evidence),
+        };
+        let mut response = request
+            .send()
+            .await
+            .context("request turn verdict")?
+            .error_for_status()
+            .context("turn verdict HTTP status")?;
         ensure!(
             response
                 .content_length()
@@ -197,7 +227,7 @@ mod tests {
             serde_json::from_slice(&request).unwrap()
         });
         (
-            VerdictClient::new(VerdictSource {
+            VerdictClient::new(VerdictSource::Direct {
                 key: "test-key".into(),
                 endpoint,
             })
@@ -215,6 +245,58 @@ mod tests {
             &Default::default(),
             0,
         )
+    }
+
+    #[test]
+    fn local_keys_choose_direct_and_missing_keys_choose_hosted() {
+        assert!(matches!(VerdictSource::for_key(Some("my-key".into())),
+            VerdictSource::Direct { key, endpoint } if key == "my-key" && endpoint == TYPESAFE_ENDPOINT));
+        assert!(matches!(VerdictSource::for_key(None),
+            VerdictSource::Hosted { endpoint } if endpoint == HOSTED_VERDICT_ENDPOINT));
+        assert!(
+            VerdictClient::resolve_blocking(Some(VerdictSource::Direct {
+                key: String::new(),
+                endpoint: String::new(),
+            }))
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_requests_send_only_evidence_without_authorization() {
+        for status in [200, 429, 502] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1/turn-verdict", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                socket.read_exact(&mut request).await.unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                assert_eq!(request, serde_json::to_value(evidence()).unwrap());
+                let body = response("background_work");
+                socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
+            let result = client.ask(&evidence()).await;
+            assert_eq!(result.is_ok(), status == 200);
+            if let Ok(verdict) = result {
+                assert_eq!(verdict.waiting_on, WaitingOn::BackgroundWork);
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -248,7 +330,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         drop(listener);
-        let client = VerdictClient::new(VerdictSource {
+        let client = VerdictClient::new(VerdictSource::Direct {
             key: "test-key".into(),
             endpoint,
         })

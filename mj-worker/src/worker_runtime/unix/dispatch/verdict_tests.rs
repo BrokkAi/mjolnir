@@ -88,7 +88,7 @@ async fn completed_turn_verdict(action: WhileClassifying) {
         BTreeMap::new(),
         events_tx.clone(),
     );
-    let client = VerdictClient::new(VerdictSource {
+    let client = VerdictClient::new(VerdictSource::Direct {
         key: "fake-key".into(),
         endpoint,
     })

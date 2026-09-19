@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mj-jev-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "ratelimits": [
+    {
+      "name": "TURN_RATE_LIMITER",
+      "namespace_id": "1938471201",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ]
+}
