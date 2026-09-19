@@ -233,6 +233,7 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         model: Some("sonnet".into()),
         effort: Some("high".into()),
+        fast_mode: None,
         generation: 2,
         mcp_servers: Vec::new(),
     };

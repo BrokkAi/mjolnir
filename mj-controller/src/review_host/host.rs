@@ -94,7 +94,7 @@ impl TurnReviewHost {
                 awaiting_forward_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
-                missing_reviewer_reported: BTreeSet::new(),
+                preparation_cancellation: BTreeMap::new(),
                 recovery_candidates: BTreeSet::new(),
                 recovery_in_flight: BTreeSet::new(),
             },

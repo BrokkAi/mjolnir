@@ -67,23 +67,6 @@ impl HostState {
             return;
         }
         let config = (self.config)();
-        let Some(profile) = config.reviewer_profile().map(str::to_owned) else {
-            // Configuration is the only place this can be fixed, so the
-            // message names the key. A session hears it once, not once a turn.
-            let refusal = StartRefusal(
-                "turn review needs a reviewer: set [review] profile in config.toml".to_owned(),
-            );
-            if self.missing_reviewer_reported.insert(session_id.clone()) {
-                self.record_notice(&session_id, refusal.0.clone());
-            }
-            answer(reply, Err(refusal));
-            return;
-        };
-        let reviewer = ReviewerIdentity {
-            profile,
-            model: config.model.clone(),
-            effort: config.effort.clone(),
-        };
         let tier = config.tier;
         let control = self.control.clone();
         let events = self.events.clone();
@@ -93,9 +76,21 @@ impl HostState {
         // ahead of the preparation's reviewer-status command is drained before
         // `prepare` reads the actor view; every later prompt sees this hold.
         hold_prompts(&session_id);
-        self.preparing.insert(session_id);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.preparation_cancellation
+            .insert(session_id.clone(), cancelled.clone());
+        self.preparing.insert(session_id.clone());
+        self.publish(&session_id);
         tokio::spawn(async move {
-            let prepared = prepare(&control, &environment, &prepare_session, &reviewer, tier).await;
+            let prepared = prepare(
+                &control,
+                &environment,
+                &prepare_session,
+                config,
+                tier,
+                cancelled,
+            )
+            .await;
             let _ = events.send(HostEvent::Prepared {
                 session_id: prepare_session,
                 manual,

@@ -192,6 +192,22 @@ impl RelayClient {
         }
     }
 
+    pub async fn pause_reviewer_generation(
+        &mut self,
+        role: Option<&str>,
+        generation: u64,
+    ) -> Result<()> {
+        let request =
+            self.reviewer_request(role, ReviewerRequest::PauseGeneration { generation })?;
+        match self
+            .call_with_timeout(request, RELAY_ACKNOWLEDGE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewerPaused => Ok(()),
+            _ => bail!("relay returned an unexpected reviewer pause response"),
+        }
+    }
+
     /// Report what every workspace repository changed since the review
     /// baselines the controller holds.
     pub async fn capture_review_delta(

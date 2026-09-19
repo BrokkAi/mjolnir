@@ -154,23 +154,6 @@ impl ActiveChat {
         }
     }
 
-    /// The configured profiles a reviewer can run under. The waterfall offers
-    /// the same list plan review offers, so a workspace's remembered reviewer
-    /// serves both.
-    pub(crate) fn reviewer_profiles(&self) -> Vec<ReviewerProfileChoice> {
-        let Some(context) = self.context.as_ref() else {
-            return Vec::new();
-        };
-        context
-            .config
-            .enabled_profiles()
-            .map(|(id, profile)| ReviewerProfileChoice {
-                id: id.to_owned(),
-                harness: profile.kind.id().to_owned(),
-            })
-            .collect()
-    }
-
     /// Hands one request to the daemon bridge, or reports that this chat has
     /// none: a chat without a bridge cannot reach the daemon at all, and
     /// silently dropping a review action would leave the pane sitting there.
@@ -223,12 +206,13 @@ impl ActiveChat {
                 self.finish_session_reconnect(result);
                 return;
             }
-            ChatIoUpdate::ReviewerProbe { generation, result } => {
-                self.apply_reviewer_options(generation, result, false);
-                return;
-            }
-            ChatIoUpdate::ReviewerConfigured { generation, result } => {
-                self.apply_reviewer_options(generation, result, true);
+            ChatIoUpdate::ReviewerPrepared {
+                generation,
+                result,
+                acknowledged,
+            } => {
+                self.apply_reviewer_prepared(generation, result);
+                let _ = acknowledged.send(());
                 return;
             }
             ChatIoUpdate::ReviewerStarted(result) => {

@@ -131,14 +131,20 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
             review.tier.label()
         ),
         (true, None) => {
-            "[review] enabled = true but no profile is named, so nothing can review".to_owned()
+            format!(
+                "Reviewing every completed turn with Auto ({} tier)",
+                review.tier.label()
+            )
         }
         (false, Some(profile)) => format!(
             "Automatic review is off; /review reviews one turn with {profile:?} ({} tier)",
             review.tier.label()
         ),
         (false, None) => {
-            "Turn review needs a reviewer: set [review] profile in config.toml".to_owned()
+            format!(
+                "Automatic review is off; /review uses Auto ({} tier)",
+                review.tier.label()
+            )
         }
     };
     if open {

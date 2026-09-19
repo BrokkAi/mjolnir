@@ -935,7 +935,10 @@ pub(super) async fn run_reviewer_operation(
     cancelled: tokio_util::sync::CancellationToken,
 ) {
     let operation = action.operation_name();
-    let keep_connection = !matches!(&action, ReviewerAction::Pause);
+    let keep_connection = !matches!(
+        &action,
+        ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. }
+    );
     let result = tokio::select! {
         biased;
         _ = cancelled.cancelled() => Err(anyhow::anyhow!("reviewer operation cancelled for session lifecycle change")),
@@ -1010,6 +1013,10 @@ pub(super) async fn drive_reviewer(
                 .respond_to_reviewer(role, elicitation_id, response)
                 .await?;
             ReviewerOutcome::ElicitationResolved
+        }
+        ReviewerAction::PauseGeneration { generation } => {
+            client.pause_reviewer_generation(role, generation).await?;
+            ReviewerOutcome::Paused
         }
         ReviewerAction::Pause => {
             client.pause_reviewer(role).await?;

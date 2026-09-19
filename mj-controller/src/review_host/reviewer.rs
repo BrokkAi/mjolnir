@@ -70,8 +70,14 @@ pub(super) async fn launch_role(
         .map_err(|error| format!("staging the reviewer stopped: {error}"))??
     };
     let mut config = staged;
-    config.model = reviewer.model.clone();
-    config.effort = reviewer.effort.clone();
+    let model = if lane {
+        &reviewer.specialist
+    } else {
+        &reviewer.main
+    };
+    config.model = model.model.clone();
+    config.effort = model.effort.clone();
+    config.fast_mode = model.fast_mode.then_some(true);
     match reviewer_action(
         control,
         session_id,
@@ -92,21 +98,10 @@ pub(super) async fn prepare(
     control: &SessionManagerControl,
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
-    reviewer: &ReviewerIdentity,
+    config: ReviewConfig,
     tier: ReviewTier,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Prepared, StartRefusal> {
-    let profile = reviewer.profile.clone();
-    let session = session_id.to_owned();
-    let environment = environment.clone();
-    // Both answers come from the controller and its database, so they are
-    // asked together, once, off the host's loop.
-    let checked = tokio::task::spawn_blocking(move || -> Result<TurnReviewState, String> {
-        environment.check(&session, &profile)?;
-        environment.load_state(&session)
-    })
-    .await
-    .map_err(|error| StartRefusal(format!("preparing the review stopped: {error}")))?;
-    let state = checked.map_err(StartRefusal)?;
     // Mutual exclusion with a plan-review second opinion: they share the
     // default reviewer role, and the running one keeps the slot. Checked
     // against the worker rather than against any UI's state, because the
@@ -149,6 +144,23 @@ pub(super) async fn prepare(
             "prompts are queued; the review waits for them".to_owned(),
         ));
     }
+    let reviewer = environment
+        .resolve(handle.clone(), config, cancelled.clone())
+        .await
+        .map_err(StartRefusal)?;
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(StartRefusal("review preparation cancelled".into()));
+    }
+    let profile = reviewer.profile.clone();
+    let session = session_id.to_owned();
+    let environment = environment.clone();
+    let state = tokio::task::spawn_blocking(move || {
+        environment.check(&session, &profile)?;
+        environment.load_state(&session)
+    })
+    .await
+    .map_err(|e| StartRefusal(format!("preparing review: {e}")))?
+    .map_err(StartRefusal)?;
     Ok(Prepared {
         state,
         reviewer: reviewer.clone(),
@@ -197,11 +209,7 @@ pub(super) async fn prepare_recovery(
     Ok(Some(Prepared {
         state,
         // No reviewer process is started for a handoff-only recovery.
-        reviewer: ReviewerIdentity {
-            profile: String::new(),
-            model: None,
-            effort: None,
-        },
+        reviewer: ReviewerIdentity::default(),
         tier: ReviewTier::Quick,
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),

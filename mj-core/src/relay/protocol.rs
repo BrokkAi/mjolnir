@@ -194,6 +194,10 @@ pub enum ReviewerRequest {
     /// Cancel any turn in flight and stop the reviewer's process group,
     /// keeping its staged profile, native session and journal for next time.
     Pause,
+    /// Stop only the preparation that owns this generation; stale cleanup must not stop its replacement.
+    PauseGeneration {
+        generation: u64,
+    },
     /// Report what changed in every workspace repository since `baselines`.
     ///
     /// A baseline is a Git tree id recorded by an earlier capture, keyed by
@@ -258,7 +262,7 @@ impl ReviewerRequest {
             Self::Submit { .. } => "reviewer_submit",
             Self::Status => "reviewer_status",
             Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause => "reviewer_pause",
+            Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
@@ -312,6 +316,14 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::Submit { command, .. } => command.minimum_protocol(),
+            Self::Reviewer {
+                request: ReviewerRequest::PauseGeneration { .. },
+                ..
+            } => 14,
+            Self::Reviewer {
+                request: ReviewerRequest::Start { config },
+                ..
+            } if config.fast_mode.is_some() => 14,
             Self::Reviewer { .. } => 6,
             _ => RELAY_MIN_PROTOCOL_VERSION,
         }

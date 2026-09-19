@@ -1482,23 +1482,33 @@ fn a_review_section_names_the_profile_that_reviews() {
     assert_eq!(config.review.effort, None);
 }
 
-/// Arming review without naming a reviewer has no sensible default: Mjolnir
-/// will not choose which agent reviews on the user's behalf.
 #[test]
-fn arming_review_without_a_profile_is_refused() {
+fn auto_review_can_be_enabled_without_an_explicit_profile() {
     let config = Config {
         review: ReviewConfig {
             enabled: true,
-            ..ReviewConfig::default()
+            ..Default::default()
         },
-        ..Config::default()
+        ..Default::default()
     };
-    let error = config
-        .validate()
-        .expect_err("armed review needs a reviewer");
+    config.validate().expect("Auto resolves at review start");
+}
+
+#[test]
+fn auto_rejects_manual_model_overrides() {
+    let config = Config {
+        review: ReviewConfig {
+            model: Some("custom".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     assert!(
-        format!("{error:#}").contains("needs `profile`"),
-        "unexpected error: {error:#}"
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("name a profile")
     );
 }
 

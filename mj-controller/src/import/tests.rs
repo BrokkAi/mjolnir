@@ -1610,6 +1610,43 @@ fn codex_listing_flags_natively_archived_threads_and_latest_skips_them() {
     );
 }
 
+/// Resume scans profile homes, never the sibling worker-private reviewer homes.
+#[test]
+fn reviewer_named_profiles_remain_visible_without_importing_sidecar_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("profiles/reviewer");
+    let sidecar = directory.path().join("workers/primary/reviewer/profile");
+    let ordinary_id = "019feb6c-6b55-7111-a210-6d85ee0772cd";
+    let reviewer_id = "019feb6c-6b55-7111-a210-6d85ee0772ce";
+    codex_named_rollout(&profile, ordinary_id, json!("cli"));
+    codex_named_rollout(&sidecar, reviewer_id, json!("cli"));
+    for (home, id) in [(&profile, ordinary_id), (&sidecar, reviewer_id)] {
+        fs::write(
+            home.join("session_index.jsonl"),
+            json!({"id": id, "thread_name": "A completed conversation"}).to_string(),
+        )
+        .unwrap();
+    }
+    let mut listed = Vec::new();
+    scan_native_sessions(
+        HarnessKind::Codex,
+        &profile,
+        &NativeScanCache::new(),
+        |progress| {
+            if let Some(session) = progress.session {
+                listed.push(session.native_session_id);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(listed, [ordinary_id]);
+    assert_eq!(
+        list_codex_sessions(&sidecar).unwrap()[0].native_session_id,
+        reviewer_id,
+        "the reviewer transcript is valid but outside the configured scan root"
+    );
+}
+
 #[test]
 fn codex_scan_reports_progress_and_emits_newest_first() {
     let directory = tempfile::tempdir().unwrap();

@@ -111,8 +111,8 @@ impl PhoneConfig {
 /// than to any surface: a session driven from a phone is reviewed on the same
 /// terms as one driven from the terminal, and the person who set it can see
 /// what they set. `profile` names a harness profile defined in this same file
-/// -- the reviewer runs under that profile, and it must not be the profile the
-/// session under review is using, or the "second opinion" is the same opinion.
+/// -- or Auto when absent. A reviewer always has its own conversation, even
+/// when it uses the primary session's profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
@@ -126,9 +126,8 @@ pub struct ReviewConfig {
     /// The harness profile the reviewing agents run under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Model and effort applied to every reviewing role, when the reviewing
-    /// harness advertises such a selector. Absent means the profile's own
-    /// default, which is what most configurations want.
+    /// Main reviewer overrides for a named profile. Auto uses its fixed policy;
+    /// specialist lanes use provider-specific models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,11 +189,7 @@ impl ReviewConfig {
 
     /// Rejects a configuration that cannot review.
     ///
-    /// Arming review without naming a reviewer is a configuration mistake with
-    /// no sensible default -- Mjolnir will not pick a profile on the user's behalf,
-    /// because which agent reviews is the most consequential review setting.
-    /// Naming a disabled profile is invalid because neither automatic nor
-    /// one-off reviews may start new work with it.
+    /// Auto needs no profile; explicit selections must remain usable.
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
         if let Some(profile_id) = self.profile.as_ref()
             && let Some(profile) = profiles.get(profile_id)
@@ -208,9 +203,9 @@ impl ReviewConfig {
                 );
             }
         }
-        if self.enabled && self.profile.is_none() {
+        if self.profile.is_none() && (self.model.is_some() || self.effort.is_some()) {
             bail!(
-                "[review] enabled = true needs `profile` naming the harness profile that reviews"
+                "[review] Auto uses fixed model and effort settings; name a profile to override model or effort"
             );
         }
         if let Some(profile) = &self.profile
@@ -221,7 +216,7 @@ impl ReviewConfig {
         Ok(())
     }
 
-    /// Whether a turn review can run at all: it needs a reviewer, armed or not.
+    /// Explicit reviewer profile, or None for Auto.
     #[must_use]
     pub fn reviewer_profile(&self) -> Option<&str> {
         self.profile.as_deref()

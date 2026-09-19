@@ -503,6 +503,18 @@ impl ReviewerRole {
 
         match request {
             ReviewerRequest::Start { config } => self.start(lane_slots, *config).await,
+            ReviewerRequest::PauseGeneration { generation } => {
+                if self
+                    .running
+                    .as_ref()
+                    .is_some_and(|running| running.config.generation == generation)
+                {
+                    self.pause().await;
+                }
+                Ok(RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::ReviewerPaused,
+                })
+            }
             ReviewerRequest::Pause => {
                 self.pause().await;
                 Ok(RelayResponseBody::Ok {
@@ -572,7 +584,7 @@ impl ReviewerRole {
             "this session was started without a review baseline, so a review \
              cannot tell its work from what the working tree already held; \
              sub-agent children are never reviewed, and an ordinary session \
-             needs `[review] profile` set in config.toml before it starts"
+             needs an eligible reviewer in Settings before it starts; resume or restart the session after configuring one"
         );
         let repositories = self.review_repositories();
         let untracked_at_start = self
@@ -989,56 +1001,76 @@ impl ReviewerRole {
     /// sent: the reviewer keeps whatever its profile configures.
     async fn apply_configuration(&mut self, config: &ReviewerLaunchConfig) -> Result<()> {
         for (key, value) in [("model", &config.model), ("effort", &config.effort)] {
-            let Some(value) = value else {
-                continue;
-            };
-            if self
-                .state()?
-                .config
-                .get(key)
-                .is_some_and(|current| current == value)
+            if let Some(value) = value {
+                self.apply_setting(key, value).await?;
+            }
+        }
+        if let Some(enabled) = config.fast_mode {
+            let state = self.state()?;
+            let facts = mj_core::acp::AcpSessionFacts::from_operational(
+                config.harness,
+                &state.config,
+                &state.config_options,
+                state.modes.as_ref(),
+            );
+            if facts.supports_fast_mode()
+                && let Err(error) = self
+                    .apply_setting("fast-mode", if enabled { "on" } else { "off" })
+                    .await
             {
-                continue;
+                tracing::warn!(role = %self.role, %error, "reviewer fast mode unavailable; continuing at standard speed");
             }
-            self.config_sequence += 1;
-            let command_id = format!("reviewer-{key}-{}", self.config_sequence);
-            let cursor = self.cursor()?;
-            let body = self.forward(RelayRequest::Submit {
-                command_id: command_id.clone(),
-                command: RelayCommand::SetConfig {
-                    key: key.to_owned(),
-                    value: value.clone(),
-                },
-            })?;
-            if let RelayResponseBody::Error { error } = body {
-                bail!(
-                    "reviewer could not accept {key} {value:?}: {}",
-                    error.message
-                );
-            }
-            self.wake_dispatch();
-            // Waiting for the command's own completion, not for the value in
-            // the relay's configuration map, is what makes the refreshed
-            // option list part of the answer: the runtime records the value,
-            // then the refreshed options, then the completion.
-            let settled = self
-                .wait_for_observation(CONFIGURE_TIMEOUT, &cursor, |observation| {
-                    matches!(
-                        observation,
-                        RelayObservation::CommandCompleted { command_id: done, .. }
-                            | RelayObservation::CommandRejected { command_id: done, .. }
-                            | RelayObservation::CommandInterrupted { command_id: done, .. }
-                        if *done == command_id
-                    )
-                })
-                .await;
-            let applied = self.state()?.config.get(key) == Some(value);
-            if settled.is_err() || !applied {
-                let failure = self
-                    .failure_since(&cursor)
-                    .unwrap_or_else(|| format!("the reviewer did not apply {key} {value:?}"));
-                bail!("{failure}");
-            }
+        }
+        Ok(())
+    }
+
+    async fn apply_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        if self
+            .state()?
+            .config
+            .get(key)
+            .is_some_and(|current| current == value)
+        {
+            return Ok(());
+        }
+        self.config_sequence += 1;
+        let command_id = format!("reviewer-{key}-{}", self.config_sequence);
+        let cursor = self.cursor()?;
+        let body = self.forward(RelayRequest::Submit {
+            command_id: command_id.clone(),
+            command: RelayCommand::SetConfig {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            },
+        })?;
+        if let RelayResponseBody::Error { error } = body {
+            bail!(
+                "reviewer could not accept {key} {value:?}: {}",
+                error.message
+            );
+        }
+        self.wake_dispatch();
+        // Waiting for the command's own completion, not for the value in
+        // the relay's configuration map, is what makes the refreshed
+        // option list part of the answer: the runtime records the value,
+        // then the refreshed options, then the completion.
+        let settled = self
+            .wait_for_observation(CONFIGURE_TIMEOUT, &cursor, |observation| {
+                matches!(
+                    observation,
+                    RelayObservation::CommandCompleted { command_id: done, .. }
+                        | RelayObservation::CommandRejected { command_id: done, .. }
+                        | RelayObservation::CommandInterrupted { command_id: done, .. }
+                    if *done == command_id
+                )
+            })
+            .await;
+        let applied = self.state()?.config.get(key) == Some(&value.to_owned());
+        if settled.is_err() || !applied {
+            let failure = self
+                .failure_since(&cursor)
+                .unwrap_or_else(|| format!("the reviewer did not apply {key} {value:?}"));
+            bail!("{failure}");
         }
         Ok(())
     }

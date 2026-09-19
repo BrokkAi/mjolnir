@@ -1084,9 +1084,8 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     assert!(relaunch.subagent_tools);
 }
 
-/// Capturing the working tree is only ever useful to a turn review, so it is
-/// armed only when the configuration names a reviewer. A session started with
-/// no reviewer must do no Git work at startup at all (#1065).
+/// Auto captures a baseline even with automation off, so manual review can
+/// measure the first turn in a single-profile installation.
 #[test]
 fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() {
     const MARKER: &str = "MJ_TEST_LAUNCH_REVIEW_CAPTURE_CHILD";
@@ -1120,11 +1119,11 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
     };
 
     assert!(
-        !controller
+        controller
             .current_worker_launch_config(&id, &backend)
             .unwrap()
             .review_capture,
-        "with no [review] profile there is nothing a capture could serve"
+        "Auto can review with the primary profile even with automation off"
     );
 
     controller.config.review.profile = Some("codex".into());

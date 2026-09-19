@@ -382,6 +382,7 @@ fn config(generation: u64) -> ReviewerLaunchConfig {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         model: None,
         effort: None,
+        fast_mode: None,
         generation,
         mcp_servers: Vec::new(),
     }
@@ -1233,6 +1234,22 @@ fn a_reviewer_request_needs_the_protocol_that_introduced_it() {
     assert!(!request.supported_at(5));
     assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
     assert_eq!(request.method_name(), "reviewer_status");
+    let cleanup = RelayRequest::Reviewer {
+        role: None,
+        request: ReviewerRequest::PauseGeneration { generation: 1 },
+    };
+    assert!(!cleanup.supported_at(13));
+    assert!(cleanup.supported_at(14));
+    let mut fast = config(1);
+    fast.fast_mode = Some(true);
+    let start = RelayRequest::Reviewer {
+        role: None,
+        request: ReviewerRequest::Start {
+            config: Box::new(fast),
+        },
+    };
+    assert!(!start.supported_at(13));
+    assert!(start.supported_at(14));
 }
 
 #[test]
@@ -1545,4 +1562,71 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
             .is_some_and(|error| error.contains("advertised roster")),
         "unexpected reply {reply:?}"
     );
+}
+
+#[tokio::test]
+async fn stale_preparation_cleanup_does_not_stop_a_replacement_reviewer() {
+    let mut fixture = Fixture::new(true);
+    fixture.stage_generation(10);
+    fixture.start(config(10)).await;
+    fixture.stage_generation(11);
+    fixture.start(config(11)).await;
+    let pid = fixture.harness_pid();
+    fixture
+        .request(ReviewerRequest::PauseGeneration { generation: 10 })
+        .await;
+    assert!(
+        process_alive(pid),
+        "old cancellation must not kill the new reviewer"
+    );
+    fixture
+        .request(ReviewerRequest::PauseGeneration { generation: 11 })
+        .await;
+    assert!(
+        !process_alive(pid),
+        "the owning generation can stop its reviewer"
+    );
+}
+
+#[tokio::test]
+async fn reviewer_fast_mode_is_applied_when_advertised_and_optional_otherwise() {
+    for scenario in ["supported", "absent", "rejected"] {
+        let mut fixture = Fixture::new(true);
+        let directory = fixture.script_directory();
+        let fast_option = |value| {
+            SessionConfigOption::select(
+                "fast-mode",
+                "Fast mode",
+                value,
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("off", "Off"),
+                    SessionConfigSelectOption::new("on", "On"),
+                ]),
+            )
+        };
+        let options = if scenario == "absent" {
+            vec![]
+        } else {
+            vec![fast_option("off")]
+        };
+        write_options(&directory, "options.json", &options);
+        write_options(&directory, "options-on.json", &[fast_option("on")]);
+        if scenario == "rejected" {
+            std::fs::write(directory.join("reject-on"), "1").unwrap();
+        }
+        let mut chosen = config(0);
+        chosen.fast_mode = Some(true);
+        let body = fixture.start(chosen).await;
+        started_options(&body);
+        if scenario == "supported" {
+            assert!(
+                std::fs::read_to_string(directory.join("applied"))
+                    .unwrap()
+                    .contains("fast-mode=on")
+            );
+        } else {
+            assert!(!directory.join("applied").exists());
+        }
+        fixture.sidecar.pause_all().await;
+    }
 }

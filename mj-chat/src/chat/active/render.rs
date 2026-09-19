@@ -298,7 +298,7 @@ pub(crate) fn render_in(
         form,
     }) = chat.second_opinion_mut()
     {
-        // The waterfall owns this pane's interaction, so the chat behind it
+        // The preparation owns this pane's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
         let area = crate::modal::centered_modal_rect_fixed(frame, 60, 16, inner);
         let body = render_setup(
@@ -456,14 +456,6 @@ pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
         functions: &[],
         banner: None,
     }
-}
-
-/// A remembered configuration value, or `None` when it stands for the
-/// harness's own default and nothing should be applied.
-pub(crate) fn remembered_value(stored: Option<&str>) -> Option<String> {
-    stored
-        .filter(|value| *value != mj_core::second_opinion::HARNESS_DEFAULT_VALUE)
-        .map(str::to_owned)
 }
 
 /// Draws the composer band: the title, borders, queued-prompt previews,
@@ -749,7 +741,7 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     // Auto-review changes what happens when this turn ends, so the composer
     // says it is armed rather than surprising the user with a pane.
     let review = chat.review_config();
-    if review.enabled && review.reviewer_profile().is_some() {
+    if review.enabled {
         parts.push(format!("review {}", review.tier.label()));
     }
     parts

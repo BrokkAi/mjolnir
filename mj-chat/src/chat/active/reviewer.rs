@@ -1,107 +1,175 @@
 use super::*;
 
 impl ActiveChat {
-    /// Opens the reviewer waterfall for a captured plan.
-    ///
-    /// The harness's decision stays pending: it is answered only once a
-    /// reviewer is running, because gathering context needs an idle planning
-    /// session and cancelling before then must leave the decision intact.
+    /// Resolve shared settings before consuming the captured plan decision.
     pub(crate) fn open_second_opinion(
         &mut self,
         request: mj_core::elicitation::ElicitationRequest,
         proposal: String,
     ) {
-        let Some(context) = self.context.as_ref() else {
+        if self.context.is_none() {
             self.state
                 .set_notice("A second opinion needs this session's configuration");
             self.state.restore_elicitation(request);
             return;
-        };
-        let profiles = self.reviewer_profiles();
-        if profiles.is_empty() {
-            self.state
-                .set_notice("Configure a second profile to review plans with");
-            self.state.restore_elicitation(request);
-            return;
         }
-        let defaults = self.reviewer_defaults.clone();
-        let workspace_id = context.session.workspace_id.clone();
-        // A workspace that has already chosen a reviewer does not choose
-        // again: the same reviewer resumes with its own conversation. The
-        // waterfall reopens only when starting it that way fails.
-        let remembered = defaults
-            .profile(&workspace_id)
-            .filter(|id| context.config.enabled_profile(id).is_some())
-            .map(|profile_id| ReviewerSelection {
-                profile_id: profile_id.to_owned(),
-                model: remembered_value(defaults.model(&workspace_id, profile_id)),
-                effort: remembered_value(
-                    defaults.effort(
-                        &workspace_id,
-                        profile_id,
-                        defaults
-                            .model(&workspace_id, profile_id)
-                            .unwrap_or(mj_core::second_opinion::HARNESS_DEFAULT_VALUE),
-                    ),
-                ),
-            });
-        let setup = ReviewerSetup::new(workspace_id, profiles, defaults);
         self.state
-            .open_second_opinion(CapturedProposal { request, proposal }, setup);
-        if let Some(selection) = remembered {
-            if let Some(view) = self.state.second_opinion_mut() {
-                view.set_status("resuming the reviewer…");
-            }
-            self.probe_reviewer(
-                0,
-                selection.profile_id.clone(),
-                selection.model.clone(),
-                selection.effort.clone(),
-                false,
-            );
-            self.resuming_reviewer = Some(selection);
-        }
+            .open_second_opinion(CapturedProposal { request, proposal });
+        self.prepare_reviewer();
     }
 
-    /// Performs the steps the second-opinion view asked for.
     pub(crate) fn run_second_opinion(&mut self, intent: SecondOpinionIntent) {
         match intent {
-            SecondOpinionIntent::Setup(requests) => {
-                for request in requests {
-                    self.run_setup_request(request);
-                }
-            }
-            SecondOpinionIntent::Confirmed {
-                profile_id,
-                model,
-                effort,
-            } => self.confirm_reviewer(profile_id, model, effort),
+            SecondOpinionIntent::Retry => self.prepare_reviewer(),
             SecondOpinionIntent::Workflow(requests) => {
-                // Every workflow batch that reaches here ends the review, so
-                // the record goes before the steps run: a crash between them
-                // must not restore a split whose feedback already went out.
+                // Forget before dispatch: a crash must not restore a review whose feedback went out.
                 self.forget_review();
                 for request in requests {
                     self.run_workflow_request(request);
                 }
             }
-            SecondOpinionIntent::Closed => {}
+            SecondOpinionIntent::Closed => {
+                if let Some(flag) = self.reviewer_preparation.take() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
         }
     }
 
-    pub(crate) fn run_setup_request(&mut self, request: SetupRequest) {
-        match request {
-            SetupRequest::Probe {
-                generation,
-                profile_id,
-            } => self.probe_reviewer(generation, profile_id, None, None, false),
-            SetupRequest::ApplyModel { generation, model } => {
-                let Some(profile_id) = self.setup_profile_id() else {
-                    return;
-                };
-                self.probe_reviewer(generation, profile_id, Some(model), None, true);
+    fn prepare_reviewer(&mut self) {
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        if let Some(flag) = self.reviewer_preparation.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.reviewer_preparation_sequence += 1;
+        let generation = self.reviewer_preparation_sequence;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.reviewer_preparation = Some(cancelled.clone());
+        let stager = context.reviewer_stager.clone();
+        let config = context.config.clone();
+        let record = context.session.clone();
+        let session = self.session.clone();
+        let updates = self.chat_io_tx.clone();
+        tokio::spawn(async move {
+            let mut started_generation = None;
+            let result = async {
+                // Turn review and second opinion use the same default role.
+                if let ReviewerOutcome::Status(status) =
+                    session.reviewer(ReviewerAction::Status).await?
+                    && status.active_prompt.is_some()
+                {
+                    anyhow::bail!("the reviewer is busy");
+                }
+                let resolved = session.resolve_review_settings(cancelled.clone()).await?;
+                anyhow::ensure!(
+                    !cancelled.load(std::sync::atomic::Ordering::Acquire),
+                    "review preparation cancelled"
+                );
+                let profile = resolved.profile.clone();
+                let lifetime = resolved.generation;
+                let staging_cancelled = cancelled.clone();
+                let mut launch = tokio::task::spawn_blocking(move || {
+                    stager.stage(config, record, profile, lifetime, staging_cancelled)
+                })
+                .await??;
+                launch.model = resolved.main.model.clone();
+                launch.effort = resolved.main.effort.clone();
+                anyhow::ensure!(
+                    !cancelled.load(std::sync::atomic::Ordering::Acquire),
+                    "review preparation cancelled"
+                );
+                started_generation = Some(lifetime);
+                match session
+                    .reviewer(ReviewerAction::Start {
+                        config: Box::new(launch),
+                    })
+                    .await?
+                {
+                    ReviewerOutcome::Started(_) => Ok(resolved),
+                    other => anyhow::bail!("unexpected reviewer startup: {other:?}"),
+                }
             }
-            SetupRequest::CancelProbe { .. } => self.pause_reviewer(),
+            .await
+            .map_err(|error| format!("{error:#}"));
+            let abandoned =
+                cancelled.load(std::sync::atomic::Ordering::Acquire) || updates.is_closed();
+            if (abandoned || result.is_err())
+                && let Some(generation) = started_generation
+                && let Err(error) = session
+                    .reviewer(ReviewerAction::PauseGeneration { generation })
+                    .await
+            {
+                tracing::warn!(%error, "could not stop failed or cancelled reviewer");
+            }
+            if abandoned {
+                return;
+            }
+            // Keep cleanup ownership until the UI has consumed the result. Dropping
+            // a chat with an unread successful startup must also stop that reviewer.
+            let (acknowledged, acknowledgement) = tokio::sync::oneshot::channel();
+            if let Err(error) = updates.send(ChatIoUpdate::ReviewerPrepared {
+                generation,
+                result,
+                acknowledged,
+            }) {
+                tracing::debug!(%error, "reviewer preparation result dropped");
+            }
+            if acknowledgement.await.is_err()
+                && let Some(generation) = started_generation
+                && let Err(error) = session
+                    .reviewer(ReviewerAction::PauseGeneration { generation })
+                    .await
+            {
+                tracing::warn!(%error, "could not stop abandoned reviewer");
+            }
+        });
+    }
+
+    pub(crate) fn apply_reviewer_prepared(
+        &mut self,
+        generation: u64,
+        result: std::result::Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    ) {
+        if generation != self.reviewer_preparation_sequence
+            || !matches!(
+                self.state.second_opinion(),
+                Some(SecondOpinion::Setup { .. })
+            )
+        {
+            if let Ok(resolved) = result {
+                let session = self.session.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = session
+                        .reviewer(ReviewerAction::PauseGeneration {
+                            generation: resolved.generation,
+                        })
+                        .await
+                    {
+                        tracing::warn!(%error, "could not stop stale reviewer preparation");
+                    }
+                });
+            }
+            return;
+        }
+        self.reviewer_preparation = None;
+        match result {
+            Ok(resolved) => {
+                self.reviewer_generation = resolved.generation;
+                self.confirm_reviewer();
+                if let Some(view) = self.state.second_opinion_mut() {
+                    view.set_status(format!(
+                        "{} · asking the planner for context…",
+                        resolved.description()
+                    ));
+                }
+            }
+            Err(error) => {
+                if let Some(view) = self.state.second_opinion_mut() {
+                    view.report_failure(error);
+                }
+            }
         }
     }
 
@@ -142,107 +210,12 @@ impl ActiveChat {
         }
     }
 
-    pub(crate) fn setup_profile_id(&self) -> Option<String> {
-        let SecondOpinion::Setup { setup, .. } = self.state.second_opinion()? else {
-            return None;
-        };
-        setup
-            .profiles()
-            .get(setup.profile_index())
-            .map(|profile| profile.id.clone())
-    }
-
-    /// Stages a profile and starts (or reconfigures) the reviewer under it,
-    /// reporting the options it advertises back to the waterfall.
-    pub(crate) fn probe_reviewer(
-        &mut self,
-        generation: u64,
-        profile_id: String,
-        model: Option<String>,
-        effort: Option<String>,
-        configuring: bool,
-    ) {
-        let Some(context) = self.context.as_ref() else {
-            return;
-        };
-        let reviewer_stager = context.reviewer_stager.clone();
-        let config = context.config.clone();
-        let session_record = context.session.clone();
-        let session = self.session.clone();
-        let updates = self.chat_io_tx.clone();
-        // The reviewer's lifetime generation is what decides whether the
-        // running reviewer can be kept; `generation` here only says which
-        // probe this answer belongs to.
-        let lifetime = self.reviewer_generation;
-        tokio::spawn(async move {
-            let staged = tokio::task::spawn_blocking(move || {
-                reviewer_stager.stage(config, session_record, profile_id, lifetime)
-            })
-            .await;
-            let result = async {
-                let mut config = match staged {
-                    Ok(Ok(config)) => config,
-                    Ok(Err(error)) => return Err(format!("{error:#}")),
-                    Err(error) => return Err(format!("staging the reviewer stopped: {error}")),
-                };
-                config.model = model;
-                config.effort = effort;
-                match session
-                    .reviewer(ReviewerAction::Start {
-                        config: Box::new(config),
-                    })
-                    .await
-                {
-                    Ok(ReviewerOutcome::Started(started)) => Ok(started.config_options),
-                    Ok(other) => Err(format!("unexpected reviewer response {other:?}")),
-                    Err(error) => Err(format!("{error:#}")),
-                }
-            }
-            .await;
-            let update = if configuring {
-                ChatIoUpdate::ReviewerConfigured { generation, result }
-            } else {
-                ChatIoUpdate::ReviewerProbe { generation, result }
-            };
-            if let Err(error) = updates.send(update) {
-                tracing::debug!(%error, "reviewer result dropped because the chat closed");
-            }
-        });
-    }
-
-    /// Confirms the chosen reviewer: remember it, answer the harness's own
-    /// plan decision, and ask the planner for the context the reviewer needs.
-    pub(crate) fn confirm_reviewer(
-        &mut self,
-        profile_id: String,
-        model: Option<String>,
-        effort: Option<String>,
-    ) {
+    /// The reviewer is ready; consume the plan decision and gather context.
+    pub(crate) fn confirm_reviewer(&mut self) {
         let Some(view) = self.state.second_opinion() else {
             return;
         };
         let captured = view.captured().clone();
-        if let Some(context) = self.context.as_ref() {
-            let selection = ReviewerSelection {
-                profile_id,
-                model,
-                effort,
-            };
-            self.reviewer_defaults
-                .remember(&context.session.workspace_id, &selection);
-            if let Some(persistence) = &self.persistence {
-                if let Err(error) = persistence.send(ChatDaemonRequest::RememberReviewerSelection {
-                    workspace_id: context.session.workspace_id.clone(),
-                    selection,
-                }) {
-                    tracing::warn!(%error, "could not queue the reviewer choice for persistence");
-                }
-            } else {
-                self.state
-                    .set_notice("Reviewer choice persistence is unavailable");
-            }
-        }
-
         let command_id = self.state.next_second_opinion_command_id("context");
         let (workflow, request) =
             ReviewWorkflow::start(captured.id(), captured.proposal.clone(), command_id.clone());
@@ -490,54 +463,6 @@ impl ActiveChat {
         });
     }
 
-    /// Reports what the reviewer advertises back to the waterfall.
-    ///
-    /// A result from a probe the user has moved past is dropped by the state
-    /// machine, which also names the reviewer to stop, so a slow harness can
-    /// never overwrite a newer selection.
-    pub(crate) fn apply_reviewer_options(
-        &mut self,
-        generation: u64,
-        result: std::result::Result<Vec<SessionConfigOption>, String>,
-        configuring: bool,
-    ) {
-        // A resumed review never shows the waterfall: the choice was already
-        // made, so a successful start goes straight to the review and only a
-        // failure falls back to asking again.
-        if let Some(selection) = self.resuming_reviewer.clone() {
-            match result {
-                Ok(_) => {
-                    self.resuming_reviewer = None;
-                    self.confirm_reviewer(selection.profile_id, selection.model, selection.effort);
-                    return;
-                }
-                Err(error) => {
-                    self.resuming_reviewer = None;
-                    if let Some(view) = self.state.second_opinion_mut() {
-                        view.report_failure(format!(
-                            "the remembered reviewer could not start: {error}"
-                        ));
-                    }
-                    return;
-                }
-            }
-        }
-        let Some(SecondOpinion::Setup { setup, .. }) = self.state.second_opinion_mut() else {
-            return;
-        };
-        let stale = match result {
-            Ok(options) if configuring => setup.model_applied(generation, &options),
-            Ok(options) => setup.probe_succeeded(generation, &options),
-            Err(error) => {
-                setup.probe_failed(generation, error);
-                None
-            }
-        };
-        if let Some(request) = stale {
-            self.run_setup_request(request);
-        }
-    }
-
     /// Folds one reviewing role's events into its pane, and keeps reading.
     ///
     /// Display only: the daemon reads the same journals to drive the review,
@@ -590,7 +515,6 @@ impl ActiveChat {
         );
     }
 
-    /// Folds a page of reviewer events into the pane and keeps reading.
     pub(crate) fn apply_reviewer_events(
         &mut self,
         result: std::result::Result<Vec<mj_core::relay::RelayEvent>, String>,

@@ -245,6 +245,9 @@ pub struct ReviewerLaunchConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Best-effort fast mode, applied only when the harness advertises it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
     /// Bumped whenever native continuity is lost, so a reviewer that outlived
     /// its harness starts a visibly new conversation instead of pretending to
     /// resume one.

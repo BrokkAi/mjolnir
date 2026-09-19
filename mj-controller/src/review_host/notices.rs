@@ -90,6 +90,19 @@ impl HostState {
                     true
                 }
             }
+            None if self.preparing.contains(session_id) => {
+                let next = RuntimeReviewView {
+                    session_id: session_id.into(),
+                    tier: (self.config)().tier,
+                    phase: TurnReviewPhase::LaunchingReviewer,
+                    roles: Vec::new(),
+                    status: "Preparing reviewer…".into(),
+                    verdict: None,
+                };
+                let changed = views.get(session_id) != Some(&next);
+                views.insert(session_id.into(), next);
+                changed
+            }
             None => views.remove(session_id).is_some(),
         };
         drop(views);
@@ -136,6 +149,10 @@ impl HostState {
                 tracing::warn!(session_id, %error, "could not queue review shutdown persistence");
             }
         }
+        for flag in self.preparation_cancellation.values() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.preparation_cancellation.clear();
         self.preparing.clear();
         self.closing.clear();
         self.reviews.clear();

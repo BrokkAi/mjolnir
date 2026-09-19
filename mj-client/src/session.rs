@@ -84,6 +84,10 @@ pub enum ReviewerAction {
         response: ElicitationResponse,
     },
     Pause,
+    /// Stop only the preparation that owns this generation; stale cleanup must not stop its replacement.
+    PauseGeneration {
+        generation: u64,
+    },
     CaptureDelta {
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
@@ -105,7 +109,7 @@ impl ReviewerAction {
             Self::Acknowledge { .. } => "reviewer_acknowledge",
             Self::Status => "reviewer_status",
             Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause => "reviewer_pause",
+            Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
@@ -169,7 +173,6 @@ impl PendingRelaySync {
 #[derive(Debug, Default)]
 pub struct ReviewState {
     pub review: Option<mj_core::storage::StoredReview>,
-    pub defaults: mj_core::second_opinion::ReviewerDefaults,
 }
 
 pub trait SessionHandleBackend: Send + Sync {
@@ -180,6 +183,13 @@ pub trait SessionHandleBackend: Send + Sync {
         query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
     fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>>;
+    fn resolve_review_settings(
+        &self,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>> {
+        let _ = cancelled;
+        Box::pin(async { anyhow::bail!("review settings resolution is unavailable") })
+    }
 
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>>;
 
@@ -223,6 +233,13 @@ impl SessionHandle {
     }
     pub async fn review_state(&self) -> Result<ReviewState> {
         self.backend.review_state().await
+    }
+
+    pub async fn resolve_review_settings(
+        &self,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<mj_core::review::settings::ResolvedReviewSettings> {
+        self.backend.resolve_review_settings(cancelled).await
     }
 
     pub fn new(backend: impl SessionHandleBackend + 'static) -> Self {
@@ -402,6 +419,7 @@ pub trait ReviewerStagerBackend: Send + Sync {
         session: SessionRecord,
         profile_id: String,
         generation: u64,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig>;
 }
 
@@ -423,8 +441,10 @@ impl ReviewerStager {
         session: SessionRecord,
         profile_id: String,
         generation: u64,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig> {
-        self.backend.stage(config, session, profile_id, generation)
+        self.backend
+            .stage(config, session, profile_id, generation, cancelled)
     }
 
     #[doc(hidden)]
@@ -448,6 +468,7 @@ impl ReviewerStagerBackend for UnavailableReviewerStager {
         _session: SessionRecord,
         _profile_id: String,
         _generation: u64,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig> {
         anyhow::bail!(self.0.clone())
     }

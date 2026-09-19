@@ -11,6 +11,16 @@ pub trait ReviewEnvironment: Send + Sync {
     /// reviewed under `profile`.
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
+    fn resolve<'a>(
+        &'a self,
+        handle: ManagedSessionHandle,
+        config: ReviewConfig,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    >;
+
     /// Stages the reviewer profile for one role and describes how to launch
     /// it. Blocking: it copies a profile onto the session's target.
     fn stage(
@@ -67,6 +77,23 @@ impl ReviewEnvironment for ControllerEnvironment {
         )
     }
 
+    fn resolve<'a>(
+        &'a self,
+        handle: ManagedSessionHandle,
+        config: ReviewConfig,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    > {
+        Box::pin(async move {
+            let specialists = config.tier == ReviewTier::Extended;
+            crate::review_selection::resolve(handle, Some(config), specialists, cancelled)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        })
+    }
+
     fn stage(
         &self,
         session_id: &str,
@@ -105,7 +132,7 @@ impl ReviewEnvironment for ControllerEnvironment {
 pub(crate) fn validate_reviewer_assignment(
     session_id: &str,
     session: Option<&mj_core::state::SessionRecord>,
-    profile: &str,
+    _profile: &str,
 ) -> Result<(), String> {
     let Some(session) = session else {
         return Err(format!(
@@ -114,11 +141,6 @@ pub(crate) fn validate_reviewer_assignment(
     };
     if session.archived {
         return Err("this session is archived".to_owned());
-    }
-    if session.last_profile == profile {
-        return Err(format!(
-            "turn review profile {profile:?} is also this session's primary profile; choose a different [review] profile"
-        ));
     }
     Ok(())
 }
