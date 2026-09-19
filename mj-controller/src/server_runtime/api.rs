@@ -51,6 +51,16 @@ pub trait ExportRuntime: Send + Sync {
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
 
+    /// Whether a close the daemon admitted is still running for this session.
+    ///
+    /// The record alone cannot answer this: a close cancels the previous owner
+    /// of the session before it writes `Closing`, so between admission and that
+    /// write the record still says whatever it said. A backend without a daemon
+    /// has no close in flight.
+    fn close_is_requested(&self, _session_id: &str) -> bool {
+        false
+    }
+
     fn workspace_session(
         &self,
         _session_id: String,
@@ -124,6 +134,10 @@ pub trait ExportRuntime: Send + Sync {
 impl ExportRuntime for RuntimeState {
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
+    }
+
+    fn close_is_requested(&self, session_id: &str) -> bool {
+        RuntimeState::close_is_requested(self, session_id)
     }
 
     fn workspace_session(
@@ -481,6 +495,7 @@ impl ApiBackend {
                                 .and_then(Option::as_ref),
                             starts.get(&relation.child_session_id),
                             None,
+                            self.exports.close_is_requested(&relation.child_session_id),
                         );
                         serde_json::json!({
                             "child_session_id":relation.child_session_id,
@@ -555,7 +570,14 @@ impl ApiBackend {
                     }
                     let complete = summaries.iter().all(|(id, summary)| {
                         let record = self.exports.session_record(id);
-                        subagent_status(record.as_ref(), summary.as_ref(), starts.get(id), None).2
+                        subagent_status(
+                            record.as_ref(),
+                            summary.as_ref(),
+                            starts.get(id),
+                            None,
+                            self.exports.close_is_requested(id),
+                        )
+                        .2
                     });
                     if complete || tokio::time::Instant::now() >= deadline {
                         // Only read now, and only here: this is the one answer
@@ -579,6 +601,7 @@ impl ApiBackend {
                                     summary.as_ref(),
                                     starts.get(&id),
                                     reports.get(&id).and_then(Option::as_deref),
+                                    self.exports.close_is_requested(&id),
                                 );
                                 serde_json::json!({
                                     "child_session_id":id,
@@ -795,12 +818,32 @@ fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
 /// back to the session-wide message only for a child with no recorded turn
 /// span, which has no report of its own to lose. A running child keeps showing
 /// its newest message, which is the point of looking at a running child.
+///
+/// `closing` says a close the daemon admitted is still running for this child.
+/// A close is not instant: it cancels whatever owned the session, checkpoints,
+/// seals the relay and tears the child's process tree down, and the record only
+/// says `Closing` once that is under way. Without this, a child whose turn had
+/// finished reported `completed` the moment its close was admitted, so a parent
+/// that closed a child and spawned its replacement stacked the two process
+/// trees inside one container (#1087). This is the projection the daemon's own
+/// viewer applies, down to leaving a record that already says `Stopped` alone.
 fn subagent_status(
     record: Option<&mj_core::state::SessionRecord>,
     summary: Option<&mj_core::state::MaterializedSessionSummary>,
     start: Option<&StartStatus>,
     finished_turn_message: Option<&str>,
+    closing: bool,
 ) -> (String, Option<String>, bool) {
+    // A close the daemon admitted owns this child until it finishes, the same
+    // rule `resolve_wait` applies to a session-level wait: a close ends
+    // nothing. It is read before anything else for the same reason it is there,
+    // so a child that had finished — or had failed to start — is not reported
+    // as something the parent is done with while its teardown is still running.
+    // A record that already settled to `Stopped` is left alone, exactly as the
+    // daemon's viewer projection leaves it.
+    if closing && record.is_some_and(|record| record.state != SessionState::Stopped) {
+        return ("stopping".into(), None, false);
+    }
     // A record that failed to start holds the cause; the follow-up's own
     // message only says that the session would not take a prompt, which is
     // the symptom. Prefer the cause when there is one, and keep the follow-up

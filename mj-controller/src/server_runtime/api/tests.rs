@@ -81,8 +81,68 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
         message: "model is unavailable".into(),
     };
     assert_eq!(
-        subagent_status(None, None, Some(&status), None),
+        subagent_status(None, None, Some(&status), None, false),
         ("error".into(), Some("model is unavailable".into()), true)
+    );
+}
+
+/// A close is accepted long before the child is gone: it cancels whatever owned
+/// the session, checkpoints, seals the relay and tears the process tree down,
+/// and the record only says `Closing` once that is under way. A child that had
+/// finished its turn therefore reported `completed` the moment its close was
+/// admitted, so a parent that closed a child and spawned its replacement stacked
+/// both process trees inside one container (#1087). A wait must follow the close
+/// instead, the way a session-level wait does.
+#[test]
+fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::Running;
+    let summary = mj_core::state::MaterializedSessionSummary {
+        session_id: "child".into(),
+        applied_event_ordinal: 4,
+        last_activity_at_ms: None,
+        execution: MaterializedExecutionState::Idle,
+        session_title: None,
+        last_agent_message: Some("the child's report".into()),
+        last_user_message: None,
+        last_agent_message_follows_last_user: true,
+        agent_message_latest_content_ordinals: Vec::new(),
+        session_restart_event_ordinals: Vec::new(),
+    };
+
+    assert_eq!(
+        subagent_status(Some(&record), Some(&summary), None, None, false),
+        ("completed".into(), Some("the child's report".into()), true),
+        "an idle child nobody is closing is finished"
+    );
+
+    let (state, output, finished) =
+        subagent_status(Some(&record), Some(&summary), None, None, true);
+    assert_eq!(state, "stopping");
+    assert_eq!(output, None);
+    assert!(
+        !finished,
+        "a wait must keep following a child whose close is still running"
+    );
+
+    // A child whose start failed is terminal, but it is not gone either while
+    // its close runs; its cause was already reported to the parent before it
+    // asked for the close.
+    let failed = StartStatus::Failed {
+        message: "model is unavailable".into(),
+    };
+    assert!(
+        !subagent_status(Some(&record), Some(&summary), Some(&failed), None, true).2,
+        "a failed child is still being torn down while its close runs"
+    );
+
+    // The close finished: the record settled, and the flag the daemon clears
+    // just after it is no longer allowed to hold the wait open.
+    record.state = SessionState::Stopped;
+    assert_eq!(
+        subagent_status(Some(&record), Some(&summary), None, None, true),
+        ("stopped".into(), None, true),
+        "a record that already settled to stopped ends the wait"
     );
 }
 
@@ -103,7 +163,8 @@ fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
         message: "session child is Error and will not take a first prompt".into(),
     };
 
-    let (state, output, terminal) = subagent_status(Some(&record), None, Some(&status), None);
+    let (state, output, terminal) =
+        subagent_status(Some(&record), None, Some(&status), None, false);
 
     assert_eq!(state, "error");
     assert!(terminal);
