@@ -17,6 +17,18 @@ impl DashboardState {
         self.native_agents.contains_key(id)
     }
 
+    pub(crate) fn subagent_parent_for(&self, id: &str) -> Option<String> {
+        self.native_agents
+            .get(id)
+            .map(|pane| pane.agent.parent_view_id())
+            .or_else(|| {
+                self.state
+                    .subagents
+                    .get(id)
+                    .map(|agent| agent.parent_session_id.clone())
+            })
+    }
+
     pub fn subagent_count_for(&self, parent: &str) -> usize {
         self.state
             .subagents
@@ -165,10 +177,7 @@ impl DashboardState {
             KeyCode::End => pane.scroll = 0,
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 let parent = pane.agent.parent_view_id();
-                self.subagent_parent_id = self
-                    .native_agents
-                    .get(&parent)
-                    .map(|pane| pane.agent.parent_view_id());
+                self.subagent_parent_id = self.subagent_parent_for(&parent);
                 self.selected_session_id = Some(parent.clone());
                 return Some(DashboardAction::Open { session_id: parent });
             }

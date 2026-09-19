@@ -4476,4 +4476,32 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
         dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
         DashboardAction::StopNativeAgent { .. }
     ));
+    // Returning to a managed owner retains that owner's own parent workspace.
+    let mut ancestor = parent.clone();
+    ancestor.id = "ancestor".into();
+    dashboard
+        .state
+        .sessions
+        .insert(ancestor.id.clone(), ancestor.clone());
+    dashboard.state.subagents.insert(
+        parent.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: parent.id.clone(),
+            parent_session_id: ancestor.id.clone(),
+            task_name: "managed owner".into(),
+            profile_id: parent.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "inspect".into(),
+            request_key: "request".into(),
+            created_at: parent.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    assert!(
+        matches!(dashboard.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)), DashboardAction::Open { session_id } if session_id == parent.id)
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some("ancestor"));
+    assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
 }

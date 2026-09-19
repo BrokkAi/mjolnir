@@ -228,6 +228,17 @@ pub(super) async fn serve_session(
                     },
                 )
                 .await?;
+                if native_children {
+                    // The missing session was proven unused. Publish the empty
+                    // replay before routing children of its replacement live.
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::NativeAgent {
+                            event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                        },
+                    )
+                    .await?;
+                }
                 None
             }
         };

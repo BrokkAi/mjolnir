@@ -36,10 +36,7 @@ impl DashboardState {
         let Some(parent_id) = self.subagent_parent_id.take() else {
             return;
         };
-        self.subagent_parent_id = self
-            .native_agents
-            .get(&parent_id)
-            .map(|pane| pane.agent.parent_view_id());
+        self.subagent_parent_id = self.subagent_parent_for(&parent_id);
         self.selected_session_id = Some(parent_id);
         self.set_current_session(None);
         self.clamp_selections();

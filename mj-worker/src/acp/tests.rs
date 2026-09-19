@@ -4302,7 +4302,7 @@ for line in sys.stdin:
     ident = request.get("id")
     method = request.get("method")
     if method == "initialize":
-        result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}}
+        result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}, "_meta": {{"jetbrains": {{"air": {{"version": 1, "capabilities": ["nativeSubagentSessions"]}}}}}}}}
     elif method in ("session/new", "session/load", "session/resume"):
         if second and not used and method != "session/new":
             write({{"jsonrpc": "2.0", "id": ident, "error": {{"code": -32603, "message": "no rollout found for thread id unused"}}}})
@@ -4360,12 +4360,14 @@ for line in sys.stdin:
     ));
     let mut opened = Vec::new();
     let mut prompt_sent = false;
+    let mut replay = Vec::new();
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv())
             .await
             .expect("the replacement bridge must become ready")
             .expect("the runtime must survive the first bridge's death");
         match event {
+            RuntimeEvent::NativeAgent { event } => replay.push(event),
             RuntimeEvent::SessionStarted {
                 native_session_id,
                 resumed,
@@ -4408,6 +4410,17 @@ for line in sys.stdin:
                 send_prompt
             ),
         ]
+    );
+    assert_eq!(
+        replay,
+        if send_prompt {
+            vec![
+                mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+            ]
+        } else {
+            Vec::new()
+        }
     );
     drop(request_tx);
     tokio::time::timeout(std::time::Duration::from_secs(5), runtime)
@@ -5755,7 +5768,11 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
 async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() {
     use mj_core::native_agent::NativeAgentEvent;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+    for (harness, missing) in [
+        (HarnessKind::Claude, false),
+        (HarnessKind::Codex, false),
+        (HarnessKind::Codex, true),
+    ] {
         let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
         let bridge = tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(bridge_stream);
@@ -5770,7 +5787,15 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                         serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
                             "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
                     }
-                    "session/load" => {
+                    "session/load" if missing => {
+                        let response = serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"no rollout found for thread id root"}});
+                        write
+                            .write_all(format!("{response}\n").as_bytes())
+                            .await
+                            .unwrap();
+                        continue;
+                    }
+                    "session/load" | "session/new" => {
                         // Exceed the pipe capacity so the driver must drain history
                         // concurrently with the load response.
                         for (address, update) in [
@@ -5793,7 +5818,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
                                 .await
                                 .unwrap();
                         }
-                        serde_json::json!({"modes":{"currentModeId":"auto","availableModes":[{"id":"auto","name":"Auto"},{"id":"agent","name":"Agent"}]}})
+                        serde_json::json!({"sessionId":"replacement","modes":{"currentModeId":"auto","availableModes":[{"id":"auto","name":"Auto"},{"id":"agent","name":"Agent"}]}})
                     }
                     "session/resume" => panic!("native recovery must load child history"),
                     "session/set_mode" | "session/set_config_option" => serde_json::json!({}),
@@ -5855,12 +5880,9 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             while let Some(event) = event_rx.recv().await {
                 match event {
                     RuntimeEvent::NativeAgent { event } => {
-                        let done = matches!(event, NativeAgentEvent::ReplayCommit);
                         children.push(event);
-                        if done {
-                            break;
-                        }
                     }
+                    RuntimeEvent::SessionConfigured { .. } => break,
                     RuntimeEvent::SessionUpdate { update } => {
                         assert_ne!(update["sessionUpdate"], "agent_message_chunk")
                     }
@@ -5872,9 +5894,25 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         .expect("child history load finishes");
         assert_eq!(children.len(), 5);
         assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
-        assert!(matches!(children[1], NativeAgentEvent::Spawned { .. }));
-        assert!(matches!(children[2], NativeAgentEvent::Update { .. }));
-        assert!(matches!(children[3], NativeAgentEvent::State { .. }));
+        let spawn_index = if missing {
+            assert!(matches!(children[1], NativeAgentEvent::ReplayCommit));
+            2
+        } else {
+            assert!(matches!(children[4], NativeAgentEvent::ReplayCommit));
+            1
+        };
+        assert!(matches!(
+            children[spawn_index],
+            NativeAgentEvent::Spawned { .. }
+        ));
+        assert!(matches!(
+            children[spawn_index + 1],
+            NativeAgentEvent::Update { .. }
+        ));
+        assert!(matches!(
+            children[spawn_index + 2],
+            NativeAgentEvent::State { .. }
+        ));
         drop(request_tx);
         driver.await.unwrap().unwrap();
         bridge.abort();
