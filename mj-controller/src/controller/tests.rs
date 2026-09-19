@@ -272,6 +272,46 @@ fn more_than_fifty_matches_are_truncated() {
     );
 }
 
+/// A directory whose first fifty names share a prefix the rest do not: this is
+/// `/tmp` on a busy machine, where the dotfiles fill the shown list. Inserting
+/// their prefix would narrow the field to those dotfiles and make every other
+/// entry unreachable, so nothing shared is left to insert.
+#[test]
+fn the_shared_prefix_comes_from_every_match_not_from_the_shown_fifty() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..50 {
+        std::fs::create_dir(directory.path().join(format!(".cache-{index:03}"))).unwrap();
+    }
+    for index in 0..10 {
+        std::fs::create_dir(directory.path().join(format!("project-{index:03}"))).unwrap();
+    }
+    let controller = completion_controller("host", r#"{"kind":"local-bare"}"#);
+
+    let completion = controller
+        .complete_path(
+            &CompletionHost::Target("host".into()),
+            &format!("{}/", directory.path().display()),
+            CompletionKind::Directories,
+            &UnusedExecutor,
+        )
+        .unwrap();
+
+    assert!(completion.truncated);
+    assert_eq!(completion.candidates.len(), 50);
+    assert!(
+        completion
+            .candidates
+            .iter()
+            .all(|candidate| candidate.contains("/.cache-")),
+        "the shown list is the dotfiles: {:?}",
+        completion.candidates
+    );
+    assert_eq!(
+        completion.insert, None,
+        "the sixty matches share only the directory the user already typed"
+    );
+}
+
 #[test]
 fn remote_path_resolution_uses_login_home_without_evaluating_suffix() {
     struct HomeExecutor {

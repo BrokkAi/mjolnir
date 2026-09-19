@@ -53,17 +53,23 @@ impl Controller {
         if prefix.ends_with('/') && !lookup.ends_with('/') {
             lookup.push('/');
         }
-        let mut candidates = match &host {
+        let candidates = match &host {
             CacheHost::Local => local_completions(&lookup, kind),
             CacheHost::Ssh(ssh) => ssh_completions(ssh, &lookup, kind, executor)?,
         };
-        let truncated = candidates.len() > MAX_CANDIDATES;
-        candidates.truncate(MAX_CANDIDATES);
-        let candidates = candidates
+        let mut candidates = candidates
             .into_iter()
             .map(|candidate| fold_home(candidate, home.as_deref()))
             .collect::<Result<Vec<_>>>()?;
+        // The shared prefix belongs to every match, not to the first
+        // `MAX_CANDIDATES` the popup can show. Reading it from the shown ones
+        // would push the field into a subset of a large directory: fifty
+        // dotfiles at the head of `/tmp` would insert `.` and leave the other
+        // sixteen thousand entries unreachable without deleting what the
+        // completion itself typed.
         let insert = common_insert(prefix, &candidates);
+        let truncated = candidates.len() > MAX_CANDIDATES;
+        candidates.truncate(MAX_CANDIDATES);
         Ok(PathCompletion {
             candidates,
             insert,
