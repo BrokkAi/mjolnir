@@ -4977,6 +4977,7 @@ fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
 fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     let directory = tempfile::tempdir().unwrap();
     let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
         project_key: "project".into(),
         root: directory.path().join("replica"),
         baseline_root: directory.path().join("baseline"),

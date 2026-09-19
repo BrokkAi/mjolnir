@@ -2376,7 +2376,7 @@ fn a_child_opens_its_parents_container_workspace() {
     let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
     let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
     let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
+        borrowed_from: Some(parent_id.into()),
         container_id: targets::resource_name(parent_id).unwrap(),
         workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
     };
@@ -2424,13 +2424,13 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let profile = zai_profile(home.path());
-    let mut session = crate::controller::test_support::checkpoint_test_session("s-glm");
+    let mut session = crate::controller::test_support::checkpoint_test_session("session-glm");
     session.harness_kind = HarnessKind::Codex;
     session.last_profile = "glm".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
     session.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: "/home/me/.local/share/hel/worker".into(),
+        worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
     });
 
     let (launch, _, target_home) = worker_launch_config(
@@ -2438,7 +2438,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
         &profile,
         None,
         &targets::TargetLocator::LocalBare {
-            worker_root: "/home/me/.local/share/hel/worker".into(),
+            worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
         },
         &session.id,
         None,
@@ -2449,7 +2449,7 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     assert_eq!(launch.environment["ZAI_API_KEY"], "coding-plan-key");
     assert_eq!(launch.environment["CODEX_HOME"], target_home);
     assert_eq!(
-        target_home, "/home/me/.local/share/hel/worker/profile",
+        target_home, "/home/me/.local/share/hel/workers/session-glm/profile",
         "the session runs from the staged copy, not the user's profile home"
     );
     assert_eq!(
@@ -2471,13 +2471,13 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
 #[test]
 fn raw_local_muse_launches_unconstrained() {
     let project = tempfile::tempdir().unwrap();
-    let mut session = crate::controller::test_support::checkpoint_test_session("s-muse");
+    let mut session = crate::controller::test_support::checkpoint_test_session("session-muse");
     session.harness_kind = HarnessKind::Muse;
     session.last_profile = "muse".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
     session.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: "/home/me/.local/share/hel/worker".into(),
+        worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
     });
     let profile = mj_core::config::HarnessProfile {
         enabled: true,
@@ -2493,7 +2493,7 @@ fn raw_local_muse_launches_unconstrained() {
         &profile,
         None,
         &targets::TargetLocator::LocalBare {
-            worker_root: "/home/me/.local/share/hel/worker".into(),
+            worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
         },
         &session.id,
         None,
@@ -2560,6 +2560,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
+        history_socket: Some("/var/lib/hel/workers/session/control.sock".into()),
         project_key: "project".into(),
         root: "/var/lib/hel/profiles/session/projects/project/memory".into(),
         baseline_root: PathBuf::new(),
@@ -2586,7 +2587,9 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
                 "worker",
                 "memory-mcp",
                 "--root",
-                "/var/lib/hel/profiles/session/projects/project/memory"
+                "/var/lib/hel/profiles/session/projects/project/memory",
+                "--history-socket",
+                "/var/lib/hel/workers/session/control.sock"
             ],
             "runtime_id": "local"
         })
@@ -2602,6 +2605,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
 fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
     let staged = tempfile::tempdir().unwrap();
     let memory = ProjectMemoryLaunchConfig {
+        history_socket: Some(".local/share/hel/workers/session/control.sock".into()),
         project_key: "project".into(),
         root: ".local/share/hel/profiles/session/projects/project/memory".into(),
         baseline_root: PathBuf::new(),
@@ -2621,10 +2625,11 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
         server["args"],
         serde_json::json!([
             "-c",
-            "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
+            "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\" --history-socket \"$HOME/$3\"",
             "mj-memory",
             ".local/share/hel/workers/session/hel",
-            ".local/share/hel/profiles/session/projects/project/memory"
+            ".local/share/hel/profiles/session/projects/project/memory",
+            ".local/share/hel/workers/session/control.sock"
         ])
     );
 }

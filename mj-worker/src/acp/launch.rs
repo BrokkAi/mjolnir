@@ -53,24 +53,38 @@ pub struct LaunchSpec {
 }
 
 pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
-    if spec.harness == HarnessKind::Claude
-        || spec
-            .project_memory
-            .as_ref()
-            .is_some_and(|memory| memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile)
+    if spec
+        .project_memory
+        .as_ref()
+        .is_some_and(|memory| memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile)
     {
         return Vec::new();
     }
     let Some(memory) = &spec.project_memory else {
         return Vec::new();
     };
+    if spec.harness == HarnessKind::Muse
+        || (spec.harness == HarnessKind::Claude && memory.history_socket.is_none())
+    {
+        return Vec::new();
+    }
+    let mut args = vec![
+        "worker".into(),
+        "memory-mcp".into(),
+        "--root".into(),
+        memory.root.to_string_lossy().into_owned(),
+    ];
+    if let Some(socket) = &memory.history_socket {
+        args.extend([
+            "--history-socket".into(),
+            socket.to_string_lossy().into_owned(),
+        ]);
+    }
+    if spec.harness == HarnessKind::Claude {
+        args.push("--native-notes".into());
+    }
     vec![McpServer::Stdio(
-        McpServerStdio::new("mj-memory", spec.command.clone()).args(vec![
-            "worker".into(),
-            "memory-mcp".into(),
-            "--root".into(),
-            memory.root.to_string_lossy().into_owned(),
-        ]),
+        McpServerStdio::new("mj-memory", spec.command.clone()).args(args),
     )]
 }
 

@@ -66,6 +66,7 @@ pub(super) fn project_memory_launch(
         );
     }
     Ok(ProjectMemoryLaunchConfig {
+        history_socket: None,
         project_key,
         root,
         baseline_root,

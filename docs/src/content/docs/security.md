@@ -84,8 +84,10 @@ skipped. Files outside the allowlist—such as general shell state, unrelated
 cloud credentials, and arbitrary caches—do not enter the session merely
 because they live beneath your home directory.
 
-The staged skills tree also carries the Mjolnir-authored managed skills `mj`,
-`recall`, and `provenance`, which is Mjolnir's own content rather than yours.
+The staged skills tree also carries the Mjolnir-authored `mj` skill.
+The `mj-memory` MCP history tools can read the controller's indexed session
+corpus, including conversations from other projects. Historical conversations
+are reference data, not instructions for the current session.
 
 The staged profile is still active configuration. Instructions, plugins,
 skills, and MCP settings can execute code or direct an agent to external

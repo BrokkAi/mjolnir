@@ -109,8 +109,18 @@ where
 {
     let output = Arc::new(Mutex::new(writer));
     let call = Arc::new(server.call);
-    let mut calls = Vec::new();
+    let mut calls: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for line in reader.lines() {
+        let mut i = 0;
+        while i < calls.len() {
+            if calls[i].is_finished() {
+                if calls.swap_remove(i).join().is_err() {
+                    tracing::warn!("an MCP tool call thread panicked");
+                }
+            } else {
+                i += 1;
+            }
+        }
         let line = line.context("read MCP request")?;
         if line.trim().is_empty() {
             continue;

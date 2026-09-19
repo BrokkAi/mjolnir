@@ -9,17 +9,7 @@ use super::SkillsEntry;
 use crate::config::HarnessKind;
 
 /// One managed skill: the directory it occupies and its `SKILL.md`.
-const MANAGED: &[(&str, &str)] = &[
-    ("mj", include_str!("../../assets/skills/mj/SKILL.md")),
-    (
-        "provenance",
-        include_str!("../../assets/skills/provenance/SKILL.md"),
-    ),
-    (
-        "recall",
-        include_str!("../../assets/skills/recall/SKILL.md"),
-    ),
-];
+const MANAGED: &[(&str, &str)] = &[("mj", include_str!("../../assets/skills/mj/SKILL.md"))];
 
 /// The skills Mjolnir installs into every session-owned profile home.
 ///

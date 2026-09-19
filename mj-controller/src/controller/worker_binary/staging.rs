@@ -56,25 +56,46 @@ pub(super) fn configure_kimi_project_memory_mcp(
 
         let worker = Path::new(worker_root).join("hel");
         let server = if worker.is_absolute() && memory.root.is_absolute() {
+            let mut args = vec![
+                "worker".to_owned(),
+                "memory-mcp".into(),
+                "--root".into(),
+                memory.root.to_string_lossy().into_owned(),
+            ];
+            if let Some(socket) = &memory.history_socket {
+                args.extend([
+                    "--history-socket".into(),
+                    socket.to_string_lossy().into_owned(),
+                ]);
+            }
             serde_json::json!({
                 "transport": "stdio",
                 "command": worker,
-                "args": ["worker", "memory-mcp", "--root", memory.root],
+                "args": args,
                 "runtime_id": "local"
             })
         } else {
             let worker = worker.to_string_lossy();
             let memory_root = memory.root.to_string_lossy();
+            let mut args = vec![
+                "-c".to_owned(),
+                "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"".into(),
+                "mj-memory".into(),
+                worker.into_owned(),
+                memory_root.into_owned(),
+            ];
+            if let Some(socket) = &memory.history_socket {
+                args[1].push_str(if socket.is_absolute() {
+                    " --history-socket \"$3\""
+                } else {
+                    " --history-socket \"$HOME/$3\""
+                });
+                args.push(socket.to_string_lossy().into_owned());
+            }
             serde_json::json!({
                 "transport": "stdio",
                 "command": "sh",
-                "args": [
-                    "-c",
-                    "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"",
-                    "mj-memory",
-                    worker,
-                    memory_root
-                ],
+                "args": args,
                 "runtime_id": "local"
             })
         };

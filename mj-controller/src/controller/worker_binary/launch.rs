@@ -595,6 +595,8 @@ pub(super) fn worker_launch_config(
     let mut project_memory =
         project_memory_launch(session, bundle, &workspace, &target_profile_home)?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
+    project_memory.history_socket =
+        Some(Path::new(&targets::worker_root(backend, &session.id)?).join("control.sock"));
     if profile.kind == mj_core::config::HarnessKind::Claude {
         environment.insert(
             "CLAUDE_CODE_PROJECT_DIR_NAME".into(),

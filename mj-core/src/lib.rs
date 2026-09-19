@@ -18,6 +18,7 @@ pub mod go;
 pub mod goal;
 pub mod harness_runtime;
 pub mod hex;
+pub mod history;
 pub mod local_git;
 pub mod local_sockets;
 pub mod login_environment;

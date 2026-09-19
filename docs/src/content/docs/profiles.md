@@ -381,15 +381,28 @@ The sync has protective limits:
 
 ### Managed skills
 
-Mjolnir also installs three skills of its own into every session whose harness
-home belongs to the session: `mj` (driving Mjolnir sessions from an agent),
-`recall` (finding and reading earlier sessions), and `provenance` (finding
-which sessions changed a file). They are written at launch and merged into the
-tree pushed on every reconciliation, so they do not disappear after the first
-sync. A user skill with one of those three paths is replaced by the managed
-copy. Sessions that run out of your own harness home instead of a
-Mjolnir-managed one never receive them, so your own `skills/` directory is left
-alone.
+Mjolnir installs the `mj` skill (driving Mjolnir sessions from an agent) into
+every session whose harness home belongs to the session. It is written at launch
+and merged into the tree pushed on every reconciliation. A user skill at the
+same path is replaced by the managed copy. Sessions using your own harness home
+do not receive the managed skill, so your own `skills/` directory is left alone.
+
+Session recall and file provenance are provided by the `mj-memory` MCP server:
+`search_sessions`, `get_session_brief`, `search_session`, `read_session`,
+`trace_file`, `session_files`, and `blame_file`. They query the controller's
+session index on local, container, and SSH targets without installing `sw` or
+copying the index to the target. Claude receives these history tools and keeps
+native project notes; other MCP-capable harnesses also receive the document
+tools `list`, `read`, and `write`. Muse currently cannot receive injected MCP
+tools. Applicable tools are registered again when a session resumes.
+
+History reads are bounded and include continuation information. The index can
+lag active sessions, and older transcripts may lack timestamps or file evidence.
+`blame_file` runs Git in the target checkout and reports heuristic attribution;
+uncommitted lines remain unattributed. Queries require a connected controller
+and time out after 60 seconds. Local project document tools remain usable while
+a history query waits. History tools never resume or restore old sessions.
+User-supplied `recall` and `provenance` skills are preserved.
 
 The destination tree is replaced atomically. Removing the controller-side
 `skills/` directory therefore removes the synced tree on the next successful

@@ -94,6 +94,10 @@ enum WorkerCommand {
     MemoryMcp {
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        history_socket: Option<PathBuf>,
+        #[arg(long)]
+        native_notes: bool,
     },
     /// Serve the turn review's specialist-dispatch tool over MCP stdio.
     ReviewMcp {
@@ -416,7 +420,13 @@ async fn run_command(command: Command) -> Result<()> {
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
-        WorkerCommand::MemoryMcp { root } => mj_worker::memory_mcp::run_mcp_stdio(&root),
+        WorkerCommand::MemoryMcp {
+            root,
+            history_socket,
+            native_notes,
+        } => {
+            mj_worker::memory_mcp::run_mcp_stdio_with_history(&root, history_socket, !native_notes)
+        }
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
         WorkerCommand::SubagentMcp { socket, harness } => {
             mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness)

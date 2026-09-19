@@ -124,6 +124,8 @@ impl DurableRelay {
             | RelayRequest::InstallGithubToken { .. }
             | RelayRequest::RemoveGithubToken
             | RelayRequest::ProjectMemorySnapshot
+            | RelayRequest::HistoryQuery { .. }
+            | RelayRequest::CompleteHistoryRequest { .. }
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::CompleteSubagentRequest { .. } => {
                 return Ok(relay_error(
@@ -136,6 +138,11 @@ impl DurableRelay {
             RelayRequest::SubagentRequests => RelayResponsePayload::SubagentRequests {
                 requests: Vec::new(),
                 results: Vec::new(),
+            },
+            // A durable-only relay has no live history broker. The worker's
+            // connection transport intercepts this when a broker is present.
+            RelayRequest::HistoryRequests => RelayResponsePayload::HistoryRequests {
+                requests: Vec::new(),
             },
             RelayRequest::RespondElicitation { .. } => {
                 return Ok(relay_error(

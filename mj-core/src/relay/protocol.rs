@@ -134,6 +134,14 @@ pub enum RelayRequest {
     /// Fetch controller work queued by the parent session's private MCP
     /// socket. Connection-only: request payloads do not enter chat history.
     SubagentRequests,
+    /// Connection-only history queries; never part of the durable transcript.
+    HistoryQuery {
+        query: crate::history::HistoryQuery,
+    },
+    HistoryRequests,
+    CompleteHistoryRequest {
+        result: crate::history::HistoryResult,
+    },
     /// Acknowledge a completed MCP request and cache its bounded answer for
     /// subsequent tool calls and restart recovery.
     CompleteSubagentRequest {
@@ -296,6 +304,9 @@ impl RelayRequest {
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
+            Self::HistoryQuery { .. } => "history_query",
+            Self::HistoryRequests => "history_requests",
+            Self::CompleteHistoryRequest { .. } => "complete_history_request",
             Self::CompleteSubagentRequest { .. } => "complete_subagent_request",
             Self::Reviewer { request, .. } => request.action_name(),
         }
@@ -307,6 +318,9 @@ impl RelayRequest {
     /// non-steering turn cancellation in 7.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::HistoryQuery { .. }
+            | Self::HistoryRequests
+            | Self::CompleteHistoryRequest { .. } => 15,
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
@@ -456,6 +470,13 @@ pub enum RelayResponsePayload {
         results: Vec<crate::subagent::SubagentToolResult>,
     },
     SubagentRequestCompleted,
+    HistoryRequests {
+        requests: Vec<crate::history::HistoryRequest>,
+    },
+    HistoryResult {
+        result: crate::history::HistoryResult,
+    },
+    HistoryRequestCompleted,
     /// The reviewer sidecar is running under the requested configuration.
     ReviewerStarted {
         #[serde(default, skip_serializing_if = "Option::is_none")]

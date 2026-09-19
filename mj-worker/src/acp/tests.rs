@@ -203,6 +203,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         additional_directories: vec!["/workspace/api".into()],
         extra_mcp_servers: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
             project_key: "abc".into(),
             root: "/profile/projects/abc/memory".into(),
             baseline_root: "/profile/projects/abc/.hel-memory-baseline".into(),
@@ -256,6 +257,21 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
 
     let mut claude = spec;
     claude.harness = HarnessKind::Claude;
+    assert!(project_memory_mcp(&claude).is_empty());
+    claude.project_memory.as_mut().unwrap().history_socket = Some("/worker/control.sock".into());
+    let servers = project_memory_mcp(&claude);
+    let [McpServer::Stdio(server)] = servers.as_slice() else {
+        panic!("Claude receives history tools");
+    };
+    assert!(server.args.contains(&"--native-notes".into()));
+    assert!(server.args.contains(&"/worker/control.sock".into()));
+    claude.harness = HarnessKind::Codex;
+    let servers = project_memory_mcp(&claude);
+    let [McpServer::Stdio(server)] = servers.as_slice() else {
+        panic!("Codex receives history and notes");
+    };
+    assert!(!server.args.contains(&"--native-notes".into()));
+    claude.harness = HarnessKind::Muse;
     assert!(project_memory_mcp(&claude).is_empty());
 }
 
@@ -4515,6 +4531,7 @@ for line in sys.stdin:
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
             project_key: "project".into(),
             root: temp.path().join("memory"),
             baseline_root: temp.path().join("baseline"),
@@ -4665,6 +4682,7 @@ while True:
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
             project_key: "abc".into(),
             root: temp.path().join("memory"),
             baseline_root: temp.path().join("baseline"),

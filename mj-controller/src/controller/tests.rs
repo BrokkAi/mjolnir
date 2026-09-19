@@ -1073,7 +1073,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
         .unwrap();
     let backend = crate::targets::TargetLocator::LocalPodman {
         borrowed_from: None,
-        container_id: "container".into(),
+        container_id: crate::targets::resource_name(&id).unwrap(),
         workspace_storage: Default::default(),
     };
 
@@ -1114,7 +1114,7 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
         .unwrap();
     let backend = crate::targets::TargetLocator::LocalPodman {
         borrowed_from: None,
-        container_id: "container".into(),
+        container_id: crate::targets::resource_name(&id).unwrap(),
         workspace_storage: Default::default(),
     };
 

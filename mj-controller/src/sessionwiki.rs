@@ -10,6 +10,7 @@
 //! this adapter to parse the ones whose checkpoint changed.
 
 mod harness_adapters;
+pub(crate) mod history;
 mod provenance;
 pub mod tags;
 

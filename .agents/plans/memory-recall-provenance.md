@@ -10,10 +10,10 @@ An agent must retain its memory tools after a session resumes, and must be able 
 
 - [x] (2026-09-19) Inspect launch, indexing, MCP, transport, and pinned adapter/library interfaces; user approved the plan.
 - [x] (2026-09-19) Fix memory registration on new/load/resume. Worker library tests: 503 passed, 8 ignored; bridge restart and historical replay regression tests pass.
-- [ ] Extract and backfill provenance from stored successful file edits and commit independently.
-- [ ] Add bounded controller history queries and worker forwarding independent of delegation.
-- [ ] Expose recall/provenance through mj-memory and retire managed CLI skills.
-- [ ] Complete behavior tests, required Cargo checks, acceptance checks, and commits.
+- [x] (2026-09-19) Extract/backfill successful file evidence from live and checkpointed transcripts; focused controller tests pass (31 tests), followed by the full controller suite. Committed separately as 5b4d657c.
+- [x] (2026-09-19) Add typed, protocol-gated controller history queries and a bounded worker queue independent of delegation.
+- [x] (2026-09-19) Wire history-only Claude and combined MCP capabilities, Kimi target socket delivery, and retire packaged recall/provenance skills while preserving user copies.
+- [x] (2026-09-19) Complete behavior tests, required Cargo checks, available acceptance checks, and separate implementation commits; publish to origin/master under the user's explicit instruction.
 
 ## Surprises & Discoveries
 
@@ -30,6 +30,10 @@ The pinned Claude ACP 0.79.0 adapter accepts `mcpServers` on new/load/resume and
 2026-09-19: Treat missing provenance and disappearing tools as independent bugs and commit their validated fixes separately. Retire packaged recall/provenance skills only once their MCP replacement works. Preserve user-owned skills.
 
 2026-09-19: Keep SessionWiki and all history queries on the controller. Worker/controller messages must be typed, protocol-gated, bounded, and independent of subagent enablement. Run Git blame on the actual target checkout through shared subprocess helpers, then attribute on the controller.
+
+2026-09-19: Poll history work from each existing standalone worker connection and supervise query tasks there. Limit the worker to eight outstanding requests and the controller to four blocking queries across workers. A disconnected MCP caller drops its request; an unavailable controller yields a deadline error. Local document calls use a separate mutex and stay responsive. Reap finished MCP call threads during normal operation and close history sockets on stdin EOF before joining remaining calls.
+
+2026-09-19: The user explicitly requested publication to origin/master. The resume fix was pushed in merge commit 7968c56b; finish, validate, commit, and push the remaining implementation to the same destination.
 
 ## Context and Orientation
 
@@ -61,7 +65,7 @@ Serve requests concurrently, serializing document-store operations only. Timeout
 
 ## Concrete Steps
 
-Work in the repository root and commit directly to the current branch. Use focused tests during milestones, then run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` on the dev profile. This environment has unrestricted filesystem/network access, so normal Cargo invocations are already outside a restricted sandbox. Do not push or close the issue.
+Work in the repository root and commit directly to the current branch. Use focused tests during milestones, then run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` on the dev profile. This environment has unrestricted filesystem/network access, so normal Cargo invocations are already outside a restricted sandbox. Push the validated commits to origin/master as explicitly requested; do not close the issue.
 
 ## Validation and Acceptance
 
@@ -75,12 +79,26 @@ No primary database schema migration or destructive index rebuild is planned. Ba
 
 Record concise validation results and deviations below as implementation proceeds. Historical transcript text or edit details already discarded cannot be reconstructed.
 
+2026-09-19: Focused worker history tests pass (15 tests), covering actual MCP framing and worker socket framing with 180 KB Unicode responses, local compare-and-swap note writes during delayed history calls, cancellation on MCP EOF and socket disconnect, queue limits/deadlines, target Git errors/uncommitted lines, and existing native-child replay behavior. An isolated live Codex ACP probe called history search and note read successfully on session/new and again on session/load after terminating and restarting the bridge. This probe used the built MCP executable with a controlled history reply; the real SessionWiki query and controller polling are covered separately by isolated-index tests.
+
+Live Claude is unavailable because this environment has neither Claude credentials nor a Claude API/setup-token environment variable. Docker and Podman are absent and localhost SSH refuses connections, so remote-target acceptance is limited to automated launch/transport fixtures. No live stores or source profiles were modified.
+
+The full-build environment exposed an mbx 1.12.0 shared-shim race: `/mnt/nvme/mbx/shims/mbx-cc` was repeatedly replaced with links into other disposable workers that are absent in this container. Required checks use `MBX_DISABLE=1` with the existing target directory to avoid that race. They also unset inherited `NO_COLOR=1`, which invalidates existing terminal-color assertions. Neither workaround changes the repository's build configuration.
+
+The container exposes 96 CPUs to libtest but has a 24-CPU cgroup quota. A default-concurrency run passed the full controller suite (1,494 tests) but hit one-second deadlines in seven existing worker relay tests. Final validation uses `RUST_TEST_THREADS=4`; no production behavior or test deadline was changed to accommodate contention. The controller integration fixture now models transient history polling explicitly; durable-only relays report an empty history queue, matching their existing delegation-queue behavior.
+
+Final checks on the integrated source all exited 0: `env -u NO_COLOR MBX_DISABLE=1 RUST_TEST_THREADS=4 cargo test`, `env MBX_DISABLE=1 cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`. The full run passed all seven worker tests that timed out at default concurrency. Logs are local build artifacts `target/memory-tests-final.log` and `target/memory-clippy-final.log`; this summary is the durable validation record.
+
 ## Interfaces and Dependencies
 
 Use existing crates only. Typed history requests/responses belong in mj-core; library queries in mj-controller; target IPC and MCP serving in mj-worker. Keep SessionWiki dependency confined to the controller. Reuse its pure blame parser/attribution and grep/index functions instead of invoking the standalone binary. Extend shared subprocess support only if bounded process capture is missing; do not hand-roll pipe management at the blame call site.
 
 ## Outcomes & Retrospective
 
-Milestone 1 restores the memory server alongside delegation on load/resume and preserves replay suppression. Worker library tests pass (503 passed, 8 ignored). Live MCP acceptance and workspace-wide validation remain for the integrated result. Provenance extraction and the history transport are in progress.
+All implementation milestones are complete. Applicable memory tools survive new/load/resume; recall and provenance are seven bounded tools in the existing mj-memory server, backed by the controller's linked SessionWiki library. Claude retains native notes; other capable harnesses receive both notes and history. Provenance extraction and a compatible, retryable repair populate retained file evidence without a schema upgrade or index reset. Packaged CLI skills are retired and user-owned skills remain intact.
+
+Full Rust tests, Clippy, formatting, and whitespace checks pass. Automated checks cover real-index controller polling, worker and MCP wire transport, large replies, Unicode continuation, literal paths, target Git, concurrent notes, cancellation, expiry, capability selection, and replay. A live isolated Codex session read both history and notes before and after bridge restart. Live Claude and remote-target acceptance remain environment limitations described above, rather than unimplemented features. The resume fix was already published; the provenance fix and MCP implementation are committed separately for the requested origin/master publication.
 
 Revision 2026-09-19: initial executable plan transcribed from the approved conversation, including independently fixing provenance extraction.
+
+Revision 2026-09-19: completed the migration, documented supervision and shutdown decisions, recorded live/automated validation and environment limitations, and updated publication instructions to match the user's explicit push request.
