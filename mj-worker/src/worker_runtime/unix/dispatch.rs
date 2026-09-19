@@ -295,7 +295,10 @@ pub(crate) fn record_runtime_event_and_track_configuration(
     // A fresh bridge must configure its session again before any command is
     // dispatched to it. That gap is what lets the bridge drop the requests the
     // previous one left queued without racing a new dispatch.
-    if matches!(event, RuntimeEvent::HarnessRestarting { .. }) {
+    if matches!(
+        event,
+        RuntimeEvent::HarnessRestarting { .. } | RuntimeEvent::ContextClearing { .. }
+    ) {
         *session_configured = false;
     }
     *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
@@ -329,6 +332,21 @@ pub(crate) fn record_runtime_event(
             relay.record_observation(RelayObservation::Warning {
                 message: "ACP initialized without capability metadata".into(),
             })?;
+        }
+        RuntimeEvent::ContextClearing { .. } => {}
+        RuntimeEvent::ContextCleared {
+            request_id,
+            native_session_id,
+            memory,
+        } => {
+            relay.record_command_completed(
+                &request_id,
+                RelayCommandOutcome::ContextCleared {
+                    native_session_id,
+                    memory,
+                },
+            )?;
+            in_flight.remove(&request_id);
         }
         RuntimeEvent::SessionStarted {
             native_session_id,
@@ -760,6 +778,7 @@ pub(crate) fn dispatch_user_shells(
 pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandRequest> {
     let request_id = claimed.command_id.clone();
     match &claimed.command {
+        RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
         RelayCommand::Prompt { prompt } => {
             let mut prompt = prompt.clone();
             if let Some(context) = &claimed.hidden_prompt_context {

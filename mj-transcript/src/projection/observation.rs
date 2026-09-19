@@ -72,6 +72,12 @@ pub(super) fn project_observation(
             command,
             created_at_ms,
         } => match command {
+            RelayCommand::ClearContext => {
+                mutation.execution = Some(MaterializedExecutionState::Running {
+                    started_at_ms: *created_at_ms,
+                });
+                push_system(mutation, event, "Clearing context…");
+            }
             RelayCommand::Prompt { prompt } => {
                 let content = prompt
                     .iter()
@@ -193,6 +199,41 @@ pub(super) fn project_observation(
             let mut queue = current.queued_prompts.clone();
             queue.retain(|queued| queued.command_id != *command_id);
             match outcome {
+                mj_core::relay::RelayCommandOutcome::ContextCleared { .. } => {
+                    mutation.clear_turn_outcome = true;
+                    close_streams(index, mutation, event.recorded_at_ms);
+                    mutation.execution = Some(MaterializedExecutionState::Idle);
+                    mutation.active_turn = Some(None);
+                    mutation.pending_elicitations = Some(Vec::new());
+                    let mut configuration = current.configuration.clone();
+                    let mut goal = mj_core::goal::GoalState::from_configuration(&configuration)?;
+                    goal = mj_core::goal::GoalState {
+                        capability: goal.capability,
+                        known: true,
+                        ..Default::default()
+                    };
+                    configuration.insert(
+                        mj_core::goal::PROJECTION_KEY.into(),
+                        serde_json::to_value(goal)?,
+                    );
+                    mutation.configuration = Some(configuration);
+                    upsert(
+                        mutation,
+                        TranscriptItem {
+                            stable_id: format!(
+                                "{}{command_id}",
+                                mj_core::archive::CONTEXT_BOUNDARY_PREFIX
+                            ),
+                            position: event.ordinal,
+                            latest_content_event_ordinal: None,
+                            created_at_ms: event.recorded_at_ms,
+                            last_changed_at_ms: event.recorded_at_ms,
+                            body: TranscriptBody::System {
+                                text: "Context cleared — a new conversation starts here.".into(),
+                            },
+                        },
+                    );
+                }
                 mj_core::relay::RelayCommandOutcome::Prompt {
                     stop_reason,
                     usage,
@@ -305,6 +346,9 @@ pub(super) fn project_observation(
             command,
             message,
         } => {
+            if *command == RelayCommandKind::ClearContext {
+                mutation.execution = Some(MaterializedExecutionState::Idle);
+            }
             if *command == RelayCommandKind::SetConfig {
                 mutation
                     .config_results

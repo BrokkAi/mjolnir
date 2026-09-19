@@ -1224,6 +1224,10 @@ impl ProjectionPage<'_> {
         if let Some(active_turn) = &mutation.active_turn {
             self.pending.active_turn = Some(active_turn.clone());
         }
+        if mutation.clear_turn_outcome {
+            self.pending.clear_turn_outcome = true;
+            self.pending.last_turn_outcome = None;
+        }
         if let Some(last_turn_outcome) = &mutation.last_turn_outcome {
             self.pending_turns.push(last_turn_outcome.clone());
             self.pending.last_turn_outcome = Some(last_turn_outcome.clone());
@@ -1334,6 +1338,9 @@ impl ProjectionPage<'_> {
                         .transpose()?
                 ],
             )?;
+        }
+        if self.pending.clear_turn_outcome {
+            self.transaction.execute("UPDATE materialized_sessions SET last_turn_outcome_json = NULL WHERE session_id = ?1", [session_id])?;
         }
         if let Some(last_turn_outcome) = &self.pending.last_turn_outcome {
             tx.execute(

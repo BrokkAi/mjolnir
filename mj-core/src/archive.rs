@@ -20,6 +20,12 @@ pub const ARCHIVE_SCHEMA_VERSION: u32 = 2;
 pub const ARCHIVE_SCHEMA_VERSION_SHARDED: u32 = 3;
 /// Separate image blobs must be restored into the relay, not the harness home.
 pub const ARCHIVE_SCHEMA_VERSION_ATTACHMENTS: u32 = 4;
+/// A durable transcript identity; text alone must never reset model history.
+pub const CONTEXT_BOUNDARY_PREFIX: &str = "context-cleared:";
+pub fn is_context_boundary(stable_id: &str) -> bool {
+    stable_id.starts_with(CONTEXT_BOUNDARY_PREFIX)
+}
+pub const ARCHIVE_SCHEMA_VERSION_CONTEXT: u32 = 5;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -107,6 +113,15 @@ pub struct CanonicalSessionSnapshot {
 }
 
 impl CanonicalSessionSnapshot {
+    pub fn current_context_start(&self) -> u64 {
+        self.transcript
+            .iter()
+            .filter(|item| is_context_boundary(&item.stable_id))
+            .map(|item| item.position)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_canonical_session(self)
     }

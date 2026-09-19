@@ -199,6 +199,8 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],

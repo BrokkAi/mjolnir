@@ -2391,3 +2391,18 @@ fn review_capture_handles_unborn_repositories_and_rejects_corrupt_indexes() {
     assert!(capture_worktree_tree(&SystemGit, repository.path()).is_err());
     assert_eq!(fs::read(index).unwrap(), b"corrupt index");
 }
+
+#[test]
+fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cleared.hel.zip");
+    let mut input = input();
+    input.canonical_session.transcript[1].stable_id = "context-cleared:reset".into();
+    let verified = write_archive_atomic(&path, &input).unwrap();
+    assert_eq!(
+        verified.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_CONTEXT
+    );
+    assert_eq!(verified.canonical_session, input.canonical_session);
+    assert_eq!(verified.canonical_session.current_context_start(), 2);
+}

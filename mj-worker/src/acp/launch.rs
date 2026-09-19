@@ -2,6 +2,9 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub clear_context_request: Option<ContextReset>,
+    /// Settings to restore when a failed clear reloads the old conversation.
+    pub context_restore: Option<ContextReset>,
     pub goal_recovery: Arc<Mutex<mj_core::goal::GoalRecoveryContext>>,
     pub command: PathBuf,
     pub args: Vec<String>,
@@ -238,4 +241,12 @@ pub(super) fn resume_session_request(
         .additional_directories(spec.additional_directories.clone())
         .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec))
+}
+
+/// Settings captured from the old native conversation before retiring it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextReset {
+    pub request_id: String,
+    pub selectors: Vec<(String, String)>,
+    pub mode: Option<String>,
 }

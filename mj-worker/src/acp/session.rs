@@ -16,7 +16,7 @@ pub(super) async fn serve_session(
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: &grok_usage::Collector,
-) -> Result<Option<String>> {
+) -> Result<Option<SessionRestart>> {
     let mut meta = serde_json::Map::new();
     meta.insert("terminal_output".into(), serde_json::Value::Bool(true));
     if spec.harness == HarnessKind::Codex {
@@ -346,7 +346,9 @@ pub(super) async fn serve_session(
                 // and ask the operator below. Asking the catalogue after
                 // the attempt rather than before keeps every dialect's own
                 // availability rule, including Grok's legacy model list.
-                if selector_value_is_offered(&config_options, key, &value) {
+                if spec.clear_context_request.is_some()
+                    || selector_value_is_offered(&config_options, key, &value)
+                {
                     return Err(
                         error.context(format!("restore this session's accepted {key} {value:?}"))
                     );
@@ -355,6 +357,53 @@ pub(super) async fn serve_session(
             }
         }
     }
+    if let Some(reset) = spec
+        .clear_context_request
+        .as_ref()
+        .or(spec.context_restore.as_ref())
+    {
+        for (key, value) in &reset.selectors {
+            apply_session_selector(
+                connection,
+                &session_id,
+                &mut config_options,
+                &mut grok_models,
+                spec.harness,
+                key,
+                value,
+            )
+            .await
+            .with_context(|| format!("restore {key} after clear"))?;
+        }
+        if let Some(mode) = &reset.mode {
+            enforce_execution_mode(
+                connection,
+                &session_id,
+                mode,
+                &mut config_options,
+                &mut modes,
+            )
+            .await?;
+        }
+    }
+    let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
+        if let Some(memory) = spec.project_memory.clone() {
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    mj_core::project_memory::startup_prompt_context(
+                        &mj_core::project_memory::ProjectMemoryStore::new(&memory.root),
+                        &memory.repository_roots,
+                    )
+                })
+                .await
+                .context("load project memory after clear")??,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     // Startup failures must retain their cause rather than being classified
     // as a dead running bridge and retried with the same invalid settings.
     *opened.lock().expect("opened session lock poisoned") = Some(OpenedSession {
@@ -379,16 +428,28 @@ pub(super) async fn serve_session(
         drain_requests_from_the_previous_bridge(requests);
     }
 
-    emit_runtime_event(
-        events,
-        RuntimeEvent::SessionStarted {
-            native_session_id: session_id.to_string(),
-            resumed,
-            execution_mode: enforcement.map(|enforcement| enforcement.label().to_owned()),
-            native_continuity_lost,
-        },
-    )
-    .await?;
+    if let Some(reset) = &spec.clear_context_request {
+        emit_runtime_event(
+            events,
+            RuntimeEvent::ContextCleared {
+                request_id: reset.request_id.clone(),
+                native_session_id: session_id.to_string(),
+                memory,
+            },
+        )
+        .await?;
+    } else {
+        emit_runtime_event(
+            events,
+            RuntimeEvent::SessionStarted {
+                native_session_id: session_id.to_string(),
+                resumed,
+                execution_mode: enforcement.map(|enforcement| enforcement.label().to_owned()),
+                native_continuity_lost,
+            },
+        )
+        .await?;
+    }
     emit_runtime_event(
         events,
         RuntimeEvent::SessionConfigured {
@@ -485,6 +546,58 @@ pub(super) async fn serve_session(
         match request {
             CommandRequest::PromptAttachments { .. } => {
                 unreachable!("resolved before ACP dispatch")
+            }
+            CommandRequest::ClearContext { request_id } => {
+                if !pending_elicitations
+                    .lock()
+                    .expect("pending elicitation lock poisoned")
+                    .is_empty()
+                    || config_recovery.is_some()
+                    || goal_question.is_some()
+                {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            request_id,
+                            message: "/clear requires all pending interactions to be resolved"
+                                .into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::ContextClearing {
+                        request_id: request_id.clone(),
+                    },
+                )
+                .await?;
+                let mut options: Vec<_> = config_options.iter().collect();
+                options.sort_by_key(|option| match option.category {
+                    Some(SessionConfigOptionCategory::Model) => 0,
+                    Some(SessionConfigOptionCategory::ThoughtLevel) => 1,
+                    _ => 2,
+                });
+                let selectors = options
+                    .into_iter()
+                    .filter_map(|option| {
+                        let SessionConfigKind::Select(select) = &option.kind else {
+                            return None;
+                        };
+                        Some((option.id.to_string(), select.current_value.to_string()))
+                    })
+                    .collect();
+                return Ok(Some(SessionRestart::Clear {
+                    reset: ContextReset {
+                        request_id,
+                        selectors,
+                        mode: modes
+                            .as_ref()
+                            .map(|modes| modes.current_mode_id.to_string()),
+                    },
+                    previous: session_id.to_string(),
+                }));
             }
             CommandRequest::Prompt { request_id, prompt } => {
                 if prompt.is_empty() {
@@ -813,7 +926,7 @@ pub(super) async fn serve_session(
                             let message = "Plan implementation timed out while finishing planning or restoring bypassPermissions; restarting the harness without submitting the continuation.";
                             emit_runtime_event(events, RuntimeEvent::Warning { message: message.into() }).await?;
                             emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() }).await?;
-                            return Ok(Some(session_id.to_string()));
+                            return Ok(Some(SessionRestart::Resume(session_id.to_string())));
                         }
                         _ = async {
                             tokio::time::sleep_until(
@@ -836,7 +949,7 @@ pub(super) async fn serve_session(
                                 },
                             )
                             .await?;
-                            return Ok(Some(session_id.to_string()));
+                            return Ok(Some(SessionRestart::Resume(session_id.to_string())));
                         }
                         steer_outcome = async {
                             pending_steer
@@ -960,6 +1073,7 @@ pub(super) async fn serve_session(
                                     goal_controls.start(connection, &session_id, request_id, action);
                                 }
                             }
+                            Some(CommandRequest::ClearContext { request_id }) |
                             Some(CommandRequest::SetConfig { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,

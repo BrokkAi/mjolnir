@@ -481,6 +481,10 @@ impl DurableRelay {
         state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
         state.native_agent_count = self.native_agent_count();
+        state.clear_context = matches!(
+            self.verdict_harness,
+            Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+        );
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
         // Answer the activity question once, here, where every fact is in
@@ -510,6 +514,15 @@ impl DurableRelay {
     /// must stay identical to `RelayOperationalState::facts`, which is what
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
+    fn clear_context_started_at_ms(&self) -> Option<i64> {
+        self.snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
+            .then_some(self.snapshot.activity_turn_started_at_ms)
+            .flatten()
+    }
+
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
         let background_commands = self.background_commands().len() + self.native_agent_count();
         self.turn_context
@@ -537,7 +550,8 @@ impl DurableRelay {
                 .snapshot
                 .active_prompt
                 .as_ref()
-                .map(|prompt| prompt.started_at_ms),
+                .map(|prompt| prompt.started_at_ms)
+                .or_else(|| self.clear_context_started_at_ms()),
             harness_turn_started_at_ms: self.snapshot.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.snapshot.activity_turn_started_at_ms,
             expected_continuation,

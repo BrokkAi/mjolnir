@@ -351,6 +351,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         state.set_transcript_loading(false);
     }
     if let Some(snapshot) = view.snapshot {
+        state.clear_context_supported = snapshot.operational.clear_context;
         state.apply_materialized(
             &snapshot.materialized,
             &snapshot.operational.config_options,
@@ -649,6 +650,10 @@ impl ActiveChat {
                     .as_ref()
                     .map_or(&[][..], |snapshot| &snapshot.operational.available_commands),
             );
+            state.clear_context_supported = snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.clear_context);
+            state.rebuild_command_choices();
             if let Some(harness_kind) = header
                 .harness_kind
                 .or_else(|| context.as_ref().map(|context| context.session.harness_kind))

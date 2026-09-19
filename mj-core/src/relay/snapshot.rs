@@ -45,6 +45,8 @@ pub use digest::*;
     deny_unknown_fields
 )]
 pub enum RelayCommand {
+    /// Start an empty native conversation, preserving the logical session.
+    ClearContext,
     Prompt {
         prompt: Vec<ContentBlock>,
     },
@@ -109,9 +111,18 @@ pub enum RelayCommand {
 impl RelayCommand {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::ClearContext => 15,
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
             Self::GoalControl { .. } => 11,
             Self::CancelTurn => 7,
+            Self::Prompt { prompt }
+                if matches!(
+                    crate::acp::context_command(prompt),
+                    Some((crate::acp::ContextCommand::Clear, _))
+                ) =>
+            {
+                15
+            }
             Self::Prompt { prompt } if crate::attachment::has_references(prompt) => 8,
             _ => super::RELAY_MIN_PROTOCOL_VERSION,
         }
@@ -137,7 +148,8 @@ impl RelayCommand {
     pub fn is_effectful_acp(&self) -> bool {
         matches!(
             self,
-            Self::Prompt { .. }
+            Self::ClearContext
+                | Self::Prompt { .. }
                 | Self::SetConfig { .. }
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
@@ -156,6 +168,7 @@ impl RelayCommand {
 
     pub const fn kind(&self) -> RelayCommandKind {
         match self {
+            Self::ClearContext => RelayCommandKind::ClearContext,
             Self::Prompt { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
             Self::CancelUserShell { .. } => RelayCommandKind::CancelUserShell,
@@ -179,6 +192,7 @@ impl RelayCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayCommandKind {
+    ClearContext,
     Prompt,
     RunUserShell,
     CancelUserShell,
@@ -391,6 +405,10 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     #[serde(default)]
+    pub clear_context: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_context_started_at_ms: Option<i64>,
+    #[serde(default)]
     pub native_agent_count: usize,
     /// Process-local inference; a restarted worker must forget it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -530,7 +548,8 @@ impl RelayOperationalState {
             prompt_started_at_ms: self
                 .active_prompt
                 .as_ref()
-                .map(|prompt| prompt.started_at_ms),
+                .map(|prompt| prompt.started_at_ms)
+                .or(self.clear_context_started_at_ms),
             harness_turn_started_at_ms: self.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.activity_turn_started_at_ms,
             queued_commands: self.queued_prompts.len(),
@@ -806,6 +825,11 @@ pub enum RelayObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayCommandOutcome {
+    ContextCleared {
+        native_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+    },
     Prompt {
         stop_reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1027,6 +1051,13 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            clear_context: false,
+            clear_context_started_at_ms: self
+                .dispatches
+                .values()
+                .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
+                .then_some(self.activity_turn_started_at_ms)
+                .flatten(),
             native_agent_count: self
                 .native_agents
                 .values()

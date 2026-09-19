@@ -369,6 +369,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: clear-context relay commands/outcomes are persisted in event
+    // JSON. Older readers cannot decode them or honor the context boundary.
+    if version < 41 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 41 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (41, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 41;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -447,8 +460,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 40 adds native child projections.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 40;
+    /// `SCHEMA_VERSION`. Migration 41 adds native context replacement.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 41;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -498,8 +511,8 @@ mod reader_tests {
             .unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 40);
-        assert_eq!(state.minimum_compatible, Some(40));
+        assert_eq!(state.revision, 41);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let event = ApiEventData::InputRequired {
             request: None,
             turn_id: Some(1),
@@ -639,7 +652,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert_eq!(state.minimum_compatible, Some(41));
     }
 
     #[test]

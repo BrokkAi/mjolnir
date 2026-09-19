@@ -3823,3 +3823,195 @@ fn configuration_notice_is_recorded_only_after_confirmed_completion() {
         matches!(&event.observation, RelayObservation::Notice { message } if message == "model set to new-model")
     ).count(), 1);
 }
+
+#[test]
+fn compact_preserves_large_pending_context_for_the_next_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let context = "shell output\n".repeat(8192);
+    relay.install_prompt_context(context.clone()).unwrap();
+    submit_relay(
+        &mut relay,
+        "compact-command",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("/compact")],
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(claimed[0].hidden_prompt_context.is_none());
+    relay
+        .record_command_completed(
+            "compact-command",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "followup-command",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("continue")],
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some(context.as_str())
+    );
+}
+
+fn clearable_relay(root: &Path) -> DurableRelay {
+    let mut relay = DurableRelay::open(root, SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionOpened {
+            native_session_id: "original".into(),
+            resumed: false,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    relay.mark_native_session_used().unwrap();
+    relay
+}
+
+#[test]
+fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    relay
+        .install_prompt_context("old conversation handoff".into())
+        .unwrap();
+    relay
+        .snapshot
+        .config
+        .insert("model".into(), "chosen-model".into());
+    let clear = RelayCommand::Prompt {
+        prompt: vec![ContentBlock::from("/clear")],
+    };
+    assert!(
+        relay
+            .submit_command("clear-request", clear.clone())
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Running
+    );
+    assert!(
+        relay
+            .submit_command(
+                "later-prompt",
+                RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::from("must wait")],
+                }
+            )
+            .unwrap()
+            .is_err()
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command, RelayCommand::ClearContext);
+    assert_eq!(
+        relay.operational_state().native_session_id.as_deref(),
+        Some("original")
+    );
+    relay
+        .record_command_completed(
+            "clear-request",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "replacement".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    let ordinal = relay.operational_state().latest_ordinal;
+    assert!(!relay.native_session_may_have_history());
+    assert!(relay.snapshot.pending_prompt_context.is_none());
+    assert_eq!(
+        relay.snapshot.config.get("model").map(String::as_str),
+        Some("chosen-model")
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Codex);
+    assert!(
+        relay
+            .submit_command("clear-request", clear)
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(relay.operational_state().latest_ordinal, ordinal);
+    assert_eq!(
+        relay.operational_state().native_session_id.as_deref(),
+        Some("replacement")
+    );
+    assert!(!relay.native_session_may_have_history());
+}
+
+#[test]
+fn interrupted_clear_keeps_the_original_native_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    assert!(
+        relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        relay.operational_state().native_session_id.as_deref(),
+        Some("original")
+    );
+    assert!(relay.native_session_may_have_history());
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Idle
+    );
+}
+
+#[test]
+fn clear_refuses_pending_work_and_invalid_input_without_changing_identity() {
+    for input in ["/clear extra", "/compact ignored-instructions"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = clearable_relay(temp.path());
+        assert!(
+            relay
+                .submit_command(
+                    "invalid-command",
+                    RelayCommand::Prompt {
+                        prompt: vec![ContentBlock::from(input)],
+                    }
+                )
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            relay.operational_state().native_session_id.as_deref(),
+            Some("original")
+        );
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(
+        &mut relay,
+        "pending-work",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("do work")],
+        },
+    );
+    assert!(
+        relay
+            .submit_command("clear-request", RelayCommand::ClearContext)
+            .unwrap()
+            .is_err()
+    );
+    assert!(relay.snapshot.dispatches.contains_key("pending-work"));
+}

@@ -541,6 +541,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             })),
         }));
         let acp_spec = LaunchSpec {
+            clear_context_request: None,
+        context_restore: None,
             goal_recovery,
             command: worker_executable,
             args: vec![

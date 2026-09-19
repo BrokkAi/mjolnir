@@ -264,7 +264,18 @@ pub(super) fn seed_from_session(
     let mut user_messages = Vec::new();
     let mut initial_result = String::new();
     let mut trajectory = Vec::new();
-    for item in &session.transcript {
+    let context_start = session
+        .transcript
+        .iter()
+        .filter(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+        .map(|item| item.position)
+        .max()
+        .unwrap_or(0);
+    for item in session
+        .transcript
+        .iter()
+        .filter(|item| context_start == 0 || item.position > context_start)
+    {
         match &item.body {
             mj_core::state::TranscriptBody::User { content } => {
                 let text = mj_core::transcript::materialized_content_text(content);
