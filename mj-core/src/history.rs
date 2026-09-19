@@ -154,3 +154,23 @@ impl HistoryResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn workers_with_context_clear_but_without_history_do_not_receive_history_queries() {
+        use crate::relay::{RelayCommand, RelayRequest, RelayVersionRange};
+        let negotiated = RelayVersionRange::CURRENT
+            .negotiate(RelayVersionRange { min: 1, max: 15 })
+            .unwrap();
+        assert!(
+            RelayRequest::Submit {
+                command_id: "clear".into(),
+                command: RelayCommand::ClearContext
+            }
+            .supported_at(negotiated)
+        );
+        assert!(!RelayRequest::HistoryRequests.supported_at(negotiated));
+        assert!(RelayRequest::HistoryRequests.supported_at(crate::relay::RELAY_PROTOCOL_VERSION));
+    }
+}

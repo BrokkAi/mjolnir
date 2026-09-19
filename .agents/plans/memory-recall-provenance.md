@@ -17,11 +17,11 @@ An agent must retain its memory tools after a session resumes, and must be able 
 
 ## Surprises & Discoveries
 
-Codex reconstructs its MCP set from each launch request. `mj-worker/src/acp/launch.rs` sends project memory only for new sessions despite restoring delegation tools on resume. Replay filtering already suppresses historical parent messages and delayed unknown tool updates.
+Codex reconstructs its MCP set from each launch request. At inspection, `mj-worker/src/acp/launch.rs` sent project memory only for new sessions despite restoring delegation tools on resume. Replay filtering already suppressed historical parent messages and delayed unknown tool updates.
 
 The pinned Claude ACP 0.79.0 adapter accepts `mcpServers` on new/load/resume and merges them into SDK options; repository comments claiming it cannot are stale. ACP delivery avoids modifying a user's profile on macOS.
 
-`mj-controller/src/sessionwiki.rs` currently returns empty touched/edits for Mjolnir sessions. Stored completed tool calls retain paths even after tool content compaction. The linked library exposes files_for, sessions_for_file, sessions_touching, grep_session, parse_line_porcelain, group_runs, and attribute_commit; its CLI/MCP dispatch is not the embedding interface.
+At inspection, `mj-controller/src/sessionwiki.rs` returned empty touched/edits for Mjolnir sessions. Stored completed tool calls retain paths even after tool content compaction. The linked library exposes files_for, sessions_for_file, sessions_touching, grep_session, parse_line_porcelain, group_runs, and attribute_commit; its CLI/MCP dispatch is not the embedding interface.
 
 ## Decision Log
 
@@ -35,13 +35,15 @@ The pinned Claude ACP 0.79.0 adapter accepts `mcpServers` on new/load/resume and
 
 2026-09-19: The user explicitly requested publication to origin/master. The resume fix was pushed in merge commit 7968c56b; finish, validate, commit, and push the remaining implementation to the same destination.
 
+2026-09-19: A concurrent upstream context-clear change also allocated relay protocol 15. After merging it, history uses protocol 16 while clear remains at 15. Negotiating with an upstream-only version-15 worker must not send history requests. The merge introduces upstream's separate database/archive revisions; validation continues to use isolated stores.
+
 ## Context and Orientation
 
-`mj-worker/src/acp/launch.rs` builds harness requests. `mj-worker/src/memory_mcp.rs` serves local document list/read/write through `mcp_stdio.rs`, currently sequentially. `mj-core/src/worker_launch.rs` describes memory locations and delivery. Kimi isolated targets use staged mcp.json; other capable harnesses can receive the server over ACP.
+`mj-worker/src/acp/launch.rs` builds harness requests. `mj-worker/src/memory_mcp.rs` serves local document list/read/write and forwarded history calls concurrently through `mcp_stdio.rs`, serializing document operations with their own mutex. `mj-core/src/worker_launch.rs` describes memory locations and delivery. Kimi isolated targets use staged mcp.json; other capable harnesses receive the server over ACP.
 
 The controller is the persistent process coordinating workers on targets. The relay protocol in `mj-core/src/relay/protocol.rs` connects it to workers. Existing delegation queues in `mj-worker/src/worker_runtime/subagents.rs`, polling in `mj-controller/src/session_manager/standalone.rs`, and supervised dispatch in `mj-controller/src/server_runtime/run.rs` demonstrate the request/response direction. History requests need separate capability and bounded transient state, not delegation permission or durable orchestration records.
 
-`mj-controller/src/sessionwiki.rs` reads live materialized transcripts or verified checkpoint transcripts, implements the SessionWiki adapter and read-only query wrappers, and owns the background indexer. `sessionwiki/tags.rs` demonstrates compatible metadata storage in the existing index. `mj-core/src/skills/managed.rs` embeds three packaged skills; remove recall and provenance after migrating their guidance.
+`mj-controller/src/sessionwiki.rs` reads live materialized transcripts or verified checkpoint transcripts, implements the SessionWiki adapter and read-only query wrappers, and owns the background indexer. `sessionwiki/provenance.rs` extracts and backfills file evidence; `sessionwiki/history.rs` serves the controller queries. `sessionwiki/tags.rs` demonstrates compatible metadata storage in the existing index. `mj-core/src/skills/managed.rs` now embeds only the mj skill; recall/provenance guidance lives in the MCP instructions and tool descriptions.
 
 ## Plan of Work
 
@@ -87,7 +89,11 @@ The full-build environment exposed an mbx 1.12.0 shared-shim race: `/mnt/nvme/mb
 
 The container exposes 96 CPUs to libtest but has a 24-CPU cgroup quota. A default-concurrency run passed the full controller suite (1,494 tests) but hit one-second deadlines in seven existing worker relay tests. Final validation uses `RUST_TEST_THREADS=4`; no production behavior or test deadline was changed to accommodate contention. The controller integration fixture now models transient history polling explicitly; durable-only relays report an empty history queue, matching their existing delegation-queue behavior.
 
-Final checks on the integrated source all exited 0: `env -u NO_COLOR MBX_DISABLE=1 RUST_TEST_THREADS=4 cargo test`, `env MBX_DISABLE=1 cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`. The full run passed all seven worker tests that timed out at default concurrency. Logs are local build artifacts `target/memory-tests-final.log` and `target/memory-clippy-final.log`; this summary is the durable validation record.
+Checks on the implementation before the publication merge all exited 0: `env -u NO_COLOR MBX_DISABLE=1 RUST_TEST_THREADS=4 cargo test`, `env MBX_DISABLE=1 cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`. The full run passed all seven worker tests that timed out at default concurrency.
+
+After merging upstream 24db400e and separating the history protocol at 16, the shared managed target directory disappeared during validation, terminating both checks. Rebuild and validate with `MBX_DISABLE=1 CARGO_TARGET_DIR=target-memory-validation CARGO_BUILD_JOBS=16`, additionally unsetting NO_COLOR and setting RUST_TEST_THREADS=4 for tests. This workspace-local target is outside the shared managed cache. The final logs are `target-memory-validation/tests.log` and `target-memory-validation/clippy.log`; the recorded results here are the durable validation record.
+
+Final validation of the merged implementation passed from the workspace-local target: the full dev-profile test suite with four test threads, Clippy on all targets with warnings denied, rustfmt check, and diff whitespace check. This includes the regression test that permits protocol-15 context clearing while withholding protocol-16 history requests from older workers.
 
 ## Interfaces and Dependencies
 

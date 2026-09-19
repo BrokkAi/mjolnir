@@ -320,7 +320,7 @@ impl RelayRequest {
         match self {
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
-            | Self::CompleteHistoryRequest { .. } => 15,
+            | Self::CompleteHistoryRequest { .. } => 16,
             Self::AttachmentPresent { .. }
             | Self::InstallAttachment { .. }
             | Self::ReadAttachment { .. } => 8,
