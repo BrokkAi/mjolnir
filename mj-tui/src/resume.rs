@@ -74,6 +74,10 @@ pub(crate) enum ResumeFocus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeTab {
+    /// Sessions running right now, in every workspace. Enter goes to one
+    /// instead of recovering it, so this is the only tab listing sessions the
+    /// dashboard already holds.
+    Live,
     Hel,
     Import,
     /// Sessions SessionWiki kept after the tool that ran them deleted its own
@@ -82,18 +86,24 @@ pub(crate) enum ResumeTab {
 }
 
 impl ResumeTab {
+    /// How many tabs the strip has: the arrow keys wrap around it and the
+    /// per-tab hit counts are one entry each, so both follow the tab list.
+    pub(crate) const COUNT: usize = 4;
+
     fn index(self) -> usize {
         match self {
-            Self::Hel => 0,
-            Self::Import => 1,
-            Self::Archive => 2,
+            Self::Live => 0,
+            Self::Hel => 1,
+            Self::Import => 2,
+            Self::Archive => 3,
         }
     }
 
     fn from_index(index: usize) -> Self {
         match index {
-            0 => Self::Hel,
-            1 => Self::Import,
+            0 => Self::Live,
+            1 => Self::Hel,
+            2 => Self::Import,
             _ => Self::Archive,
         }
     }
@@ -101,7 +111,8 @@ impl ResumeTab {
     fn includes(self, row: &ResumeRow) -> bool {
         matches!(
             (self, &row.key),
-            (Self::Hel, ResumeRowKey::Hel(_))
+            (Self::Live, ResumeRowKey::Live(_))
+                | (Self::Hel, ResumeRowKey::Hel(_))
                 | (Self::Import, ResumeRowKey::Native(..))
                 | (Self::Archive, ResumeRowKey::Archive(_))
         )
@@ -112,6 +123,8 @@ impl ResumeTab {
 /// incremental scan update.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ResumeRowKey {
+    /// A session running right now, keyed by its Hel session id.
+    Live(String),
     /// A Hel session record, keyed by its Hel session id.
     Hel(String),
     /// A native session with no Hel record, keyed by harness and native id.
@@ -124,6 +137,8 @@ pub(crate) enum ResumeRowKey {
 /// What selecting the row does, and whether it may be selected at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumeRowStatus {
+    /// A session the dashboard is already running: Enter goes to it.
+    Running,
     /// A checkpointed Hel record: Enter opens the resume wizard.
     Resumable,
     /// A native session Hel has never adopted: Enter imports it.
@@ -139,7 +154,10 @@ pub(crate) enum ResumeRowStatus {
 
 impl ResumeRowStatus {
     pub(crate) fn is_recoverable(self) -> bool {
-        matches!(self, Self::Resumable | Self::Importable | Self::Restorable)
+        matches!(
+            self,
+            Self::Running | Self::Resumable | Self::Importable | Self::Restorable
+        )
     }
 
     /// Short marker shown in the origin column, sized to fit beside it.
@@ -147,7 +165,7 @@ impl ResumeRowStatus {
         match self {
             Self::Lost => Some("⚠ lost"),
             Self::DataLoss => Some("⚠ data lost"),
-            Self::Resumable | Self::Importable | Self::Restorable => None,
+            Self::Running | Self::Resumable | Self::Importable | Self::Restorable => None,
         }
     }
 
@@ -157,7 +175,7 @@ impl ResumeRowStatus {
         match self {
             Self::Lost => Some("lost without a verified checkpoint"),
             Self::DataLoss => Some("force-destroyed; nothing is left to restore"),
-            Self::Resumable | Self::Importable | Self::Restorable => None,
+            Self::Running | Self::Resumable | Self::Importable | Self::Restorable => None,
         }
     }
 }
@@ -170,7 +188,9 @@ pub(crate) struct ResumeRow {
     /// Where the session ran and the project it opened directly, matching the
     /// live one-line summary. Native sessions use `local/<project>` because Hel
     /// has not chosen their import destination yet. A stored target missing
-    /// from config is shown verbatim because its kind is no longer known.
+    /// from config is shown verbatim because its kind is no longer known. A Live
+    /// row carries its workspace's name instead: the question about a running
+    /// session is where to find it.
     pub(crate) origin: String,
     pub(crate) details: String,
     pub(crate) last_activity_ms: i64,
@@ -200,7 +220,7 @@ pub(crate) struct ResumeRow {
 impl ResumeRow {
     pub(crate) fn session_id(&self) -> Option<&str> {
         match &self.key {
-            ResumeRowKey::Hel(session_id) => Some(session_id),
+            ResumeRowKey::Live(session_id) | ResumeRowKey::Hel(session_id) => Some(session_id),
             ResumeRowKey::Native(..) | ResumeRowKey::Archive(_) => None,
         }
     }
@@ -292,7 +312,7 @@ impl ResumeDialog {
         form.declare_with_enabled(
             Tabs,
             ControlKind::Tabs {
-                len: 3,
+                len: ResumeTab::COUNT,
                 selected: self.tab.index(),
             },
             true,
@@ -318,14 +338,18 @@ impl ResumeDialog {
         form.end_frame(Sessions);
     }
 
-    /// Whether the search box accepts typing. Search is the index's answer, so
-    /// there is nothing to type into until the index can answer.
+    /// Whether the search box accepts typing. On the history tabs search is the
+    /// index's answer, so there is nothing to type into until the index can
+    /// answer. The Live tab matches names itself and can answer at once.
     pub(crate) fn search_enabled(&self) -> bool {
-        self.wiki_status.state == WikiIndexState::Ready
+        self.tab == ResumeTab::Live || self.wiki_status.state == WikiIndexState::Ready
     }
 
     /// What stands in the search box while it cannot be typed into.
     pub(crate) fn search_placeholder(&self) -> Option<&'static str> {
+        if self.tab == ResumeTab::Live {
+            return None;
+        }
         match self.wiki_status.state {
             WikiIndexState::Ready => None,
             WikiIndexState::Indexing => Some("Indexing…"),
@@ -720,24 +744,28 @@ fn archive_details(hit: &WikiRow) -> String {
     details
 }
 
-/// The rows one dialog tab shows: the merged sources split by ownership, with
-/// checkpoint sizes appended.
+/// The rows the three history tabs show: the merged sources split by
+/// ownership, with checkpoint sizes appended.
 ///
-/// There is one search path. With an empty query a tab lists everything it
-/// owns, newest first. With a query it lists only the rows the index returned,
-/// in the order the index ranked them, so what the dialog shows and what
-/// SessionWiki found are the same thing.
+/// The dialog has two search paths, and this is the index's. With an empty
+/// query a tab lists everything it owns, newest first. With a query it lists
+/// only the rows the index returned, in the order the index ranked them, so
+/// what the dialog shows and what SessionWiki found are the same thing. The
+/// Live tab takes the other path, [`DashboardState::live_resume_rows`], because
+/// a running session has no index rank unless a query happened to match its
+/// transcript, and dropping the unranked rows would empty the tab exactly when
+/// someone typed a session's name into the box.
 fn build_resume_rows(
     config: &Config,
     state: &State,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
-) -> (Vec<ResumeRow>, [usize; 3]) {
+) -> (Vec<ResumeRow>, [usize; ResumeTab::COUNT]) {
     let searching = !dialog.search.is_empty();
     let merged = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki);
     // Counted before the tab filter: the other tabs' hits are already ranked
     // here, and throwing them away is what hid where a query matched.
-    let mut hits = [0usize; 3];
+    let mut hits = [0usize; ResumeTab::COUNT];
     if searching {
         for row in merged.iter().filter(|row| row.wiki_rank.is_some()) {
             for tab in [ResumeTab::Hel, ResumeTab::Import, ResumeTab::Archive] {
@@ -753,13 +781,16 @@ fn build_resume_rows(
         .filter(|row| !searching || row.wiki_rank.is_some())
         .map(|mut row| {
             // The checkpoint's size is loaded in the background, so it is
-            // appended here rather than folded into the pure merge.
-            if let Some(size) = row
-                .session_id()
-                .and_then(|id| checkpoint_archive_sizes.get(id))
-                .copied()
-                .flatten()
-            {
+            // appended here rather than folded into the pure merge. Only a
+            // settled record is described by its checkpoint; on a running
+            // session the size belongs to whatever it was resumed from.
+            let size = match &row.key {
+                ResumeRowKey::Hel(session_id) => {
+                    checkpoint_archive_sizes.get(session_id).copied().flatten()
+                }
+                _ => None,
+            };
+            if let Some(size) = size {
                 row.details
                     .push_str(&format!(" · {}", format_resource_bytes(size)));
             }
@@ -775,6 +806,67 @@ fn build_resume_rows(
 }
 
 impl DashboardState {
+    /// Every running session in every workspace, newest activity first,
+    /// narrowed by the search box's text when there is any.
+    ///
+    /// Built here rather than in [`build_resume_rows`] because what the Sessions
+    /// pane lists, and what each workspace is called, are this type's own
+    /// knowledge.
+    fn live_resume_rows(&self, dialog: &ResumeDialog) -> Vec<ResumeRow> {
+        let query = dialog.search.to_string().trim().to_lowercase();
+        let mut rows = self
+            .state
+            .sessions
+            .values()
+            // A session's own workspace id passes the pane's workspace check,
+            // which is how one list covers every workspace at once. The state
+            // check is this list's own: a stopped session the display setting
+            // reveals is listed there, and it is not running.
+            .filter(|session| {
+                session.state.is_active()
+                    && self.is_listed_top_level_session(session, &session.workspace_id)
+            })
+            .map(|session| {
+                let workspace = self.workspace_display_name(&session.workspace_id);
+                ResumeRow {
+                    key: ResumeRowKey::Live(session.id.clone()),
+                    profile_id: session.last_profile.clone(),
+                    title: session.display_title().to_owned(),
+                    origin: workspace.to_owned(),
+                    details: session.project_name(&self.config),
+                    last_activity_ms: timestamp_ms(&session.updated_at).unwrap_or_default(),
+                    status: ResumeRowStatus::Running,
+                    natively_archived: false,
+                    unavailable_reason: None,
+                    move_recovery: None,
+                    wiki_match: None,
+                    wiki_rank: None,
+                    wiki_profile: None,
+                    wiki_target: None,
+                }
+            })
+            .filter(|row| {
+                query.is_empty()
+                    || [
+                        row.title.as_str(),
+                        row.session_id().unwrap_or_default(),
+                        row.origin.as_str(),
+                    ]
+                    .iter()
+                    .any(|field| field.to_lowercase().contains(&query))
+            })
+            .collect::<Vec<_>>();
+        // Newest first, with the key breaking ties so the order holds still
+        // between rebuilds.
+        rows.sort_by(|left, right| {
+            right
+                .last_activity_ms
+                .cmp(&left.last_activity_ms)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        rows
+    }
+
     /// Rebuilds the open dialog's rows from what they are derived from: the
     /// Hel records, the scanned native sessions, the checkpoint sizes, and the
     /// newest search answer. Every mutation of those inputs calls this.
@@ -782,15 +874,21 @@ impl DashboardState {
     pub fn rebuild_resume_rows(&mut self) {
         let Mode::ResumeDialog(dialog) = &self.mode else {
             self.resume_rows.clear();
-            self.resume_hit_counts = [0; 3];
+            self.resume_hit_counts = [0; ResumeTab::COUNT];
             return;
         };
-        let (rows, hits) = build_resume_rows(
-            &self.config,
-            &self.state,
-            dialog,
-            &self.checkpoint_archive_sizes,
-        );
+        // The Live tab answers its own search, so the index has nothing to
+        // count for it and its entry stays zero.
+        let (rows, hits) = if dialog.tab == ResumeTab::Live {
+            (self.live_resume_rows(dialog), [0; ResumeTab::COUNT])
+        } else {
+            build_resume_rows(
+                &self.config,
+                &self.state,
+                dialog,
+                &self.checkpoint_archive_sizes,
+            )
+        };
         self.resume_rows = rows;
         self.resume_hit_counts = hits;
         self.resume_rows.retain(|row| {
@@ -801,18 +899,20 @@ impl DashboardState {
             })
         });
         for row in &mut self.resume_rows {
-            row.move_recovery = row
-                .session_id()
-                .and_then(|session_id| self.move_operations.get(session_id))
-                .filter(|operation| {
-                    matches!(
-                        operation.phase,
-                        mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
-                    ) && (operation.checkpoint.is_some()
-                        || (operation.queue_admission_started
-                            && !operation.queue_admission_finished))
-                })
-                .cloned();
+            // Recovery is the settled record's offer; Enter on a running session
+            // goes to it, so a mark inviting a recovery here would not act.
+            row.move_recovery = match &row.key {
+                ResumeRowKey::Hel(session_id) => self.move_operations.get(session_id),
+                _ => None,
+            }
+            .filter(|operation| {
+                matches!(
+                    operation.phase,
+                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
+                ) && (operation.checkpoint.is_some()
+                    || (operation.queue_admission_started && !operation.queue_admission_finished))
+            })
+            .cloned();
         }
         dialog.prepare(&self.resume_rows);
         // Background state updates can remove the selected row.
@@ -1355,8 +1455,13 @@ impl DashboardState {
                     }
                     // Keep list navigation shortcuts; arrows in fields belong to editing.
                     KeyCode::Left | KeyCode::Right if focused == Sessions => {
-                        let step = if key.code == KeyCode::Left { 2 } else { 1 };
-                        let next = ResumeTab::from_index((dialog.tab.index() + step) % 3);
+                        let step = if key.code == KeyCode::Left {
+                            ResumeTab::COUNT - 1
+                        } else {
+                            1
+                        };
+                        let next =
+                            ResumeTab::from_index((dialog.tab.index() + step) % ResumeTab::COUNT);
                         self.switch_resume_tab(next);
                         return self.next_wiki_preview();
                     }
@@ -1371,8 +1476,14 @@ impl DashboardState {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(Search, edit)) => {
                 TextField::apply(&mut dialog.search, edit);
+                let live = dialog.tab == ResumeTab::Live;
                 self.rebuild_resume_rows();
                 self.select_resume_row(0);
+                // The Live tab matched the name itself. Asking the index as well
+                // would spend a daemon search on an answer this tab discards.
+                if live {
+                    return DashboardAction::None;
+                }
                 return self.wiki_search_action();
             }
             Some(Interaction::Select(Tabs, index)) => {
@@ -1401,6 +1512,14 @@ impl DashboardState {
         let Some(row) = self.selected_resume_row() else {
             return DashboardAction::None;
         };
+        // Destroy here removes a settled record. Ending a session that is still
+        // running has its own confirmations, and they belong to the pane that
+        // owns the session.
+        if matches!(row.key, ResumeRowKey::Live(_)) {
+            self.notices
+                .set("Stop or delete a running session from the Sessions pane.");
+            return DashboardAction::None;
+        }
         let Some(session_id) = row.session_id().map(ToOwned::to_owned) else {
             self.notices
                 .set("Mjolnir never destroys a harness's own session.");
@@ -1433,6 +1552,19 @@ impl DashboardState {
             return DashboardAction::None;
         }
         match row.key {
+            ResumeRowKey::Live(session_id) => {
+                let Some(workspace_id) = self
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.workspace_id.clone())
+                else {
+                    self.notices.set("That session is no longer running.");
+                    return DashboardAction::None;
+                };
+                self.cancel_modal();
+                self.focus_session_anywhere(&workspace_id, &session_id)
+            }
             ResumeRowKey::Hel(session_id) => {
                 if let Some(operation) = row.move_recovery {
                     self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::RecoverMove {
@@ -1647,6 +1779,7 @@ pub(crate) fn render_resume_dialog(
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
             (ResumeTab::Import, true, _) => "Scanning native sessions…".to_owned(),
+            (ResumeTab::Live, _, true) => "No running sessions".to_owned(),
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
             (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
             (ResumeTab::Archive, _, true) => "No archived sessions".to_owned(),
@@ -1742,6 +1875,7 @@ pub(crate) fn render_resume_dialog(
     }
     footer.push(Line::styled(
         match dialog.tab {
+            ResumeTab::Live => "Enter opens · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
             ResumeTab::Archive => "Enter restores · ←/→ tabs · / searches · Tab moves",
@@ -1777,6 +1911,7 @@ pub(crate) fn render_resume_dialog(
     buttons.push((
         ResumeFocus::Open,
         match dialog.tab {
+            ResumeTab::Live => "Open",
             ResumeTab::Hel => "Resume",
             ResumeTab::Import => "Import",
             ResumeTab::Archive => "Restore",
@@ -1794,6 +1929,7 @@ fn resume_tab_labels(dashboard: &DashboardState, dialog: &ResumeDialog) -> Vec<S
     let searching = !dialog.search.is_empty();
     let (scanned, total) = dialog.scan_progress();
     [
+        (ResumeTab::Live, "Live"),
         (ResumeTab::Hel, "Mjolnir"),
         (ResumeTab::Import, "Import"),
         (ResumeTab::Archive, "Archived"),
@@ -1801,7 +1937,9 @@ fn resume_tab_labels(dashboard: &DashboardState, dialog: &ResumeDialog) -> Vec<S
     .into_iter()
     .map(|(tab, name)| {
         let mut label = format!(" {name}");
-        if searching {
+        // The counts are the index's, and the Live tab does not use the index.
+        // A zero beside it would deny the matches its own search just found.
+        if searching && tab != ResumeTab::Live {
             label.push_str(&format!(" · {}", hits[tab.index()]));
         }
         if tab == ResumeTab::Import && dialog.is_scanning() {
@@ -1823,6 +1961,7 @@ fn resume_list_title(
     let mut spans = vec![Span::raw(" ")];
     if dialog.search.is_empty() {
         spans.push(Span::raw(match dialog.tab {
+            ResumeTab::Live => "Running sessions · every workspace · newest first",
             ResumeTab::Hel => "Mjolnir sessions · newest first",
             ResumeTab::Import => "Importable sessions · newest first",
             ResumeTab::Archive => "Archived sessions · newest first",
@@ -1870,7 +2009,10 @@ fn empty_search_message(dashboard: &DashboardState, dialog: &ResumeDialog) -> St
     .map(|(tab, name)| format!("{} on {name}", hits[tab.index()]))
     .collect::<Vec<_>>();
     if elsewhere.is_empty() {
-        return "No matching sessions".to_owned();
+        return match dialog.tab {
+            ResumeTab::Live => "No matching running sessions".to_owned(),
+            _ => "No matching sessions".to_owned(),
+        };
     }
     format!("No matches here · {}", elsewhere.join(", "))
 }

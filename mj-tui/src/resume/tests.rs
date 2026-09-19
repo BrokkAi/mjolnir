@@ -1095,6 +1095,115 @@ fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
     );
 }
 
+/// Two running sessions in the active workspace and one in `other`, each with
+/// its own title so a name search can pick one out.
+fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
+    let mut sessions = Vec::new();
+    for (id, workspace, title) in [
+        ("live-alpha", "default", "Sweep the hearth"),
+        ("live-beta", "default", "Count the coins"),
+        ("live-remote", "other", "Raise the mast"),
+    ] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.workspace_id = workspace.into();
+        session.session_title_override = Some(title.into());
+        session.native_session_id = None;
+        sessions.push(session);
+    }
+    let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
+    dashboard.set_workspace_names(BTreeMap::from([
+        ("default".into(), "Default".into()),
+        ("other".into(), "Other".into()),
+    ]));
+    dashboard
+}
+
+/// The Live tab lists the running sessions of every workspace, and its search
+/// box narrows them by name while the index is still building.
+#[test]
+fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Left)),
+        DashboardAction::None
+    );
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Live, "Left reaches the Live tab");
+
+    let listed = rows(&dashboard)
+        .into_iter()
+        .map(|row| match row.key {
+            ResumeRowKey::Live(session_id) => session_id,
+            other => panic!("the Live tab listed {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed.len(), 3, "every running session is listed");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|session_id| dashboard.state.sessions[session_id].workspace_id.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["default".to_owned(), "other".to_owned()]),
+        "the list spans both workspaces"
+    );
+
+    // Live is the leftmost tab, so from the list Left wraps around to the last
+    // one rather than landing in the middle of the strip.
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    dashboard.handle_key(key(KeyCode::Left));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Archive);
+    switch_to_tab(&mut dashboard, ResumeTab::Live);
+
+    // Drawing registers the dialog's controls, so `/` reaches the box the way
+    // it does in the running dashboard. The index is still building, which is
+    // what keeps the box from taking the focus on the history tabs.
+    drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    focus_resume_control(&mut dashboard, ResumeFocus::Search);
+    for character in "mast".chars() {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char(character))),
+            DashboardAction::None,
+            "a name search answers from the session list, not the index"
+        );
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+}
+
+/// Enter on a running session in another workspace closes the dialog and takes
+/// the dashboard there, the same jump the attention key makes.
+#[test]
+fn enter_on_a_live_row_moves_the_dashboard_to_that_session() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_tab(&mut dashboard, ResumeTab::Live);
+    let index = rows(&dashboard)
+        .iter()
+        .position(|row| row.key == ResumeRowKey::Live("live-remote".into()))
+        .expect("the other workspace's session is listed");
+    dashboard.select_resume_row(index);
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "the dialog closed"
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("live-remote"));
+}
+
 /// The dashboard lists live sessions; the dialog lists the rest. Nothing
 /// appears in both, and a stop in progress stays on the dashboard until
 /// the state machine reaches Stopped.
@@ -1812,7 +1921,7 @@ fn search_counts_hits_on_every_tab() {
 
     assert_eq!(
         dashboard.resume_hit_counts,
-        [1, 2, 1],
+        [0, 1, 2, 1],
         "every tab's hits are counted, whichever tab is showing"
     );
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
@@ -1820,7 +1929,7 @@ fn search_counts_hits_on_every_tab() {
     };
     assert_eq!(
         resume_tab_labels(&dashboard, dialog),
-        [" Mjolnir · 1 ", " Import · 2 ", " Archived · 1 "]
+        [" Live ", " Mjolnir · 1 ", " Import · 2 ", " Archived · 1 "]
     );
 
     // A query only the Import rows match leaves the other tabs empty, and
@@ -1833,7 +1942,7 @@ fn search_counts_hits_on_every_tab() {
             ..wiki_row("alpha-hit", false)
         }],
     );
-    assert_eq!(dashboard.resume_hit_counts, [0, 1, 0]);
+    assert_eq!(dashboard.resume_hit_counts, [0, 0, 1, 0]);
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };

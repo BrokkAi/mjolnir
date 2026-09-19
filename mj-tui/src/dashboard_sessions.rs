@@ -358,7 +358,11 @@ impl DashboardState {
     /// are shown. Terminal failures such as a lost or data-loss session have
     /// no row, so the badges and the attention queue must not count them
     /// either; they are reachable only through the resume dialog.
-    fn is_listed_top_level_session(&self, session: &SessionRecord, workspace_id: &str) -> bool {
+    pub(crate) fn is_listed_top_level_session(
+        &self,
+        session: &SessionRecord,
+        workspace_id: &str,
+    ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.subagents.contains_key(&session.id)
             && (session.state.is_active()
