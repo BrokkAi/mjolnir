@@ -969,6 +969,32 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
 }
 
 #[test]
+fn provisioning_persists_the_build_cache_it_resolved() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    save_session_to(&database, &record).unwrap();
+
+    // Provisioning resolves the cache once the container's mounts are fixed
+    // and then saves through the lifecycle path, which is the only write a
+    // newly provisioned session gets.
+    record.state = SessionState::Running;
+    record.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "ssh:morannon".into(),
+        directory: PathBuf::from("/mnt/nvme/mbx"),
+        max_size: Some("1000GB".into()),
+        target_root: None,
+    });
+    save_lifecycle_session_to(&database, &record).unwrap();
+
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(
+        loaded.sessions["session-1"].build_cache, record.build_cache,
+        "a resumed session must find the cache its container is already mounting"
+    );
+}
+
+#[test]
 fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

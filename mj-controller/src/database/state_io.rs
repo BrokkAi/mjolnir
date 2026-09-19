@@ -630,6 +630,46 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
 /// that provisioning and teardown maintain with them. The row must exist:
 /// a transition never resurrects a session another writer deleted.
 pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    // Destructured exhaustively and without `..` on purpose. This statement is
+    // the only thing standing between a new `SessionRecord` field and a value
+    // that is set in memory, read back as its default, and never missed until
+    // somebody inspects the database. A new field breaks this binding, and
+    // whoever adds it decides then whether a lifecycle transition owns it.
+    // Everything bound to `_` is owned by `upsert_session` instead.
+    let SessionRecord {
+        id,
+        title,
+        harness_kind,
+        last_profile,
+        target_template_id,
+        state,
+        updated_at,
+        viewed_through_event_ordinal,
+        last_error,
+        resource_allocation,
+        last_checkpoint_error,
+        project_directory,
+        managed_worktree,
+        build_cache,
+        workspace_id: _,
+        bundle_id: _,
+        create_managed_worktree: _,
+        mjolnir_subagents: _,
+        additional_mounts: _,
+        container_cpus: _,
+        container_memory: _,
+        container_workspace: _,
+        archived: _,
+        // Written by `replace_targets` below rather than by this statement.
+        target: _,
+        native_session_id: _,
+        acp_session_title: _,
+        session_title_override: _,
+        created_at: _,
+        draft_input: _,
+        // Written by `replace_checkpoint`.
+        checkpoint: _,
+    } = session;
     let changed = tx.execute(
         // The detach ordinal only ever moves forward, so a transition that
         // started before a detach receipt cannot rewind it.
@@ -645,37 +685,36 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              resource_allocation = ?10,
              last_checkpoint_error = ?11,
              project_directory = ?12,
-             managed_worktree = ?13
+             managed_worktree = ?13,
+             build_cache_json = ?14
          WHERE session_id = ?1",
         params![
-            session.id,
-            session.title,
-            session.harness_kind.id(),
-            session.last_profile,
-            session.target_template_id,
-            session.state.as_str(),
-            session.updated_at,
-            session.viewed_through_event_ordinal,
-            session.last_error,
-            session
-                .resource_allocation
+            id,
+            title,
+            harness_kind.id(),
+            last_profile,
+            target_template_id,
+            state.as_str(),
+            updated_at,
+            viewed_through_event_ordinal,
+            last_error,
+            resource_allocation
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            session.last_checkpoint_error,
-            session
-                .project_directory
-                .as_ref()
-                .map(|path| path_to_blob(path)),
-            session
-                .managed_worktree
+            last_checkpoint_error,
+            project_directory.as_ref().map(|path| path_to_blob(path)),
+            managed_worktree
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            // Resolved while a session is provisioned and assigned to the
+            // record right before this write, so the lifecycle path owns it.
+            build_cache.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     if changed != 1 {
-        bail!("unknown session {}", session.id);
+        bail!("unknown session {id}");
     }
     replace_targets(tx, session)
 }
