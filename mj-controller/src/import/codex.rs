@@ -1,5 +1,14 @@
 use super::*;
 
+/// How many directory levels below `sessions` a rollout can sit. Codex writes
+/// `sessions/<year>/<month>/<day>/rollout-<timestamp>-<id>.jsonl`, so the year,
+/// month and day directories are the last ones worth reading.
+///
+/// Both walks below stop there. Nothing is gained by going deeper, and a
+/// symlink in the tree can point at a directory of any size: reading all of it
+/// would turn one lookup into a scan of the whole disk.
+const CODEX_ROLLOUT_DEPTH: usize = 3;
+
 /// Locate a Codex rollout exposed by its native interactive resume picker.
 pub fn locate_codex_session(
     home: &Path,
@@ -44,7 +53,7 @@ pub(super) fn locate_unindexed_codex_session(
     };
     let root = home.join("sessions");
     if root.is_dir() {
-        walk.walk(&root, None)?;
+        walk.walk(&root, 0, None)?;
     }
     let titles = codex_native_titles(home)?;
     let mut matches = Vec::new();
@@ -96,7 +105,8 @@ pub(super) fn locate_unindexed_codex_session(
 /// The walk behind a Codex lookup by session id. Unlike the listing walk it
 /// follows symlinked directories, so a rollout that exists only behind one is
 /// refused with its reason instead of being reported as missing. `visited`
-/// holds the directories already walked, which stops a symlink loop.
+/// holds the directories already walked, which stops a symlink loop;
+/// [`CODEX_ROLLOUT_DEPTH`] bounds how much of any tree is read.
 struct NamedCodexWalk<'a> {
     session_id: &'a str,
     visited: BTreeSet<PathBuf>,
@@ -105,16 +115,27 @@ struct NamedCodexWalk<'a> {
 }
 
 impl NamedCodexWalk<'_> {
-    /// Walk one directory. `via_symlink` names the symlinked directory this
-    /// one was reached through, if any: nothing under it can be archived.
-    fn walk(&mut self, directory: &Path, via_symlink: Option<&Path>) -> Result<()> {
+    /// Walk one directory, `depth` levels below the sessions root.
+    /// `via_symlink` names the symlinked directory this one was reached through,
+    /// if any: nothing under it can be archived.
+    fn walk(&mut self, directory: &Path, depth: usize, via_symlink: Option<&Path>) -> Result<()> {
         let Ok(canonical) = directory.canonicalize() else {
             return Ok(());
         };
         if !self.visited.insert(canonical) {
             return Ok(());
         }
-        for entry in fs::read_dir(directory)? {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // A directory the lookup cannot read is one more reason the
+                // named session was not found, not a failure of the lookup:
+                // whatever else the tree holds is still worth reading.
+                self.rejected.push(cannot_read(directory, &error));
+                return Ok(());
+            }
+        };
+        for entry in entries {
             let path = entry?.path();
             let metadata = fs::symlink_metadata(&path)?;
             // A rollout filename ends in the thread's UUID. Only a path that
@@ -126,7 +147,9 @@ impl NamedCodexWalk<'_> {
             let may_be_session = rollout_id.is_none_or(|id| id == self.session_id);
             if metadata.file_type().is_symlink() {
                 if fs::metadata(&path).is_ok_and(|target| target.is_dir()) {
-                    self.walk(&path, via_symlink.or(Some(&path)))?;
+                    if depth < CODEX_ROLLOUT_DEPTH {
+                        self.walk(&path, depth + 1, via_symlink.or(Some(&path)))?;
+                    }
                 } else if names_session
                     && let NamedEntry::Rejected(reason) = CODEX_STORE.file(&path)
                 {
@@ -135,7 +158,9 @@ impl NamedCodexWalk<'_> {
                 continue;
             }
             if metadata.is_dir() {
-                self.walk(&path, via_symlink)?;
+                if depth < CODEX_ROLLOUT_DEPTH {
+                    self.walk(&path, depth + 1, via_symlink)?;
+                }
                 continue;
             }
             if !may_be_session || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
@@ -208,7 +233,7 @@ pub fn scan_codex_sessions(
     let mut candidates = Vec::new();
     let root = home.join("sessions");
     if root.is_dir() {
-        collect_codex_candidate_paths(&root, &titles, &mut candidates)?;
+        collect_codex_candidate_paths(&root, 0, &titles, &mut candidates)?;
     }
     candidates.sort_by(|left, right| {
         right
@@ -329,12 +354,29 @@ pub(super) fn codex_indexed_sessions(home: &Path) -> Result<Option<Vec<LocatedCo
     Ok(Some(sessions))
 }
 
+/// Collect the rollouts of one directory `depth` levels below the sessions
+/// root, and of the levels below it a rollout can still sit in.
 pub(super) fn collect_codex_candidate_paths(
     root: &Path,
+    depth: usize,
     native_titles: &BTreeMap<String, String>,
     candidates: &mut Vec<FileScanCandidate>,
 ) -> Result<()> {
-    for entry in fs::read_dir(root)? {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            // One unreadable directory must not fail the whole listing. The
+            // rows it holds cannot be offered, and naming such a session says
+            // why the listing left it out.
+            tracing::debug!(
+                path = %root.display(),
+                %error,
+                "skipped a Codex sessions directory the listing cannot read"
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
         let entry = entry?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
@@ -342,7 +384,9 @@ pub(super) fn collect_codex_candidate_paths(
             continue;
         }
         if metadata.is_dir() {
-            collect_codex_candidate_paths(&path, native_titles, candidates)?;
+            if depth < CODEX_ROLLOUT_DEPTH {
+                collect_codex_candidate_paths(&path, depth + 1, native_titles, candidates)?;
+            }
             continue;
         }
         if !metadata.is_file() || path.extension().and_then(|value| value.to_str()) != Some("jsonl")

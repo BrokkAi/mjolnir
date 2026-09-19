@@ -154,6 +154,14 @@ fn entry_metadata(path: &Path) -> NamedEntry {
     match fs::symlink_metadata(path) {
         Ok(metadata) => NamedEntry::Importable(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => NamedEntry::Absent,
-        Err(error) => NamedEntry::Rejected(format!("{} cannot be read: {error}", path.display())),
+        Err(error) => NamedEntry::Rejected(cannot_read(path, &error)),
     }
+}
+
+/// The refusal for a path a lookup cannot read at all, such as a directory with
+/// no permissions. A lookup reports this instead of failing, so naming the
+/// session says which path is in the way rather than returning a bare I/O
+/// error or calling the session missing.
+pub(super) fn cannot_read(path: &Path, error: &std::io::Error) -> String {
+    format!("{} cannot be read: {error}", path.display())
 }
