@@ -42,7 +42,7 @@ use crate::targets::ProcessExecutor;
 use mj_core::relay::{SequencedEvent, WorkerEvent, strip_hidden_prompt_context};
 
 mod named_session;
-use named_session::{CLAUDE_STORE, CODEX_STORE, GROK_STORE, KIMI_STORE, NamedEntry};
+use named_session::{CLAUDE_STORE, CODEX_STORE, GROK_STORE, KIMI_STORE, NamedEntry, cannot_read};
 mod types;
 pub use types::*;
 mod safety;

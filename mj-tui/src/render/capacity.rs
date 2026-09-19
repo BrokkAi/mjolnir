@@ -66,8 +66,9 @@ pub(crate) fn capacity_table_rows(
                             .min(100)
                         };
                         format!(
-                            "{}% CPU · {memory_percent}% RAM",
-                            usage.cpu_percent.unwrap_or(0)
+                            "{}% CPU{sep}{memory_percent}% RAM",
+                            usage.cpu_percent.unwrap_or(0),
+                            sep = theme::footer_separator(),
                         )
                     }
                     (DeploymentCapacityKind::AwsFleet, Some(usage)) => format!(

@@ -1583,6 +1583,162 @@ fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
     }
 }
 
+/// The saved file keeps only the build cache fields that are set, so the page
+/// has to fill the rest back in: all three stay listed and editable after a
+/// save, and each one can still be handed back to the host.
+#[test]
+fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "max_size");
+    dashboard.handle_key(key(KeyCode::Char('1')));
+    dashboard.handle_key(key(KeyCode::Char('2')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!(
+            "settings must save: {:?}",
+            setup_dialog_mut(&mut dashboard.mode).unwrap().notice
+        );
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    // What the file now holds: the size alone, with the two unset fields gone.
+    assert_eq!(
+        serde_json::to_value(&saved.machines["local"]).unwrap(),
+        json!({"kind":"local","build_cache":{"max_size":"12GB"}})
+    );
+    dashboard.setup_saved(generation, Ok(saved));
+
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    let keys = dialog.keys();
+    for expected in ["enabled", "directory", "max_size"] {
+        assert!(
+            keys.iter().any(|key| key == expected),
+            "{expected:?} is missing from the reopened page: {keys:?}"
+        );
+    }
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    for expected in ["Enabled", "Cache directory", "Cache size limit (GB)", "12"] {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+
+    // The same defaults are what "Use default" hands a field back to, so the
+    // size can be returned to the host's own limits.
+    choose(&mut dashboard, "max_size");
+    activate(&mut dashboard, SetupControl::Clear);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["max_size"],
+        Value::Null,
+        "Use default must hand an optional field back: {:?}",
+        dialog.notice
+    );
+}
+
+/// The border promises `Esc back`, and below the first page that is what it
+/// must do: return to the parent with the draft intact.
+#[test]
+fn escape_returns_from_a_settings_subpage_and_closes_only_from_the_first_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on a sub-page must keep Settings open");
+    };
+    assert_eq!(dialog.path, ["machines"]);
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on the Machines page must return to the first page");
+    };
+    assert!(dialog.path.is_empty());
+
+    // A sub-page edit survives the way back out.
+    choose(&mut dashboard, "phone");
+    choose(&mut dashboard, "enabled");
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc must not discard the draft from a sub-page");
+    };
+    assert!(dialog.path.is_empty());
+    assert_eq!(dialog.draft["phone"]["enabled"], Value::Bool(false));
+    assert!(dialog.is_dirty());
+
+    // From the first page Esc closes the dialog, through the discard guard.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(dashboard.mode, Mode::Confirm(_)),
+        "a dirty draft asks before closing"
+    );
+}
+
+/// The breadcrumb names each page the way the page above it named its row, so
+/// a machine the user called `local` is not retitled as the repository setting
+/// that shares the key.
+#[test]
+fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(text.contains("Settings › Machines › local"), "{text}");
+    assert!(
+        !text.contains("Local repository directory"),
+        "the machine's name went through the label table:\n{text}"
+    );
+    choose(&mut dashboard, "build_cache");
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(
+        text.contains("Settings › Machines › local › Build cache (mbx)"),
+        "a schema key below it still gets its label:\n{text}"
+    );
+}
+
+/// A refused value is reported with the field it was typed into, not on the
+/// dialog's bottom rows a page below it.
+#[test]
+fn a_rejected_field_value_is_reported_under_the_field() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "max_size");
+    for typed in ['1', '.', '5'] {
+        dashboard.handle_key(key(KeyCode::Char(typed)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.notice.as_deref(),
+        Some("Enter a whole number of gigabytes.")
+    );
+    let lines = drawn(&mut dashboard, 140, 30);
+    let (_, field) = point(&lines, "1.5");
+    let (_, message) = point(&lines, "Enter a whole number of gigabytes.");
+    assert_eq!(
+        message,
+        field + 1,
+        "the message is {} rows from the field:\n{}",
+        i32::from(message) - i32::from(field),
+        lines.join("\n")
+    );
+}
+
 #[test]
 fn empty_archive_after_days_renders_as_never() {
     let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});

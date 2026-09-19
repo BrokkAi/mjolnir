@@ -54,6 +54,9 @@ pub(crate) struct CommandPalette {
     pub(crate) entries: Vec<PaletteEntry>,
     /// Index into `entries` of the highlighted row.
     pub(crate) selected: usize,
+    /// The query `entries` were built for, so a rebuild can tell a new search
+    /// from the same search rebuilt because availability moved.
+    ranked_for: String,
     pub(crate) form: RefCell<Dialog<PaletteControl>>,
     session_only: bool,
     session_id: Option<String>,
@@ -141,12 +144,15 @@ fn scope_order(dashboard: &DashboardState) -> Vec<Scope> {
 /// How well `query` matches a command, higher being better, or `None` when
 /// it does not match at all.
 ///
-/// A label that starts with the query beats everything. Otherwise the query's
-/// characters must appear in the label in order (so `cre` finds "Create
-/// session" and `mvs` finds "Move session"), scored by how many land on the
-/// start of a word and how many sit next to each other. A query found only in
-/// the description ranks last, so a word from the description still finds the
-/// command without outranking a label hit.
+/// A label that starts with the query beats everything, then a label that
+/// carries the query as one run of characters — `rend` in "rendering" — because
+/// that is what a reader means by a match. Below those the query's characters
+/// need only appear in the label in order (so `cre` finds "Create session" and
+/// `mvs` finds "Move session"), scored by how many land on the start of a word
+/// and how many sit next to each other; letters scattered across three words
+/// are the weakest kind of label hit and must not outrank a run. A query found
+/// only in the description ranks last, so a word from the description still
+/// finds the command without outranking a label hit.
 pub(crate) fn match_score(label: &str, description: &str, query: &str) -> Option<u32> {
     let query = query.to_lowercase();
     let label_lower = label.to_lowercase();
@@ -155,6 +161,15 @@ pub(crate) fn match_score(label: &str, description: &str, query: &str) -> Option
     }
     if label_lower.starts_with(&query) {
         return Some(10_000);
+    }
+    if let Some(index) = label_lower.find(&query) {
+        // A run that starts a word reads as the word the person typed, so it
+        // comes before one buried inside another word.
+        let word_start = label_lower[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| !previous.is_alphanumeric());
+        return Some(5_000 + if word_start { 30 } else { 0 });
     }
     if let Some(score) = subsequence_score(&label_lower, &query) {
         return Some(1_000 + score);
@@ -262,6 +277,7 @@ impl DashboardState {
             query: TextInput::new(),
             entries,
             selected: 0,
+            ranked_for: String::new(),
             form: RefCell::new(Dialog::default()),
             session_only: false,
             session_id: self.selected_session_id.clone(),
@@ -281,25 +297,40 @@ impl DashboardState {
         }
     }
 
-    /// Refreshes query matches and availability, retaining the selected command.
+    /// Refreshes query matches and availability.
+    ///
+    /// A new query is a new list, so the cursor starts on its top match: Enter
+    /// runs the row the cursor is on, and a cursor that followed the command it
+    /// happened to sit on — the one the Recent group leads with, say — would run
+    /// a command the ranking had moved to the bottom. A rebuild under the same
+    /// query is only availability moving, so there the cursor stays put.
     pub(crate) fn rebuild_palette_entries(&mut self) {
         let Mode::Palette(palette) = &self.mode else {
             return;
         };
-        let mut entries = palette_entries(self, palette.query.value());
+        let query = palette.query.value().to_owned();
+        let mut entries = palette_entries(self, &query);
         if palette.session_only {
             entries.retain(|entry| spec(entry.id).scope == Scope::Session);
         }
         let Mode::Palette(palette) = &mut self.mode else {
             return;
         };
-        if palette.entries == entries {
+        let same_query = palette.ranked_for == query;
+        if same_query && palette.entries == entries {
             return;
         }
-        let selected_id = palette.entries.get(palette.selected).map(|entry| entry.id);
-        palette.selected = selected_id
-            .and_then(|id| entries.iter().position(|entry| entry.id == id))
-            .unwrap_or(0);
+        palette.selected = if same_query {
+            palette
+                .entries
+                .get(palette.selected)
+                .map(|entry| entry.id)
+                .and_then(|id| entries.iter().position(|entry| entry.id == id))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        palette.ranked_for = query;
         palette.form.get_mut().cancel_pointer();
         palette.entries = entries;
         palette.prepare();
@@ -737,11 +768,17 @@ mod tests {
         assert!(rename < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < global, "{lines:#?}");
-        // The palette never lists itself. Create and Resume are listed even
-        // though they have buttons, so a search finds them.
+        // The palette never lists itself. Create and Sessions are listed even
+        // though they have buttons, so a search finds them. Sessions is named
+        // with its chord, because the pane of the same name is on screen too.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
         assert!(row_of(&lines, "Create session").is_some(), "{lines:#?}");
-        assert!(row_of(&lines, "Resume a session").is_some(), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Sessions") && line.contains("ctrl+b g")),
+            "{lines:#?}"
+        );
         assert!(
             lines
                 .iter()
@@ -884,6 +921,99 @@ mod tests {
             described.iter().map(|entry| entry.id).collect::<Vec<_>>(),
             vec![CommandId::MarkAllRead]
         );
+    }
+
+    /// Enter runs the row the cursor is on, so the cursor has to follow the
+    /// ranking. A command run earlier leads the unfiltered list under Recent,
+    /// and the cursor used to ride that command down into the results of the
+    /// next search: the screen pointed at the top match while Enter ran the
+    /// command from last time.
+    #[test]
+    fn a_new_palette_query_puts_the_cursor_on_its_top_match() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "workspaces");
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(dashboard.mode, Mode::WorkspaceManager(_)),
+            "{:?}",
+            dashboard.mode
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(dashboard.mode, Mode::Dashboard);
+
+        // The unfiltered list leads with what was just run.
+        open_palette(&mut dashboard);
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the palette stays open");
+        };
+        assert_eq!(palette.entries[0].id, CommandId::Workspaces, "{palette:?}");
+        assert!(palette.entries[0].recent);
+
+        // "Workspaces" carries "rename" in its description, so it still
+        // matches the query — at the bottom of the results, where the cursor
+        // must not follow it.
+        type_query(&mut dashboard, "rename");
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the palette stays open");
+        };
+        assert_eq!(
+            palette.entries[0].id,
+            CommandId::RenameSession,
+            "{:?}",
+            palette.entries
+        );
+        assert_eq!(
+            palette.entries.get(palette.selected).map(|entry| entry.id),
+            Some(CommandId::RenameSession),
+            "the cursor sits on the top match: {:?}",
+            palette.entries
+        );
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(dashboard.mode, Mode::Rename(_)),
+            "{:?}",
+            dashboard.mode
+        );
+    }
+
+    /// A run of the query inside a word is what a reader means by a match.
+    /// Letters merely found in order, which any long label can supply, must
+    /// not outrank it, and a label that starts with the query still wins.
+    #[test]
+    fn a_contiguous_label_match_outranks_a_scattered_one() {
+        let contiguous =
+            match_score("Toggle transcript rendering", "", "rend").expect("a contiguous match");
+        let scattered = match_score("Resize pane down", "", "rend").expect("a scattered match");
+        assert!(
+            contiguous > scattered,
+            "'rend' in 'rendering' beats R-e-n-d across three words: {contiguous} vs {scattered}"
+        );
+        let prefix = match_score("Rendering", "", "rend").expect("a prefix match");
+        assert!(prefix > contiguous, "{prefix} vs {contiguous}");
+    }
+
+    /// The same ranking through the palette, on the two commands that showed
+    /// the defect.
+    #[test]
+    fn palette_ranks_toggle_rendering_above_resize_pane_down_for_rend() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        let ranked = palette_entries(&dashboard, "rend")
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let rendering = ranked
+            .iter()
+            .position(|id| *id == CommandId::ToggleTranscriptRendering)
+            .expect("Toggle transcript rendering");
+        let resize = ranked
+            .iter()
+            .position(|id| *id == CommandId::ResizePaneDown)
+            .expect("Resize pane down");
+        assert!(rendering < resize, "{ranked:?}");
     }
 
     #[test]

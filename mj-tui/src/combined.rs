@@ -1280,10 +1280,14 @@ fn render_empty_prompt_advice(
                     dashboard.first_key_label(crate::CommandId::NewSessionWizard),
                     dashboard.first_key_label(crate::CommandId::ResumeDialog),
                 ) {
-                    (Some(create), Some(resume)) => {
-                        format!("Press {create} to create a session or {resume} to resume one.")
+                    // `prefix+g` opens the session list, which shows running
+                    // sessions first and stopped ones a tab away, so telling
+                    // someone it resumes a session misses most of what it does.
+                    (Some(create), Some(sessions)) => {
+                        format!("Press {create} to create a session or {sessions} to find one.")
                     }
-                    _ => "Create a session, or resume one, from the buttons above.".to_owned(),
+                    _ => "Create a session, or find an existing one, from the buttons above."
+                        .to_owned(),
                 },
             ],
         ),

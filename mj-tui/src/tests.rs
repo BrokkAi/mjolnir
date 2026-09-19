@@ -5,7 +5,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use mj_core::config::{ProjectBundle, ProjectRepository};
-use mj_core::state::{STATE_VERSION, SessionState, State};
+use mj_core::state::{
+    MaterializedExecutionState, STATE_VERSION, SessionState, State, TranscriptBody,
+};
 
 use super::*;
 use crate::test_support::*;
@@ -3183,20 +3185,6 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
     assert_eq!(restored.selected_session_id(), Some("session-2"));
 }
 
-/// A form question the agent is waiting on, as the daemon projects it.
-fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
-    mj_core::elicitation::ElicitationRequest::from_acp_params(
-        format!("{session_id}-question"),
-        serde_json::json!({
-            "mode": "form",
-            "sessionId": session_id,
-            "message": "Choose a path",
-            "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
-        }),
-    )
-    .expect("valid test question")
-}
-
 /// Three live sessions in the default workspace and one in `other`: `asks`
 /// is waiting on a question, `done` has an unread answer, `quiet` is idle and
 /// read, and `remote` (in `other`) is also waiting on a question.
@@ -3536,14 +3524,16 @@ fn next_attention_reports_an_empty_queue_and_unfolds_a_folded_project() {
 fn the_footer_names_the_next_key_only_while_something_waits() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
-    let lines = drawn(&mut dashboard, 120, 40);
+    // Wide enough for the whole chord list: a narrow row drops the hint for
+    // want of room, which says nothing about whether anything is waiting.
+    let lines = drawn(&mut dashboard, 200, 40);
     let footer = lines.last().unwrap();
     // The hint carries the same badge as the tabs: the most urgent glyph and
     // how many sessions need a person.
     assert!(footer.contains("o next (!3)"), "{footer}");
 
     let mut quiet = dashboard_with_session(running_session());
-    let lines = drawn(&mut quiet, 120, 40);
+    let lines = drawn(&mut quiet, 200, 40);
     assert!(
         !lines.last().unwrap().contains("next ("),
         "{}",
@@ -3651,6 +3641,21 @@ fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
         lines.iter().any(|line| line.contains("Sessions · /qui")),
         "{lines:#?}"
     );
+    // At this width the count has no room, and the pane keeps its own name
+    // rather than shortening to `S · ` to make the number fit.
+    assert!(
+        !lines.iter().any(|line| line.contains("hidden")),
+        "{lines:#?}"
+    );
+
+    // Given the room, the title says how many rows the filter holds back, so a
+    // shortened list never reads as the whole truth.
+    let wide = drawn(&mut dashboard, 240, 40);
+    assert!(
+        wide.iter()
+            .any(|line| line.contains("Sessions · /qui · 2 hidden")),
+        "{wide:#?}"
+    );
 
     // Enter keeps the filter and returns the letters to the pane; `j` moves
     // again instead of typing.
@@ -3737,6 +3742,139 @@ fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
         }
     );
     assert!(dashboard.sessions_filter.is_none());
+}
+
+/// Two running sessions, `alpha` open in the conversation pane and selected,
+/// and a reply that has landed for `beta` while it was off screen. The reply
+/// arrives the way the host delivers one: a materialized projection whose
+/// agent message sits past the read frontier the pane left behind.
+fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
+    let mut alpha = running_session();
+    alpha.id = "alpha".into();
+    alpha.session_title_override = Some("alpha".into());
+    alpha.created_at = "2026-08-01T00:00:00Z".into();
+    let mut beta = running_session();
+    beta.id = "beta".into();
+    beta.session_title_override = Some("beta".into());
+    beta.created_at = "2026-08-02T00:00:00Z".into();
+    // The pane read `beta` through its own prompt before it was left for
+    // `alpha`; the answer that follows is the unread one.
+    beta.viewed_through_event_ordinal = 3;
+    let mut dashboard = dashboard_with_session(alpha);
+    dashboard.state.sessions.insert("beta".into(), beta);
+    let state = dashboard.state.clone();
+    dashboard.set_state(state);
+    dashboard.select_active_session("beta");
+    dashboard.set_current_session(Some("beta"));
+    dashboard.select_active_session("alpha");
+    dashboard.set_current_session(Some("alpha"));
+    let mut reply = materialized_session_for(
+        "beta",
+        vec![
+            transcript_item(
+                3,
+                TranscriptBody::User {
+                    content: vec![serde_json::json!({"type": "text", "text": "beta prompt"})],
+                },
+            ),
+            agent_message(4, "reliability reply: beta prompt"),
+        ],
+    );
+    reply.execution = MaterializedExecutionState::Idle;
+    dashboard.apply_materialized_session(&reply);
+    dashboard
+}
+
+/// The `d` filter has to keep the row it found, and the row it found is the one
+/// drawn with the done glyph.
+///
+/// The Sessions selection is what the host opens, and opening a conversation
+/// marks its answer read. A filter that moved the selection onto the row it had
+/// just found therefore read that answer, dropped the row out of the filter,
+/// and left `d` reporting that nothing matches a row still drawn with `✓`. A
+/// filter is a view: it hides rows without choosing a conversation.
+#[test]
+fn the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone() {
+    let mut dashboard = dashboard_with_an_unread_reply_off_screen();
+    let lines = drawn(&mut dashboard, 120, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("beta"))
+        .expect("beta has a row");
+    assert!(
+        row.contains(mj_chat::theme::glyphs().unread),
+        "the row says the answer is unread: {lines:#?}"
+    );
+    dashboard.focus_sessions();
+
+    dashboard.handle_key(key(KeyCode::Char('d')));
+
+    assert_eq!(
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        ["beta"]
+    );
+    assert_eq!(
+        dashboard.selected_session_id(),
+        Some("alpha"),
+        "the filter must not hand the host a different conversation to open"
+    );
+}
+
+/// A letter that hides every row leaves the pane with no row to select, so the
+/// frame moves the focus to the Create action. The filter must keep answering
+/// from there: the empty pane's own line promises that Esc clears the filter,
+/// and without the letters there is no way back to the sessions at all.
+#[test]
+fn a_state_letter_that_hides_every_row_keeps_answering_the_letters_and_esc() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Nothing is working, so `w` empties the list.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(ids(&dashboard).is_empty());
+    assert!(
+        lines.iter().any(|line| line.contains("No sessions match")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.session_action_focus,
+        Some(CommandId::NewSessionWizard),
+        "an empty list leaves the focus on the action row"
+    );
+
+    // `a` widens the filter to everything again, and the rows take the focus
+    // back from the action row.
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    assert_eq!(dashboard.session_action_focus, None);
+
+    // Another letter still narrows from the empty pane, rather than leaving
+    // the person with one filter and no way to change it.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let _ = drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(ids(&dashboard), ["asks"]);
+
+    // And Esc drops the filter the pane says it drops.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let _ = drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
 }
 
 #[test]
@@ -3892,7 +4030,16 @@ fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
         "{:?}",
         dashboard.mode
     );
+    // Esc leaves a focused filter box even with nothing in it, so closing help
+    // from there takes one more press: the list has to have the keyboard back
+    // before Esc means the overlay.
     dashboard.handle_key(key(KeyCode::Char('/')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(&dashboard.mode, Mode::Help(overlay) if !overlay.search_focused),
+        "{:?}",
+        dashboard.mode
+    );
     dashboard.handle_key(key(KeyCode::Esc));
     assert_eq!(dashboard.mode, Mode::Dashboard);
 
@@ -3954,6 +4101,45 @@ fn session_rows_carry_the_branch_once_the_checkout_was_read() {
     assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
 }
 
+/// Every session created with a managed worktree gets a `mj/<32 hex>` branch,
+/// which is wider than the sidebar, so dropping the whole marker hid the
+/// feature at the widths people use. The middle of the name is what nobody
+/// reads: elide it and the marker keeps its ahead, behind, and changed counts.
+#[test]
+fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
+    let mut session = running_session();
+    session.session_title_override = Some("alpha".into());
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    // The 35 characters a managed worktree's own branch name costs.
+    let branch = "mj/d45dc90af02510176be667cf8b330580";
+    assert_eq!(branch.chars().count(), 35);
+    dashboard.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/work".into(),
+            branch,
+            Some("2\t1"),
+            "12\t3\tsrc/main.rs\n",
+            " M src/main.rs\n?? notes.md\n",
+        )),
+    );
+    // A third of a 100-column terminal, floored at 40, is a 40-column pane.
+    let lines = drawn(&mut dashboard, 100, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("alpha"))
+        .unwrap_or_else(|| panic!("the session row: {lines:#?}"));
+    // The prefix and the last characters of the name survive; the middle does
+    // not, which is what makes room for the counts.
+    assert!(row.contains("⎇ mj/d45dc"), "{row:?}");
+    assert!(row.contains("…"), "{row:?}");
+    assert!(row.contains("80 ↑1 ↓2 ±2"), "{row:?}");
+}
+
 #[test]
 fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     let mut session = running_session();
@@ -4007,16 +4193,16 @@ fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
 
     dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
     let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines.iter().any(|line| line.contains("modified")
-            && line.contains("src/main.rs")
-            && line.contains("+12 −3")),
-        "{lines:#?}"
-    );
+    // The longest status word fills its column, so the column has to carry the
+    // separator: `modifiedsrc/main.rs` is not a line anyone can read.
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("new") && line.contains("notes.md")),
+            .any(|line| line.contains("modified src/main.rs") && line.contains("+12 −3")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("new      notes.md")),
         "{lines:#?}"
     );
     assert!(
@@ -4085,7 +4271,7 @@ fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
     );
     // The chord hints are joined by the ASCII separator.
     assert!(
-        wide.last().unwrap().contains("c create - g resume"),
+        wide.last().unwrap().contains("c create - g sessions"),
         "ASCII footer separators: {}",
         wide.last().unwrap()
     );

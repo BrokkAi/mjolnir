@@ -323,11 +323,40 @@ pub(crate) fn running_session() -> SessionRecord {
     }
 }
 
-/// Reaches the resume wizard the way the UI does: open the resume dialog with
-/// no native scan results, then activate the first row, which is the session's
-/// own stopped record.
+/// A form question the agent is waiting on, as the daemon projects it.
+pub(crate) fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
+    mj_core::elicitation::ElicitationRequest::from_acp_params(
+        format!("{session_id}-question"),
+        serde_json::json!({
+            "mode": "form",
+            "sessionId": session_id,
+            "message": "Choose a path",
+            "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
+        }),
+    )
+    .expect("valid test question")
+}
+
+/// Moves the open resume dialog to the Mjolnir tab with its list focused. The
+/// dialog opens on the running sessions with the list itself focused, and a
+/// stopped record is one tab to the right of them.
+pub(crate) fn focus_resume_hel_rows(dashboard: &mut DashboardState) {
+    if let crate::Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+        dialog.tab = crate::resume::ResumeTab::Hel;
+        dialog
+            .form
+            .get_mut()
+            .focus(crate::resume::ResumeFocus::Sessions);
+    }
+    dashboard.rebuild_resume_rows();
+}
+
+/// Reaches the resume wizard the way the UI does: open the resume dialog, move
+/// to the Mjolnir tab, then activate the first row, which is the session's own
+/// stopped record.
 pub(crate) fn open_resume_wizard(dashboard: &mut DashboardState) -> crate::DashboardAction {
     dashboard.show_resume_dialog(1, Vec::new());
+    focus_resume_hel_rows(dashboard);
     dashboard.handle_key(key(KeyCode::Enter))
 }
 

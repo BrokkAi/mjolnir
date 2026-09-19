@@ -8,13 +8,18 @@
 //! because the restart path, `mj daemon status` and `mj doctor` all ask it.
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Only the Linux and macOS answers inspect files; Windows returns "unknown".
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::Context as _;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::path::Path;
+
+/// The version this build reports, which is also the version a daemon started
+/// from it records in `daemon.json`.
+///
+/// Every crate in the workspace carries the workspace version, so the client
+/// crate's version is the running binary's version.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A file, identified by what it is rather than by what it is called.
 ///
@@ -145,6 +150,69 @@ pub fn running_executable_path() -> Option<PathBuf> {
     {
         std::env::current_exe().ok()
     }
+}
+
+/// One Mjolnir build as a message names it: the file it runs and the version
+/// that build reports.
+#[derive(Debug, Clone, Copy)]
+pub struct BuildDescription<'a> {
+    /// The executable, when the operating system could name it.
+    pub executable: Option<&'a Path>,
+    /// The version that build reports.
+    pub version: &'a str,
+}
+
+/// Name an executable for a message a person reads.
+///
+/// `None` is the answer the operating system gave — the process is gone, its
+/// executable is unreadable, or the platform does not expose it — so the
+/// message says that rather than omitting the file.
+pub fn describe_executable(path: Option<&Path>) -> String {
+    path.map_or_else(
+        || "an unknown file".to_owned(),
+        |path| path.display().to_string(),
+    )
+}
+
+/// One sentence naming the daemon's build and this client's, for a message a
+/// person reads.
+///
+/// Both halves carry a file and a version because either can differ. Two builds
+/// of one version are different files after a rebuild, and a client installed
+/// by `cargo install` stays first on PATH while a newer daemon runs from a
+/// build tree. The paths are what the reader acts on, so they are named even
+/// when only the versions disagree.
+///
+/// The sentence carries no final period: every caller follows it with its own
+/// explanation or advice.
+pub fn describe_daemon_and_client_builds(
+    daemon_pid: u32,
+    daemon: BuildDescription<'_>,
+    client: BuildDescription<'_>,
+) -> String {
+    format!(
+        "Daemon {daemon_pid} runs {} (version {}), while this client runs {} (version {})",
+        describe_executable(daemon.executable),
+        daemon.version,
+        describe_executable(client.executable),
+        client.version,
+    )
+}
+
+/// [`describe_daemon_and_client_builds`] with both executables resolved from
+/// the operating system and this build's own version on the client side.
+pub fn describe_running_daemon_and_client_builds(daemon_pid: u32, daemon_version: &str) -> String {
+    describe_daemon_and_client_builds(
+        daemon_pid,
+        BuildDescription {
+            executable: process_executable_path(daemon_pid).as_deref(),
+            version: daemon_version,
+        },
+        BuildDescription {
+            executable: running_executable_path().as_deref(),
+            version: BUILD_VERSION,
+        },
+    )
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

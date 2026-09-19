@@ -154,9 +154,11 @@ Destroying a session leaves the managed worktree's git branch in the source repo
 
 ## Resume on a fresh target
 
-Press **Resume** or `prefix+g` to search every non-live Mjolnir session, including
-records that were previously archived by a provider. Provider archive metadata
-is shown read-only. The resume wizard lets you:
+`prefix+g` and the **Open** button open the session dialog on the running
+sessions. Press `→` once for the **Mjolnir** tab, which lists every non-live
+Mjolnir session, including records that were previously archived by a provider.
+Provider archive metadata is shown read-only. Pressing Enter on a row opens the
+resume wizard, which lets you:
 
 - keep the original profile or choose another harness profile;
 - choose a compatible target and adjust its resources;
@@ -319,8 +321,9 @@ closed. The daemon indexes when it starts, when a session reaches the stopped
 state, once an hour, and before a Resume search that has not synced in the last
 minute. The first build walks every tool's store and can take many minutes on a
 large corpus. Until it finishes, the Resume search box cannot be typed into and
-reads **Indexing…**; the tabs and the list keep working, and the box opens by
-itself when the build finishes. What is stored is the conversation: the prompts,
+reads **Indexing…**; the tabs and the list keep working, and the box becomes
+typable as soon as the build finishes, though moving the keyboard focus there
+still takes `/` or a click. What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
 project directory. Native sessions from every enabled profile home are indexed
 too, including Kimi Code, Grok Build, and Muse, under the tool names
@@ -355,9 +358,11 @@ opens on the same profile and target. A target that has since been removed from
 `config.toml` is shown exactly as it was recorded, and Restore falls back to the
 first profile and target.
 
-### Searching Resume
+### Searching the session dialog
 
-The Resume search box searches the index and nothing else. With the box empty,
+On the **Live** tab the search box matches the running sessions by name, ID, and
+workspace, answering from the dashboard's own state and needing no index. On the
+three history tabs it searches the index and nothing else. With the box empty,
 each tab lists what it always lists. With a query, each tab lists only the
 sessions the index returned, in the order the index ranked them, and each row
 carries the text the search matched. That includes text that appears only inside
@@ -372,8 +377,8 @@ navigation keep working.
 
 ### The Archived tab
 
-`prefix+g` opens Resume with a third tab, **Archived**, listing sessions whose live
-Mjolnir copy is gone but whose conversation SessionWiki still has. The pane under
+The dialog's last tab, **Archived**, lists sessions whose live Mjolnir copy is
+gone but whose conversation SessionWiki still has. The pane under
 the list previews the selected session's conversation. The web viewer has the
 same search, Archived section, preview, and Restore button.
 

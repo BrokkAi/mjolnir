@@ -1,5 +1,10 @@
 use super::*;
 
+/// How a refusal names the directory a Grok Build session sits in. Grok Build
+/// names that directory after the working directory the session ran in, and the
+/// listing and the by-id lookup both refuse it in these words.
+const GROK_CWD_DIRECTORY: &str = "working directory";
+
 /// Locate a Grok Build session directory. Its name is the session UUID, which
 /// is the native identifier `session/load` takes.
 pub fn locate_grok_session(
@@ -36,16 +41,19 @@ fn locate_named_grok_session(home: &Path, native_session_id: &str) -> Result<Loc
         .with_context(|| format!("read Grok Build sessions directory {}", sessions.display()))?
     {
         let cwd_directory = entry?.path();
-        let directory_metadata = fs::symlink_metadata(&cwd_directory)?;
         let session_path = cwd_directory.join(native_session_id);
-        if directory_metadata.file_type().is_symlink() {
-            if session_path.exists() {
-                rejected.push(GROK_STORE.symlinked_container(&cwd_directory, "working directory"));
+        match GROK_STORE.container(&cwd_directory, GROK_CWD_DIRECTORY) {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                // A working directory that cannot be archived is worth
+                // reporting only when the named session is inside it; an
+                // unrelated symlink in the sessions root says nothing about it.
+                if session_path.exists() {
+                    rejected.push(reason);
+                }
+                continue;
             }
-            continue;
-        }
-        if !directory_metadata.is_dir() {
-            continue;
+            NamedEntry::Importable(_) => {}
         }
         let metadata = match GROK_STORE.directory(&session_path) {
             NamedEntry::Absent => continue,
@@ -144,12 +152,21 @@ pub fn scan_grok_sessions(
 
 /// Walk `sessions/<encoded-cwd>/<session-uuid>`. The sessions root also holds
 /// the shared search index and lock files, which are not sessions.
+///
+/// A working directory the import could not archive is left out, so the listing
+/// offers only sessions that can actually be imported and the by-id lookup is
+/// left to report why one is missing from it.
 pub(super) fn grok_candidates(sessions: &Path) -> Result<Vec<KimiScanCandidate>> {
     let mut candidates = Vec::new();
     for cwd_entry in fs::read_dir(sessions)? {
         let cwd_directory = cwd_entry?.path();
-        if !cwd_directory.is_dir() {
-            continue;
+        match GROK_STORE.container(&cwd_directory, GROK_CWD_DIRECTORY) {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                tracing::debug!(reason, "skipped a Grok Build working directory");
+                continue;
+            }
+            NamedEntry::Importable(_) => {}
         }
         let decoded_cwd = grok_decode_cwd_dirname(&cwd_directory);
         for session_entry in fs::read_dir(&cwd_directory)? {

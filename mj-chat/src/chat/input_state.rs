@@ -504,6 +504,15 @@ impl ChatState {
                         );
                         return ChatAction::None;
                     }
+                    // A harness with no selector for this key cannot apply the
+                    // change at all. Say so now: sending it would report the
+                    // relay's acceptance in the footer and leave the harness's
+                    // refusal to arrive in the transcript seconds later.
+                    if self.advertised_config_values(key).is_empty() {
+                        self.set_notice(mj_core::acp::missing_config_selector_refusal(key));
+                        self.clear_input();
+                        return ChatAction::None;
+                    }
                     // A busy agent does not refuse the change: it waits in the
                     // command queue and applies when its turn comes.
                     self.clear_input();

@@ -474,6 +474,27 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
     schema::label(key)
 }
 
+/// The trail of page names above `path`, starting at the first page.
+///
+/// Each segment is named the way the page above it names its rows, so a name
+/// the user chose is shown as they wrote it and only schema keys reach the
+/// label table: a machine called `local` is that machine, not the "Local
+/// repository directory" setting that shares the key.
+fn breadcrumb(path: &[String], draft: &Value) -> String {
+    let mut segments = vec!["Settings".to_owned()];
+    let mut parent: Vec<String> = Vec::new();
+    for key in path {
+        let mut child = parent.clone();
+        child.push(key.clone());
+        segments.push(match draft.pointer(&pointer(&parent)) {
+            Some(value) => row_label(&parent, value, key, draft.pointer(&pointer(&child))),
+            None => schema::label(key),
+        });
+        parent = child;
+    }
+    segments.join(" › ")
+}
+
 /// A size string as the whole number of GB the field is measured in, or the
 /// string itself when it is not a size at all.
 fn build_cache_gigabytes_label(size: &str) -> String {
@@ -568,11 +589,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
             return;
         };
         let keys = visible_keys(path, value);
-        let breadcrumb = std::iter::once("Settings".to_owned())
-            .chain(path.iter().map(|key| schema::label(key)))
-            .collect::<Vec<_>>()
-            .join(" › ");
-        *max_width = (*max_width).max(Line::raw(breadcrumb).width());
+        *max_width = (*max_width).max(Line::raw(breadcrumb(path, draft)).width());
         *max_height = (*max_height).max(
             u16::try_from(page_plan(path, &keys).len())
                 .unwrap_or(u16::MAX)
@@ -1780,6 +1797,18 @@ impl DashboardState {
                     KeyCode::Backspace if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Back))
                     }
+                    // The dialog's own border promises `Esc back`, so on a
+                    // page below the first one Esc does what Back does and
+                    // keeps the draft. Only the first page closes on Esc, and
+                    // only the title's × closes from anywhere.
+                    KeyCode::Esc
+                        if dialog.editor.is_none()
+                            && dialog.search.is_none()
+                            && !dialog.path.is_empty()
+                            && key.modifiers.is_empty() =>
+                    {
+                        Some(Interaction::Activate(Back))
+                    }
                     KeyCode::Char('a') if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Add))
                     }
@@ -2327,12 +2356,8 @@ pub(crate) fn render_setup(
     };
     let nested = !path.is_empty();
     if nested {
-        let breadcrumb = std::iter::once("Settings".to_owned())
-            .chain(path.iter().map(|key| schema::label(key)))
-            .collect::<Vec<_>>()
-            .join(" › ");
         frame.render_widget(
-            Paragraph::new(breadcrumb).style(theme::title(true)),
+            Paragraph::new(breadcrumb(path, &dialog.draft)).style(theme::title(true)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
     }
@@ -2404,6 +2429,9 @@ pub(crate) fn render_setup(
     );
     let mut initial;
     let mut background_offset = form.list_offset(List);
+    // Where a rejected value is reported while a field is being edited: with
+    // the field, not on the dialog's bottom rows far below it.
+    let mut editor_notice = None;
     if text_editor {
         let editor = dialog.editor.as_ref().expect("text editor");
         let label = if editor.adding {
@@ -2420,6 +2448,7 @@ pub(crate) fn render_setup(
             EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
         }
+        let mut next_row = body.y + 2;
         // The archive window's estimate follows the number as it is typed, so
         // it sits right under the input rather than on the notice line.
         if editor
@@ -2431,8 +2460,19 @@ pub(crate) fn render_setup(
         {
             frame.render_widget(
                 Paragraph::new(estimate).style(theme::muted()),
-                Rect::new(body.x, body.y + 2, body.width, 1),
+                Rect::new(body.x, next_row, body.width, 1),
             );
+            next_row += 1;
+        }
+        // The field's own column is narrower than the dialog, so the message
+        // keeps every row left below it to wrap into.
+        if next_row < body.bottom() {
+            editor_notice = Some(Rect::new(
+                body.x,
+                next_row,
+                body.width,
+                body.bottom() - next_row,
+            ));
         }
         initial = Field;
     } else {
@@ -2589,7 +2629,7 @@ pub(crate) fn render_setup(
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            Rect::new(inner.x, inner.bottom() - 4, inner.width, 3),
+            editor_notice.unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
         );
     }
     form.end_frame(initial);

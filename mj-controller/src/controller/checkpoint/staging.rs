@@ -421,4 +421,20 @@ pub(in crate::controller) fn prune_replaced_checkpoint(
             "could not remove superseded recovery copy: {error}"
         );
     }
+    reap_finished_move_intents();
+}
+
+/// Release the durable rows of finished moves whose checkpoint has gone.
+///
+/// Called where an archive stops being retained: after a superseded archive is
+/// pruned, and in the startup archive reconciliation. Like the prune itself this
+/// is housekeeping, so a failure is logged rather than returned.
+pub(in crate::controller) fn reap_finished_move_intents() {
+    match crate::database::reap_finished_move_intents() {
+        Ok(0) => {}
+        Ok(reaped) => tracing::debug!(reaped, "reaped durable rows of finished moves"),
+        Err(error) => {
+            tracing::warn!("could not reap the durable rows of finished moves: {error:#}")
+        }
+    }
 }

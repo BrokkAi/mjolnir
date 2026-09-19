@@ -262,6 +262,18 @@ impl DashboardState {
         parts.join(" · ")
     }
 
+    /// How many rows the Sessions filter is holding back, or zero when no
+    /// filter is in force. A shortened list that does not say it is shortened
+    /// reads as the whole truth.
+    pub(crate) fn sessions_hidden_count(&self) -> usize {
+        if self.sessions_filter.is_none() {
+            return 0;
+        }
+        self.ordered_sessions_unfiltered()
+            .len()
+            .saturating_sub(self.ordered_sessions().len())
+    }
+
     /// Answers a key for the Sessions filter, or `None` when the filter does
     /// not claim it. While editing, printable keys are text and the arrows
     /// still move the selection; `Enter` keeps the filter and returns the
@@ -338,6 +350,12 @@ impl DashboardState {
             _ => return None,
         }
         self.clamp_selections();
+        // A filter that hides every row leaves the focus on the action row,
+        // because there is nothing to select. Once a row is back, it takes the
+        // focus again, so the person lands on a session rather than on Create.
+        if !self.visible_session_indices().is_empty() {
+            self.set_session_action_focus(None);
+        }
         Some(())
     }
 
@@ -346,7 +364,11 @@ impl DashboardState {
     /// are shown. Terminal failures such as a lost or data-loss session have
     /// no row, so the badges and the attention queue must not count them
     /// either; they are reachable only through the resume dialog.
-    fn is_listed_top_level_session(&self, session: &SessionRecord, workspace_id: &str) -> bool {
+    pub(crate) fn is_listed_top_level_session(
+        &self,
+        session: &SessionRecord,
+        workspace_id: &str,
+    ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.subagents.contains_key(&session.id)
             && (session.state.is_active()
@@ -623,11 +645,6 @@ impl DashboardState {
     /// Moves to the next (`1`) or previous (`-1`) session in the attention
     /// queue, counting from the selected session when it is in the queue and
     /// from the top otherwise.
-    ///
-    /// A session in another workspace is reached by recording it as that
-    /// workspace's selection and asking the host to switch: the host restores
-    /// the selection when the tab changes and opens its conversation, exactly
-    /// as it does for a tab the person clicks.
     pub(crate) fn step_attention(&mut self, delta: isize) -> DashboardAction {
         let queue = self.attention_queue();
         if queue.is_empty() {
@@ -646,13 +663,27 @@ impl DashboardState {
             None if delta < 0 => queue[queue.len() - 1].clone(),
             None => queue[0].clone(),
         };
+        self.focus_session_anywhere(&target.workspace_id, &target.session_id)
+    }
+
+    /// Moves the dashboard to one session, wherever it lives.
+    ///
+    /// A session in another workspace is reached by recording it as that
+    /// workspace's selection and asking the host to switch: the host restores
+    /// the selection when the tab changes and opens its conversation, exactly
+    /// as it does for a tab the person clicks.
+    pub(crate) fn focus_session_anywhere(
+        &mut self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> DashboardAction {
         if self.subagent_parent_id.is_some() {
             self.close_subagent_workspace();
         }
-        if self.active_workspace_id.as_deref() != Some(target.workspace_id.as_str()) {
+        if self.active_workspace_id.as_deref() != Some(workspace_id) {
             let view = self
                 .workspace_views
-                .entry(target.workspace_id.clone())
+                .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
                     selected_session_id: None,
                     sessions_scroll: 0,
@@ -665,13 +696,13 @@ impl DashboardState {
                     collapsed_project_keys: BTreeSet::new(),
                     focus: Focus::Prompt,
                 });
-            view.selected_session_id = Some(target.session_id.clone());
+            view.selected_session_id = Some(session_id.to_owned());
             view.focus = Focus::Prompt;
             return DashboardAction::SelectWorkspace {
-                workspace_id: target.workspace_id,
+                workspace_id: workspace_id.to_owned(),
             };
         }
-        if let Some(session) = self.state.sessions.get(&target.session_id) {
+        if let Some(session) = self.state.sessions.get(session_id) {
             let key = self.project_source(session).key;
             self.collapsed_project_keys.remove(&key);
         }
@@ -680,11 +711,11 @@ impl DashboardState {
         if !self
             .ordered_sessions()
             .iter()
-            .any(|session| session.id == target.session_id)
+            .any(|session| session.id == session_id)
         {
             self.sessions_filter = None;
         }
-        self.select_active_session(&target.session_id);
+        self.select_active_session(session_id);
         self.open_selected_session()
     }
 
@@ -981,6 +1012,35 @@ impl DashboardState {
         }
     }
 
+    /// Whether the state letter, rather than the end of the session itself, is
+    /// what took the selected row off screen.
+    ///
+    /// The surface opens whatever the selection names, and opening a
+    /// conversation reads its answer. A state letter that re-pointed the
+    /// selection at the first row it admits would therefore read that answer,
+    /// and `d` admits exactly the sessions holding an unread answer: it would
+    /// hide the row it had just found. The state letters narrow the list and
+    /// leave the selection on the session the person chose, with no row
+    /// highlighted while they hide it. A typed query selects on names, which
+    /// opening a conversation cannot change, so it still carries the selection
+    /// to what it finds.
+    fn selection_is_hidden_by_state(&self) -> bool {
+        let Some(state) = self
+            .sessions_filter
+            .as_ref()
+            .and_then(|filter| filter.state)
+        else {
+            return false;
+        };
+        let Some(selected) = self.selected_session_id.as_deref() else {
+            return false;
+        };
+        self.ordered_sessions_unfiltered()
+            .into_iter()
+            .any(|session| session.id == selected)
+            && !state.admits(self.attention_level(selected))
+    }
+
     pub(crate) fn clamp_selections(&mut self) {
         // The selection is anchored by id, so it survives the list changing
         // under it; it only moves when the session it named stopped being on
@@ -995,6 +1055,7 @@ impl DashboardState {
             .selected_session_id
             .as_ref()
             .is_some_and(|id| visible.contains(id))
+            && !self.selection_is_hidden_by_state()
         {
             self.selected_session_id = visible.into_iter().next();
         }

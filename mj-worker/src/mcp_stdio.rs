@@ -324,7 +324,10 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Instant;
+
+    /// Only a guard against a hang, never a deadline a result is judged by, so
+    /// it can be as generous as a loaded machine needs.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     /// Collects everything the server writes, so a test can read it after
     /// `serve` has consumed the writer.
@@ -443,9 +446,15 @@ mod tests {
     fn socket_request_reports_a_missing_reply_within_the_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("worker.sock");
-        fake_worker(&socket, |_| std::thread::sleep(Duration::from_secs(2)));
+        // The worker never replies. It reports the event that proves the
+        // timeout fired instead of racing a wall clock: the client hung up,
+        // having been sent nothing.
+        let (hung_up_tx, hung_up_rx) = std::sync::mpsc::channel();
+        fake_worker(&socket, move |stream| {
+            let ended = stream.read(&mut [0u8; 1]);
+            let _ = hung_up_tx.send(matches!(ended, Ok(0)));
+        });
 
-        let started = Instant::now();
         let reply: Option<Value> = socket_request(
             &socket,
             &json!({"ping": true}),
@@ -453,11 +462,13 @@ mod tests {
             Duration::from_millis(200),
         )
         .unwrap();
+        // `Ok(None)` comes only from the read-timeout arm; a closed socket or
+        // an unreadable reply is an error instead.
         assert_eq!(reply, None);
-        assert!(
-            started.elapsed() < Duration::from_millis(1500),
-            "the call must give up at the reply timeout, took {:?}",
-            started.elapsed()
+        assert_eq!(
+            hung_up_rx.recv_timeout(HANG_GUARD),
+            Ok(true),
+            "the call must drop the connection once the reply timeout passes"
         );
     }
 

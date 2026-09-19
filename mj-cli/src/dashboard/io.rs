@@ -516,12 +516,8 @@ impl DashboardContext {
                         },
                         Ok(WorkerRecordPersistenceOutcome::TargetMissing(state)),
                     ) => {
-                        let applies = self
-                            .controller
-                            .state
-                            .sessions
-                            .get(&session_id)
-                            .is_some_and(|session| {
+                        let applies = self.controller.state.sessions.get(&session_id).is_some_and(
+                            |session| {
                                 matches!(
                                     session.state,
                                     SessionState::Provisioning
@@ -529,7 +525,8 @@ impl DashboardContext {
                                         | SessionState::Disconnected
                                         | SessionState::Error
                                 )
-                            });
+                            },
+                        );
                         if applies {
                             let notice = match state {
                                 SessionState::Error => {

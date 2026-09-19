@@ -1580,9 +1580,62 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             assert!(text.contains(": palette"), "{width}: {text:?}");
         }
         if width == 32 {
-            assert_eq!(text.trim_end(), ": palette · ? keys");
+            // The chords give way before the composer's own keys, so what a
+            // narrow row keeps is the key that works right here plus the two
+            // hints that lead to everything else.
+            assert_eq!(text.trim_end(), "Tab pane │ : palette · ? keys");
         }
     }
+}
+
+/// `symbols = "ascii"` is for a Linux console or a locale without UTF-8. The
+/// composer's own hints were written out with a literal middle dot joining
+/// them, so splitting on the glyph set's separator found nothing under the
+/// ASCII set and the dot reached the screen anyway. Each branch that builds
+/// those hints (idle, queued, and dictating) is checked here.
+#[test]
+fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let draw = |chat: &ChatState| {
+        // Wide enough that no hint gives way to the row's width limit; a
+        // dropped hint would hide the joiner this test exists to check.
+        let mut terminal = Terminal::new(TestBackend::new(200, 1)).expect("terminal");
+        theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_chat_footer(frame, test_footer(area), chat, true);
+                })
+                .expect("draw ascii footer");
+        });
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+
+    let idle = draw(&chat);
+    assert!(idle.is_ascii(), "{idle:?}");
+    assert!(idle.contains("Ctrl-V paste"), "{idle:?}");
+
+    chat.queued_prompts.push_back(queued("queued-1", "next"));
+    let queued_footer = draw(&chat);
+    assert!(queued_footer.is_ascii(), "{queued_footer:?}");
+    assert!(
+        queued_footer.contains("Ctrl-R history"),
+        "{queued_footer:?}"
+    );
+    chat.queued_prompts.clear();
+
+    // The dictating hint keeps its own "…" (unrelated to the separator this
+    // fix addresses), so only the joiner between hints is checked here.
+    chat.voice_active = true;
+    let dictating = draw(&chat);
+    assert!(!dictating.contains('\u{b7}'), "{dictating:?}");
+    assert!(dictating.contains("Listening"), "{dictating:?}");
 }
 
 #[test]
@@ -2307,7 +2360,7 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         "the transcript's titled border is the region's first row: {:?}",
         row(4)
     );
-    assert!(row(16).contains(VOICE_BUTTON_GLYPH), "{:?}", row(16));
+    assert!(row(16).contains(voice_button_glyph()), "{:?}", row(16));
     assert!(!row(16).contains("Prompt"), "{:?}", row(16));
     assert_eq!(
         row(17).chars().take(4).collect::<String>(),
@@ -2353,7 +2406,10 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
         let prompt_top = usize::from(input.y.saturating_sub(1));
         let prompt_bottom = prompt_top + 1 + usize::from(input.height);
         let prompt_title = &running[prompt_top];
-        assert!(prompt_title.contains(VOICE_BUTTON_GLYPH), "{prompt_title}");
+        assert!(
+            prompt_title.contains(voice_button_glyph()),
+            "{prompt_title}"
+        );
         assert!(!prompt_title.contains("Prompt"), "{prompt_title}");
         assert!(!prompt_title.contains("Running"), "{prompt_title}");
         let spinner_width = prompt_title

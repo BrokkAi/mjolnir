@@ -929,6 +929,10 @@ pub fn collapsed_streak_entries(members: &[ChatEntry]) -> Vec<ChatEntry> {
     projected
 }
 
+/// The mark the browser projection sends for one entry. The browser always has
+/// UTF-8, so these stay Unicode; a terminal reads its marks from the symbol set
+/// in force instead (`mj_chat`'s `role_glyph`), because a Linux console or a
+/// locale without UTF-8 draws mojibake for them.
 pub fn entry_glyph(entry: &ChatEntry) -> &'static str {
     match entry.role {
         ChatRole::User => "❯",

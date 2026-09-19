@@ -2369,6 +2369,97 @@ fn codex_lookup_by_id_reports_a_symlinked_rollout() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
+#[cfg(unix)]
+#[test]
+fn codex_lookup_by_id_stops_at_the_rollout_depth_inside_a_symlinked_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    // A symlink in the sessions tree can point at anything, including a tree far
+    // deeper than a rollout can sit in. Walking all of it would make the lookup
+    // read an unbounded number of directories.
+    let linked = directory.path().join("elsewhere");
+    let mut deep = linked.clone();
+    for level in 0..12 {
+        deep = deep.join(format!("level-{level}"));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(
+        deep.join(format!(
+            "rollout-2026-08-10T00-00-00-{NAMED_LOOKUP_ID}.jsonl"
+        )),
+        json!({"type": "session_meta", "payload": {"id": NAMED_LOOKUP_ID, "cwd": "/work/app"}})
+            .to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(directory.path().join("sessions")).unwrap();
+    std::os::unix::fs::symlink(&linked, directory.path().join("sessions/linked")).unwrap();
+
+    let error = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("was not found"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_lookup_by_id_reports_a_rollout_behind_a_symlinked_day_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    // A symlink standing in for one level of the rollout shape is still read, so
+    // the depth bound does not turn this refusal back into "not found".
+    let stored = directory.path().join("stored");
+    fs::create_dir_all(&stored).unwrap();
+    fs::write(
+        stored.join(format!(
+            "rollout-2026-08-10T00-00-00-{NAMED_LOOKUP_ID}.jsonl"
+        )),
+        json!({"type": "session_meta", "payload": {"id": NAMED_LOOKUP_ID, "cwd": "/work/app"}})
+            .to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(directory.path().join("sessions/2026/08")).unwrap();
+    std::os::unix::fs::symlink(&stored, directory.path().join("sessions/2026/08/10")).unwrap();
+
+    let error = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("is a symlinked rollout directory"),
+        "{error}"
+    );
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_lookup_by_id_reports_a_directory_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let day = directory.path().join("sessions/2026/08/10");
+    fs::create_dir_all(&day).unwrap();
+    fs::set_permissions(&day, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root ignores the mode, so there is nothing to observe there.
+    if fs::read_dir(&day).is_ok() {
+        return;
+    }
+
+    let error = locate_codex_session(
+        directory.path(),
+        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    fs::set_permissions(&day, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(error.contains("cannot be read"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
 #[test]
 fn codex_lookup_by_id_still_reports_a_missing_session_as_not_found() {
     let directory = tempfile::tempdir().unwrap();
@@ -2472,6 +2563,37 @@ fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("is a symlink"), "{error}");
+    assert!(!error.contains("was not found"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn grok_listing_and_lookup_agree_about_a_symlinked_working_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    // The session directory itself is real; only the working directory above it
+    // is a symlink, so the archive step would store nothing for this session.
+    let stored = directory.path().join("stored/%2Fwork%2Fapp");
+    let session = stored.join(NAMED_LOOKUP_ID);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("summary.json"),
+        json!({"info": {"cwd": "/work/app"}}).to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(directory.path().join("sessions")).unwrap();
+    std::os::unix::fs::symlink(&stored, directory.path().join("sessions/%2Fwork%2Fapp")).unwrap();
+
+    assert!(list_grok_sessions(directory.path()).unwrap().is_empty());
+    let error = locate_grok_session(
+        directory.path(),
+        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("is a symlinked working directory"),
+        "{error}"
+    );
     assert!(!error.contains("was not found"), "{error}");
 }
 

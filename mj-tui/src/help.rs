@@ -42,6 +42,9 @@ pub(crate) struct HelpOverlay {
     pub(crate) return_to: Box<Mode>,
     pub(crate) form: RefCell<Form<()>>,
     pub(crate) area: Cell<Rect>,
+    /// Rows the last frame gave the list, so scrolling can stop once the final
+    /// line is on screen. Zero until the overlay has been drawn once.
+    pub(crate) body_rows: Cell<u16>,
 }
 
 /// The composer's own keys, which the chat handles rather than the dashboard,
@@ -95,6 +98,7 @@ impl DashboardState {
             return_to: Box::new(previous),
             form: RefCell::new(Form::default()),
             area: Cell::new(Rect::default()),
+            body_rows: Cell::new(0),
         });
     }
 
@@ -107,7 +111,7 @@ impl DashboardState {
     }
 
     pub(crate) fn handle_help_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
-        let last = self.help_last_line();
+        let last = self.help_max_scroll();
         let Mode::Help(overlay) = &mut self.mode else {
             return DashboardAction::None;
         };
@@ -133,37 +137,44 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    /// The index of the last line the overlay can scroll to, under the filter
-    /// in force.
-    fn help_last_line(&self) -> usize {
-        let query = match &self.mode {
-            Mode::Help(overlay) => overlay.query.clone(),
-            _ => String::new(),
+    /// The furthest the overlay can scroll under the filter in force: the
+    /// offset that puts the last line on the last drawn row. A list that
+    /// already fits cannot scroll at all, so the scrolling keys never push the
+    /// prefix line or a group heading off the top to show blank rows.
+    ///
+    /// Before the first frame there is no viewport to consult, so the whole
+    /// list is treated as one row and the next frame clamps it properly.
+    fn help_max_scroll(&self) -> usize {
+        let (query, rows) = match &self.mode {
+            Mode::Help(overlay) => (
+                overlay.query.clone(),
+                usize::from(overlay.body_rows.get()).max(1),
+            ),
+            _ => (String::new(), 1),
         };
-        help_lines(self, &query).len().saturating_sub(1)
+        help_lines(self, &query).len().saturating_sub(rows)
     }
 
     pub(crate) fn handle_help_key(&mut self, key: KeyEvent) -> DashboardAction {
-        let last = self.help_last_line();
+        let last = self.help_max_scroll();
         let Mode::Help(mut overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             unreachable!("help input requires the help overlay");
         };
         // While the filter has focus every printable key is filter text, so
         // `j`, `k` and `?` type rather than scroll or close. Only the keys
         // that cannot be text — the arrows and the Page keys — still move the
-        // list.
+        // list. Esc answers the innermost thing there is: the query and the box
+        // it was typed in, and only once the list has the keyboard back does it
+        // close the overlay.
         if overlay.search_focused {
             match key.code {
                 KeyCode::Enter => {
                     self.mode = *overlay.return_to;
                     return DashboardAction::None;
                 }
-                // Esc with nothing typed closes help, as it does everywhere
-                // else; with a query it clears the query first.
-                KeyCode::Esc if overlay.query.is_empty() => {
-                    self.mode = *overlay.return_to;
-                    return DashboardAction::None;
-                }
+                // Esc leaves the box whether or not anything is left in it: a
+                // filter emptied with Ctrl-U still holds the keyboard, and
+                // closing the dialog around a focused input would surprise.
                 KeyCode::Esc => {
                     overlay.query.clear();
                     overlay.search_focused = false;
@@ -172,6 +183,12 @@ impl DashboardState {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     overlay.query.clear();
                     overlay.scroll = 0;
+                }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_sub(1);
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_add(1).min(last);
                 }
                 KeyCode::Backspace => {
                     overlay.query.pop();
@@ -393,6 +410,7 @@ pub(crate) fn render_help(
         body,
     );
     overlay.area.set(popup);
+    overlay.body_rows.set(body.height);
     form.end_frame(());
 }
 
@@ -548,6 +566,123 @@ mod tests {
         assert!(rendered.contains("Command palette"), "{rendered}");
         assert!(rendered.contains("Create session"), "{rendered}");
         // A second Esc, with nothing to clear, closes as it always did.
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(dashboard.mode, Mode::Dashboard);
+    }
+
+    /// The filter keeps every printable key as text, so walking the matches
+    /// needs a chord. `ctrl+n` and `ctrl+p` move while `n` and `p` still type,
+    /// the same pairing the command palette already answers.
+    #[test]
+    fn ctrl_n_and_ctrl_p_move_the_help_filter_while_plain_letters_type() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        chord(&mut dashboard, crate::CommandId::Help);
+        dashboard.handle_key(key(KeyCode::Char('/')));
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.scroll, 1);
+        assert_eq!(overlay.query, "");
+
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.scroll, 0);
+        assert_eq!(overlay.query, "");
+
+        for character in "np".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.query, "np");
+        assert!(overlay.search_focused);
+    }
+
+    /// Scrolling stops once the last line is on screen. A body that already
+    /// fits cannot scroll at all: pushing past it used to take the prefix line
+    /// and the group heading off the top, leaving one match over blank rows.
+    #[test]
+    fn help_does_not_scroll_a_body_that_already_fits() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        chord(&mut dashboard, crate::CommandId::Help);
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "palette".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let rendered = drawn(&mut dashboard, 200, 60).join("\n");
+        assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
+        assert!(rendered.contains("Anywhere"), "{rendered}");
+
+        for code in [
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::PageDown,
+            KeyCode::End,
+        ] {
+            dashboard.handle_key(key(code));
+            assert!(
+                matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll == 0),
+                "{code:?} scrolled a list that fits: {:?}",
+                dashboard.mode
+            );
+        }
+        let rendered = drawn(&mut dashboard, 200, 60).join("\n");
+        assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
+        assert!(rendered.contains("Anywhere"), "{rendered}");
+
+        // A list that does not fit still scrolls, to the offset that puts its
+        // last line on the last row and no further.
+        for _ in 0.."palette".len() {
+            dashboard.handle_key(key(KeyCode::Backspace));
+        }
+        let lines = help_lines(&dashboard, "").len();
+        let rows = drawn(&mut dashboard, 200, 30);
+        dashboard.handle_key(key(KeyCode::End));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        let body = usize::from(overlay.body_rows.get());
+        assert!(
+            body > 0 && body < lines,
+            "{body} of {lines} rows: {rows:#?}"
+        );
+        assert_eq!(overlay.scroll, lines - body);
+    }
+
+    /// Esc answers the innermost thing there is: the query, then the box it was
+    /// typed in, and only then the overlay. Emptying the box with Ctrl-U leaves
+    /// it focused, so the next Esc has to leave the box rather than close the
+    /// dialog around a focused input.
+    #[test]
+    fn esc_leaves_the_focused_help_filter_before_it_closes_help() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        chord(&mut dashboard, crate::CommandId::Help);
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "palette".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("the help overlay stays open");
+        };
+        assert_eq!(overlay.query, "");
+        assert!(overlay.search_focused, "Ctrl-U keeps the box focused");
+
+        dashboard.handle_key(key(KeyCode::Esc));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            panic!("Esc must leave the filter box before it closes help");
+        };
+        assert!(!overlay.search_focused);
         dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(dashboard.mode, Mode::Dashboard);
     }

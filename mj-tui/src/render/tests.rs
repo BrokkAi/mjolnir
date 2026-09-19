@@ -381,7 +381,7 @@ fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
             let sessions = dashboard.pane_areas.expect("dashboard panes")[0];
             assert_eq!(sessions.width, expected_sidebar);
             assert!(rendered.contains("Create"), "{rendered}");
-            assert!(rendered.contains("Resume"), "{rendered}");
+            assert!(rendered.contains("Open"), "{rendered}");
             assert!(rendered.contains("Q"), "{rendered}");
             assert!(
                 dashboard
@@ -398,7 +398,7 @@ fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
     let sessions = minimized.pane_areas.expect("minimized panes")[0];
     assert_eq!(sessions.width, 20);
     assert!(rendered.contains("Create"), "{rendered}");
-    assert!(rendered.contains("Resume"), "{rendered}");
+    assert!(rendered.contains("Open"), "{rendered}");
     assert!(
         minimized
             .session_row_areas
@@ -1387,7 +1387,9 @@ fn dashboard_stacks_below_80_columns_and_gives_up_below_60() {
         lines.iter().any(|line| line.contains("Conversation")),
         "{lines:#?}"
     );
-    assert!(lines.last().unwrap().contains("ctrl+b"), "{lines:#?}");
+    // Seventy columns has no room for the chord list, so what the row keeps is
+    // the pane's own keys and the two hints that lead to all the others.
+    assert!(lines.last().unwrap().contains("? keys"), "{lines:#?}");
 
     // From 80 columns the sidebar sits beside the conversation again.
     let lines = drawn(&mut dashboard, 80, 30);
@@ -1530,10 +1532,21 @@ fn footer_drops_whole_hints_when_the_width_runs_out() {
         if width >= 20 {
             assert!(footer.contains(": palette"), "{width}: {footer}");
         }
-        // Every hint that survived is a whole hint of the full text.
+        // Every hint that survived is a whole hint of the full text. The
+        // prefix label moves to whichever chord survives first, so it is
+        // set aside before comparing.
+        let unlabeled = |hint: &str| {
+            hint.strip_prefix("ctrl+b then: ")
+                .unwrap_or(hint)
+                .to_owned()
+        };
+        let whole = footer_hints(&full)
+            .iter()
+            .map(|hint| unlabeled(hint))
+            .collect::<Vec<_>>();
         for hint in footer_hints(&footer) {
             assert!(
-                footer_hints(&full).contains(&hint),
+                whole.contains(&unlabeled(&hint)),
                 "{width}: {hint:?} is not a whole hint of {full:?}"
             );
         }
@@ -1565,7 +1578,10 @@ fn the_footer_shows_the_prefix_banner_while_a_chord_is_pending() {
         dashboard.cancel_prefix();
         let lines = drawn(&mut dashboard, 120, 40);
         assert!(
-            lines.last().expect("the footer row").contains("q detach"),
+            lines
+                .last()
+                .expect("the footer row")
+                .contains("ctrl+b then:"),
             "{focus:?}"
         );
     }
@@ -1595,6 +1611,24 @@ fn footer_hints(footer: &str) -> Vec<String> {
         .collect()
 }
 
+/// The prefix label rides on the first chord hint, which is also the first
+/// chord a narrow row gives up. The label must outlive it: a row reading
+/// `: palette · ? keys` would say `:` alone opens the palette.
+#[test]
+fn the_prefix_is_still_named_when_only_protected_chords_survive() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    let footer = combined_footer_text(&dashboard, 60);
+    assert_eq!(
+        footer, "Enter open │ ctrl+b then: : palette · ? keys",
+        "{footer}"
+    );
+    assert!(
+        !combined_footer_text(&dashboard, 200).contains("then: : palette"),
+        "a wide row keeps the label on the first chord"
+    );
+}
+
 /// The row is read left to right by someone hunting one key, so the kinds of
 /// key never swap places: what this pane answers, then the keys that follow
 /// the prefix, in one rank order. The chord group leads with the prefix
@@ -1605,9 +1639,31 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
-         · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette \
-         · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+         · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering \
+         · : palette · ? keys"
+    );
+
+    // At the widths people actually work at, the pane group stays whole and the
+    // chord list gives way from its right-hand end.
+    assert_eq!(
+        combined_footer_text(&dashboard, 160),
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+         · a read · b panes · q detach · u web · : palette · ? keys"
+    );
+    assert_eq!(
+        combined_footer_text(&dashboard, 140),
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+         · a read · b panes · q detach · : palette · ? keys"
+    );
+    // The filter letters are what the search hint is there to teach, and 140
+    // columns is an ordinary window, so that hint has to survive at that width.
+    assert!(
+        footer_hints(&combined_footer_text(&dashboard, 140))
+            .iter()
+            .any(|hint| hint == "/ search (filter a/b/w/i/d)"),
+        "{}",
+        combined_footer_text(&dashboard, 140)
     );
 
     // The cancel chord takes its fixed place before detach, and only while
@@ -1627,10 +1683,12 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     );
 }
 
-/// Pane hints give way before the prefix chords, and help and palette remain
-/// visible after every other chord has been dropped.
+/// The prefix chords give way before the pane's own hints, and help and palette
+/// remain visible after every other hint has been dropped. The pane group is
+/// the short list of keys that work right here; the chord group is the long one
+/// the palette holds in full, so the long one is what a narrow row gives up.
 #[test]
-fn footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest() {
+fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.focus_sessions();
@@ -1641,11 +1699,20 @@ fn footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest() {
         "{full}"
     );
 
-    // Narrow enough to lose the pane group, wide enough to keep chords.
+    // Narrow enough to lose every chord, still wide enough for everything the
+    // focused pane answers.
     let squeezed = combined_footer_text(&dashboard, 90);
-    assert!(!squeezed.contains("Enter open"), "{squeezed}");
-    assert!(squeezed.contains("ctrl+b then: c create"), "{squeezed}");
-    assert!(squeezed.ends_with(": palette · ? keys"), "{squeezed}");
+    assert_eq!(
+        squeezed,
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: : palette · ? keys"
+    );
+
+    // Narrower still, the pane hints give way from the right as well, and the
+    // prefix label stays on the first chord left standing.
+    assert_eq!(
+        combined_footer_text(&dashboard, 52),
+        "Enter open │ ctrl+b then: : palette · ? keys"
+    );
 
     assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
     assert_eq!(combined_footer_text(&dashboard, 6), "? keys");
@@ -1778,7 +1845,7 @@ fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
     let lines = drawn(&mut empty, 120, 44).join("\n");
     assert!(lines.contains("No live session"), "{lines}");
     assert!(
-        lines.contains("ctrl+b c to create a session or ctrl+b g to resume one"),
+        lines.contains("ctrl+b c to create a session or ctrl+b g to find one"),
         "{lines}"
     );
 
@@ -2988,6 +3055,35 @@ fn capacity_pane_renders_grouped_host_load_without_sample_clock() {
         .find(|line| line.contains("Host / fleet") && line.contains("Targets"))
         .expect("capacity header");
     assert!(header.contains("In Use"));
+}
+
+/// `symbols = "ascii"` must reach the Targets pane's own summary text: the
+/// "% CPU · % RAM" join was a literal Unicode dot, so it survived the ASCII
+/// set while every other glyph in the row correctly swapped. The symbol set
+/// is read from the dashboard's own configuration, the way a running session
+/// selects it, rather than through the thread-local override the render
+/// pipeline itself already scopes to that configuration.
+#[test]
+fn ascii_symbols_reach_the_capacity_panes_cpu_and_ram_join() {
+    let mut ascii_config = config();
+    ascii_config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    let mut dashboard = DashboardState::new(ascii_config, State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(host_capacity_usage())),
+        now_epoch_seconds(),
+    );
+    let rendered = drawn_dashboard(&mut dashboard, 200);
+    let cpu_ram_line = rendered
+        .lines()
+        .find(|line| line.contains("% CPU"))
+        .expect("capacity row");
+    assert!(cpu_ram_line.is_ascii(), "{cpu_ram_line:?}");
+    assert!(
+        cpu_ram_line.contains("37% CPU - 75% RAM"),
+        "{cpu_ram_line:?}"
+    );
 }
 
 #[test]

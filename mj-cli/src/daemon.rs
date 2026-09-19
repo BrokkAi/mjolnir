@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::{
-    process_executable_path, process_runs_this_executable, running_executable_path,
+    describe_executable, process_executable_path, process_runs_this_executable,
+    running_executable_path,
 };
 pub(crate) use mj_controller::daemon::run_daemon_process;
 use std::fs::{self, OpenOptions};
@@ -89,7 +90,7 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
 /// requirement is visible at every call site.
 async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonClient> {
     if let Ok(metadata) = read_metadata_any() {
-        ensure_supported_daemon_protocol(metadata.protocol_version)?;
+        ensure_supported_daemon_protocol(&metadata)?;
     }
     maybe_replace_stale_development_daemon().await?;
     if let Ok(metadata) = read_metadata_any()

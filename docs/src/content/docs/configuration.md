@@ -168,7 +168,7 @@ The default bindings:
 | `settings` | `prefix+s` | Open Settings |
 | `detach` | `prefix+q` | Detach this terminal |
 | `new_session` | `prefix+c` | Open the session creation wizard |
-| `resume` | `prefix+g` | Open the Resume picker |
+| `resume` | `prefix+g` | Open the session dialog on every running session, with the resume, import, and archive lists on its other tabs |
 | `workspace_manager` | `prefix+shift+n` | Open workspace management |
 | `focus_workspaces` | `prefix+w` | Focus the workspace tab row |
 | `next_workspace` | `prefix+n` | Select the next workspace |

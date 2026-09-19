@@ -1338,6 +1338,7 @@ fn button_confirmations_keep_their_button_row_visible() {
 fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.show_resume_dialog(1, Vec::new());
+    focus_resume_hel_rows(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Delete));
     let Mode::Confirm(dialog) = &dashboard.mode else {
         panic!("expected destroy confirmation");

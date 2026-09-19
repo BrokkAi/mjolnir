@@ -36,8 +36,41 @@ impl PathField {
     /// The popup is at most this many rows tall, matching the shared popup shell.
     const VISIBLE_ROWS: usize = 8;
 
+    /// The rows the popup needs beneath the field, its border included, or
+    /// zero when nothing is open. A dialog reserves these so a popup never
+    /// lands on the button row and never grows past its frame.
+    #[must_use]
+    pub fn popup_rows(input: &crate::path_input::PathInput) -> u16 {
+        let rows = if input.is_completing() {
+            input.completions().len().min(Self::VISIBLE_ROWS)
+        } else if input.completion_pending().is_some() {
+            1
+        } else {
+            return 0;
+        };
+        u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
+    }
+
     pub fn render<K: Copy + Eq>(
         frame: &mut ratatui::Frame<'_>,
+        area: ratatui::layout::Rect,
+        input: &crate::path_input::PathInput,
+        form: &mut Form<K>,
+        id: K,
+    ) {
+        let bounds = frame.area();
+        Self::render_within(frame, bounds, area, input, form, id);
+    }
+
+    /// Draws the field with its popup confined to `bounds`.
+    ///
+    /// The popup belongs to the surface that owns the field, so that surface
+    /// says which rows it can spare: pass the region above a dialog's button
+    /// row and the popup opens upward, or shrinks, instead of painting over
+    /// the buttons, the frame, or the screen behind the dialog.
+    pub fn render_within<K: Copy + Eq>(
+        frame: &mut ratatui::Frame<'_>,
+        bounds: ratatui::layout::Rect,
         area: ratatui::layout::Rect,
         input: &crate::path_input::PathInput,
         form: &mut Form<K>,
@@ -50,7 +83,6 @@ impl PathField {
         if !form.is_focused(id) {
             return;
         }
-        let bounds = frame.area();
         if input.is_completing() {
             let candidates = input.completions();
             let title = if input.completion_truncated() {

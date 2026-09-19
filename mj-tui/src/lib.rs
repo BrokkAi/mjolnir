@@ -808,10 +808,11 @@ pub struct DashboardState {
     /// a second for the activity labels; empty when no dialog is open.
     pub(crate) resume_rows: Vec<crate::resume::ResumeRow>,
     /// How many rows the current query matched on each tab, indexed by
-    /// `ResumeTab::index`. All zero when nothing is typed. Rebuilt beside
+    /// `ResumeTab::index`. All zero when nothing is typed, and always zero for
+    /// the Live tab, which matches names rather than the index. Rebuilt beside
     /// `resume_rows`, from the same merge, so the tabs a person is not looking
     /// at can still say where their hits are.
-    pub(crate) resume_hit_counts: [usize; 3],
+    pub(crate) resume_hit_counts: [usize; crate::resume::ResumeTab::COUNT],
     /// Row hitboxes for the Active pane, keyed by the row's index into the
     /// active session list. Each rect spans the summary line and every
     /// visible preview line beneath it, so a click anywhere on the row
@@ -992,7 +993,7 @@ impl DashboardState {
             sessions_filter: None,
             recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
-            resume_hit_counts: [0; 3],
+            resume_hit_counts: [0; crate::resume::ResumeTab::COUNT],
             session_row_areas: Vec::new(),
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),

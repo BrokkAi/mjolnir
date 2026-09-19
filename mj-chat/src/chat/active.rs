@@ -43,8 +43,8 @@ use super::remote::{
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
 };
 use super::rendering::{
-    VOICE_BUTTON_GLYPH, display_width, truncate_line_to_width, truncate_to_width,
-    voice_button_area, voice_button_line, wrap_styled_line,
+    display_width, truncate_line_to_width, truncate_to_width, voice_button_area,
+    voice_button_glyph, voice_button_line, wrap_styled_line,
 };
 use super::second_opinion::{
     CapturedProposal, ReviewerPane, SecondOpinion, SecondOpinionIntent, render_reviewer,

@@ -624,12 +624,14 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::ResumeDialog,
-        label: "Resume a session",
-        description: "Open the picker for every session that is not live.",
+        label: "Sessions",
+        description: "Open every running session, in every workspace, on one list. \
+                      The tabs to its right list the sessions that can be resumed, \
+                      imported, or restored from the search index.",
         scope: Scope::Global,
         pane_keys: &[],
         action: Some(KeyAction::Resume),
-        footer: footer_word!("resume"),
+        footer: footer_word!("sessions"),
         footer_group: FooterGroup::Chord,
         footer_rank: 1,
         available: always_ready,
@@ -653,7 +655,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Sessions,
         pane_keys: &[KeyHint::plain(KeyCode::Char('/'), "/")],
         action: None,
-        footer: footer_word!("search"),
+        footer: footer_word!("search (filter a/b/w/i/d)"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: always_ready,
@@ -893,7 +895,9 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::PaneSize),
-        footer: footer_word!("size"),
+        // The pane title carries clickable size controls in the place they
+        // apply, so the footer spends its width on keys with no such affordance.
+        footer: no_footer,
         footer_group: FooterGroup::Chord,
         footer_rank: 3,
         available: support_pane_focused,

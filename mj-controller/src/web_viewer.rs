@@ -603,10 +603,9 @@ mod tests {
         let mut options = options(address);
         options.set_api_token("test-api-token".to_owned());
         let cancel = options.shutdown.clone();
-        let mut server =
-            crate::server_runtime::ViewerServer::spawn(crate::server::run_server_on_listener(
-                options, listener,
-            ));
+        let mut server = crate::server_runtime::ViewerServer::spawn(
+            crate::server::run_server_on_listener(options, listener),
+        );
 
         let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
         // A turn that occupies its task for far longer than the client waits.

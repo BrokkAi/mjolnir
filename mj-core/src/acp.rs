@@ -232,6 +232,26 @@ pub fn session_config_choices(
         .collect()
 }
 
+/// `a` or `an` for a session-configuration key, so a sentence built from the
+/// key's own name reads as English: "a model selector", "an effort selector".
+pub fn config_key_article(key: &str) -> &'static str {
+    if key.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// What to report when the harness advertises no selector for `key` at all.
+/// The worker and the terminal say the same words, so the refusal a surface
+/// shows the moment it knows and the one the transcript records agree.
+pub fn missing_config_selector_refusal(key: &str) -> String {
+    format!(
+        "ACP bridge does not expose {} {key} selector",
+        config_key_article(key)
+    )
+}
+
 pub fn find_session_config_option<'a>(
     options: &'a [SessionConfigOption],
     key: &str,

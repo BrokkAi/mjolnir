@@ -186,31 +186,32 @@ pub fn run_with_config_path(
     apple_platform: ApplePlatform,
     options: DoctorOptions,
 ) -> Vec<DoctorCheck> {
-    let (config, mut checks) = configuration_checks(config_path);
-    checks.push(harness_discovery_check(config.as_ref(), executor));
-    checks.extend(harness_checks(config.as_ref(), executor));
-    checks.extend(subagent_eligibility_checks(config.as_ref()));
-    checks.extend(podman_checks(config.as_ref(), executor, options.smoke));
-    checks.extend(docker_checks(config.as_ref(), executor, options.smoke));
-    checks.extend(ssh_bare_checks(config.as_ref(), executor));
-    checks.extend(ssh_podman_checks(config.as_ref(), executor, options.smoke));
-    checks.extend(ssh_docker_checks(config.as_ref(), executor, options.smoke));
-    checks.extend(aws_checks(config.as_ref(), executor));
-    checks.extend(worker_binary_checks(config.as_ref()));
+    let (loaded, mut checks) = configuration_checks(config_path);
+    let config: ConfigStatus<'_> = loaded.as_ref().map_err(|gap| *gap);
+    checks.push(harness_discovery_check(config, executor));
+    checks.extend(harness_checks(config, executor));
+    checks.extend(subagent_eligibility_checks(config));
+    checks.extend(podman_checks(config, executor, options.smoke));
+    checks.extend(docker_checks(config, executor, options.smoke));
+    checks.extend(ssh_bare_checks(config, executor));
+    checks.extend(ssh_podman_checks(config, executor, options.smoke));
+    checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(aws_checks(config, executor));
+    checks.extend(worker_binary_checks(config));
     checks.push(daemon_build_check());
-    checks.extend(worker_freshness_checks(config.as_ref()));
-    checks.extend(review_residue_checks(config.as_ref()));
+    checks.extend(worker_freshness_checks(config));
+    checks.extend(review_residue_checks(config));
     checks.push(apple_container_check(
         &apple_platform,
         executor,
         options.smoke,
-        apple_container_image(config.as_ref()),
+        apple_container_image(config),
     ));
     checks
 }
 
 fn harness_discovery_check(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let home = dirs::home_dir();
@@ -220,7 +221,7 @@ fn harness_discovery_check(
     let discovered = discover_harness_homes_with_executor(home.as_deref(), overrides, executor);
     harness_discovery_check_from(
         &discovered,
-        config.is_some_and(|config| !config.profiles.is_empty()),
+        config.is_ok_and(|config| !config.profiles.is_empty()),
     )
 }
 
@@ -335,10 +336,43 @@ Podman prerequisites. Resolve every `fixable` status before starting a session."
     }
 }
 
-fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
+/// Why `mj doctor` has no configuration for the checks that need one.
+///
+/// The two cases call for opposite advice, so every dependent check is told
+/// which one it is: a file this build cannot read because a newer Mjolnir
+/// wrote it is not broken, and telling the user to fix or replace it would
+/// destroy that build's settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigGap {
+    /// A newer Mjolnir wrote the file; the value is the version it carries.
+    NewerVersion(u32),
+    /// The file is missing, or is not valid Mjolnir TOML.
+    Unreadable,
+}
+
+/// What a dependent check works from: the loaded configuration, or why there
+/// is none.
+type ConfigStatus<'a> = std::result::Result<&'a Config, ConfigGap>;
+
+/// What a check reports when the configuration came from a newer Mjolnir.
+///
+/// Nothing about the check can be evaluated, and nothing the user does to
+/// `config.toml` would help, so the check skips and names the one real fix.
+fn newer_config_skip(id: &str, title: &str, version: u32) -> DoctorCheck {
+    DoctorCheck::unsupported(
+        id,
+        title,
+        format!(
+            "Skipped: config.toml was written by a newer Mjolnir (config version {version}; this build supports {}). Update Mjolnir to that build or newer.",
+            mj_core::config::CONFIG_VERSION
+        ),
+    )
+}
+
+fn configuration_checks(path: &Path) -> (std::result::Result<Config, ConfigGap>, Vec<DoctorCheck>) {
     if !path.exists() {
         return (
-            None,
+            Err(ConfigGap::Unreadable),
             vec![DoctorCheck::fixable(
                 "config",
                 "Mjolnir configuration",
@@ -352,7 +386,7 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
     // wrong before the load below reports it as invalid.
     if let Some(found) = mj_core::config::newer_version_on_disk(path) {
         return (
-            None,
+            Err(ConfigGap::NewerVersion(found)),
             vec![DoctorCheck::fixable(
                 "config",
                 "Mjolnir configuration",
@@ -386,10 +420,10 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
                     "At least one profile, bundle, and target are configured.",
                 ));
             }
-            (Some(config), checks)
+            (Ok(config), checks)
         }
         Err(error) => (
-            None,
+            Err(ConfigGap::Unreadable),
             vec![DoctorCheck::fixable(
                 "config",
                 "Mjolnir configuration",
@@ -400,14 +434,24 @@ fn configuration_checks(path: &Path) -> (Option<Config>, Vec<DoctorCheck>) {
     }
 }
 
-fn harness_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
-        return vec![DoctorCheck::fixable(
-            "harness.profiles",
-            "Harness profiles",
-            "Harness homes cannot be checked until config.toml is valid.",
-            "Fix config.toml, then rerun `mj doctor --json`.",
-        )];
+fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
+    let config = match config {
+        Ok(config) => config,
+        Err(ConfigGap::NewerVersion(version)) => {
+            return vec![newer_config_skip(
+                "harness.profiles",
+                "Harness profiles",
+                version,
+            )];
+        }
+        Err(ConfigGap::Unreadable) => {
+            return vec![DoctorCheck::fixable(
+                "harness.profiles",
+                "Harness profiles",
+                "Harness homes cannot be checked until config.toml is valid.",
+                "Fix config.toml, then rerun `mj doctor --json`.",
+            )];
+        }
     };
     if config.profiles.is_empty() {
         return vec![DoctorCheck::fixable(
@@ -517,8 +561,8 @@ fn unscopable_home_is_ignored(config: &Config, profile: &HarnessProfile) -> Opti
 /// enabled profile. This surfaces the contradiction so the eligible list and
 /// the profile's `enabled` flag can be reconciled, rather than leaving a profile
 /// the user meant to use silently unavailable.
-fn subagent_eligibility_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+fn subagent_eligibility_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
         return Vec::new();
     };
     config
@@ -570,7 +614,7 @@ fn harness_login_remediation(id: &str, profile: &HarnessProfile) -> String {
 /// The image checks run only after the host preflight passes, because a broken
 /// Podman installation already reports its own actionable check.
 fn podman_checks(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
@@ -583,13 +627,19 @@ fn podman_checks(
     checks
 }
 
-fn podman_check(config: Option<&Config>, executor: &impl CommandExecutor) -> DoctorCheck {
-    let Some(config) = config else {
-        return DoctorCheck::unsupported(
-            "runtime.podman",
-            "Rootless Podman",
-            "Podman prerequisites cannot be evaluated until config.toml is valid.",
-        );
+fn podman_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> DoctorCheck {
+    let config = match config {
+        Ok(config) => config,
+        Err(ConfigGap::NewerVersion(version)) => {
+            return newer_config_skip("runtime.podman", "Rootless Podman", version);
+        }
+        Err(ConfigGap::Unreadable) => {
+            return DoctorCheck::unsupported(
+                "runtime.podman",
+                "Rootless Podman",
+                "Podman prerequisites cannot be evaluated until config.toml is valid.",
+            );
+        }
     };
     if local_podman_targets(config).is_empty() {
         return DoctorCheck::unsupported(
@@ -638,11 +688,11 @@ fn local_podman_targets(config: &Config) -> Vec<(&String, &ContainerTemplate)> {
 }
 
 fn podman_image_checks(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+    let Ok(config) = config else {
         return Vec::new();
     };
     local_podman_targets(config)
@@ -717,16 +767,22 @@ fn missing_image_remediation(image: &str) -> String {
 
 /// Host Docker prerequisites, then one image check per `local-docker` target.
 fn docker_checks(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
-        return vec![DoctorCheck::unsupported(
-            "runtime.docker",
-            "Docker",
-            "Docker prerequisites cannot be evaluated until config.toml is valid.",
-        )];
+    let config = match config {
+        Ok(config) => config,
+        Err(ConfigGap::NewerVersion(version)) => {
+            return vec![newer_config_skip("runtime.docker", "Docker", version)];
+        }
+        Err(ConfigGap::Unreadable) => {
+            return vec![DoctorCheck::unsupported(
+                "runtime.docker",
+                "Docker",
+                "Docker prerequisites cannot be evaluated until config.toml is valid.",
+            )];
+        }
     };
     let targets = local_docker_targets(config);
     if targets.is_empty() {
@@ -990,8 +1046,8 @@ fn ssh_identity_file(ssh: &RuntimeSshTarget) -> Option<&str> {
 }
 
 /// One check per `ssh-bare` target: can Hel reach the host noninteractively?
-fn ssh_bare_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
         return Vec::new();
     };
     config
@@ -1032,11 +1088,11 @@ fn ssh_bare_check(
 /// Two checks per `ssh-podman` target: the same Podman probes run over SSH,
 /// then the host limits that only bite under provisioning load.
 fn ssh_podman_checks(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+    let Ok(config) = config else {
         return Vec::new();
     };
     config
@@ -1380,11 +1436,11 @@ fn ssh_podman_limits_check(
 /// One check per `ssh-docker` target: Docker daemon, image, and optional
 /// remote OverlayFS smoke test, all executed on the SSH host.
 fn ssh_docker_checks(
-    config: Option<&Config>,
+    config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
     smoke: bool,
 ) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+    let Ok(config) = config else {
         return Vec::new();
     };
     config
@@ -1544,8 +1600,8 @@ const AWS_CLI_INSTALL_URL: &str =
 
 /// One check per `aws-ec2` target: the AWS CLI, its credentials, and the
 /// configured launch template.
-fn aws_checks(config: Option<&Config>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+fn aws_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
         return Vec::new();
     };
     config
@@ -1723,10 +1779,11 @@ fn daemon_build_check() -> DoctorCheck {
             ID,
             TITLE,
             format!(
-                "Daemon {pid} runs {}, while this client runs {}. Both report version {}, so the version alone cannot tell them apart. Code rebuilt since that daemon started is not running.",
-                describe_executable(mj_client::executable::process_executable_path(pid)),
-                describe_executable(mj_client::executable::running_executable_path()),
-                metadata.build_version,
+                "{}. Two builds can report the same version, so the files are what tell them apart. Code rebuilt since that daemon started is not running.",
+                mj_client::executable::describe_running_daemon_and_client_builds(
+                    pid,
+                    &metadata.build_version,
+                ),
             ),
             "Run `mj daemon restart` from this build. It now fails rather than reporting success if another client's build wins.",
         ),
@@ -1746,13 +1803,6 @@ fn daemon_build_check() -> DoctorCheck {
     }
 }
 
-fn describe_executable(path: Option<std::path::PathBuf>) -> String {
-    path.map_or_else(
-        || "an unknown file".to_owned(),
-        |path| path.display().to_string(),
-    )
-}
-
 /// Whether a new session would run the worker binary as it is on disk now.
 ///
 /// The daemon copies each worker it can find into a content-addressed cache
@@ -1760,7 +1810,7 @@ fn describe_executable(path: Option<std::path::PathBuf>) -> String {
 /// `mj-worker` does not reach a running daemon. Nothing else reports this, and
 /// the digests are what make it checkable at all: two worker builds differ by
 /// content, not by name or version.
-fn worker_freshness_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
+fn worker_freshness_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let daemon = mj_client::daemon::read_metadata_any()
         .ok()
@@ -1834,8 +1884,8 @@ fn worker_freshness_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
 }
 
 /// The architectures this configuration needs a portable Linux worker for.
-fn container_worker_architectures(config: Option<&Config>) -> Vec<String> {
-    let Some(config) = config else {
+fn container_worker_architectures(config: ConfigStatus<'_>) -> Vec<String> {
+    let Ok(config) = config else {
         return Vec::new();
     };
     let mut architectures = Vec::new();
@@ -1903,14 +1953,24 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
     Ok(modified > started)
 }
 
-fn worker_binary_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
-        return vec![DoctorCheck::fixable(
-            "worker.containers",
-            "Container worker binary",
-            "Worker availability cannot be checked until config.toml is valid.",
-            "Fix config.toml, then rerun `mj doctor --json`.",
-        )];
+fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
+    let config = match config {
+        Ok(config) => config,
+        Err(ConfigGap::NewerVersion(version)) => {
+            return vec![newer_config_skip(
+                "worker.containers",
+                "Container worker binary",
+                version,
+            )];
+        }
+        Err(ConfigGap::Unreadable) => {
+            return vec![DoctorCheck::fixable(
+                "worker.containers",
+                "Container worker binary",
+                "Worker availability cannot be checked until config.toml is valid.",
+                "Fix config.toml, then rerun `mj doctor --json`.",
+            )];
+        }
     };
     let containers = config
         .targets
@@ -2006,8 +2066,9 @@ fn container_architecture(platform: Option<&str>) -> std::result::Result<&'stati
     }
 }
 
-fn apple_container_image(config: Option<&Config>) -> String {
+fn apple_container_image(config: ConfigStatus<'_>) -> String {
     config
+        .ok()
         .and_then(|config| {
             config.targets.values().find_map(|target| match target {
                 TargetTemplate::AppleContainer { container } => Some(container.image.clone()),
@@ -2242,8 +2303,8 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
 /// This deletes nothing. Removing refs and running `git gc` in someone else's
 /// repository without asking is the same mistake as writing to it without
 /// asking, which is what left this residue in the first place.
-fn review_residue_checks(config: Option<&Config>) -> Vec<DoctorCheck> {
-    let Some(config) = config else {
+fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
         return Vec::new();
     };
     let mut repositories: Vec<PathBuf> = config

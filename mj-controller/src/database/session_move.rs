@@ -107,6 +107,55 @@ pub fn move_checkpoint_is_retained(path: &Path) -> Result<bool> {
     }))
 }
 
+/// Delete the rows of finished moves that can no longer act, and report how
+/// many went away.
+///
+/// A finished move keeps its row only for what still reads it: the resume
+/// dialog's "move needs recovery" offer and the viewer's retry projection, both
+/// of which restore a destination from the move's own checkpoint archive. Once
+/// that archive is gone the offer cannot do anything, so the row is litter every
+/// reader has to skip, and a lingering row is what wedged daemon startup once
+/// its harness was removed (BrokkAi/mjolnir#1026).
+///
+/// [`MoveOperation::retains_checkpoint`] already draws the line: it is false
+/// only for a completed or cancelled move that is not mid queue admission. A
+/// move that is preparing, closing, resuming, starting a queue, failed, or
+/// holding a partly admitted queue keeps its row however its archive looks.
+/// Deleting rows needs no migration.
+pub fn reap_finished_move_intents() -> Result<usize> {
+    submit_database_write("reap_finished_move_intents", |connection| {
+        reap_finished_move_intents_with(connection)
+    })
+}
+
+pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result<usize> {
+    let mut reaped = 0;
+    for operation in load_move_operations_with(connection)? {
+        if operation.retains_checkpoint()
+            || operation
+                .checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.archive_path.exists())
+        {
+            continue;
+        }
+        let removed = connection.execute(
+            "DELETE FROM session_moves WHERE session_id=?1 AND operation_id=?2",
+            params![operation.selection.session_id, operation.operation_id],
+        )?;
+        if removed > 0 {
+            tracing::debug!(
+                session_id = operation.selection.session_id,
+                operation_id = operation.operation_id,
+                phase = ?operation.phase,
+                "reaped the durable row of a finished move whose checkpoint is gone"
+            );
+            reaped += removed;
+        }
+    }
+    Ok(reaped)
+}
+
 pub fn request_move_cancellation(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("request_move_cancellation", move |connection| {
@@ -333,6 +382,91 @@ mod tests {
         assert!(
             loaded.is_none(),
             "the undecodable intent is treated as absent"
+        );
+    }
+
+    #[test]
+    fn reaping_deletes_a_finished_move_only_once_its_checkpoint_archive_is_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let present = directory.path().join("present.hel.zip");
+        std::fs::write(&present, b"archive").unwrap();
+        let gone = directory.path().join("gone.hel.zip");
+        // session id, phase, whether its archive is still on disk, whether its
+        // queue admission is half done, and whether the row must survive.
+        let cases = [
+            (
+                "completed-retained",
+                MovePhase::Completed,
+                true,
+                false,
+                true,
+            ),
+            ("completed-gone", MovePhase::Completed, false, false, false),
+            (
+                "completed-admitting",
+                MovePhase::Completed,
+                false,
+                true,
+                true,
+            ),
+            (
+                "cancelled-retained",
+                MovePhase::Cancelled,
+                true,
+                false,
+                true,
+            ),
+            ("cancelled-gone", MovePhase::Cancelled, false, false, false),
+            ("failed-gone", MovePhase::Failed, false, false, true),
+            (
+                "running-gone",
+                MovePhase::ResumingDestination,
+                false,
+                false,
+                true,
+            ),
+        ];
+        for (session_id, phase, archive_present, mid_admission, _) in cases {
+            let session = super::super::tests::session(session_id, "project");
+            save_session_to(&path, &session).unwrap();
+            let connection = open(&path).unwrap();
+            let mut intent = operation(&session);
+            intent.operation_id = format!("{session_id}-operation");
+            intent.phase = phase;
+            intent.queue_admission_started = mid_admission;
+            intent.checkpoint = Some(CheckpointMetadata {
+                archive_path: if archive_present {
+                    present.clone()
+                } else {
+                    gone.clone()
+                },
+                sha256: "b".repeat(64),
+                created_at: session.created_at.clone(),
+                event_frontier: 6,
+            });
+            save_move_operation_with(&connection, &intent).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let reaped = reap_finished_move_intents_with(&connection).unwrap();
+        assert_eq!(
+            reaped,
+            cases.iter().filter(|case| !case.4).count(),
+            "only the finished moves whose archive is gone are reaped"
+        );
+        for (session_id, _, _, _, survives) in cases {
+            assert_eq!(
+                load_move_operation_with(&connection, session_id)
+                    .unwrap()
+                    .is_some(),
+                survives,
+                "{session_id} row survival"
+            );
+        }
+        assert_eq!(
+            reap_finished_move_intents_with(&connection).unwrap(),
+            0,
+            "a second sweep finds nothing left to reap"
         );
     }
 

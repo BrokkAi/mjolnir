@@ -51,6 +51,40 @@ fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>
     ]
 }
 
+/// The groups that fit in `width`, with the prefix still named.
+///
+/// The prefix label rides on the chord group's first hint, and that hint is
+/// the first unprotected chord the fitter drops. Once it is gone the survivors
+/// would read `: palette · ? keys`, as if `:` alone opened the palette. So
+/// when the labeled hint did not survive, the label moves to the first hint
+/// that did, and the fit runs again so the label's width is paid for.
+fn fitted_footer_groups(
+    dashboard: &DashboardState,
+    width: u16,
+) -> [Vec<(crate::CommandId, String)>; 3] {
+    let groups = footer_groups(dashboard);
+    let labeled = groups[1].first().map(|(id, _)| *id);
+    let fitted = theme::fit_footer_items(groups, width, |(_, text)| text.as_str(), protected_hint);
+    let survivor = fitted[1].first().map(|(id, _)| *id);
+    if survivor.is_none() || survivor == labeled {
+        return fitted;
+    }
+    let mut relabeled = fitted.clone();
+    if let Some((_, text)) = relabeled[1].first_mut() {
+        *text = format!("{} then: {text}", dashboard.keybinds().prefix_label());
+    }
+    let relabeled =
+        theme::fit_footer_items(relabeled, width, |(_, text)| text.as_str(), protected_hint);
+    // A row too narrow for the label and the palette together keeps the
+    // palette: below the dashboard's own floor, a reachable key beats a
+    // complete sentence.
+    if relabeled[1].first().map(|(id, _)| *id) == survivor {
+        relabeled
+    } else {
+        fitted
+    }
+}
+
 /// The hotkey hints for whatever applies right now.
 ///
 /// Built from the action registry ([`crate::actions`]) rather than written out
@@ -66,20 +100,18 @@ fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>
 ///
 /// `width` is the row's width in cells. When the hints do not fit, whole
 /// segments are dropped from the right — never truncated mid-word, because
-/// half a hint names a key that does not exist — first from the pane group,
-/// then from the chords, with palette and help retained longest so the user
-/// can find everything the narrow row leaves out.
+/// half a hint names a key that does not exist — first from the chords, then
+/// from the pane group, with palette and help retained longest so the user can
+/// find everything the narrow row leaves out. The pane group is what works
+/// right here and holds three entries; the chord group holds twelve, and the
+/// palette lists all of them, so a narrow row keeps the three and gives up the
+/// twelve.
 ///
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text
 /// is only drawn when a pane has the keyboard.
 pub(crate) fn combined_footer_text(dashboard: &DashboardState, width: u16) -> String {
-    let groups = theme::fit_footer_items(
-        footer_groups(dashboard),
-        width,
-        |(_, text)| text.as_str(),
-        protected_hint,
-    );
+    let groups = fitted_footer_groups(dashboard, width);
     theme::footer_items_text(&groups, |(_, text)| text.as_str())
 }
 
@@ -100,12 +132,7 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
         return;
     }
     let notice = dashboard.notices.current();
-    let groups = theme::fit_footer_items(
-        footer_groups(dashboard),
-        area.width,
-        |(_, text)| text.as_str(),
-        protected_hint,
-    );
+    let groups = fitted_footer_groups(dashboard, area.width);
     let line = match notice.as_deref() {
         Some(notice) => Line::styled(
             notice.to_owned(),

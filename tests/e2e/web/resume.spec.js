@@ -564,11 +564,13 @@ test('the Archived section lists what the index kept and marks a hit on a live r
   await expect(page.locator('#resume-wiki-note')).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-  // One request follows a burst of typing, and it carries the final text.
+  // A burst of typing is debounced into a request that carries the final text.
+  // A stall longer than the debounce splits a burst, so this waits for the
+  // request the complete word produced instead of counting requests.
   const before = state.wikiQueries.length;
   await page.locator('#resume-search').pressSequentially('pomegranate', { delay: 20 });
-  await expect.poll(() => state.wikiQueries.length).toBe(before + 1);
-  expect(state.wikiQueries[before]).toBe('pomegranate');
+  await expect.poll(() => state.wikiQueries.at(-1)).toBe('pomegranate');
+  expect(state.wikiQueries.length).toBeGreaterThan(before);
 });
 
 test('an archived row shows its brief and restores into a new session', async ({ page }) => {

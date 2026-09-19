@@ -369,10 +369,15 @@ impl DashboardState {
             return action;
         }
         // The Sessions filter takes the keys it is editing with, and its state
-        // letters, before anything else can read them as navigation.
+        // letters, before anything else can read them as navigation. The action
+        // row normally keeps the plain letters, but a filter that hides every
+        // row moves the focus there, and the letters are then the only way back
+        // to the sessions — including the Esc the empty pane advertises.
+        let filter_owns_letters =
+            self.session_action_focus.is_none() || self.sessions_filter.is_some();
         if self.focus == Focus::Sessions
             && self
-                .handle_sessions_filter_key(key, plain && self.session_action_focus.is_none())
+                .handle_sessions_filter_key(key, plain && filter_owns_letters)
                 .is_some()
         {
             self.record_event_handled();

@@ -4,10 +4,21 @@ use tokio::io::AsyncWriteExt;
 
 #[test]
 fn newer_daemon_protocol_requires_updating_the_client() {
-    assert!(ensure_supported_daemon_protocol(PROTOCOL_VERSION).is_ok());
-    assert!(ensure_supported_daemon_protocol(PROTOCOL_VERSION - 1).is_ok());
-    let error = ensure_supported_daemon_protocol(PROTOCOL_VERSION + 1).unwrap_err();
-    assert!(error.to_string().contains("restart this client"));
+    let metadata = |protocol_version| DaemonMetadata {
+        protocol_version,
+        pid: std::process::id(),
+        address: "127.0.0.1:1".parse().unwrap(),
+        token: "tok".into(),
+        started_at: "2026-09-01T07:48:14Z".into(),
+        build_version: "9.9.9".into(),
+    };
+    assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION)).is_ok());
+    assert!(ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION - 1)).is_ok());
+    let error = ensure_supported_daemon_protocol(&metadata(PROTOCOL_VERSION + 1)).unwrap_err();
+    let message = error.to_string();
+    // The two protocol numbers are not enough to find the stale binary.
+    assert!(message.contains("version 9.9.9"), "{message}");
+    assert!(message.contains("first on PATH"), "{message}");
 }
 
 #[test]
@@ -2603,8 +2614,10 @@ async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout
     let dirty_id = "fedcba9876543210fedcba9876543210";
     let mut lost = Vec::new();
     for session_id in [clean_id, dirty_id] {
-        let mut session =
-            crate::controller::test_support::managed_worktree_session(repository.path(), session_id);
+        let mut session = crate::controller::test_support::managed_worktree_session(
+            repository.path(),
+            session_id,
+        );
         session.state = SessionState::Lost;
         session.checkpoint = None;
         session.last_error = Some("working directory is gone".into());
@@ -2698,7 +2711,11 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
 fn startup_selects_every_record_that_is_only_a_tombstone() {
     let sessions = [
         runtime_test_session("lost", "workspace", SessionState::Lost),
-        runtime_test_session("data-loss", "workspace", SessionState::DestroyedWithDataLoss),
+        runtime_test_session(
+            "data-loss",
+            "workspace",
+            SessionState::DestroyedWithDataLoss,
+        ),
         runtime_test_session("stopped", "workspace", SessionState::Stopped),
         runtime_test_session("running", "workspace", SessionState::Running),
         runtime_test_session("failed", "workspace", SessionState::Error),
