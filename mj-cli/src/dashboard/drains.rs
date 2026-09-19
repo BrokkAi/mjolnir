@@ -452,10 +452,11 @@ impl DashboardContext {
         records: Vec<SessionRecord>,
         subagents: Vec<SubagentRecord>,
     ) {
-        let sessions: BTreeMap<String, SessionRecord> = records
+        let mut sessions: BTreeMap<String, SessionRecord> = records
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect();
+        read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
         let subagents: BTreeMap<String, SubagentRecord> = subagents
             .into_iter()
             .map(|subagent| (subagent.child_session_id.clone(), subagent))

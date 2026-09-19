@@ -420,6 +420,12 @@ fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams()
 
     apply_observation(&mut session, RelayObservation::SessionRestarted);
 
+    assert_eq!(session.unread_interruptions_after(0), 1);
+    assert_eq!(
+        session.unread_interruptions_after(session.applied_event_ordinal),
+        0
+    );
+
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
     assert!(!session.transcript.iter().any(|item| matches!(
         &item.body,
@@ -494,6 +500,42 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
 }
 
 #[test]
+fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("go")],
+            },
+            created_at_ms: 10,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "prompt".into(),
+            started_at_ms: 20,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandInterrupted {
+            command_id: "prompt".into(),
+            command: mj_core::relay::RelayCommandKind::Prompt,
+            message: "worker restarted".into(),
+        },
+    );
+    let interrupted_at = session.applied_event_ordinal;
+    apply_observation(&mut session, RelayObservation::SessionRestarted);
+    assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+    assert_eq!(session.unread_interruptions_after(interrupted_at), 0);
+    apply_observation(&mut session, RelayObservation::SessionRestarted);
+    assert_eq!(session.interruption_event_ordinals(), vec![interrupted_at]);
+}
+
+#[test]
 fn session_restarts_project_as_distinct_durable_system_lines() {
     let mut session = MaterializedSession::empty("session");
     apply_observation(&mut session, RelayObservation::SessionRestarted);
@@ -506,7 +548,7 @@ fn session_restarts_project_as_distinct_durable_system_lines() {
             .iter()
             .all(|item| item.is_session_restart())
     );
-    assert_eq!(session.unread_session_restarts_after(0), 2);
+    assert_eq!(session.unread_interruptions_after(0), 0);
     assert!(session.transcript.iter().all(|item| matches!(
         &item.body,
         TranscriptBody::System { text }
@@ -519,7 +561,7 @@ fn session_restarts_project_as_distinct_durable_system_lines() {
 
     let canonical = canonical_session_from_materialized(&session).unwrap();
     let restored = materialized_session_from_canonical("session", &canonical).unwrap();
-    assert_eq!(restored.unread_session_restarts_after(0), 2);
+    assert_eq!(restored.unread_interruptions_after(0), 0);
     assert!(
         restored
             .transcript

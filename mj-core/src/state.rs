@@ -221,6 +221,15 @@ pub struct MaterializedTurnOutcome {
     pub outcome: TurnOutcomeKind,
 }
 
+impl MaterializedTurnOutcome {
+    /// Only work that actually started can have been interrupted.
+    pub fn interruption_ordinal(&self) -> Option<u64> {
+        (self.turn_start_position.is_some()
+            && matches!(self.outcome, TurnOutcomeKind::Interrupted { .. }))
+        .then_some(self.completed_ordinal)
+    }
+}
+
 /// Canonical controller projection for one logical ACP session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,7 +279,7 @@ pub struct MaterializedSessionSummary {
     /// nonempty user message in transcript order.
     pub last_agent_message_follows_last_user: bool,
     pub agent_message_latest_content_ordinals: Vec<u64>,
-    pub session_restart_event_ordinals: Vec<u64>,
+    pub interruption_event_ordinals: Vec<u64>,
 }
 
 impl MaterializedSession {
@@ -337,13 +346,30 @@ impl MaterializedSession {
             .count() as u64
     }
 
-    pub fn unread_session_restarts_after(&self, viewed_through_event_ordinal: u64) -> u64 {
-        self.transcript
-            .iter()
-            .filter(|item| {
-                item.position > viewed_through_event_ordinal && item.is_session_restart()
-            })
+    pub fn unread_interruptions_after(&self, viewed_through_event_ordinal: u64) -> u64 {
+        self.interruption_event_ordinals()
+            .into_iter()
+            .filter(|ordinal| *ordinal > viewed_through_event_ordinal)
             .count() as u64
+    }
+
+    pub fn interruption_event_ordinals(&self) -> Vec<u64> {
+        let mut ordinals = self
+            .transcript
+            .iter()
+            .filter(|item| item.is_work_interruption())
+            .map(|item| item.position)
+            .collect::<Vec<_>>();
+        if let Some(ordinal) = self
+            .last_turn_outcome
+            .as_ref()
+            .and_then(MaterializedTurnOutcome::interruption_ordinal)
+        {
+            ordinals.push(ordinal);
+        }
+        ordinals.sort_unstable();
+        ordinals.dedup();
+        ordinals
     }
 
     pub fn validate(&self) -> Result<()> {

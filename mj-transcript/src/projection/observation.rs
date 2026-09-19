@@ -379,6 +379,22 @@ pub(super) fn project_observation(
                     item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
                     upsert(mutation, item);
                 }
+            } else if prompt_was_started
+                && matches!(
+                    event.observation,
+                    RelayObservation::CommandInterrupted { .. }
+                )
+            {
+                push_system_with_id(
+                    mutation,
+                    event,
+                    format!(
+                        "{}{}",
+                        mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX,
+                        event.ordinal
+                    ),
+                    format!("Work interrupted: {message}"),
+                );
             } else {
                 push_system(mutation, event, format!("command {command_id}: {message}"));
             }
@@ -540,6 +556,16 @@ pub(super) fn project_observation(
                 current.execution,
                 MaterializedExecutionState::Running { .. }
             ) {
+                push_system_with_id(
+                    mutation,
+                    event,
+                    format!(
+                        "{}{}",
+                        mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX,
+                        event.ordinal
+                    ),
+                    "Work interrupted by session restart",
+                );
                 close_streams(index, mutation, event.recorded_at_ms);
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }

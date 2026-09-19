@@ -1789,7 +1789,7 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
     assert_eq!(summary.last_agent_message.as_deref(), Some("Finished"));
     assert!(!summary.last_agent_message_follows_last_user);
     assert_eq!(summary.agent_message_latest_content_ordinals, vec![2, 7]);
-    assert_eq!(summary.session_restart_event_ordinals, vec![5]);
+    assert!(summary.interruption_event_ordinals.is_empty());
     assert_eq!(summary.execution, materialized.execution);
     assert!(load_materialized_session_from(&database, "session-1").is_err());
 }
@@ -2453,6 +2453,90 @@ fn detach_receipt_is_monotonic_and_cannot_pass_projection() {
         client_read_frontier_at(&database, "client-a", DEFAULT_WORKSPACE_ID, "session-1").unwrap(),
         2
     );
+}
+
+#[test]
+fn read_receipts_survive_reopen_with_a_new_terminal_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.viewed_through_event_ordinal = 0;
+    save_session_to(&database, &record).unwrap();
+    let materialized = materialized_session("session-1");
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let through = materialized.applied_event_ordinal;
+    {
+        let mut connection = open(&database).unwrap();
+        persist_read_receipt_with(
+            &mut connection,
+            "tui-old",
+            DEFAULT_WORKSPACE_ID,
+            "session-1",
+            through,
+        )
+        .unwrap();
+    }
+    // A lifecycle writer holding an older copy cannot erase the receipt.
+    save_session_to(&database, &record).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"].viewed_through_event_ordinal,
+        through
+    );
+    assert_eq!(
+        client_read_frontier_at(&database, "tui-new", DEFAULT_WORKSPACE_ID, "session-1").unwrap(),
+        through
+    );
+    let restored = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.unread_agent_messages_after(through), 0);
+}
+
+#[test]
+fn interruption_summary_matches_full_projection_and_legacy_outcomes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut materialized = materialized_session("session-1");
+    materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(1),
+        completed_ordinal: 3,
+        completed_at_ms: 1_500,
+        outcome: TurnOutcomeKind::Interrupted {
+            message: "worker restarted".into(),
+        },
+    });
+    for with_marker in [false, true] {
+        if with_marker {
+            materialized.transcript.push(Arc::new(TranscriptItem {
+                stable_id: format!("{}3", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX),
+                position: 3,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1_500,
+                last_changed_at_ms: 1_500,
+                body: TranscriptBody::System {
+                    text: "Work interrupted".into(),
+                },
+            }));
+        }
+        save_materialized_session_to(&database, &materialized).unwrap();
+        let summary = load_materialized_session_summary_from(&database, "session-1")
+            .unwrap()
+            .unwrap();
+        let restored = load_materialized_session_from(&database, "session-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.interruption_event_ordinals, vec![3]);
+        assert_eq!(
+            summary.interruption_event_ordinals,
+            restored.interruption_event_ordinals()
+        );
+        assert_eq!(restored.unread_interruptions_after(3), 0);
+    }
 }
 
 #[test]

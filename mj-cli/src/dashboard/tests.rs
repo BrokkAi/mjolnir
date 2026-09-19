@@ -12,6 +12,26 @@ use mj_core::state::State;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Position, Rect};
+
+#[test]
+fn background_records_preserve_read_positions_without_resurrecting_sessions() {
+    let mut old = BTreeMap::from([(
+        "session-1".to_owned(),
+        live_session("session-1", "2026-09-19T00:00:00Z"),
+    )]);
+    let id = old.keys().next().unwrap().clone();
+    old.get_mut(&id).unwrap().viewed_through_event_ordinal = 8;
+    let mut incoming = old.clone();
+    incoming.get_mut(&id).unwrap().viewed_through_event_ordinal = 2;
+    read_receipts::preserve_read_positions(&mut incoming, &old);
+    assert_eq!(incoming[&id].viewed_through_event_ordinal, 8);
+    incoming.get_mut(&id).unwrap().viewed_through_event_ordinal = 10;
+    read_receipts::preserve_read_positions(&mut incoming, &old);
+    assert_eq!(incoming[&id].viewed_through_event_ordinal, 10);
+    incoming.remove(&id);
+    read_receipts::preserve_read_positions(&mut incoming, &old);
+    assert!(!incoming.contains_key(&id));
+}
 use ratatui::style::Modifier;
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {

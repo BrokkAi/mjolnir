@@ -91,16 +91,31 @@ pub(super) fn load_materialized_session_summary_from(
     let agent_message_latest_content_ordinals = ordinal_statement
         .query_map([session_id], |row| row.get::<_, u64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let restart_pattern = format!("{}*", mj_core::transcript::SESSION_RESTART_ITEM_PREFIX);
+    let restart_pattern = format!("{}*", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX);
     let mut restart_statement = connection.prepare(
         "SELECT position
          FROM materialized_transcript_items
          WHERE session_id = ?1 AND stable_id GLOB ?2
          ORDER BY position, stable_id",
     )?;
-    let session_restart_event_ordinals = restart_statement
+    let mut interruption_event_ordinals = restart_statement
         .query_map((session_id, restart_pattern), |row| row.get::<_, u64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let outcome: Option<String> = connection.query_row(
+        "SELECT last_turn_outcome_json FROM materialized_sessions WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if let Some(ordinal) = outcome
+        .map(|json| serde_json::from_str::<MaterializedTurnOutcome>(&json))
+        .transpose()?
+        .as_ref()
+        .and_then(MaterializedTurnOutcome::interruption_ordinal)
+    {
+        interruption_event_ordinals.push(ordinal);
+    }
+    interruption_event_ordinals.sort_unstable();
+    interruption_event_ordinals.dedup();
 
     Ok(Some(MaterializedSessionSummary {
         session_id: session_id.to_owned(),
@@ -112,7 +127,7 @@ pub(super) fn load_materialized_session_summary_from(
         last_user_message: last_user_message.map(|(_, message)| message),
         last_agent_message_follows_last_user,
         agent_message_latest_content_ordinals,
-        session_restart_event_ordinals,
+        interruption_event_ordinals,
     }))
 }
 

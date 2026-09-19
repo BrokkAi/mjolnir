@@ -1162,23 +1162,23 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         "background work is not idle after it has been read"
     );
 
-    let restarted_idle = SessionDetail {
-        unread_session_restarts: 1,
+    let interrupted_idle = SessionDetail {
+        unread_interruptions: 1,
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&restarted_idle), false, SessionState::Running),
+        band(Some(&interrupted_idle), false, SessionState::Running),
         theme::palette().session_attention,
-        "an unread restart is unread activity"
+        "an unread interruption needs attention"
     );
 
-    let restarted_running = SessionDetail {
+    let interrupted_running = SessionDetail {
         current_turn_started_at: Some(1),
-        unread_session_restarts: 1,
+        unread_interruptions: 1,
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&restarted_running), false, SessionState::Running),
+        band(Some(&interrupted_running), false, SessionState::Running),
         theme::palette().session_activity,
         "a running turn is activity, whatever is still unread"
     );

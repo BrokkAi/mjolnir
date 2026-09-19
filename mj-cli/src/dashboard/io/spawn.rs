@@ -1019,6 +1019,7 @@ pub(crate) fn spawn_read_receipt_persist(
     workspace_id: String,
     session_id: String,
     through: u64,
+    retry_delay: Duration,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
@@ -1029,6 +1030,8 @@ pub(crate) fn spawn_read_receipt_persist(
         updates,
         SAVE_ACK_TIMEOUT,
         async move {
+            // Give projection persistence or a reconnect time to catch up.
+            tokio::time::sleep(retry_delay).await;
             daemon::connect_or_start()
                 .await?
                 .persist_read_receipt(client_id, workspace_id, persisted_session_id, through)
