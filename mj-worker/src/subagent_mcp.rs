@@ -664,16 +664,28 @@ mod tests {
     fn a_slow_tool_call_does_not_block_a_later_one() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
+        use std::sync::mpsc;
 
-        // Observe output after `run` consumes the writer.
-        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        // Observe output after `run` consumes the writer, and announce the
+        // response the fake worker is waiting for. The writer is the one place
+        // that knows a response has been written, so releasing the slow call
+        // from here orders the two responses by events: no sleep, and no
+        // assumption about how fast either thread runs.
+        struct SharedWriter {
+            written: Arc<Mutex<Vec<u8>>>,
+            cheap_call_answered: mpsc::Sender<()>,
+        }
 
         impl Write for SharedWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0
+                self.written
                     .lock()
                     .expect("shared writer poisoned")
                     .extend_from_slice(buf);
+                // `write_line` writes one whole response per call.
+                if String::from_utf8_lossy(buf).contains("\"id\":2") {
+                    let _ = self.cheap_call_answered.send(());
+                }
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -683,14 +695,19 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");
+        let (cheap_call_answered, answered) = mpsc::channel::<()>();
+        // One receiver, taken by whichever connection carries the `wait`.
+        let answered = Arc::new(Mutex::new(answered));
 
-        // Fake worker: reply to any non-wait call at once, delay `wait_agents`,
-        // and serve each accepted connection on its own thread so the delay
+        // Fake worker: reply to any non-wait call at once, and hold the
+        // `wait_agents` reply until the cheap call has been answered. Each
+        // accepted connection is served on its own thread so the held reply
         // cannot serialize the two calls at the socket layer.
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || {
             for _ in 0..2 {
                 let (stream, _) = listener.accept().unwrap();
+                let answered = Arc::clone(&answered);
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -701,7 +718,11 @@ mod tests {
                         .unwrap_or_default()
                         .to_owned();
                     if action == "wait_agents" {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        answered
+                            .lock()
+                            .expect("handshake receiver poisoned")
+                            .recv()
+                            .expect("the cheap call must be answered while the wait is open");
                     }
                     let reply = json!({"accepted": true, "result": {"action": action}});
                     let mut body = serde_json::to_vec(&reply).unwrap();
@@ -716,9 +737,12 @@ mod tests {
             }
         });
 
-        // The slow `wait` is sent first, the cheap `list_agents` second. Serial
-        // dispatch would answer `wait` first; concurrent dispatch answers the
-        // cheap call first because it does not wait behind the slow one.
+        // The slow `wait` is sent first, the cheap `list_agents` second. Only
+        // concurrent dispatch can answer the cheap call first, because the
+        // `wait`'s reply is released by that answer being written. A dispatcher
+        // that ran the calls in order would answer the `wait` first — nothing
+        // releases it, so it would fall back to its own budget — and the two
+        // responses would come back the other way round.
         let input = format!(
             "{}\n{}\n",
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{"child_session_ids":["c1"],"timeout_seconds":1}}}),
@@ -727,26 +751,27 @@ mod tests {
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
         run(
             input.as_bytes(),
-            SharedWriter(Arc::clone(&buffer)),
+            SharedWriter {
+                written: Arc::clone(&buffer),
+                cheap_call_answered,
+            },
             &socket,
             None,
         )
         .unwrap();
 
         let written = buffer.lock().unwrap();
-        let first: Value = serde_json::from_str(
-            std::str::from_utf8(&written)
-                .unwrap()
-                .lines()
-                .next()
-                .expect("at least one response"),
-        )
-        .unwrap();
+        let text = std::str::from_utf8(&written).unwrap();
+        // Progress notifications carry no id; only the two responses do.
+        let answered_ids = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|response| response["id"].as_u64())
+            .collect::<Vec<_>>();
         assert_eq!(
-            first["id"],
-            2,
-            "the cheap list_agents response must be written before the slow wait: {}",
-            String::from_utf8_lossy(&written)
+            answered_ids,
+            vec![2, 1],
+            "the cheap list_agents response must be written before the slow wait: {text}"
         );
     }
 
