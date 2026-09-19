@@ -14,6 +14,12 @@ use std::time::Duration;
 /// provisioning defaults: `BatchMode=yes` never prompts for a password, and
 /// `StrictHostKeyChecking=yes` never accepts an unknown host key. Doctor
 /// diagnoses; the user decides whether to trust a key.
+///
+/// Those overrides are also why the probe joins a shared master but never
+/// opens one (see `push_connection_reuse_args`): as the master it would hold
+/// them over every later session on that connection, and a plain `mj doctor`
+/// would leave an `ssh` process behind for the whole `ControlPersist` window
+/// even though the user asked only for a diagnosis.
 pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
     let mut probe = ssh.clone();
     probe.ssh_args.splice(
@@ -25,7 +31,8 @@ pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
             "StrictHostKeyChecking=yes".to_owned(),
         ],
     );
-    ssh_command(&probe, ["true"]).purpose("verify SSH connectivity")
+    ssh_command_with_control(&probe, vec!["true".to_owned()], false)
+        .purpose("verify SSH connectivity")
 }
 
 pub fn ssh_command(
@@ -41,8 +48,17 @@ pub fn ssh_command(
 }
 
 pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
+    ssh_command_with_control(ssh, remote_args, true)
+}
+
+/// Build an `ssh` command, choosing whether it may open the shared master.
+fn ssh_command_with_control(
+    ssh: &SshTarget,
+    remote_args: Vec<String>,
+    may_become_master: bool,
+) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
-    push_connection_sharing_args(&mut args);
+    push_control_args(&mut args, may_become_master);
     args.push(ssh.destination.clone());
     args.push(join_remote_command(&remote_args));
     CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
@@ -1035,6 +1051,47 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    /// `mj doctor` diagnoses and exits. Its connectivity probe must join a
+    /// master when one is up and otherwise open a plain connection, so a
+    /// doctor run never leaves a `ControlPersist` master behind, and the
+    /// probe's own strict overrides never bind a shared connection.
+    #[test]
+    #[cfg(unix)]
+    fn connectivity_probe_joins_a_master_without_becoming_one() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
+        let ssh = SshTarget {
+            destination: "host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let args = ssh_connectivity_probe(&ssh).args;
+        set_ssh_connection_sharing_for_test(None);
+
+        assert!(args.contains(&"ControlMaster=no".to_owned()), "{args:?}");
+        assert!(
+            args.contains(&format!("ControlPath={}/%C", socket_dir.path().display())),
+            "the probe must still join an existing master: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("ControlPersist")),
+            "a doctor probe must not set how long a master lingers: {args:?}"
+        );
+        let master = args
+            .iter()
+            .position(|arg| arg == "ControlMaster=no")
+            .expect("sharing options");
+        let strict = args
+            .iter()
+            .position(|arg| arg == "StrictHostKeyChecking=yes")
+            .expect("its own host key policy");
+        assert!(strict < master, "{args:?}");
     }
 
     #[test]
