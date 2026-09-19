@@ -497,6 +497,18 @@ fn breadcrumb(path: &[String], draft: &Value) -> String {
 
 /// A size string as the whole number of GB the field is measured in, or the
 /// string itself when it is not a size at all.
+/// Compiler time the cache avoided, in units somebody reads at a glance. The
+/// number is mbx's own estimate, so more precision than this would be false.
+fn format_compiler_time(nanoseconds: u64) -> String {
+    let seconds = nanoseconds / 1_000_000_000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86_400 => format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60),
+        _ => format!("{}d {}h", seconds / 86_400, (seconds % 86_400) / 3600),
+    }
+}
+
 fn build_cache_gigabytes_label(size: &str) -> String {
     mj_core::config::build_cache_size_gigabytes(size)
         .map_or_else(|| size.to_owned(), |gigabytes| gigabytes.to_string())
@@ -1217,6 +1229,30 @@ impl SetupDialog {
             BuildCachePreviewResult::Ready(None) => "Not available for this machine".to_owned(),
         };
         Some(label)
+    }
+
+    /// What this machine's cache has actually done, for a line under the
+    /// fields that configure it. The page otherwise only predicts.
+    fn build_cache_stats_line(&self) -> Option<String> {
+        let (_, key) = self.build_cache_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key {
+            return None;
+        }
+        let BuildCachePreviewResult::Ready(Some(preview)) = &preview.result else {
+            return None;
+        };
+        let stats = preview.stats.as_ref()?;
+        if stats.builds == 0 {
+            return Some("No build has used this cache yet.".to_owned());
+        }
+        Some(format!(
+            "{} builds, {} compilations from cache, {} of compiler time saved, {} cloned",
+            stats.builds,
+            stats.cached_compilations,
+            format_compiler_time(stats.avoided_compiler_ns),
+            crate::widgets::format_resource_bytes(stats.reflinked_bytes),
+        ))
     }
 
     /// The reason this page's host cannot support the build cache at all, so
@@ -2533,6 +2569,17 @@ pub(crate) fn render_setup(
                         &format!("{SETTING_GUTTER}    Off: {reason}"),
                         usize::from(body.width),
                     ),
+                    theme::muted(),
+                ));
+                row_map.push(None);
+                row_enabled.push(true);
+            }
+        }
+        // What the cache has done, under the fields that configure it.
+        if let Some(activity) = dialog.build_cache_stats_line() {
+            for line in [String::new(), format!("{SETTING_GUTTER}{activity}")] {
+                rows.push(Line::styled(
+                    truncate(&line, usize::from(body.width)),
                     theme::muted(),
                 ));
                 row_map.push(None);

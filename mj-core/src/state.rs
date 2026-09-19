@@ -955,9 +955,30 @@ pub struct BuildCachePreview {
     pub directory: Option<PathBuf>,
     /// The budget sessions would run with, once known.
     pub max_size: Option<BuildCacheLimit>,
+    /// What the cache on that host has done so far, when it has a tally.
+    pub stats: Option<BuildCacheStats>,
     /// Why sessions on this target run without a cache, or `None` when they
     /// share one.
     pub off_reason: Option<BuildCacheOff>,
+}
+
+/// mbx's own running totals for one host's cache, read from the tally beside
+/// the store.
+///
+/// These are machine-wide and cumulative: every session on that host and any
+/// native builds the user ran themselves are counted together, since they
+/// share one cache. They answer whether the cache is being used at all, not
+/// what one session got out of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildCacheStats {
+    /// Builds that went through mbx. Zero means nothing has used the shim.
+    pub builds: u64,
+    /// Compilations answered from the cache instead of run.
+    pub cached_compilations: u64,
+    /// Compiler time those answers avoided, as mbx estimates it.
+    pub avoided_compiler_ns: u64,
+    /// Restored output bytes that were cloned rather than copied.
+    pub reflinked_bytes: u64,
 }
 
 /// Why a target's sessions run without the build cache.

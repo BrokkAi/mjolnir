@@ -1397,6 +1397,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             native_mbx: Some("1.12.0".into()),
             directory: Some("/mnt/fast/mbx-cache".into()),
             max_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
+            stats: None,
             off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
                 "the filesystem under /mnt/fast/mbx-cache does not support reflinks".into(),
             )),
@@ -1481,11 +1482,25 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
             native_mbx: Some("1.12.0".into()),
             directory: Some("/home/dev/.cache/mbx".into()),
             max_size: Some(BuildCacheLimit::Size("100000000000B".into())),
+            stats: Some(mj_core::state::BuildCacheStats {
+                builds: 155,
+                cached_compilations: 12050,
+                avoided_compiler_ns: 6_004_997_818_721,
+                reflinked_bytes: 47_612_059_386,
+            }),
             off_reason: None,
         })),
     );
     let checked = drawn(&mut dashboard, 140, 30).join("\n");
     assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
+    // The page otherwise only predicts; this line is the one thing on it that
+    // says the cache is being used.
+    for expected in ["155 builds", "12050 compilations from cache", "1h 40m", "44.3"] {
+        assert!(
+            checked.contains(expected),
+            "missing {expected:?} in\n{checked}"
+        );
+    }
     assert!(
         !checked.contains("Off:"),
         "a supported host explains nothing:\n{checked}"

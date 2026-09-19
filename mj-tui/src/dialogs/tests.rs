@@ -424,6 +424,35 @@ fn an_unrelated_listener_has_no_enabled_stop_action() {
     assert!(dialog.confirm_stop.is_none());
 }
 
+#[test]
+fn the_container_editor_names_the_build_cache_the_session_was_given() {
+    let mut session = running_session();
+    session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "ssh:morannon".into(),
+        directory: PathBuf::from("/mnt/nvme/mbx"),
+        max_size: Some("1000GB".into()),
+        target_root: None,
+    });
+    let mut dashboard = dashboard_with_session(session);
+    open_container_editor(&mut dashboard);
+    let shown = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(
+        shown.contains("Build cache") && shown.contains("/mnt/nvme/mbx"),
+        "the session names the cache its container mounts:\n{shown}"
+    );
+}
+
+#[test]
+fn the_container_editor_says_when_a_session_has_no_build_cache() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open_container_editor(&mut dashboard);
+    let shown = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(
+        shown.contains("none for this session"),
+        "a session without a cache says so:\n{shown}"
+    );
+}
+
 fn dashboard_with_container_session() -> DashboardState {
     let mut session = running_session();
     session.additional_mounts = vec![AdditionalMount {

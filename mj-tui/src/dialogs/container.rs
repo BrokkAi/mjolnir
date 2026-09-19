@@ -31,6 +31,10 @@ pub(crate) struct ContainerEditor {
     /// The listed attachment the editor fields are editing, when they were
     /// loaded from one. Adding then replaces that entry instead of appending.
     pub(crate) editing_mount: Option<usize>,
+    /// The build cache this session was provisioned with, if it got one. Read
+    /// only: it is fixed when the container's mounts are, so changing it here
+    /// could not affect the running session.
+    pub(crate) build_cache: Option<PathBuf>,
     scroll: Cell<u16>,
 }
 
@@ -191,6 +195,20 @@ impl ContainerEditor {
                 self.suggestion_index,
             ));
         }
+        rows.extend([
+            Row::Text(Line::raw("")),
+            Row::Text(Line::raw("Build cache")),
+            Row::Text(Line::styled(
+                match &self.build_cache {
+                    Some(directory) => format!("  {}", directory.display()),
+                    // No reason is recorded, only the outcome. The machine's
+                    // settings page explains what a host does or does not
+                    // offer.
+                    None => "  none for this session".to_owned(),
+                },
+                Style::default().fg(theme::palette().muted),
+            )),
+        ]);
         if let Some(error) = &self.error {
             rows.push(Row::Text(Line::styled(
                 error.clone(),
@@ -549,6 +567,10 @@ impl DashboardState {
             suggestion_index: 0,
             error: None,
             editing_mount: None,
+            build_cache: session
+                .build_cache
+                .as_ref()
+                .map(|cache| cache.directory.clone()),
             scroll: Cell::new(0),
         };
         editor.prepare();

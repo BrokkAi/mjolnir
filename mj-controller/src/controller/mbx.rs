@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::{BuildCacheConfig, TargetBuildCache};
-use mj_core::state::{BuildCacheLimit, BuildCacheOff, BuildCachePreview, SessionBuildCache};
+use mj_core::state::{
+    BuildCacheLimit, BuildCacheOff, BuildCachePreview, BuildCacheStats, SessionBuildCache,
+};
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
@@ -35,6 +37,8 @@ const MBX_BINARY_ENV: &str = "MJ_MBX_BINARY";
 
 const DEFAULT_CACHE_RELATIVE: &str = ".cache/mbx";
 const HOST_CONFIG_RELATIVE: &str = ".config/mbx/config.toml";
+/// mbx's running totals, relative to the cache directory.
+const TALLY_RELATIVE: &str = "actions/savings/v1/tally.json";
 /// The cap on the computed default total budget: 100 GB, in SI bytes.
 const DEFAULT_MAX_BYTES: u64 = 100_000_000_000;
 const RESOLUTION_LIFETIME: Duration = Duration::from_secs(600);
@@ -97,6 +101,7 @@ fn inspect(
                 native_mbx: None,
                 directory: None,
                 max_size: None,
+                stats: None,
                 off_reason: Some(BuildCacheOff::Unavailable(
                     "the build cache is turned off for every machine".into(),
                 )),
@@ -227,6 +232,7 @@ fn inspect_host(
             native_mbx: native_version.clone(),
             directory: None,
             max_size: None,
+            stats: None,
             off_reason: Some(BuildCacheOff::Unavailable(format!(
                 "the host's mbx {version} is older than the {MBX_VERSION} Mjolnir installs, \
                  so they cannot share a store"
@@ -262,10 +268,14 @@ fn inspect_host(
         (None, Some(text)) => BuildCacheLimit::HostConfiguration(configured_max_size(text)),
         (None, None) => unreachable!("a missing budget is derived above"),
     };
+    // Read before the checks below, so a host that cannot share the cache
+    // right now still reports what the cache did while it could.
+    let stats = read_stats(host, &directory, executor);
     let preview = |off_reason: Option<BuildCacheOff>| BuildCachePreview {
         native_mbx: native_version.clone(),
         directory: Some(directory.clone()),
         max_size: Some(limit.clone()),
+        stats: stats.clone(),
         off_reason,
     };
 
@@ -330,6 +340,57 @@ fn configured_max_size(config_file: &str) -> Option<String> {
         .or_else(|| gc.get("max_size"))?
         .as_str()
         .map(str::to_owned)
+}
+
+/// mbx's running totals for this cache, or `None` when it has none yet.
+///
+/// Read from the tally file rather than by running `mbx stats`, which also
+/// walks the content-addressed store to size it: that took 90 seconds on a
+/// 540 GB cache here, where the tally is a few hundred bytes. It also means
+/// the numbers need no mbx binary on the host.
+///
+/// A cache that has never been used has no tally, which is not a failure.
+fn read_stats(
+    host: &CacheHost,
+    directory: &Path,
+    executor: &impl CommandExecutor,
+) -> Option<BuildCacheStats> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Tally {
+        builds: u64,
+        cached_compilations: u64,
+        avoided_compiler_ns: u64,
+        reflinked_bytes: u64,
+    }
+
+    let path = directory.join(TALLY_RELATIVE);
+    let command = host.shell_command(
+        READ_CONFIG_SCRIPT,
+        LABEL,
+        [path.to_string_lossy().into_owned()],
+        "read the container host build cache totals",
+    );
+    let output = executor.execute(&command).ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    // A newer mbx may add counters; unknown ones are ignored rather than
+    // costing the whole report, exactly as mbx reads the file itself.
+    let tally: Tally = serde_json::from_slice(&output.stdout)
+        .inspect_err(|error| {
+            tracing::debug!(
+                path = %path.display(),
+                "the build cache totals could not be read: {error}"
+            );
+        })
+        .ok()?;
+    Some(BuildCacheStats {
+        builds: tally.builds,
+        cached_compilations: tally.cached_compilations,
+        avoided_compiler_ns: tally.avoided_compiler_ns,
+        reflinked_bytes: tally.reflinked_bytes,
+    })
 }
 
 /// `true` when `found` is at least `required`, comparing release versions.
@@ -1340,6 +1401,51 @@ mod tests {
             added[0].contains("mkdir -p"),
             "the one repeated command creates the directory: {added:?}"
         );
+    }
+
+    #[test]
+    fn the_preview_reports_what_the_cache_has_already_done() {
+        let _isolated = isolated();
+        // Ahead of the configuration read, which tests the same `[ -f ]`.
+        let mut answers = vec![(
+            "tally.json",
+            0,
+            r#"{"version":1,"since_secs":1789824719,"builds":155,"cached_compilations":12050,"avoided_compiler_ns":6004997818721,"reflinked_bytes":47612059386}"#,
+        )];
+        answers.extend(plain_host());
+        let executor = ProbeExecutor::new(&answers);
+        let preview = preview_build_cache(
+            &configured_local_machine(),
+            &BuildCacheConfig::default(),
+            &executor,
+        )
+        .expect("the host answers")
+        .expect("a local machine can hold a cache");
+        assert_eq!(
+            preview.stats,
+            Some(mj_core::state::BuildCacheStats {
+                builds: 155,
+                cached_compilations: 12050,
+                avoided_compiler_ns: 6_004_997_818_721,
+                reflinked_bytes: 47_612_059_386,
+            })
+        );
+    }
+
+    #[test]
+    fn a_cache_nothing_has_used_yet_reports_no_totals() {
+        let _isolated = isolated();
+        // `plain_host` answers every `[ -f ]` with 3: no configuration file
+        // and no tally beside the store.
+        let executor = ProbeExecutor::new(&plain_host());
+        let preview = preview_build_cache(
+            &configured_local_machine(),
+            &BuildCacheConfig::default(),
+            &executor,
+        )
+        .expect("the host answers")
+        .expect("a local machine can hold a cache");
+        assert_eq!(preview.stats, None);
     }
 
     #[test]
