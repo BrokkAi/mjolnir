@@ -119,6 +119,11 @@ impl DashboardState {
                 .get(session_id)
                 .and_then(|session| session.last_error.clone())
                 .unwrap_or_else(|| "Session failed".to_owned()),
+            AttentionLevel::Unread
+                if detail.is_some_and(|detail| detail.unread_interruptions > 0) =>
+            {
+                "Work was interrupted".to_owned()
+            }
             _ => detail
                 .and_then(|detail| detail.last_agent_message.as_deref())
                 .map(str::to_owned)
@@ -210,6 +215,34 @@ mod tests {
         done.last_agent_message = Some("All tests pass now.\nSecond line".into());
         dashboard.set_current_session(None);
         dashboard
+    }
+
+    #[test]
+    fn interrupted_work_notifies_with_its_own_message() {
+        let mut dashboard = dashboard();
+        dashboard
+            .session_details
+            .get_mut("done")
+            .unwrap()
+            .unread_interruptions = 1;
+        assert!(dashboard.notification_events(0).is_empty());
+        let due = dashboard.notification_events(2_000);
+        assert_eq!(
+            due.iter()
+                .find(|notice| notice.session_id == "done")
+                .unwrap()
+                .body,
+            "Work was interrupted"
+        );
+    }
+
+    #[test]
+    fn reopening_still_notifies_for_unresolved_activity() {
+        for _ in 0..2 {
+            let mut dashboard = dashboard();
+            assert!(dashboard.notification_events(0).is_empty());
+            assert_eq!(dashboard.notification_events(2_000).len(), 2);
+        }
     }
 
     #[test]

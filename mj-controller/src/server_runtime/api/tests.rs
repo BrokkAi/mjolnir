@@ -107,7 +107,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
         last_user_message: None,
         last_agent_message_follows_last_user: true,
         agent_message_latest_content_ordinals: Vec::new(),
-        session_restart_event_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
     };
 
     assert_eq!(

@@ -14,6 +14,7 @@ pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
 pub(crate) mod io;
+mod read_receipts;
 mod workspace_settings;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -394,8 +395,7 @@ pub(crate) struct DashboardContext {
     materialized_projections_in_flight: BTreeSet<String>,
     pending_materialized_projections: BTreeMap<String, (MaterializedSession, u64)>,
     project_sources_in_flight: BTreeSet<String>,
-    read_receipt_in_flight: Option<String>,
-    pending_read_receipts: BTreeMap<String, u64>,
+    read_receipts: read_receipts::ReadReceipts,
 
     checkpoint_archive_targets_seen: BTreeMap<String, std::path::PathBuf>,
     checkpoint_archive_generation: u64,
@@ -803,6 +803,9 @@ pub(crate) async fn run_dashboard_for_workspace(
     drop(context.terminal);
     for error in context.draft_save_failures.values() {
         eprintln!("{error}");
+    }
+    for (id, error) in &context.read_receipts.failures {
+        eprintln!("Could not save read status for {}: {error}", short_id(id));
     }
     if let Err(error) = context.pane_size_persistence.finish().await {
         tracing::warn!(%error, "workspace pane-size final flush failed");
@@ -1212,6 +1215,9 @@ impl DashboardContext {
             self.record_chat_detach(&session_id);
         }
         self.shutdown_requested = true;
+        for (session_id, through) in self.read_receipts.retry_failed() {
+            self.spawn_read_receipt(session_id, through);
+        }
         self.web_request_cancel = None;
         self.web_request_generation = self.web_request_generation.wrapping_add(1);
         self.quit_detached = detached;
@@ -1222,6 +1228,10 @@ impl DashboardContext {
     /// Returns true once every user-authored mutation has reached a durable
     /// boundary. Pure reads and projections are deliberately not blockers.
     fn refresh_shutdown_notice(&mut self) -> bool {
+        if self.read_receipts.is_saving() {
+            self.dashboard.set_notice("Saving read status…");
+            return false;
+        }
         let blockers = self.critical_operations.blockers();
         if let Some(notice) = shutdown_wait_notice(&blockers) {
             self.dashboard.set_notice(notice);
@@ -1235,6 +1245,11 @@ impl DashboardContext {
     /// The frame records which those were; before the first frame it is the
     /// one the focused pane would draw.
     pub(super) fn acknowledge_visible_chats(&mut self) {
+        // Freeze the final receipt set so ongoing worker output cannot keep
+        // extending shutdown while its existing saves drain.
+        if self.shutdown_requested {
+            return;
+        }
         let mut sessions = self.drawn_chat_sessions.clone();
         if let Some(session_id) = self.visible_chat().map(|chat| chat.session_id().to_owned())
             && !sessions.contains(&session_id)
@@ -1264,14 +1279,9 @@ impl DashboardContext {
         session.viewed_through_event_ordinal = through;
         self.dashboard.set_state(self.controller.state.clone());
         self.reconcile_question_drafts();
-        if self.read_receipt_in_flight.is_some() {
-            self.pending_read_receipts
-                .entry(session_id)
-                .and_modify(|pending| *pending = (*pending).max(through))
-                .or_insert(through);
-            return;
+        if let Some(through) = self.read_receipts.acknowledge(&session_id, through) {
+            self.spawn_read_receipt(session_id, through);
         }
-        self.spawn_read_receipt(session_id, through);
     }
 
     fn acknowledge_dashboard_sessions(&mut self, receipts: Vec<(String, u64)>) {
@@ -1279,26 +1289,22 @@ impl DashboardContext {
             let Some(session) = self.controller.state.sessions.get_mut(&session_id) else {
                 continue;
             };
-            if through <= session.viewed_through_event_ordinal {
-                continue;
+            session.viewed_through_event_ordinal =
+                session.viewed_through_event_ordinal.max(through);
+            if let Some(through) = self.read_receipts.acknowledge(&session_id, through) {
+                self.spawn_read_receipt(session_id, through);
             }
-            session.viewed_through_event_ordinal = through;
-            self.pending_read_receipts
-                .entry(session_id)
-                .and_modify(|pending| *pending = (*pending).max(through))
-                .or_insert(through);
         }
         self.dashboard.set_state(self.controller.state.clone());
         self.reconcile_question_drafts();
-        if self.read_receipt_in_flight.is_none()
-            && let Some((session_id, through)) = self.pending_read_receipts.pop_first()
-        {
-            self.spawn_read_receipt(session_id, through);
-        }
     }
 
     fn spawn_read_receipt(&mut self, session_id: String, through: u64) {
-        self.read_receipt_in_flight = Some(session_id.clone());
+        let retry_delay = if self.read_receipts.failures.contains_key(&session_id) {
+            Duration::from_millis(250)
+        } else {
+            Duration::ZERO
+        };
         io::spawn_read_receipt_persist(
             self.client_id.clone(),
             self.controller
@@ -1309,6 +1315,7 @@ impl DashboardContext {
                 .unwrap_or_else(|| self.workspace_id.clone()),
             session_id,
             through,
+            retry_delay,
             self.dashboard_io_tx.clone(),
             self.critical_operations.clone(),
         );
@@ -1319,15 +1326,15 @@ impl DashboardContext {
         session_id: String,
         result: std::result::Result<u64, String>,
     ) {
-        self.read_receipt_in_flight = None;
-        if let Err(error) = result {
+        let next = self.read_receipts.complete(&session_id, result);
+        if let Some(error) = self.read_receipts.failures.get(&session_id) {
             self.dashboard.set_notice(format!(
                 "Could not save read status for {}: {error}",
                 short_id(&session_id)
             ));
         }
-        if let Some((next_session, through)) = self.pending_read_receipts.pop_first() {
-            self.spawn_read_receipt(next_session, through);
+        if let Some(through) = next {
+            self.spawn_read_receipt(session_id, through);
         }
     }
 
@@ -1543,8 +1550,7 @@ impl DashboardContext {
             materialized_projections_in_flight: BTreeSet::new(),
             pending_materialized_projections: BTreeMap::new(),
             project_sources_in_flight: BTreeSet::new(),
-            read_receipt_in_flight: None,
-            pending_read_receipts: BTreeMap::new(),
+            read_receipts: read_receipts::ReadReceipts::default(),
             checkpoint_archive_targets_seen: BTreeMap::new(),
             checkpoint_archive_generation: 0,
         };

@@ -1898,11 +1898,11 @@ fn mark_all_read_advances_a_materialized_session_and_returns_its_receipt() {
 }
 
 #[test]
-fn mark_all_read_includes_a_restart_only_session() {
+fn mark_all_read_includes_an_interruption_only_session() {
     let mut dashboard = dashboard_with_session(running_session());
-    apply_materialized_transcript(&mut dashboard, vec![session_restart(3)]);
+    apply_materialized_transcript(&mut dashboard, vec![work_interruption(3)]);
     assert_eq!(
-        dashboard.session_details["session-1"].unread_session_restarts,
+        dashboard.session_details["session-1"].unread_interruptions,
         1
     );
 
@@ -1913,7 +1913,7 @@ fn mark_all_read_includes_a_restart_only_session() {
         }
     );
     let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.unread_session_restarts, 0);
+    assert_eq!(detail.unread_interruptions, 0);
     assert!(!detail.has_unread());
 }
 

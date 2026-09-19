@@ -440,6 +440,21 @@ pub(crate) fn session_restart(position: u64) -> Arc<TranscriptItem> {
     item
 }
 
+pub(crate) fn work_interruption(position: u64) -> Arc<TranscriptItem> {
+    let mut item = transcript_item(
+        position,
+        TranscriptBody::System {
+            text: "Work interrupted".into(),
+        },
+    );
+    Arc::make_mut(&mut item).stable_id = format!(
+        "{}{}",
+        mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX,
+        position
+    );
+    item
+}
+
 pub(crate) fn materialized_session_for(
     session_id: &str,
     transcript: Vec<Arc<TranscriptItem>>,

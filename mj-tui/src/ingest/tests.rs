@@ -15,6 +15,75 @@ use crate::test_support::*;
 use crate::{DashboardState, SessionOperationKind};
 
 #[test]
+fn delayed_projection_and_summary_cannot_revive_acknowledged_content() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let materialized = materialized_session_for(
+        "session-1",
+        vec![agent_message(2, "done"), work_interruption(3)],
+    );
+    let prepared = PreparedMaterializedSessionDetail::from_materialized(
+        materialized.clone(),
+        0,
+        Default::default(),
+    );
+    let summary = PreparedMaterializedSessionSummary::from_materialized(
+        MaterializedSessionSummary {
+            session_id: "session-1".into(),
+            applied_event_ordinal: 3,
+            last_activity_at_ms: None,
+            execution: MaterializedExecutionState::Idle,
+            session_title: None,
+            last_agent_message: Some("done".into()),
+            last_user_message: None,
+            last_agent_message_follows_last_user: true,
+            agent_message_latest_content_ordinals: vec![2],
+            interruption_event_ordinals: vec![3],
+        },
+        0,
+    );
+    dashboard
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .viewed_through_event_ordinal = 3;
+    assert!(dashboard.apply_prepared_materialized_session_summary(summary));
+    assert!(!dashboard.session_details["session-1"].has_unread());
+    assert!(dashboard.apply_prepared_materialized_session(prepared));
+    assert!(!dashboard.session_details["session-1"].has_unread());
+    let newer = materialized_session_for(
+        "session-1",
+        vec![
+            agent_message(2, "done"),
+            work_interruption(3),
+            agent_message(4, "new reply"),
+        ],
+    );
+    dashboard.apply_materialized_session(&newer);
+    assert_eq!(
+        dashboard.session_details["session-1"].unread_agent_messages,
+        1
+    );
+}
+
+#[test]
+fn idle_restart_history_does_not_need_attention_or_notify() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.config.notify.mode = mj_core::config::NotifyMode::Terminal;
+    let mut materialized =
+        materialized_session_for("session-1", vec![session_restart(2), session_restart(3)]);
+    materialized.execution = MaterializedExecutionState::Idle;
+    dashboard.apply_materialized_session(&materialized);
+    assert_eq!(
+        dashboard.attention_level("session-1"),
+        crate::AttentionLevel::Idle
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    assert!(dashboard.notification_events(60_000).is_empty());
+    assert!(!dashboard.session_details["session-1"].has_unread());
+}
+
+#[test]
 fn unchanged_config_after_a_save_preserves_a_new_palette_and_its_query() {
     use crossterm::event::KeyCode;
     let mut session = stopped_session();
@@ -287,7 +356,7 @@ fn pending_question_ordinal_stays_paired_when_a_newer_summary_arrives() {
         last_user_message: None,
         last_agent_message_follows_last_user: false,
         agent_message_latest_content_ordinals: Vec::new(),
-        session_restart_event_ordinals: Vec::new(),
+        interruption_event_ordinals: Vec::new(),
     };
     dashboard.apply_prepared_materialized_session_summary(
         PreparedMaterializedSessionSummary::from_materialized(summary, 0),
@@ -301,17 +370,17 @@ fn pending_question_ordinal_stays_paired_when_a_newer_summary_arrives() {
 }
 
 #[test]
-fn restart_marker_is_unread_until_the_existing_cursor_passes_it() {
+fn interruption_marker_is_unread_until_the_existing_cursor_passes_it() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
-    let mut materialized = materialized_session_for("session-1", vec![session_restart(3)]);
+    let mut materialized = materialized_session_for("session-1", vec![work_interruption(3)]);
     materialized.execution = MaterializedExecutionState::Idle;
     dashboard.apply_materialized_session(&materialized);
 
     let detail = &dashboard.session_details["session-1"];
     assert_eq!(detail.unread_agent_messages, 0);
-    assert_eq!(detail.unread_session_restarts, 1);
+    assert_eq!(detail.unread_interruptions, 1);
     assert!(detail.has_unread());
     assert!(detail.current_turn_started_at.is_none());
 
@@ -323,23 +392,25 @@ fn restart_marker_is_unread_until_the_existing_cursor_passes_it() {
         .viewed_through_event_ordinal = 3;
     dashboard.set_state(state);
     let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.unread_session_restarts, 0);
+    assert_eq!(detail.unread_interruptions, 0);
     assert!(!detail.has_unread());
 }
 
 #[test]
-fn adjacent_restart_markers_keep_each_ordinal_for_unread_tracking() {
+fn adjacent_interruption_markers_keep_each_ordinal_for_unread_tracking() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
-    let mut materialized =
-        materialized_session_for("session-1", vec![session_restart(3), session_restart(4)]);
+    let mut materialized = materialized_session_for(
+        "session-1",
+        vec![work_interruption(3), work_interruption(4)],
+    );
     materialized.applied_event_ordinal = 4;
     dashboard.apply_materialized_session(&materialized);
 
     let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.session_restart_event_ordinals, [3, 4]);
-    assert_eq!(detail.unread_session_restarts, 2);
+    assert_eq!(detail.interruption_event_ordinals, [3, 4]);
+    assert_eq!(detail.unread_interruptions, 2);
 
     let mut state = dashboard.state.clone();
     state
@@ -349,7 +420,7 @@ fn adjacent_restart_markers_keep_each_ordinal_for_unread_tracking() {
         .viewed_through_event_ordinal = 3;
     dashboard.set_state(state);
     assert_eq!(
-        dashboard.session_details["session-1"].unread_session_restarts, 1,
+        dashboard.session_details["session-1"].unread_interruptions, 1,
         "reading through the older marker leaves the newer ordinal unread"
     );
 }
@@ -462,7 +533,7 @@ fn stored_summary_restores_dashboard_messages_without_marking_transcript_ready()
         last_user_message: Some("Persisted question".into()),
         last_agent_message_follows_last_user: true,
         agent_message_latest_content_ordinals: vec![2, 5, 7],
-        session_restart_event_ordinals: vec![6],
+        interruption_event_ordinals: vec![6],
     };
 
     assert!(dashboard.apply_prepared_materialized_session_summary(
@@ -479,7 +550,7 @@ fn stored_summary_restores_dashboard_messages_without_marking_transcript_ready()
         Some("Persisted answer")
     );
     assert_eq!(detail.unread_agent_messages, 2);
-    assert_eq!(detail.unread_session_restarts, 1);
+    assert_eq!(detail.unread_interruptions, 1);
     assert!(detail.last_agent_message_follows_last_user);
     assert_eq!(detail.current_turn_started_at, Some(4));
     assert_eq!(detail.transcript_hydration, TranscriptHydration::Loading);
@@ -507,7 +578,7 @@ fn late_startup_summary_does_not_erase_live_tool_preview_at_the_same_frontier() 
         last_user_message: None,
         last_agent_message_follows_last_user: false,
         agent_message_latest_content_ordinals: vec![],
-        session_restart_event_ordinals: vec![],
+        interruption_event_ordinals: vec![],
     };
     assert!(!dashboard.apply_prepared_materialized_session_summary(
         PreparedMaterializedSessionSummary::from_materialized(summary, 0),
@@ -541,7 +612,7 @@ fn stored_summary_elides_hidden_context_from_the_name_and_user_preview() {
         ),
         last_agent_message_follows_last_user: false,
         agent_message_latest_content_ordinals: vec![],
-        session_restart_event_ordinals: vec![],
+        interruption_event_ordinals: vec![],
     };
 
     assert!(dashboard.apply_prepared_materialized_session_summary(
@@ -599,7 +670,7 @@ fn incremental_projection_matches_a_full_rescan_through_transcript_changes() {
     // An item inside the unchanged prefix changes.
     set_agent_text(&mut transcript[0], "first, corrected", 6);
     updates.push(transcript.clone());
-    transcript.push(session_restart(7));
+    transcript.push(work_interruption(7));
     updates.push(transcript.clone());
     // A restore rebuilds every item, sharing no handles.
     transcript = vec![agent_message(1, "restored"), agent_message(2, "and again")];
@@ -635,12 +706,12 @@ fn incremental_projection_matches_a_full_rescan_through_transcript_changes() {
             "unread count after update {index}"
         );
         assert_eq!(
-            incremental.session_restart_event_ordinals, rescanned.session_restart_event_ordinals,
-            "restart ordinals after update {index}"
+            incremental.interruption_event_ordinals, rescanned.interruption_event_ordinals,
+            "interruption ordinals after update {index}"
         );
         assert_eq!(
-            incremental.unread_session_restarts, rescanned.unread_session_restarts,
-            "unread restart count after update {index}"
+            incremental.unread_interruptions, rescanned.unread_interruptions,
+            "unread interruption count after update {index}"
         );
         cache = incremental.projection;
     }

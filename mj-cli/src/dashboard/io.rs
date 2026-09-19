@@ -404,6 +404,14 @@ fn resolve_remote_repositories(
 }
 
 impl DashboardContext {
+    fn replace_controller(&mut self, mut controller: Controller) {
+        super::read_receipts::preserve_read_positions(
+            &mut controller.state.sessions,
+            &self.controller.state.sessions,
+        );
+        self.controller = controller;
+    }
+
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
         match update {
@@ -832,7 +840,7 @@ impl DashboardContext {
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
                 Ok(controller) => {
-                    self.controller = controller;
+                    self.replace_controller(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
@@ -860,7 +868,7 @@ impl DashboardContext {
             }
             DashboardIoUpdate::ConfigRename { what, result } => match result {
                 Ok(controller) => {
-                    self.controller = controller;
+                    self.replace_controller(controller);
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
@@ -876,7 +884,7 @@ impl DashboardContext {
                 self.config_reload_in_flight = false;
                 match result {
                     Ok(controller) => {
-                        self.controller = controller;
+                        self.replace_controller(controller);
                         self.dashboard.set_config(self.controller.config.clone());
                         self.dashboard.set_state(self.controller.state.clone());
                         self.refresh_chat_context();
@@ -1385,7 +1393,7 @@ impl DashboardContext {
                 return;
             }
         };
-        self.controller = loaded;
+        self.replace_controller(loaded);
         self.dashboard.set_state(self.controller.state.clone());
         self.resolve_project_sources();
         // A lifecycle may finish after the user changed tabs. Its durable

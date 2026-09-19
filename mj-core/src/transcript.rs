@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SESSION_RESTART_TEXT: &str = "[session restarted]";
 pub const SESSION_RESTART_ITEM_PREFIX: &str = "system:session-restarted:";
+pub const WORK_INTERRUPTED_ITEM_PREFIX: &str = "system:work-interrupted:";
 /// Marks the point where the harness resumed work with no prompt in flight.
 pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
@@ -284,6 +285,10 @@ pub struct TranscriptItem {
 }
 
 impl TranscriptItem {
+    pub fn is_work_interruption(&self) -> bool {
+        self.stable_id.starts_with(WORK_INTERRUPTED_ITEM_PREFIX)
+    }
+
     pub fn is_session_restart(&self) -> bool {
         self.stable_id.starts_with(SESSION_RESTART_ITEM_PREFIX)
     }
