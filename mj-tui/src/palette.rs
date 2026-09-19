@@ -737,11 +737,17 @@ mod tests {
         assert!(rename < settings, "{lines:#?}");
         assert!(settings < setup && setup < anywhere, "{lines:#?}");
         assert!(anywhere < global, "{lines:#?}");
-        // The palette never lists itself. Create and Resume are listed even
-        // though they have buttons, so a search finds them.
+        // The palette never lists itself. Create and Sessions are listed even
+        // though they have buttons, so a search finds them. Sessions is named
+        // with its chord, because the pane of the same name is on screen too.
         assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
         assert!(row_of(&lines, "Create session").is_some(), "{lines:#?}");
-        assert!(row_of(&lines, "Resume a session").is_some(), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Sessions") && line.contains("ctrl+b g")),
+            "{lines:#?}"
+        );
         assert!(
             lines
                 .iter()

@@ -1605,7 +1605,7 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     dashboard.focus_sessions();
     assert_eq!(
         combined_footer_text(&dashboard, 200),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g resume \
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
          · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering \
          · : palette · ? keys"
     );

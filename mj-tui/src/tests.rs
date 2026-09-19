@@ -3148,20 +3148,6 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
     assert_eq!(restored.selected_session_id(), Some("session-2"));
 }
 
-/// A form question the agent is waiting on, as the daemon projects it.
-fn question(session_id: &str) -> mj_core::elicitation::ElicitationRequest {
-    mj_core::elicitation::ElicitationRequest::from_acp_params(
-        format!("{session_id}-question"),
-        serde_json::json!({
-            "mode": "form",
-            "sessionId": session_id,
-            "message": "Choose a path",
-            "requestedSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
-        }),
-    )
-    .expect("valid test question")
-}
-
 /// Three live sessions in the default workspace and one in `other`: `asks`
 /// is waiting on a question, `done` has an unread answer, `quiet` is idle and
 /// read, and `remote` (in `other`) is also waiting on a question.
@@ -4065,7 +4051,7 @@ fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
     );
     // The chord hints are joined by the ASCII separator.
     assert!(
-        wide.last().unwrap().contains("c create - g resume"),
+        wide.last().unwrap().contains("c create - g sessions"),
         "ASCII footer separators: {}",
         wide.last().unwrap()
     );

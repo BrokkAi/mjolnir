@@ -105,6 +105,7 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
     );
     dashboard.set_move_operations([incomplete_move()]);
     dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
 
     let row = dashboard
         .resume_rows()
@@ -154,25 +155,12 @@ fn focus_resume_control(dashboard: &mut DashboardState, control: ResumeFocus) {
 }
 
 fn switch_to_import(dashboard: &mut DashboardState) {
-    if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
-        dialog.form.get_mut().focus(ResumeFocus::Tabs);
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Right)),
-        DashboardAction::None
-    );
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Import);
-    if dialog.focused() == ResumeFocus::Tabs {
-        dashboard.handle_key(key(KeyCode::Enter));
-    }
+    switch_to_tab(dashboard, ResumeTab::Import);
 }
 
 /// Move the dialog to a tab by name, through the tab strip.
 fn switch_to_tab(dashboard: &mut DashboardState, tab: ResumeTab) {
-    for _ in 0..4 {
+    for _ in 0..=ResumeTab::COUNT {
         let Mode::ResumeDialog(dialog) = &mut dashboard.mode else {
             panic!("expected the resume dialog");
         };
@@ -321,6 +309,7 @@ fn resume_and_import_targets_include_the_project_like_live_summaries() {
             NEWER_THAN_THE_CHECKPOINT,
         )])],
     );
+    switch_to_hel(&mut dashboard);
 
     let targets = rows(&dashboard)
         .into_iter()
@@ -438,6 +427,7 @@ fn previously_archived_history_remains_visible() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
 
     assert_eq!(
         titles(&rows(&dashboard)),
@@ -485,6 +475,7 @@ fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
         let mut dashboard =
             DashboardState::new(config(), state_with(vec![session]), BTreeMap::new());
         dashboard.show_resume_dialog(1, Vec::new());
+        switch_to_hel(&mut dashboard);
 
         let row = &rows(&dashboard)[0];
         assert!(!row.status.is_recoverable());
@@ -516,6 +507,7 @@ fn the_destroy_button_replaces_the_d_key() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('d'))),
@@ -570,6 +562,7 @@ fn the_active_tab_is_highlighted_without_focus() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
@@ -667,23 +660,22 @@ fn apply_ready_rows(dashboard: &mut DashboardState, rows: Vec<WikiRow>) {
     dashboard.apply_wiki_search(request_id, ready_page(rows));
 }
 
+/// The dialog opens wanting a name typed into it, on a tab that matches names
+/// without the index, so the box takes the focus while the index is still
+/// building rather than waiting for an answer it does not need.
 #[test]
-fn the_dialog_focuses_the_search_box_once_the_index_is_ready() {
+fn the_dialog_focuses_the_search_box_without_waiting_for_the_index() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.show_resume_dialog(1, Vec::new());
-    // The box is disabled until the index answers, so it cannot hold the
-    // focus at first.
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert_ne!(dialog.focused(), ResumeFocus::Search);
-    apply_ready_rows(&mut dashboard, Vec::new());
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
+    assert_ne!(dialog.wiki_status.state, WikiIndexState::Ready);
     assert_eq!(dialog.focused(), ResumeFocus::Search);
 }
 
+/// The focus is offered to the box once, when the dialog opens. A key moves it
+/// somewhere the person chose, and a later index answer leaves it there.
 #[test]
 fn a_key_before_the_index_is_ready_keeps_the_focus_where_it_was_put() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -693,7 +685,7 @@ fn a_key_before_the_index_is_ready_keeps_the_focus_where_it_was_put() {
         panic!("expected the resume dialog");
     };
     let chosen = dialog.focused();
-    assert_ne!(chosen, ResumeFocus::Sessions);
+    assert_ne!(chosen, ResumeFocus::Search);
     apply_ready_rows(&mut dashboard, Vec::new());
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
@@ -781,6 +773,7 @@ fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
     assert_eq!(query, "");
     dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("gone", true)]));
 
+    switch_to_hel(&mut dashboard);
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
     switch_to_import(&mut dashboard);
     assert!(rows(&dashboard).is_empty());
@@ -954,6 +947,9 @@ fn typing_asks_for_a_search_and_stale_answers_are_dropped() {
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
     apply_ready_rows(&mut dashboard, Vec::new());
+    // The Live tab matches names itself; the index is asked from the tabs that
+    // have nothing else to search with.
+    switch_to_hel(&mut dashboard);
     focus_resume_control(&mut dashboard, ResumeFocus::Search);
 
     let action = dashboard.handle_key(key(KeyCode::Char('g')));
@@ -992,6 +988,7 @@ fn tabs_separate_hel_records_from_importable_native_sessions() {
             NEWER_THAN_THE_CHECKPOINT,
         )])],
     );
+    switch_to_hel(&mut dashboard);
 
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
@@ -1030,9 +1027,8 @@ fn search_arrows_edit_the_cursor_and_tabs_have_their_own_focus() {
         )])],
     );
     apply_ready_rows(&mut dashboard, Vec::new());
-    // The ready answer focuses the box; `/` is the way back to it from the
-    // list, so start from there.
-    dashboard.handle_key(key(KeyCode::Down));
+    switch_to_hel(&mut dashboard);
+    // Switching tabs leaves the box for the list; `/` is the way back to it.
     dashboard.handle_key(key(KeyCode::Char('/')));
     dashboard.handle_paste("nat");
     dashboard.handle_key(key(KeyCode::Left));
@@ -1069,6 +1065,7 @@ fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
             NEWER_THAN_THE_CHECKPOINT,
         )])],
     );
+    switch_to_hel(&mut dashboard);
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
@@ -1125,14 +1122,10 @@ fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
 fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
     dashboard.show_resume_dialog(1, Vec::new());
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Left)),
-        DashboardAction::None
-    );
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert_eq!(dialog.tab, ResumeTab::Live, "Left reaches the Live tab");
+    assert_eq!(dialog.tab, ResumeTab::Live, "the dialog opens on Live");
 
     let listed = rows(&dashboard)
         .into_iter()
@@ -1162,8 +1155,7 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
     switch_to_tab(&mut dashboard, ResumeTab::Live);
 
     // Drawing registers the dialog's controls, so `/` reaches the box the way
-    // it does in the running dashboard. The index is still building, which is
-    // what keeps the box from taking the focus on the history tabs.
+    // it does in the running dashboard, with the index still building.
     drawn(&mut dashboard, 120, 40);
     dashboard.handle_key(key(KeyCode::Char('/')));
     focus_resume_control(&mut dashboard, ResumeFocus::Search);
@@ -1183,12 +1175,13 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
 fn enter_on_a_live_row_moves_the_dashboard_to_that_session() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
     dashboard.show_resume_dialog(1, Vec::new());
-    switch_to_tab(&mut dashboard, ResumeTab::Live);
     let index = rows(&dashboard)
         .iter()
         .position(|row| row.key == ResumeRowKey::Live("live-remote".into()))
         .expect("the other workspace's session is listed");
     dashboard.select_resume_row(index);
+    // The dialog opens with the search box focused; Enter acts on the list.
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
@@ -1202,6 +1195,111 @@ fn enter_on_a_live_row_moves_the_dashboard_to_that_session() {
     );
     dashboard.set_active_workspace(Some("other".into()));
     assert_eq!(dashboard.selected_session_id(), Some("live-remote"));
+}
+
+/// The same three live sessions, each at a different attention level, so a
+/// state filter has something to keep and something to drop.
+fn dashboard_with_live_attention_mix() -> DashboardState {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard
+        .session_details
+        .get_mut("live-remote")
+        .expect("live-remote's details")
+        .pending_elicitations = vec![question("live-remote")];
+    dashboard
+        .session_details
+        .get_mut("live-beta")
+        .expect("live-beta's details")
+        .unread_agent_messages = 1;
+    dashboard
+}
+
+/// The dialog opens on the running sessions with the search box ready for a
+/// name, and the letters the Sessions pane uses narrow the list by state.
+#[test]
+fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
+    let mut dashboard = dashboard_with_live_attention_mix();
+    dashboard.show_resume_dialog(1, Vec::new());
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Live, "the dialog opens on Live");
+    assert_eq!(
+        dialog.focused(),
+        ResumeFocus::Search,
+        "a tab that answers its own search hands the box the focus at once"
+    );
+    assert_eq!(rows(&dashboard).len(), 3);
+
+    // The letters belong to the list, not to the box, so leave the box first.
+    drawn(&mut dashboard, 120, 40);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Down)),
+        DashboardAction::None
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('b'))),
+        DashboardAction::None
+    );
+    assert_eq!(
+        rows(&dashboard)
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>(),
+        vec![ResumeRowKey::Live("live-remote".into())],
+        "only the session waiting on a question counts as blocked"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('d'))),
+        DashboardAction::None
+    );
+    assert_eq!(
+        rows(&dashboard)
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>(),
+        vec![ResumeRowKey::Live("live-beta".into())],
+        "the unread answer is the done one"
+    );
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('a'))),
+        DashboardAction::None
+    );
+    assert_eq!(rows(&dashboard).len(), 3, "`a` brings the whole list back");
+}
+
+/// The Live tab matches names itself, so the index never hears what is typed
+/// there. Leaving for a history tab is when it has to be asked, or that tab
+/// would show no matches until the next keystroke.
+#[test]
+fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    // Drawing registers the dialog's controls; the box already has the focus.
+    drawn(&mut dashboard, 120, 40);
+    for character in "mast".chars() {
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char(character))),
+            DashboardAction::None,
+            "a name search answers from the session list, not the index"
+        );
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+
+    // Down leaves the box for the list, where the arrows walk the tab strip.
+    dashboard.handle_key(key(KeyCode::Down));
+    let action = dashboard.handle_key(key(KeyCode::Right));
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert_eq!(dialog.tab, ResumeTab::Hel);
+    assert!(
+        matches!(
+            &action,
+            DashboardAction::SearchArchivedSessions { query, .. } if query == "mast"
+        ),
+        "{action:?}"
+    );
 }
 
 /// The dashboard lists live sessions; the dialog lists the rest. Nothing
@@ -1233,6 +1331,7 @@ fn the_sidebar_shows_live_work_and_resume_lists_settled_history() {
     }
     let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
     dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_hel(&mut dashboard);
 
     let on_dashboard = dashboard
         .ordered_sessions()
@@ -1491,7 +1590,7 @@ fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .expect("draw the dashboard");
     let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("g resume"), "{rendered}");
+    assert!(rendered.contains("g sessions"), "{rendered}");
     assert!(!rendered.contains("Import"), "{rendered}");
 }
 
@@ -1513,6 +1612,7 @@ fn the_row_list_follows_state_reloads_and_background_updates_while_the_dialog_is
             NEWER_THAN_THE_CHECKPOINT,
         )])],
     );
+    switch_to_hel(&mut dashboard);
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
 
     let mut reloaded = stopped_session();
@@ -1587,6 +1687,7 @@ fn a_query_lists_only_what_the_index_returned_in_its_own_order() {
         ])],
     );
     apply_ready_rows(&mut dashboard, Vec::new());
+    switch_to_hel(&mut dashboard);
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
     switch_to_import(&mut dashboard);
     assert_eq!(rows(&dashboard).len(), 2, "an empty query lists the tab");
@@ -1655,6 +1756,7 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    switch_to_hel(&mut dashboard);
     apply_ready_rows(&mut dashboard, Vec::new());
     assert_eq!(
         dashboard.next_wiki_preview(),
@@ -1694,6 +1796,9 @@ fn the_search_box_is_disabled_until_the_first_build_finishes() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    // Search on the history tabs is the index's answer, so they are where a
+    // box that cannot answer yet says so.
+    switch_to_hel(&mut dashboard);
     let request_id = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
         _ => panic!("expected the resume dialog"),
@@ -1762,6 +1867,9 @@ fn a_version_mismatch_disables_the_box_and_stops_the_polling() {
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, vec![codex_profile(Vec::new())]);
+    // Search on the history tabs is the index's answer, so they are where a
+    // box that cannot answer yet says so.
+    switch_to_hel(&mut dashboard);
     let request_id = match &dashboard.mode {
         Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
         _ => panic!("expected the resume dialog"),
@@ -1919,7 +2027,17 @@ fn the_dialog_footer_names_its_own_keys() {
     let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the resume dialog");
+        .expect("draw the Live tab");
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    for hint in ["Enter opens", "a/b/w/i/d filter"] {
+        assert!(rendered.contains(hint), "{rendered}");
+    }
+    assert!(!rendered.contains("destroys"), "{rendered}");
+
+    switch_to_hel(&mut dashboard);
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .expect("draw the Mjolnir tab");
     let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
     for hint in [
         "Mjolnir",
@@ -1931,6 +2049,7 @@ fn the_dialog_footer_names_its_own_keys() {
     ] {
         assert!(rendered.contains(hint), "{rendered}");
     }
+    assert!(!rendered.contains("filter"), "{rendered}");
 
     switch_to_import(&mut dashboard);
     terminal
@@ -1959,6 +2078,7 @@ fn search_counts_hits_on_every_tab() {
             native("native-3", "Native beta", NEWER_THAN_THE_CHECKPOINT - 1),
         ])],
     );
+    switch_to_hel(&mut dashboard);
     replace_search(&mut dashboard, "the phrase");
     apply_ready_rows(
         &mut dashboard,

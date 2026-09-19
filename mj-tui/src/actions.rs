@@ -624,12 +624,14 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::ResumeDialog,
-        label: "Resume a session",
-        description: "Open the picker for every session that is not live.",
+        label: "Sessions",
+        description: "Open every running session, in every workspace, on one list. \
+                      The tabs to its right list the sessions that can be resumed, \
+                      imported, or restored from the search index.",
         scope: Scope::Global,
         pane_keys: &[],
         action: Some(KeyAction::Resume),
-        footer: footer_word!("resume"),
+        footer: footer_word!("sessions"),
         footer_group: FooterGroup::Chord,
         footer_rank: 1,
         available: always_ready,
