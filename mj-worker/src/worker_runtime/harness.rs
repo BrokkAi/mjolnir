@@ -837,13 +837,13 @@ INSTALLER
     };
 
     fn executable(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            parent,
+            path.file_name().unwrap().to_str().unwrap(),
+            body,
+        );
     }
 
     fn complete_fake(root: &Path, harness: HarnessKind, install_id: &str, entrypoint: &str) {

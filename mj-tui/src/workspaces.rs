@@ -50,6 +50,12 @@ pub(crate) enum WorkspaceManagerView {
     Rename {
         workspace_id: String,
     },
+    Close {
+        workspace_id: String,
+        workspace_name: String,
+        session_count: u64,
+        draft_count: usize,
+    },
     Delete {
         workspace_id: String,
         workspace_name: String,
@@ -71,6 +77,10 @@ pub(crate) enum WorkspaceControl {
     Save,
     Delete,
     ConfirmDelete,
+    Close,
+    ConfirmClose,
+    CancelClose,
+    ContinueWorking,
     Drafts,
     Name,
     Create,
@@ -82,6 +92,7 @@ pub(crate) enum WorkspaceControl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceMutation {
+    Close,
     Load,
     Create,
     Rename,
@@ -99,6 +110,8 @@ pub(crate) struct WorkspaceManager {
     pub(crate) selected: usize,
     pub(crate) selected_draft: usize,
     pub(crate) view: WorkspaceManagerView,
+    pending_command: Option<(String, bool)>,
+    closing_workspaces: std::collections::BTreeSet<String>,
     pub(crate) name: TextInput,
     pub(crate) form: RefCell<Dialog<WorkspaceControl>>,
     pub(crate) loading: bool,
@@ -116,10 +129,12 @@ impl WorkspaceManager {
         self.sync_form();
         use WorkspaceControl::*;
         let form = self.form.get_mut();
-        form.set_dismissal_enabled(
-            self.busy
-                .is_none_or(|operation| operation == WorkspaceMutation::Load),
-        );
+        form.set_dismissal_enabled(self.busy.is_none_or(|operation| {
+            matches!(
+                operation,
+                WorkspaceMutation::Load | WorkspaceMutation::Close
+            )
+        }));
         form.set_action_role(Cancel, mj_chat::components::ActionRole::Cancel);
         form.set_action_role(Back, mj_chat::components::ActionRole::Back);
         match self.view {
@@ -149,6 +164,8 @@ impl WorkspaceManager {
             selected: 0,
             selected_draft: 0,
             view: WorkspaceManagerView::List,
+            pending_command: None,
+            closing_workspaces: Default::default(),
             name: TextInput::default(),
             form: manager_form(),
             loading: true,
@@ -176,6 +193,7 @@ impl WorkspaceManager {
         match &self.view {
             WorkspaceManagerView::List | WorkspaceManagerView::Create => None,
             WorkspaceManagerView::Rename { workspace_id }
+            | WorkspaceManagerView::Close { workspace_id, .. }
             | WorkspaceManagerView::Delete { workspace_id, .. }
             | WorkspaceManagerView::Drafts { workspace_id } => Some(workspace_id),
         }
@@ -186,6 +204,40 @@ impl WorkspaceManager {
         self.entries
             .iter()
             .find(|entry| entry.workspace.id == workspace_id)
+    }
+
+    fn open_selected_command(&mut self, close: bool) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        self.name = TextInput::from_value(entry.workspace.name.clone()).with_max_chars(64);
+        let entry = self.selected_entry().expect("selection is unchanged");
+        self.view = if close {
+            WorkspaceManagerView::Close {
+                workspace_id: entry.workspace.id.clone(),
+                workspace_name: entry.workspace.name.clone(),
+                session_count: entry.workspace.session_count,
+                draft_count: entry.drafts.len(),
+            }
+        } else {
+            WorkspaceManagerView::Rename {
+                workspace_id: entry.workspace.id.clone(),
+            }
+        };
+        if close
+            && self
+                .view_workspace_id()
+                .is_some_and(|id| self.closing_workspaces.contains(id))
+        {
+            self.busy = Some(WorkspaceMutation::Close);
+        }
+        self.error = None;
+        self.success = None;
+        self.form.get_mut().focus(if close {
+            WorkspaceControl::Cancel
+        } else {
+            WorkspaceControl::Name
+        });
     }
 
     fn force_delete_ready(&self) -> bool {
@@ -245,6 +297,7 @@ impl WorkspaceManager {
                 let mut actions = vec![
                     (New, "New workspace", ready),
                     (Rename, "Rename", ready && selected.is_some()),
+                    (Close, "Close…", ready && selected.is_some()),
                     (Delete, "Delete", ready && selected.is_some()),
                 ];
                 if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
@@ -262,6 +315,16 @@ impl WorkspaceManager {
                 (Cancel, "Cancel", dismiss),
                 (Back, "Back", dismiss),
                 (Save, "Save", ready),
+            ],
+            WorkspaceManagerView::Close { .. } if self.busy == Some(WorkspaceMutation::Close) => {
+                vec![
+                    (ContinueWorking, "Continue working", true),
+                    (CancelClose, "Cancel closing", true),
+                ]
+            }
+            WorkspaceManagerView::Close { .. } => vec![
+                (Cancel, "Cancel", dismiss),
+                (ConfirmClose, "Close workspace", ready),
             ],
             WorkspaceManagerView::Delete { .. } if self.delete_is_destructive() => vec![
                 (Cancel, "Cancel", dismiss),
@@ -313,6 +376,7 @@ impl WorkspaceManager {
                 form.declare(Name, ControlKind::TextField);
                 Name
             }
+            WorkspaceManagerView::Close { .. } => Cancel,
             WorkspaceManagerView::Delete { .. } => {
                 if destructive {
                     form.declare(Name, ControlKind::TextField);
@@ -341,7 +405,7 @@ impl WorkspaceManager {
                 role: match id {
                     Cancel => ActionRole::Cancel,
                     Back => ActionRole::Back,
-                    Open | Create | Save | ConfirmDelete | ForceDelete | Recover => {
+                    Open | Create | Save | ConfirmClose | ConfirmDelete | ForceDelete | Recover => {
                         ActionRole::Primary
                     }
                     _ => ActionRole::Secondary,
@@ -497,6 +561,18 @@ impl DashboardState {
     }
 
     /// Opens the manager and requests its first snapshot off the UI loop.
+    pub(crate) fn begin_workspace_command(&mut self, close: bool) -> DashboardAction {
+        let Some(workspace_id) = self.active_workspace_id.clone() else {
+            self.set_notice("No active workspace");
+            return DashboardAction::None;
+        };
+        let action = self.begin_workspace_manager();
+        if let Mode::WorkspaceManager(manager) = &mut self.mode {
+            manager.pending_command = Some((workspace_id, close));
+        }
+        action
+    }
+
     pub fn begin_workspace_manager(&mut self) -> DashboardAction {
         self.workspace_management_generation = self.workspace_management_generation.wrapping_add(1);
         let generation = self.workspace_management_generation;
@@ -504,7 +580,25 @@ impl DashboardState {
             generation,
             self.active_workspace_id.clone(),
         ));
+        if let Mode::WorkspaceManager(manager) = &mut self.mode {
+            manager.closing_workspaces = self.closing_workspaces.clone();
+        }
         DashboardAction::LoadWorkspaceManagement { generation }
+    }
+
+    /// Clear operation state even when its original dialog has been dismissed.
+    pub fn workspace_close_finished(&mut self, workspace_id: &str) -> Option<u64> {
+        self.closing_workspaces.remove(workspace_id);
+        if let Some(manager) = workspace_manager_in_mode(&mut self.mode) {
+            manager.closing_workspaces.remove(workspace_id);
+            if manager.busy == Some(WorkspaceMutation::Close)
+                && manager.view_workspace_id() == Some(workspace_id)
+            {
+                // A reopened progress dialog owns this operation's result too.
+                return Some(manager.generation);
+            }
+        }
+        None
     }
 
     /// Whether a background workspace query or mutation may still update the
@@ -579,6 +673,7 @@ impl DashboardState {
                         WorkspaceMutation::Create
                             | WorkspaceMutation::Rename
                             | WorkspaceMutation::Delete
+                            | WorkspaceMutation::Close
                     )
                 ) {
                     manager.view = WorkspaceManagerView::List;
@@ -599,6 +694,18 @@ impl DashboardState {
                         })
                         .unwrap_or_else(|| TextInput::default().with_max_chars(64));
                 }
+                if let Some((workspace_id, close)) = manager.pending_command.take() {
+                    if let Some(index) = manager
+                        .entries
+                        .iter()
+                        .position(|entry| entry.workspace.id == workspace_id)
+                    {
+                        manager.select(index);
+                        manager.open_selected_command(close);
+                    } else {
+                        manager.error = Some("The workspace no longer exists.".into());
+                    }
+                }
                 manager.sync_form();
                 return foreground;
             }
@@ -616,6 +723,12 @@ impl DashboardState {
         let result = manager.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         match result.action {
+            Some(Interaction::Cancel) if manager.busy == Some(WorkspaceMutation::Close) => {
+                self.cancel_modal();
+                self.set_notice(
+                    "Closing workspace in the background; reopen Close workspace to cancel.",
+                );
+            }
             Some(Interaction::Cancel) => {
                 let locked = manager
                     .busy
@@ -668,16 +781,26 @@ impl DashboardState {
                     manager.form.get_mut().focus(WorkspaceControl::Name);
                 }
                 WorkspaceControl::Rename if manager.can_mutate() => {
-                    if let Some((workspace_id, workspace_name)) = manager
-                        .selected_entry()
-                        .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
-                    {
-                        manager.view = WorkspaceManagerView::Rename { workspace_id };
-                        manager.name = TextInput::from_value(workspace_name).with_max_chars(64);
-                        manager.error = None;
-                        manager.success = None;
-                        manager.form.get_mut().focus(WorkspaceControl::Name);
+                    manager.open_selected_command(false)
+                }
+                WorkspaceControl::Close if manager.can_mutate() => {
+                    manager.open_selected_command(true)
+                }
+                WorkspaceControl::ContinueWorking => {
+                    self.cancel_modal();
+                    self.set_notice(
+                        "Closing workspace in the background; reopen Close workspace to cancel.",
+                    );
+                }
+                WorkspaceControl::CancelClose => {
+                    if let WorkspaceManagerView::Close { workspace_id, .. } = &manager.view {
+                        return DashboardAction::CancelWorkspaceClose {
+                            workspace_id: workspace_id.clone(),
+                        };
                     }
+                }
+                WorkspaceControl::ConfirmClose => {
+                    return self.workspace_manager_mutation(WorkspaceMutation::Close);
                 }
                 WorkspaceControl::Delete if manager.can_mutate() => {
                     if let Some(entry) = manager.selected_entry() {
@@ -740,7 +863,10 @@ impl DashboardState {
                     return self.workspace_manager_mutation(WorkspaceMutation::Recover);
                 }
                 WorkspaceControl::Cancel => {
-                    if matches!(manager.view, WorkspaceManagerView::Delete { .. }) {
+                    if matches!(
+                        manager.view,
+                        WorkspaceManagerView::Delete { .. } | WorkspaceManagerView::Close { .. }
+                    ) {
                         manager.reset_to_list();
                     } else {
                         self.cancel_modal();
@@ -783,6 +909,17 @@ impl DashboardState {
                     generation,
                     workspace_id: workspace_id.clone(),
                     name,
+                }
+            }
+            WorkspaceMutation::Close => {
+                let WorkspaceManagerView::Close { workspace_id, .. } = &manager.view else {
+                    return DashboardAction::None;
+                };
+                self.closing_workspaces.insert(workspace_id.clone());
+                manager.closing_workspaces.insert(workspace_id.clone());
+                DashboardAction::CloseWorkspace {
+                    generation,
+                    workspace_id: workspace_id.clone(),
                 }
             }
             WorkspaceMutation::Delete => {
@@ -1034,6 +1171,7 @@ pub(crate) fn render_workspace_manager(
         WorkspaceManagerView::Create => " Workspaces · New ",
         WorkspaceManagerView::Rename { .. } => " Workspaces · Rename ",
         WorkspaceManagerView::Delete { .. } => " Workspaces · Delete ",
+        WorkspaceManagerView::Close { .. } => " Workspaces · Close ",
         WorkspaceManagerView::Drafts { .. } => " Workspaces · Drafts ",
     };
     let inner = popup.inner(Margin {
@@ -1069,6 +1207,12 @@ pub(crate) fn render_workspace_manager(
             WorkspaceManagerView::Rename { .. } => {
                 "Enter saves the new name · Esc closes manager".into()
             }
+            WorkspaceManagerView::Close { .. } if dialog.busy == Some(WorkspaceMutation::Close) => {
+                "Stopping sessions · Esc returns to the dashboard".into()
+            }
+            WorkspaceManagerView::Close { .. } => {
+                "Confirm closing the workspace · Esc cancels".into()
+            }
             WorkspaceManagerView::Delete { .. } => {
                 "Every deletion requires confirmation · Esc closes manager".into()
             }
@@ -1092,9 +1236,9 @@ pub(crate) fn render_workspace_manager(
     // The actions form a column beside the page body rather than a footer row,
     // so the body gives up exactly the width that column needs.
     let columns = form.split_actions(rows[1], &dialog.actions());
-    let dismiss_enabled = dialog
-        .busy
-        .is_none_or(|mutation| mutation == WorkspaceMutation::Load);
+    let dismiss_enabled = dialog.busy.is_none_or(|mutation| {
+        matches!(mutation, WorkspaceMutation::Load | WorkspaceMutation::Close)
+    });
     let title_line = dismissible_modal_title(
         &mut form,
         popup,
@@ -1123,6 +1267,27 @@ pub(crate) fn render_workspace_manager(
             WorkspaceControl::Save,
             "Save",
         ),
+        WorkspaceManagerView::Close {
+            workspace_name,
+            session_count,
+            draft_count,
+            ..
+        } => {
+            let text = format!(
+                "Close {workspace_name:?}?\n\nStop {session_count} session(s), including active sub-agents.\nResumable histories are preserved.\nDiscard {draft_count} saved draft(s) and any unsent composer text.\nRemove this workspace after all sessions stop."
+            );
+            frame.render_widget(
+                Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),
+                columns.body,
+            );
+            Dialog::render_actions_stacked(
+                frame,
+                columns.actions,
+                &dialog.actions(),
+                &mut form,
+                ColumnAlign::Right,
+            );
+        }
         WorkspaceManagerView::Delete {
             workspace_name,
             session_count,
@@ -1155,7 +1320,9 @@ pub(crate) fn render_workspace_manager(
         WorkspaceManagerView::Delete { .. } if dialog.delete_is_destructive() => {
             WorkspaceControl::Name
         }
-        WorkspaceManagerView::Delete { .. } => WorkspaceControl::Cancel,
+        WorkspaceManagerView::Delete { .. } | WorkspaceManagerView::Close { .. } => {
+            WorkspaceControl::Cancel
+        }
         WorkspaceManagerView::Drafts { .. } => WorkspaceControl::DraftList,
     };
     form.end_frame(initial);

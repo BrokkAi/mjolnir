@@ -95,6 +95,33 @@ pub struct TileLayout {
 }
 
 impl TileLayout {
+    /// Exchange leaf positions without changing pane identities or split ratios.
+    pub fn swap_panes(&mut self, first: PaneId, second: PaneId) -> bool {
+        if first == second
+            || !self.pane_ids().contains(&first)
+            || !self.pane_ids().contains(&second)
+        {
+            return false;
+        }
+        fn swap(node: &mut Node, first: PaneId, second: PaneId) {
+            match node {
+                Node::Pane(id) if *id == first => *id = second,
+                Node::Pane(id) if *id == second => *id = first,
+                Node::Pane(_) => {}
+                Node::Split {
+                    first: a,
+                    second: b,
+                    ..
+                } => {
+                    swap(a, first, second);
+                    swap(b, first, second);
+                }
+            }
+        }
+        swap(&mut self.root, first, second);
+        true
+    }
+
     /// Start a layout with a single pane, id 1. Returns the layout and that
     /// pane's id so the caller can set up what it shows.
     pub fn new() -> (Self, PaneId) {

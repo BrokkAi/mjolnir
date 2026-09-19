@@ -32,6 +32,14 @@ pub enum CommandId {
     FocusPaneRight,
     FocusLastPane,
     ZoomPane,
+    ResizeMode,
+    SwapPaneLeft,
+    SwapPaneDown,
+    SwapPaneUp,
+    SwapPaneRight,
+    CloseSession,
+    RenameWorkspace,
+    CloseWorkspace,
     ResizePaneLeft,
     ResizePaneDown,
     ResizePaneUp,
@@ -230,6 +238,14 @@ fn spinner_available(dashboard: &DashboardState) -> Availability {
         Availability::Blocked("The spinner preference is being saved")
     } else {
         Availability::Ready
+    }
+}
+
+fn active_workspace_ready(dashboard: &DashboardState) -> Availability {
+    if dashboard.active_workspace_id().is_some() {
+        Availability::Ready
+    } else {
+        Availability::Blocked("No active workspace")
     }
 }
 
@@ -544,6 +560,102 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::ResizeMode,
+        label: "Resize panes",
+        description: "Resize conversation panes with h/j/k/l or arrows until Escape.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::ResizeMode),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::SwapPaneLeft,
+        label: "Swap pane left",
+        description: "Move the focused conversation pane left, exchanging places with its neighbor.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::SwapPaneLeft),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::SwapPaneDown,
+        label: "Swap pane down",
+        description: "Move the focused conversation pane down, exchanging places with its neighbor.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::SwapPaneDown),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::SwapPaneUp,
+        label: "Swap pane up",
+        description: "Move the focused conversation pane up, exchanging places with its neighbor.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::SwapPaneUp),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::SwapPaneRight,
+        label: "Swap pane right",
+        description: "Move the focused conversation pane right, exchanging places with its neighbor.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::SwapPaneRight),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::CloseSession,
+        label: "Close session…",
+        description: "Confirm stopping the selected session and its children, preserving resumable history.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: Some(KeyAction::CloseSession),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: stop_session_available,
+    },
+    CommandSpec {
+        id: CommandId::RenameWorkspace,
+        label: "Rename workspace…",
+        description: "Rename the active workspace.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::RenameWorkspace),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: active_workspace_ready,
+    },
+    CommandSpec {
+        id: CommandId::CloseWorkspace,
+        label: "Close workspace…",
+        description: "Confirm stopping workspace sessions, preserving history, and discarding drafts.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: Some(KeyAction::CloseWorkspace),
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: active_workspace_ready,
     },
     CommandSpec {
         id: CommandId::ResizePaneLeft,
@@ -1245,6 +1357,15 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        if !matches!(
+            id,
+            CommandId::ResizePaneLeft
+                | CommandId::ResizePaneDown
+                | CommandId::ResizePaneUp
+                | CommandId::ResizePaneRight
+        ) {
+            self.resize_mode = false;
+        }
         if self
             .selected_session_id()
             .is_some_and(|selected| self.is_native_agent(selected))
@@ -1255,6 +1376,7 @@ impl DashboardState {
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
                     | CommandId::MoveSession
+                    | CommandId::CloseSession
                     | CommandId::StopSession
                     | CommandId::ForceDestroySession
             )
@@ -1269,7 +1391,10 @@ impl DashboardState {
             self.recent_commands.push_front(id);
             self.recent_commands.truncate(RECENT_COMMANDS);
         }
-        if matches!(id, CommandId::StopSession | CommandId::RestartSession) {
+        if matches!(
+            id,
+            CommandId::StopSession | CommandId::CloseSession | CommandId::RestartSession
+        ) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
                 Availability::Blocked(reason) => {
@@ -1296,6 +1421,22 @@ impl DashboardState {
             CommandId::FocusPaneRight => self.focus_pane_command(NavDirection::Right),
             CommandId::FocusLastPane => self.focus_last_pane_command(),
             CommandId::ZoomPane => self.zoom_pane_command(),
+            CommandId::ResizeMode => self.begin_resize_mode(),
+            CommandId::SwapPaneLeft => self.swap_pane_command(NavDirection::Left),
+            CommandId::SwapPaneDown => self.swap_pane_command(NavDirection::Down),
+            CommandId::SwapPaneUp => self.swap_pane_command(NavDirection::Up),
+            CommandId::SwapPaneRight => self.swap_pane_command(NavDirection::Right),
+            CommandId::RenameWorkspace => self.begin_workspace_command(false),
+            CommandId::CloseWorkspace => self.begin_workspace_command(true),
+            CommandId::CloseSession => {
+                if let Some(session) = self.selected_session() {
+                    self.mode =
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::CloseSession {
+                            session_id: session.id.clone(),
+                        }));
+                }
+                DashboardAction::None
+            }
             CommandId::ResizePaneLeft => self.resize_pane_command(NavDirection::Left),
             CommandId::ResizePaneDown => self.resize_pane_command(NavDirection::Down),
             CommandId::ResizePaneUp => self.resize_pane_command(NavDirection::Up),

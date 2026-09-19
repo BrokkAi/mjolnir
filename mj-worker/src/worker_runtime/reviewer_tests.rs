@@ -177,12 +177,15 @@ touch("harness-stdin-closed")
 "#,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    path
+    mj_core::test_hooks::install_fake_command(
+        directory,
+        "reviewer-bridge",
+        &format!(
+            "exec python3 {} \"$@\"\n",
+            mj_core::targets::posix_quote(path.to_str().unwrap())
+        ),
+    );
+    directory.join("reviewer-bridge")
 }
 
 fn select_option(id: &str, current: &str, values: &[&str]) -> SessionConfigOption {
@@ -505,12 +508,15 @@ while True:
 "#,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    path
+    mj_core::test_hooks::install_fake_command(
+        directory,
+        "blocking-bifrost",
+        &format!(
+            "exec python3 {} \"$@\"\n",
+            mj_core::targets::posix_quote(path.to_str().unwrap())
+        ),
+    );
+    directory.join("blocking-bifrost")
 }
 
 #[tokio::test]

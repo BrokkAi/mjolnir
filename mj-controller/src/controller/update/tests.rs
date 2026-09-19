@@ -428,7 +428,7 @@ fn npm_upgrade_restarts_after_the_running_package_is_removed() {
     // `npm` and `replacement` are only ever read: the fake npm script is run
     // through the shared dispatcher, and `replacement` is copied by that
     // script before anything execs the copy.
-    crate::controller::test_support::install_fake_command(
+    mj_core::test_hooks::install_fake_command(
         &manager_bin,
         "npm",
         r#"#!/bin/sh

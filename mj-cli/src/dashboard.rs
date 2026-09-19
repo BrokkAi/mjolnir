@@ -1158,6 +1158,24 @@ impl DashboardContext {
         self.begin_shutdown(true);
     }
 
+    /// A removed workspace's composers must not be saved back on tab switch.
+    pub(crate) fn discard_workspace_composers(&mut self, workspace_id: &str) {
+        let sessions = self
+            .controller
+            .state
+            .sessions
+            .values()
+            .filter(|session| session.workspace_id == workspace_id)
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        for session_id in sessions {
+            self.cancel_chat_open_for(&session_id);
+            self.chats.remove(&session_id);
+            self.question_drafts.remove(&session_id);
+            self.composer_drafts.discard(&session_id);
+        }
+    }
+
     pub(crate) fn select_workspace(&mut self, workspace_id: Option<String>) {
         if self.dashboard.active_workspace_id() == workspace_id.as_deref() {
             return;

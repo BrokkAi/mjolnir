@@ -419,16 +419,16 @@ fn the_list_view_dismisses_from_its_title_bar_rather_than_a_close_button() {
         .finish_workspace_management(generation, Ok(vec![entry("workspace-a", "Project alpha")]));
     let lines = draw_manager(&dashboard);
     let list = lines.join("\n");
-    // The shared modal title already draws ×, so a Close button would be a
-    // second dismiss control a few cells away from the first.
-    assert!(!list.contains("Close"), "{list}");
+    // Closing a workspace is an explicit action, distinct from dismissing
+    // the manager through its title-bar ×.
+    assert!(list.contains("Close…"), "{list}");
     assert!(list.contains('×'), "{list}");
     // The actions stack in a column at the dialog's right edge, one per
     // row, in the order they apply.
-    let labels = ["New workspace", "Rename", "Delete", "Open"];
+    let labels = ["New workspace", "Rename", "Close…", "Delete", "Open"];
     let width = labels
         .iter()
-        .map(|label| label.len())
+        .map(|label| label.chars().count())
         .max()
         .expect("labels");
     let mut rows = Vec::new();
@@ -442,7 +442,7 @@ fn the_list_view_dismisses_from_its_title_bar_rather_than_a_close_button() {
         // is followed by its share of that width and the button's padding,
         // and nothing else before the dialog's right edge.
         let after = &line[line.find(label).unwrap() + label.len()..];
-        let gap = format!("{}│", " ".repeat(2 + width - label.len()));
+        let gap = format!("{}│", " ".repeat(2 + width - label.chars().count()));
         assert!(
             after.starts_with(&gap),
             "{label} is not packed against the dialog's right edge: {line}"
@@ -592,4 +592,146 @@ fn workspace_pane_names_the_running_version_until_the_sidebar_is_too_narrow() {
     let narrow = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(narrow.contains("Workspac"), "{narrow}");
     assert!(!narrow.contains(&version), "{narrow}");
+}
+
+#[test]
+fn workspace_shortcuts_load_the_active_workspace_and_ignore_stale_replies() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("b".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::RenameWorkspace)
+    else {
+        panic!("load");
+    };
+    dashboard
+        .finish_workspace_management(generation.wrapping_sub(1), Ok(vec![entry("b", "Wrong")]));
+    assert!(matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.loading));
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("a", "Other"), entry("b", "Rename me")]),
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if matches!(&manager.view, WorkspaceManagerView::Rename { workspace_id } if workspace_id == "b") && manager.name.value() == "Rename me")
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.name = TextInput::from_value("New name");
+    }
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::RenameWorkspace {
+            generation,
+            workspace_id: "b".into(),
+            name: "New name".into()
+        }
+    );
+}
+
+#[test]
+fn closing_workspace_confirms_counts_and_supports_cancellation_while_busy() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("load");
+    };
+    let mut workspace = entry("a", "Example");
+    workspace.workspace.session_count = 2;
+    dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
+    let rendered = draw_manager(&dashboard).join("\n");
+    assert!(rendered.contains("Stop 2 session(s)"), "{rendered}");
+    assert!(rendered.contains("Resumable histories"));
+    assert!(rendered.contains("Discard 0 saved draft(s)"));
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.open_selected_command(true);
+        manager.sync_form();
+        manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
+    }
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::CloseWorkspace {
+            generation,
+            workspace_id: "a".into()
+        }
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy == Some(WorkspaceMutation::Close))
+    );
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.sync_form();
+        manager.form.get_mut().focus(WorkspaceControl::CancelClose);
+    }
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::CancelWorkspaceClose {
+            workspace_id: "a".into()
+        }
+    );
+    assert_eq!(
+        chord(&mut dashboard, crate::CommandId::QuitDetach),
+        DashboardAction::QuitDetach
+    );
+    dashboard.finish_workspace_management(generation, Err("stop failed; retry".into()));
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy.is_none() && manager.error.as_deref() == Some("stop failed; retry"))
+    );
+}
+
+#[test]
+fn a_workspace_close_can_run_in_background_and_reopen_for_cancellation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    assert!(matches!(
+        dashboard.workspace_manager_mutation(WorkspaceMutation::Close),
+        DashboardAction::CloseWorkspace { .. }
+    ));
+    dashboard.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "navigation is available while stopping"
+    );
+    let DashboardAction::LoadWorkspaceManagement {
+        generation: reopened,
+    } = chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("reopen");
+    };
+    assert_ne!(generation, reopened);
+    dashboard.finish_workspace_management(reopened, Ok(vec![entry("a", "Example")]));
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy == Some(WorkspaceMutation::Close))
+    );
+    let lines = draw_manager(&dashboard).join("\n");
+    assert!(lines.contains("Cancel closing"), "{lines}");
+    assert!(lines.contains("Continue working"));
+    assert_eq!(dashboard.workspace_close_finished("a"), Some(reopened));
+    dashboard.finish_workspace_management(reopened, Err("stop failed".into()));
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy.is_none() && manager.error.as_deref() == Some("stop failed"))
+    );
+    assert!(
+        matches!(
+            dashboard.workspace_manager_mutation(WorkspaceMutation::Close),
+            DashboardAction::CloseWorkspace { .. }
+        ),
+        "failure remains retryable"
+    );
+    assert_eq!(dashboard.workspace_close_finished("a"), Some(reopened));
+    dashboard.finish_workspace_management(reopened, Ok(vec![]));
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.entries.is_empty() && manager.busy.is_none())
+    );
 }

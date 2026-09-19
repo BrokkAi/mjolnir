@@ -756,7 +756,7 @@ mod tests {
         open_palette(&mut dashboard);
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
 
-        let lines = drawn(&mut dashboard, 120, 60);
+        let lines = drawn(&mut dashboard, 120, 100);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
         let rename = row_of(&lines, "Rename session").expect("Rename session");
         let settings = row_of(&lines, "Settings").expect("the settings heading");
@@ -869,7 +869,7 @@ mod tests {
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
 
-        let lines = drawn(&mut dashboard, 120, 44);
+        let lines = drawn(&mut dashboard, 120, 100);
         let next = row_of(&lines, "Next pane").expect("Next pane command");
         assert!(lines[next].contains("Tab / ctrl+b tab"), "{lines:#?}");
         let previous = row_of(&lines, "Previous pane").expect("Previous pane command");

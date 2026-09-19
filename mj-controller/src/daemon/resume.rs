@@ -9,6 +9,10 @@ impl RuntimeState {
     /// several-hundred-megabyte buffer and then refused to send it. The
     /// projection is already durable; a viewer reads it from the store.
     pub async fn resume_session(self: &Arc<Self>, request: ResumeSessionRequest) -> Result<()> {
+        let _admission = self
+            .workspace_resume_gate(&request.workspace_id)
+            .read_owned()
+            .await;
         let session_id = request.session_id.clone();
         self.wait_for_deferred_cleanup(&session_id).await?;
         // Whether it is already running is a boolean. Answering it used to

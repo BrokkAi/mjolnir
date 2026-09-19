@@ -38,6 +38,26 @@ fn applescript_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+fn running_over_ssh(mut env: impl FnMut(&str) -> Option<std::ffi::OsString>) -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .into_iter()
+        .any(|name| env(name).is_some_and(|value| !value.is_empty()))
+}
+
+fn copy_selected_text(
+    text: &str,
+    over_ssh: bool,
+    schedule_system_copy: impl FnOnce(&str),
+    terminal_copy: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    // Over SSH the desktop clipboard belongs to the remote host. Only OSC 52
+    // targets the connecting terminal, even when X11 forwarding sets DISPLAY.
+    if !over_ssh {
+        schedule_system_copy(text);
+    }
+    terminal_copy(text)
+}
+
 impl DashboardContext {
     /// Rebuilds the view on screen.
     ///
@@ -183,7 +203,7 @@ impl DashboardContext {
         route_prompt_selection(selection, dashboard, event)
     }
 
-    /// Copies the finished selection to the system and terminal clipboards.
+    /// Copies the finished selection, using only the terminal clipboard over SSH.
     ///
     /// The frame on screen predates the release that finished the drag, so
     /// this redraws before reading. Surfaces that scroll their own rows own
@@ -213,11 +233,17 @@ impl DashboardContext {
             tracing::debug!(?surface, ?range, "selection covered no text");
             return Ok(());
         };
-        // The desktop clipboard opens a blocking platform connection, so it
-        // runs on a blocking task; OSC 52 is one escape sequence and also
-        // reaches a terminal Hel is talking to over SSH.
-        spawn_clipboard_write(text.clone(), self.dashboard_io_tx.clone());
-        if let Err(error) = self.terminal.copy_to_terminal_clipboard(&text) {
+        let updates = self.dashboard_io_tx.clone();
+        if let Err(error) = copy_selected_text(
+            &text,
+            running_over_ssh(|name| std::env::var_os(name)),
+            |text| {
+                // Opening the desktop clipboard can block, so keep it off
+                // the render loop.
+                spawn_clipboard_write(text.to_owned(), updates);
+            },
+            |text| self.terminal.copy_to_terminal_clipboard(text),
+        ) {
             self.dashboard
                 .set_failure_notice(format!("Copy to the terminal clipboard failed: {error:#}"));
             return Ok(());
@@ -311,5 +337,64 @@ impl DashboardContext {
                 self.selection.clear();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_selection_uses_only_the_connecting_terminal_clipboard() {
+        for indicator in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            let over_ssh = running_over_ssh(|name| {
+                (name == indicator || name == "DISPLAY").then(|| "present".into())
+            });
+            let mut copied = None;
+            copy_selected_text(
+                "selected text\nsecond line",
+                over_ssh,
+                |_| panic!("SSH selection must not open the remote desktop clipboard"),
+                |text| {
+                    copied = Some(text.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(copied.as_deref(), Some("selected text\nsecond line"));
+        }
+    }
+
+    #[test]
+    fn local_selection_keeps_both_clipboard_routes_with_absent_or_empty_ssh_variables() {
+        for value in [None, Some(std::ffi::OsString::new())] {
+            let over_ssh = running_over_ssh(|_| value.clone());
+            let mut system_text = None;
+            let mut terminal_text = None;
+            copy_selected_text(
+                "local selection",
+                over_ssh,
+                |text| system_text = Some(text.to_owned()),
+                |text| {
+                    terminal_text = Some(text.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(system_text.as_deref(), Some("local selection"));
+            assert_eq!(terminal_text.as_deref(), Some("local selection"));
+        }
+    }
+
+    #[test]
+    fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
+        let error = copy_selected_text(
+            "selection",
+            true,
+            |_| panic!("SSH selection must not open the remote desktop clipboard"),
+            |_| anyhow::bail!("terminal write failed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "terminal write failed");
     }
 }

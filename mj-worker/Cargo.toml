@@ -50,6 +50,7 @@ tracing-subscriber.workspace = true
 mimalloc = "0.1"
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["test-hooks"] }
 # Projection is used only to verify relay replay in local tests.
 mj-transcript = { path = "../mj-transcript", package = "brokk-mj-transcript" }
 proptest = "1"

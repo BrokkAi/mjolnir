@@ -25,6 +25,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::DestroyStopped { .. } => &["No", "Yes", "Yes, delete branch"],
         Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
         Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
+        Confirmation::CloseSession { .. } => &["Cancel", "Close session"],
         Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Stop now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::RecoverFailed {
@@ -110,6 +111,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
             | Confirmation::StopWithSubagents { .. }
+            | Confirmation::CloseSession { .. }
             | Confirmation::InterruptWork { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::ConvertRawCheckout { .. }
@@ -1212,6 +1214,14 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 }),
             ],
         ),
+        Confirmation::CloseSession { session_id } => (
+            " Close session? ",
+            vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw("Stop this session and any active sub-agents."),
+                Line::raw("Resumable history is preserved. Work in progress will be interrupted."),
+            ],
+        ),
         Confirmation::StopWithSubagents { session_id, count } => (
             " Stop parent and sub-agents? ",
             vec![
@@ -1336,6 +1346,7 @@ pub(crate) fn render_confirmation(
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::StopWithSubagents { .. } => 10,
+        Confirmation::CloseSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,

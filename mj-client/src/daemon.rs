@@ -405,6 +405,12 @@ pub enum DaemonAction {
     TouchWorkspace {
         workspace_id: String,
     },
+    CloseWorkspace {
+        workspace_id: String,
+    },
+    CancelWorkspaceClose {
+        workspace_id: String,
+    },
     DeleteWorkspace {
         workspace_id: String,
     },
@@ -1021,6 +1027,26 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected touch-workspace reply {reply:?}"),
+        }
+    }
+
+    pub async fn cancel_workspace_close(&mut self, workspace_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::CancelWorkspaceClose { workspace_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected cancel workspace close reply: {reply:?}"),
+        }
+    }
+
+    pub async fn close_workspace(&mut self, workspace_id: String) -> Result<()> {
+        match self
+            .request(DaemonAction::CloseWorkspace { workspace_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected close workspace reply: {reply:?}"),
         }
     }
 
@@ -1760,7 +1786,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

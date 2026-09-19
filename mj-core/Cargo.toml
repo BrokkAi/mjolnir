@@ -10,6 +10,7 @@ publish = true
 readme.workspace = true
 include = [
     "src/**/*.rs",
+    "tests/fixtures/fake-command.sh",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
