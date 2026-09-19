@@ -1647,6 +1647,44 @@ fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
     );
 }
 
+/// The border promises `Esc back`, and below the first page that is what it
+/// must do: return to the parent with the draft intact.
+#[test]
+fn escape_returns_from_a_settings_subpage_and_closes_only_from_the_first_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on a sub-page must keep Settings open");
+    };
+    assert_eq!(dialog.path, ["machines"]);
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on the Machines page must return to the first page");
+    };
+    assert!(dialog.path.is_empty());
+
+    // A sub-page edit survives the way back out.
+    choose(&mut dashboard, "phone");
+    choose(&mut dashboard, "enabled");
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc must not discard the draft from a sub-page");
+    };
+    assert!(dialog.path.is_empty());
+    assert_eq!(dialog.draft["phone"]["enabled"], Value::Bool(false));
+    assert!(dialog.is_dirty());
+
+    // From the first page Esc closes the dialog, through the discard guard.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(dashboard.mode, Mode::Confirm(_)),
+        "a dirty draft asks before closing"
+    );
+}
+
 #[test]
 fn empty_archive_after_days_renders_as_never() {
     let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});

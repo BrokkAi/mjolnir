@@ -1780,6 +1780,18 @@ impl DashboardState {
                     KeyCode::Backspace if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Back))
                     }
+                    // The dialog's own border promises `Esc back`, so on a
+                    // page below the first one Esc does what Back does and
+                    // keeps the draft. Only the first page closes on Esc, and
+                    // only the title's × closes from anywhere.
+                    KeyCode::Esc
+                        if dialog.editor.is_none()
+                            && dialog.search.is_none()
+                            && !dialog.path.is_empty()
+                            && key.modifiers.is_empty() =>
+                    {
+                        Some(Interaction::Activate(Back))
+                    }
                     KeyCode::Char('a') if dialog.editor.is_none() && dialog.search.is_none() => {
                         Some(Interaction::Activate(Add))
                     }
