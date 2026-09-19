@@ -17,6 +17,7 @@ use crate::components::{AutocompletePopup, PopupSide};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalCommand {
+    Clear,
     GoalControl(mj_core::goal::GoalControlAction),
     Help,
     Detach,
@@ -175,6 +176,14 @@ impl ChatState {
 
     pub(super) fn rebuild_command_choices(&mut self) {
         let mut commands = builtin_command_choices();
+        if self.clear_context_supported {
+            commands.push(CommandChoice {
+                name: "clear".into(),
+                description: "start a new conversation, keeping workspace and history".into(),
+                input_hint: None,
+                source: CommandSource::Hel,
+            });
+        }
         if self.supports_fast_mode() {
             commands.push(CommandChoice {
                 name: "fast".to_owned(),
@@ -379,6 +388,7 @@ pub(super) fn parse_local_command(prompt: &str) -> Option<(LocalCommand, &str)> 
     let (name, args) = parse_slash_command(prompt)?;
     let command = match name {
         "goal" => LocalCommand::GoalControl(mj_core::goal::GoalControlAction::parse(args)?),
+        "clear" => LocalCommand::Clear,
         "help" => LocalCommand::Help,
         "detach" => LocalCommand::Detach,
         "model" => LocalCommand::Model,

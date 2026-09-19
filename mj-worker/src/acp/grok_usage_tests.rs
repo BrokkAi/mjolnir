@@ -6,6 +6,7 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command,
         args: vec![],

@@ -112,7 +112,8 @@ pub struct MaterializedSessionMutation {
     /// The nested option distinguishes "unchanged" from "cleared", which is
     /// how a completed turn removes the running turn.
     pub active_turn: Option<Option<MaterializedTurn>>,
-    /// A finished turn is only ever replaced, never cleared.
+    /// Explicit context resets retire the last turn without deleting its history.
+    pub clear_turn_outcome: bool,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     pub config_results: Vec<(String, Option<String>)>,
     pub provider_cost: Option<crate::usage::ProviderCost>,

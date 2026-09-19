@@ -163,6 +163,7 @@ impl ViewerSnapshot {
                     // widens these once it knows whether the session manager holds
                     // the session and what the agent has advertised.
                     capabilities: ViewerSessionCapabilities {
+                        clear_context: false,
                         open: false,
                         prompt: false,
                         run_shell: false,
@@ -773,6 +774,8 @@ pub struct ViewerRepository {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSessionCapabilities {
+    #[serde(default)]
+    pub clear_context: bool,
     pub open: bool,
     pub prompt: bool,
     pub run_shell: bool,

@@ -669,3 +669,24 @@ fn a_transcript_without_user_turns_is_an_error() {
 
     assert!(error.to_string().contains("no user turns"), "{error}");
 }
+
+#[tokio::test]
+async fn clear_boundary_excludes_old_history_from_both_handoff_paths() {
+    let mut input = exchanges(&[("old secret", "old answer"), ("new question", "new answer")]);
+    input.transcript[1].stable_id = "context-cleared:reset".into();
+    let verbatim = render_recent_snapshot(&input, 64 * 1024);
+    assert!(!verbatim.contains("old secret"));
+    assert!(!verbatim.contains("old answer"));
+    assert!(verbatim.contains("new question"));
+    let backend = FakeBackend::default();
+    compact_snapshot(&input, CompactionBudget::uniform(64 * 1024), &backend)
+        .await
+        .unwrap();
+    let prompts = backend.prompts.lock().unwrap();
+    assert!(
+        prompts
+            .iter()
+            .all(|prompt| !prompt.contains("old secret") && !prompt.contains("old answer"))
+    );
+    assert!(prompts.iter().any(|prompt| prompt.contains("new question")));
+}

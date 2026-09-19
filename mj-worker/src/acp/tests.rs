@@ -16,6 +16,7 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "codex-acp".into(),
         args: Vec::new(),
@@ -135,6 +136,7 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "/worker/mj".into(),
         args: Vec::new(),
@@ -195,6 +197,7 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "/worker/hel".into(),
         args: Vec::new(),
@@ -264,6 +267,7 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
         args: Vec::new(),
@@ -481,6 +485,7 @@ fn resumed_session_request_keeps_load_context() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "claude-agent-acp".into(),
         args: Vec::new(),
@@ -666,6 +671,7 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
             }),
             stall_policy: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
@@ -1199,6 +1205,7 @@ async fn answer_to_ext_request(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -1366,6 +1373,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -1769,6 +1777,7 @@ async fn config_change_request(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -1949,6 +1958,7 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -2036,6 +2046,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -2227,6 +2238,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -2335,6 +2347,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -2658,6 +2671,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -3119,6 +3133,7 @@ async fn exercise_image_steering(with_images: bool) {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -3259,6 +3274,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -3395,6 +3411,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -3474,7 +3491,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         .expect("runtime exits after an unacked cancel")
         .expect("runtime task does not panic")
         .expect("an unacked cancel restarts instead of failing the runtime");
-    assert_eq!(restart.as_deref(), Some("scripted"));
+    assert_eq!(restart, Some(SessionRestart::Resume("scripted".into())));
     bridge.abort();
 }
 
@@ -3484,6 +3501,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
@@ -3570,7 +3588,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
         .expect("runtime exits after an unacked cancel")
         .expect("runtime task does not panic");
     let restart = restart.expect("an unacked cancel restarts instead of failing the runtime");
-    assert_eq!(restart.as_deref(), Some("scripted"));
+    assert_eq!(restart, Some(SessionRestart::Resume("scripted".into())));
     first.abort();
 
     // The worker queued this before it saw `HarnessRestarting`, so it is
@@ -3766,7 +3784,7 @@ mod terminals {
         agent: ScriptedAgent,
         observed: Arc<Mutex<Vec<RuntimeEvent>>>,
         requests: mpsc::Sender<CommandRequest>,
-        driver: tokio::task::JoinHandle<Result<Option<String>>>,
+        driver: tokio::task::JoinHandle<Result<Option<SessionRestart>>>,
         bridge: tokio::task::JoinHandle<()>,
         events: tokio::task::JoinHandle<()>,
     }
@@ -3816,6 +3834,7 @@ mod terminals {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
@@ -4332,6 +4351,7 @@ for line in sys.stdin:
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "python3".into(),
             args: vec![script.to_string_lossy().into_owned()],
@@ -4507,6 +4527,7 @@ for line in sys.stdin:
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: Some(temp.path().join("subagents.sock")),
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -4651,6 +4672,7 @@ while True:
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -4793,6 +4815,7 @@ while True:
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -4898,6 +4921,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "sh".into(),
         args: vec![
@@ -4976,6 +5000,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: bridge.clone(),
             args: Vec::new(),
@@ -5275,6 +5300,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
@@ -5354,6 +5380,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
         LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "agent".into(),
             args: Vec::new(),
@@ -5488,6 +5515,7 @@ fn missing_native_session_spec(
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
+        clear_context_request: None,
         goal_recovery: Default::default(),
         command: "python3".into(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -5847,6 +5875,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             }),
             stall_policy: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "scripted".into(),
             args: Vec::new(),
@@ -5917,4 +5946,232 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         driver.await.unwrap().unwrap();
         bridge.abort();
     }
+}
+
+#[tokio::test]
+async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
+    exercise_context_clear(false, HarnessKind::Codex).await;
+    exercise_context_clear(false, HarnessKind::Claude).await;
+}
+
+#[tokio::test]
+async fn failed_clear_reloads_the_previous_native_session() {
+    exercise_context_clear(true, HarnessKind::Codex).await;
+    exercise_context_clear(true, HarnessKind::Claude).await;
+}
+
+async fn exercise_context_clear(fail_replacement: bool, harness: HarnessKind) {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("clear.py");
+    std::fs::write(&script, r#"
+import json, os, sys
+root = sys.argv[1]
+fail = sys.argv[2] == 'true'
+count_path = os.path.join(root, 'generation')
+generation = int(open(count_path).read()) + 1 if os.path.exists(count_path) else 1
+with open(count_path, 'w') as f: f.write(str(generation))
+options = [{'id':'fast','name':'Fast','type':'select','currentValue':'true' if generation == 1 else 'false','options':[{'value':'true','name':'On'},{'value':'false','name':'Off'}]}]
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    ident = request.get('id')
+    with open(os.path.join(root, 'requests.jsonl'), 'a') as f:
+        f.write(json.dumps(request) + '\n')
+    if ident is None: continue
+    if method == 'initialize':
+        result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}}
+    elif method in ('session/new', 'session/load', 'session/resume'):
+        if generation == 2 and fail:
+            print(json.dumps({'jsonrpc':'2.0','id':ident,'error':{'code':-32603,'message':'replacement refused'}}), flush=True)
+            continue
+        result = {'sessionId': 'original' if generation == 1 or method != 'session/new' else 'replacement',
+                  'configOptions':options,
+                  'modes': {'currentModeId':'plan' if generation == 1 else 'agent','availableModes':[{'id':'agent','name':'Agent'},{'id':'plan','name':'Plan'},{'id':'auto','name':'Auto'}]}}
+    elif method == 'session/set_config_option':
+        options[0]['currentValue'] = request['params']['value']
+        result = {'configOptions':options}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':ident,'result':result}), flush=True)
+"#).unwrap();
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.command = "python3".into();
+    spec.args = vec![
+        script.to_string_lossy().into_owned(),
+        temp.path().to_string_lossy().into_owned(),
+        fail_replacement.to_string(),
+    ];
+    spec.cwd = temp.path().to_path_buf();
+    spec.harness = harness;
+    let (request_tx, request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let runtime = tokio::spawn(run(spec, request_rx, event_tx));
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    request_tx
+        .send(CommandRequest::SetSessionMode {
+            request_id: "select-plan".into(),
+            mode_id: "plan".into(),
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionModeApplied { request_id, .. } if request_id == "select-plan")).await;
+    request_tx
+        .send(CommandRequest::ClearContext {
+            request_id: "clear-request".into(),
+        })
+        .await
+        .unwrap();
+    if fail_replacement {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, message } if request_id == "clear-request" && message.contains("replacement refused"))).await;
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::SessionStarted { native_session_id, resumed: true, .. } if native_session_id == "original")).await;
+    } else {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::ContextCleared { request_id, native_session_id, .. } if request_id == "clear-request" && native_session_id == "replacement")).await;
+    }
+    wait_for_runtime_event(&mut event_rx, |event| {
+        matches!(event, RuntimeEvent::SessionConfigured { .. })
+    })
+    .await;
+    drop(request_tx);
+    // Drain the bounded event channel while shutdown completes.
+    let drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    tokio::time::timeout(Duration::from_secs(20), runtime)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drain.await.unwrap();
+    let requests = std::fs::read_to_string(temp.path().join("requests.jsonl")).unwrap();
+    let methods: Vec<String> = requests
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["method"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert!(!methods.iter().any(|method| method == "session/prompt"));
+    if !fail_replacement {
+        let requests: Vec<serde_json::Value> = requests
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["method"] == "session/set_config_option"
+                    && request["params"]["configId"] == "fast"
+                    && request["params"]["value"] == "true")
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["method"] == "session/set_mode"
+                    && request["params"]["modeId"] == "plan")
+                .count(),
+            2
+        );
+    }
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| method.as_str() == "session/new")
+            .count(),
+        2
+    );
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| method.as_str() == "session/load")
+            .count(),
+        usize::from(fail_replacement)
+    );
+}
+
+/// Opt-in authenticated adapter check; uses a disposable project and never opens
+/// the controller database. Supply MJ_CLEAR_ADAPTER and MJ_CLEAR_HARNESS.
+#[tokio::test]
+#[ignore = "requires an authenticated ACP adapter and makes live provider requests"]
+async fn live_adapter_compacts_and_replaces_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.command = std::env::var("MJ_CLEAR_ADAPTER").unwrap().into();
+    spec.harness = match std::env::var("MJ_CLEAR_HARNESS").unwrap().as_str() {
+        "codex" => HarnessKind::Codex,
+        "claude" => HarnessKind::Claude,
+        other => panic!("unsupported live harness: {other}"),
+    };
+    spec.cwd = temp.path().to_path_buf();
+    spec.verdict = None;
+    let (tx, rx) = mpsc::channel(4);
+    let (events_tx, mut events) = mpsc::channel(256);
+    let runtime = tokio::spawn(run(spec, rx, events_tx));
+    let mut original = None;
+    async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
+        tokio::time::timeout(Duration::from_secs(180), events.recv())
+            .await
+            .unwrap()
+            .expect("adapter remains connected")
+    }
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::SessionStarted {
+                native_session_id, ..
+            } => original = Some(native_session_id),
+            RuntimeEvent::SessionConfigured { .. } => break,
+            _ => {}
+        }
+    }
+    for (id, text) in [
+        ("hello", "Reply with just hello. Do not use tools."),
+        ("compact", "/compact"),
+    ] {
+        tx.send(CommandRequest::Prompt {
+            request_id: id.into(),
+            prompt: vec![ContentBlock::from(text)],
+        })
+        .await
+        .unwrap();
+        loop {
+            match next(&mut events).await {
+                RuntimeEvent::PromptFinished { request_id, .. } if request_id == id => break,
+                RuntimeEvent::CommandRejected {
+                    request_id,
+                    message,
+                } if request_id == id => panic!("{id}: {message}"),
+                _ => {}
+            }
+        }
+        eprintln!("live adapter: {id} completed");
+    }
+    tx.send(CommandRequest::ClearContext {
+        request_id: "clear".into(),
+    })
+    .await
+    .unwrap();
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::ContextCleared {
+                native_session_id, ..
+            } => {
+                assert_ne!(Some(native_session_id), original);
+                eprintln!("live adapter: native identity replaced");
+            }
+            RuntimeEvent::SessionConfigured { .. } => break,
+            RuntimeEvent::CommandRejected { message, .. } => panic!("clear: {message}"),
+            _ => {}
+        }
+    }
+    drop(tx);
+    while events.recv().await.is_some() {}
+    runtime.await.unwrap().unwrap();
 }

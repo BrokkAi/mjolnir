@@ -36,6 +36,40 @@ impl DurableRelay {
                 None,
             )));
         }
+        let command = if let RelayCommand::Prompt { prompt } = &command {
+            if let Some((maintenance, args)) = mj_core::acp::context_command(prompt) {
+                if prompt.len() != 1
+                    || (maintenance == mj_core::acp::ContextCommand::Clear && !args.is_empty())
+                    || (maintenance == mj_core::acp::ContextCommand::Compact
+                        && !args.is_empty()
+                        && self.verdict_harness == Some(mj_core::config::HarnessKind::Codex))
+                {
+                    return Ok(Err(relay_protocol_error(
+                        RelayErrorCode::InvalidRequest,
+                        "This context command does not support these arguments or attachments",
+                        false,
+                        None,
+                    )));
+                }
+                if maintenance == mj_core::acp::ContextCommand::Clear {
+                    RelayCommand::ClearContext
+                } else {
+                    RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from(
+                            if args.is_empty() {
+                                "/compact".to_owned()
+                            } else {
+                                format!("/compact {args}")
+                            },
+                        )],
+                    }
+                }
+            } else {
+                command
+            }
+        } else {
+            command
+        };
         if let Some(handled) = self.snapshot.handled_commands.get(command_id) {
             let accepted_ordinal = {
                 if handled.command != command {
@@ -58,6 +92,54 @@ impl DurableRelay {
                 command_id: command_id.to_owned(),
                 ordinal: accepted_ordinal,
             }));
+        }
+        if self
+            .snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(dispatch.command, RelayCommand::ClearContext))
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "Context is being cleared; wait for the new conversation",
+                false,
+                None,
+            )));
+        }
+        if matches!(command, RelayCommand::ClearContext) {
+            if !matches!(
+                self.verdict_harness,
+                Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+            ) {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "This harness does not support /clear",
+                    false,
+                    None,
+                )));
+            }
+            if self.snapshot.native_session_id.is_none()
+                || self.snapshot.execution != RelayExecutionState::Idle
+                || !self.snapshot.dispatches.is_empty()
+                || !self.snapshot.queued_prompts.is_empty()
+                || self.snapshot.goal.running()
+                || self.snapshot.goal.active()
+                || self.snapshot.goal.pending_resume.is_some()
+                || self.snapshot.goal.decision.is_some()
+                || self.snapshot.harness_turn.is_some()
+                || !self.snapshot.active_user_shells.is_empty()
+                || !self.background_commands().is_empty()
+                || self.native_agent_count() > 0
+                || self.snapshot.checkpoint_barrier.is_some()
+                || self.snapshot.capacity_retry.is_some()
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "/clear requires an idle session with no queued or background work; finish or cancel that work first",
+                    false,
+                    None,
+                )));
+            }
         }
         if let RelayCommand::Prompt { prompt } = &command {
             let verified = mj_core::attachment::references(prompt).and_then(|references| {
@@ -512,31 +594,32 @@ impl DurableRelay {
                 .get_mut(&command_id)
                 .expect("claimable command disappeared");
             dispatch.state = RelayDispatchState::InFlight;
-            let hidden_prompt_context = matches!(dispatch.command, RelayCommand::Prompt { .. })
-                .then(|| {
-                    let mut contexts = Vec::new();
-                    if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
-                        if context.attached_command_id.is_none() {
-                            context.attached_command_id = Some(command_id.clone());
-                        }
-                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                            contexts.push(context.text.clone());
-                        }
+            let hidden_prompt_context = matches!(&dispatch.command, RelayCommand::Prompt { prompt }
+                if !mj_core::acp::prompt_requests_compaction(prompt))
+            .then(|| {
+                let mut contexts = Vec::new();
+                if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
+                    if context.attached_command_id.is_none() {
+                        context.attached_command_id = Some(command_id.clone());
                     }
-                    for context in &mut next_snapshot.pending_user_shell_contexts {
-                        if context.accepted_ordinal >= accepted_ordinal {
-                            continue;
-                        }
-                        if context.attached_command_id.is_none() {
-                            context.attached_command_id = Some(command_id.clone());
-                        }
-                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                            contexts.push(context.text.clone());
-                        }
+                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                        contexts.push(context.text.clone());
                     }
-                    (!contexts.is_empty()).then(|| contexts.join("\n\n"))
-                })
-                .flatten();
+                }
+                for context in &mut next_snapshot.pending_user_shell_contexts {
+                    if context.accepted_ordinal >= accepted_ordinal {
+                        continue;
+                    }
+                    if context.attached_command_id.is_none() {
+                        context.attached_command_id = Some(command_id.clone());
+                    }
+                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                        contexts.push(context.text.clone());
+                    }
+                }
+                (!contexts.is_empty()).then(|| contexts.join("\n\n"))
+            })
+            .flatten();
             claimed.push(ClaimedRelayCommand {
                 command_id,
                 accepted_ordinal,

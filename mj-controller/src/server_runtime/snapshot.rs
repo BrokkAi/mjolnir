@@ -192,6 +192,9 @@ pub(super) fn session_capabilities(
     let idle = operational
         .is_some_and(|state| state.execution == mj_core::relay::RelayExecutionState::Idle);
     crate::server::ViewerSessionCapabilities {
+        clear_context: live
+            && !mutation_busy
+            && operational.is_some_and(|state| state.clear_context),
         open: session.conversation_available
             && !session.transitioning
             && session.lifecycle == ViewerLifecycleCategory::Live,
@@ -300,7 +303,15 @@ pub(super) fn phone_commands(
     // These names are handled by Mjolnir even when the corresponding control
     // is unavailable for this session. An agent cannot claim one and turn a
     // locally interpreted slash command into a misleading palette entry.
+    if session.capabilities.clear_context {
+        commands.push(command(
+            "clear",
+            "start a new conversation, keeping workspace and history",
+            None,
+        ));
+    }
     let reserved = [
+        "clear",
         "help",
         "detach",
         "model",

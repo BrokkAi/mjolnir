@@ -2479,3 +2479,25 @@ fn unanswered_outcome(stop_reason: &str) -> mj_core::state::MaterializedTurnOutc
         },
     }
 }
+
+#[test]
+fn clear_requires_capability_and_idle_state_before_submission() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.phase = WorkerPhase::Idle;
+    chat.set_input("/clear".into());
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.notice().unwrap().contains("does not support"));
+    chat.clear_context_supported = true;
+    chat.rebuild_command_choices();
+    assert!(chat.lists_command("clear"));
+    chat.phase = WorkerPhase::Running;
+    chat.set_input("/clear".into());
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert!(chat.notice().unwrap().contains("idle"));
+    chat.phase = WorkerPhase::Idle;
+    chat.set_input("/clear".into());
+    assert_eq!(
+        chat.handle_key(key(KeyCode::Enter)),
+        ChatAction::Prompt("/clear".into())
+    );
+}

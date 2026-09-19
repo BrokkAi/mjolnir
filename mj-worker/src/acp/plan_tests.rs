@@ -128,7 +128,7 @@ struct PlanProbe {
     output: WriteHalf<DuplexStream>,
     commands: mpsc::Sender<CommandRequest>,
     events: mpsc::Receiver<RuntimeEvent>,
-    driver: tokio::task::JoinHandle<Result<Option<String>>>,
+    driver: tokio::task::JoinHandle<Result<Option<SessionRestart>>>,
 }
 
 impl Drop for PlanProbe {
@@ -151,6 +151,7 @@ impl PlanProbe {
         let spec = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
             goal_recovery: Default::default(),
             command: "plan-probe".into(),
             args: vec![],
@@ -568,7 +569,7 @@ async fn plan_transition_timeout_requests_a_restart_without_replaying_implementa
         assert!(warned);
         assert_eq!(
             (&mut probe.driver).await.unwrap().unwrap(),
-            Some("plan-session".into())
+            Some(super::SessionRestart::Resume("plan-session".into()))
         );
         tokio::time::resume();
         while let Some(line) = probe.input.next_line().await.unwrap() {

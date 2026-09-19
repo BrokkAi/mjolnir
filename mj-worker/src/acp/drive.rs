@@ -22,7 +22,7 @@ pub(super) async fn drive<T>(
     events: mpsc::Sender<RuntimeEvent>,
     opened: Arc<Mutex<Option<OpenedSession>>>,
     replacing_previous_bridge: bool,
-) -> Result<Option<String>>
+) -> Result<Option<SessionRestart>>
 where
     T: ConnectTo<Client>,
 {
@@ -1172,7 +1172,7 @@ pub(super) async fn drive_connection(
     native_session_used: Arc<AtomicBool>,
     replacing_previous_bridge: bool,
     grok_usage: grok_usage::Collector,
-) -> Result<Option<String>> {
+) -> Result<Option<SessionRestart>> {
     // Terminals belong to the connection. However the session ends — closed,
     // failed, or with its command channel dropped — their process groups must
     // not outlive it.
@@ -1355,6 +1355,7 @@ pub(super) fn drain_requests_from_the_previous_bridge(
         let (variant, request_id) = match request {
             CommandRequest::Prompt { request_id, .. }
             | CommandRequest::PromptAttachments { request_id, .. } => ("Prompt", Some(request_id)),
+            CommandRequest::ClearContext { request_id } => ("ClearContext", Some(request_id)),
             CommandRequest::SetConfig { request_id, .. } => ("SetConfig", Some(request_id)),
             CommandRequest::GoalControl { request_id, .. } => ("GoalControl", Some(request_id)),
             CommandRequest::SetSessionMode { request_id, .. } => {

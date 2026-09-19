@@ -370,15 +370,35 @@ pub fn session_update_is_compaction_banner(update: &SessionUpdate) -> bool {
 /// A turn that answers this prompt with nothing but compaction banners did
 /// exactly what was asked, so it must not be reported as unanswered. Only
 /// Mjolnir's own outgoing text is inspected, never the harness's.
-pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
-    let Some(ContentBlock::Text(first)) = prompt.first() else {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextCommand {
+    Clear,
+    Compact,
+}
+
+/// Interpret only the user's first block, before attaching background context.
+pub fn context_command(prompt: &[ContentBlock]) -> Option<(ContextCommand, &str)> {
+    let ContentBlock::Text(first) = prompt.first()? else {
+        return None;
     };
-    first
-        .text
-        .trim_start()
-        .to_lowercase()
-        .starts_with("/compact")
+    context_command_text(&first.text)
+}
+
+pub fn context_command_text(text: &str) -> Option<(ContextCommand, &str)> {
+    let text = text.trim().strip_prefix('/')?;
+    let (name, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let command = if name.eq_ignore_ascii_case("clear") {
+        ContextCommand::Clear
+    } else if name.eq_ignore_ascii_case("compact") {
+        ContextCommand::Compact
+    } else {
+        return None;
+    };
+    Some((command, args.trim()))
+}
+
+pub fn prompt_requests_compaction(prompt: &[ContentBlock]) -> bool {
+    matches!(context_command(prompt), Some((ContextCommand::Compact, _)))
 }
 
 /// Whether this update is the agent doing the work a prompt asked for.
@@ -485,6 +505,14 @@ pub enum RuntimeEvent {
         agent_info: Option<Implementation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steering_supported: Option<bool>,
+    },
+    ContextClearing {
+        request_id: String,
+    },
+    ContextCleared {
+        request_id: String,
+        native_session_id: String,
+        memory: Option<String>,
     },
     SessionStarted {
         native_session_id: String,
@@ -975,5 +1003,23 @@ mod agent_output_tests {
         assert!(!prompt_requests_compaction(&text("compact the loop")));
         assert!(!prompt_requests_compaction(&text("/context")));
         assert!(!prompt_requests_compaction(&[]));
+    }
+}
+
+#[cfg(test)]
+mod context_command_tests {
+    use super::*;
+    #[test]
+    fn maintenance_parser_matches_whole_command_names() {
+        assert_eq!(
+            context_command_text(" /CLEAR \n"),
+            Some((ContextCommand::Clear, ""))
+        );
+        assert_eq!(
+            context_command_text("/compact preserve decisions"),
+            Some((ContextCommand::Compact, "preserve decisions"))
+        );
+        assert_eq!(context_command_text("/compactfoo"), None);
+        assert_eq!(context_command_text("please /clear"), None);
     }
 }

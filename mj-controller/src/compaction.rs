@@ -458,7 +458,12 @@ fn split_at_utf8_midpoint(text: &str) -> (&str, &str) {
 /// than part of a user turn and are left out of the handoff.
 fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
     let mut turns = Vec::<Turn>::new();
-    for item in &snapshot.transcript {
+    let context_start = snapshot.current_context_start();
+    for item in snapshot
+        .transcript
+        .iter()
+        .filter(|item| item.position > context_start || context_start == 0)
+    {
         match &item.body {
             CanonicalTranscriptBody::User { content } => {
                 let text = mj_core::transcript::materialized_content_text(content);

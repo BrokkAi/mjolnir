@@ -480,6 +480,7 @@ pub struct ChatSessionContext {
 }
 
 pub struct ChatState {
+    pub(crate) clear_context_supported: bool,
     session_id: String,
     bundle_id: Option<String>,
     phase: WorkerPhase,
@@ -692,6 +693,7 @@ mod status;
 impl ChatState {
     pub fn new(snapshot: &WorkerSnapshot, events: &[SequencedEvent]) -> Self {
         let mut state = Self {
+            clear_context_supported: false,
             session_id: snapshot.session_id.clone(),
             bundle_id: None,
             phase: snapshot.phase,

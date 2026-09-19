@@ -57,6 +57,8 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        clear_context: false,
+        clear_context_started_at_ms: None,
         native_agent_count: 0,
         expected_continuation: None,
         goal: Default::default(),

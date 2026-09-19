@@ -334,7 +334,7 @@ pub(super) async fn run_session_actor(
                             ));
                             continue;
                         }
-                        if matches!(&command, RelayCommand::Prompt { .. })
+                        if matches!(&command, RelayCommand::Prompt { .. } | RelayCommand::ClearContext)
                             && !admitted
                             && let Some(refusal) =
                                 crate::review_host::prompt_refusal(&target.session_id)
@@ -345,6 +345,11 @@ pub(super) async fn run_session_actor(
                                 "refusing a prompt while a turn review is unresolved"
                             );
                             let _ = reply.send(Err(refusal.to_owned().into()));
+                            continue;
+                        }
+                        if lifecycle.is_leased() && (matches!(command, RelayCommand::ClearContext)
+                            || matches!(&command, RelayCommand::Prompt { prompt } if matches!(mj_core::acp::context_command(prompt), Some((mj_core::acp::ContextCommand::Clear, _))))) {
+                            let _ = reply.send(Err("/clear requires an idle session; a lifecycle operation is running".into()));
                             continue;
                         }
                         if lifecycle.is_leased() {

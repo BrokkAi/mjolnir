@@ -122,10 +122,29 @@ impl TurnReviewHost {
                 .snapshot
                 .as_ref()
                 .map(|snapshot| Box::new(snapshot.materialized.clone())),
-            prompt_driven: view
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.operational.active_prompt.is_some()),
+            prompt_driven: view.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .operational
+                    .active_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| {
+                        let user_id = format!("user:{}", prompt.command_id);
+                        !snapshot
+                            .materialized
+                            .transcript
+                            .iter()
+                            .find(|item| item.stable_id == user_id)
+                            .is_some_and(|item| match &item.body {
+                                mj_core::state::TranscriptBody::User { content } => matches!(
+                                    mj_core::acp::context_command_text(
+                                        &mj_core::transcript::materialized_content_text(content)
+                                    ),
+                                    Some((mj_core::acp::ContextCommand::Compact, _))
+                                ),
+                                _ => false,
+                            })
+                    })
+            }),
         });
     }
 

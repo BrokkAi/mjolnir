@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub clear_context_request: Option<ContextReset>,
     pub goal_recovery: Arc<Mutex<mj_core::goal::GoalRecoveryContext>>,
     pub command: PathBuf,
     pub args: Vec<String>,
@@ -224,4 +225,12 @@ pub(super) fn resume_session_request(
         // project memory to new sessions.
         .mcp_servers(extra_mcp(spec))
         .meta(session_request_meta(spec))
+}
+
+/// Settings captured from the old native conversation before retiring it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextReset {
+    pub request_id: String,
+    pub selectors: Vec<(String, String)>,
+    pub mode: Option<String>,
 }
