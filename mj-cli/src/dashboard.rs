@@ -486,24 +486,28 @@ pub(crate) async fn run_dashboard_for_workspace(
         let action = context.dashboard.begin_workspace_manager();
         actions::apply_dashboard_action(&mut context, action).await?;
     }
-    // Under tmux or screen, ctrl+b is taken before it reaches the dashboard.
-    // Say so once; the notice names both ways out.
-    let mut hints = crate::hints::SeenHints::load();
+    // Two things a first launch may have to say, and inside tmux it has both:
+    // that the multiplexer takes ctrl+b before the dashboard sees it, and that
+    // the prefix leads to the key list and the command list. They queue rather
+    // than write the notice bar here, because this launch may still be opening
+    // a restored conversation and reporting on that; a hint written over those
+    // reports would be recorded as shown without ever being drawn.
+    let mut hints = crate::hints::PendingHints::new(crate::hints::SeenHints::load());
     let prefix = context.dashboard.keybinds().prefix_label();
-    if crate::hints::inside_multiplexer()
+    if let Some(multiplexer) = crate::hints::multiplexer_name()
         && prefix == mj_core::config::DEFAULT_PREFIX
-        && hints.take(crate::hints::Hint::PrefixCollision)
     {
-        context.dashboard.set_notice(
-            "Inside tmux or screen: press ctrl+b twice to reach Mjolnir's prefix, or set [keys] prefix in config.toml.",
+        hints.queue(
+            crate::hints::Hint::PrefixCollision,
+            format!(
+                "{prefix} is {multiplexer}'s prefix too: press it twice, or set [keys] prefix."
+            ),
         );
-    } else if hints.take(crate::hints::Hint::PrefixKeys) {
-        // The one thing a first launch has to say: there is a prefix key,
-        // and it leads to the key list and the command list.
-        context.dashboard.set_notice(format!(
-            "Press {prefix} ? for every key and {prefix} : for every command."
-        ));
     }
+    hints.queue(
+        crate::hints::Hint::PrefixKeys,
+        format!("Press {prefix} ? for every key and {prefix} : for every command."),
+    );
     let termination = mj_controller::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch
@@ -530,6 +534,15 @@ pub(crate) async fn run_dashboard_for_workspace(
     loop {
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
+        }
+        // A hint that reaches the bar needs the frame that draws it, whatever
+        // this wakeup was otherwise going to do.
+        if hints.pump(
+            &context.notices,
+            context.ready_for_a_hint(),
+            std::time::Instant::now(),
+        ) {
+            redraw = true;
         }
         if redraw {
             context.draw()?;
@@ -900,6 +913,17 @@ impl DashboardContext {
         }
         self.opening_chat_sessions.clear();
         self.dashboard.set_opening_session(None);
+    }
+
+    /// Whether the surface has settled enough to give the notice bar to a
+    /// one-time hint: the startup pick has run, no pane is still attaching,
+    /// and nothing is covering the footer. Until then the bar belongs to what
+    /// the launch itself is doing.
+    fn ready_for_a_hint(&self) -> bool {
+        !self.startup.pick_pending()
+            && self.opening_chat_sessions.is_empty()
+            && !self.dashboard.modal_open()
+            && !self.shutdown_requested
     }
 
     /// Persists how far a warm chat has been read and the draft it holds.
