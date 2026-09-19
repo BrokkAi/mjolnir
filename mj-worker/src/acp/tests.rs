@@ -4772,8 +4772,15 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         stall_policy: None,
     };
 
+    // `run` spawns a real `sh` and waits on its real stdout, and its own
+    // cleanup path wraps `child.wait()` in a five-second `tokio::time::timeout`
+    // that a paused clock would auto-advance past while that child is still
+    // alive. So this test keeps a real clock, and the guard below only stops a
+    // hang from becoming an unbounded one: the assertions are all on the error
+    // text, none on how long the call took, so it can be generous enough for a
+    // machine running other builds.
     let error = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(120),
         run(spec, request_rx, event_tx),
     )
     .await
