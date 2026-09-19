@@ -184,6 +184,7 @@ impl DashboardState {
             self.notices.dismiss(Instant::now());
             // Reaching for the mouse abandons a half-typed chord.
             self.prefix_pending = false;
+            self.resize_mode = false;
         }
         if matches!(self.mode, Mode::Help(_)) {
             return self.handle_help_mouse(mouse);

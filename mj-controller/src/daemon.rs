@@ -115,6 +115,9 @@ pub struct RuntimeState {
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
     session_manager: SessionManagerControl,
     lifecycle: Mutex<BTreeMap<String, ActiveLifecycle>>,
+    workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    /// Resume ownership can precede its durable workspace assignment.
+    workspace_resume_admission: Mutex<BTreeMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// The bounded wait for each live session's harness to become usable.
     /// Driven only by the daemon's background readiness sweep.
     harness_readiness: Mutex<HarnessReadinessWatch>,
@@ -449,6 +452,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
 }
 
 mod close;
+mod close_workspace;
 mod create;
 mod readiness;
 use readiness::{HarnessReadinessWatch, ReadinessObservation, UnreadySession};

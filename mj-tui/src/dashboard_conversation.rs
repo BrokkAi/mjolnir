@@ -168,6 +168,35 @@ impl DashboardState {
         session_id
     }
 
+    /// Whether resize mode currently owns ordinary keyboard input.
+    pub fn resize_mode_active(&self) -> bool {
+        self.resize_mode && !self.modal_open()
+    }
+
+    pub(crate) fn begin_resize_mode(&mut self) -> DashboardAction {
+        if self.conversation_layout.pane_count() < 2 {
+            self.set_notice("Only one pane; nothing to resize");
+            return DashboardAction::None;
+        }
+        self.conversation_zoomed = false;
+        self.resize_mode = true;
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    }
+
+    pub(crate) fn swap_pane_command(&mut self, nav: NavDirection) -> DashboardAction {
+        let panes = self.conversation_layout.panes(self.conversation_area());
+        let Some(focused) = panes.iter().find(|pane| pane.is_focused) else {
+            return DashboardAction::None;
+        };
+        let Some(target) = find_in_direction(focused, nav, &panes) else {
+            return DashboardAction::None;
+        };
+        self.conversation_zoomed = false;
+        self.conversation_layout.swap_panes(focused.id, target);
+        self.mark_layout_modified();
+        DashboardAction::ConversationPanesChanged { focus_moved: false }
+    }
+
     /// Grow or shrink the focused pane toward `nav` by one step.
     pub fn resize_focused_pane(&mut self, nav: NavDirection) {
         let area = self.conversation_area();

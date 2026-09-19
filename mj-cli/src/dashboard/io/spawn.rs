@@ -288,6 +288,60 @@ pub(crate) fn spawn_workspace_rename(
     )
 }
 
+pub(crate) fn spawn_workspace_close_cancel(
+    workspace_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_background_async(
+        "cancel workspace close",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .cancel_workspace_close(workspace_id)
+                .await
+        },
+        |result| DashboardIoUpdate::WorkspaceCloseCancelled { result },
+    )
+}
+
+pub(crate) fn spawn_workspace_close(
+    generation: u64,
+    workspace_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    // The daemon owns stopping. Detaching the UI must not wait for checkpoints,
+    // and ordinary save acknowledgement deadlines are too short for them.
+    tokio::spawn(async move {
+        let closing_workspace_id = workspace_id.clone();
+        let work = tokio::spawn(async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            daemon.close_workspace(workspace_id.clone()).await?;
+            let revision = daemon
+                .runtime_snapshot(String::new(), 0, true)
+                .await?
+                .revision;
+            Ok(WorkspaceManagementResult {
+                revision,
+                entries: load_workspace_management_entries(&mut daemon).await?,
+                select_workspace: None,
+                deleted_workspace_id: Some(workspace_id),
+            })
+        });
+        let result = blocking_result("closing workspace", work.await);
+        report(
+            "closing workspace",
+            &updates,
+            DashboardIoUpdate::WorkspaceClosed {
+                generation,
+                workspace_id: closing_workspace_id,
+                result,
+            },
+        );
+    })
+}
+
 pub(crate) fn spawn_workspace_delete(
     generation: u64,
     workspace_id: String,

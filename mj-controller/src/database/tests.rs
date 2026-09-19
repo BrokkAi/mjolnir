@@ -4473,3 +4473,87 @@ fn count_rows(path: &Path, table: &str) -> i64 {
         })
         .unwrap()
 }
+
+#[test]
+fn workspace_close_discards_all_drafts_but_retains_resumable_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("close.sqlite3");
+    let workspace = create_workspace_at(&database, "Close").unwrap();
+    let mut record = session("session-close", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "unsent legacy input".into();
+    save_session_to(&database, &record).unwrap();
+    save_detached_draft_at(
+        &database,
+        &workspace.id,
+        Some(&record.id),
+        "terminal",
+        Some(42),
+        "detached input",
+    )
+    .unwrap();
+    close_workspace_at(&database, &workspace.id).unwrap();
+    let stored = load_state_from(&database).unwrap();
+    assert_eq!(stored.sessions[&record.id].checkpoint, record.checkpoint);
+    assert_eq!(stored.sessions[&record.id].state, record.state);
+    assert!(stored.sessions[&record.id].draft_input.is_empty());
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !list_workspaces_from(&database)
+            .unwrap()
+            .iter()
+            .any(|w| w.id == workspace.id)
+    );
+    let destination = create_workspace_at(&database, "Resume here").unwrap();
+    reassign_resumable_session_workspace_at(&database, &record.id, &destination.id).unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].workspace_id,
+        destination.id
+    );
+}
+
+#[test]
+fn workspace_close_refuses_new_active_sessions_without_discarding_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("close.sqlite3");
+    let workspace = create_workspace_at(&database, "Concurrent create").unwrap();
+    let mut record = session("session-new", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.state = SessionState::Provisioning;
+    record.draft_input = "keep me".into();
+    save_session_to(&database, &record).unwrap();
+    save_detached_draft_at(
+        &database,
+        &workspace.id,
+        None,
+        "terminal",
+        Some(42),
+        "keep this too",
+    )
+    .unwrap();
+    assert!(close_workspace_at(&database, &workspace.id).is_err());
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        "keep me"
+    );
+    assert_eq!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    record.state = SessionState::Stopped;
+    save_session_to(&database, &record).unwrap();
+    close_workspace_at(&database, &workspace.id).unwrap();
+    let mut late = record.clone();
+    late.id = "session-too-late".into();
+    late.state = SessionState::Provisioning;
+    assert!(
+        save_session_to(&database, &late).is_err(),
+        "creation cannot resurrect a removed workspace"
+    );
+}

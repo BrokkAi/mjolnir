@@ -63,6 +63,7 @@ impl DashboardState {
     /// Select a tab locally. The caller should save any open chat draft before
     /// invoking this setter; the setter itself performs no external work.
     pub fn set_active_workspace(&mut self, workspace_id: Option<String>) {
+        self.resize_mode = false;
         if let Mode::WorkspaceManager(manager) = &mut self.mode {
             manager.active_workspace_id = workspace_id.clone();
         }

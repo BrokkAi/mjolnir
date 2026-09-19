@@ -48,6 +48,16 @@ impl ComposerDraftCache {
         entry.clone()
     }
 
+    pub(crate) fn discard(&mut self, session_id: &str) {
+        self.drafts.insert(
+            session_id.to_owned(),
+            DetachedSessionDraft {
+                text: String::new(),
+                inherited_input: None,
+            },
+        );
+    }
+
     pub(crate) fn get(&self, session_id: &str) -> Option<&DetachedSessionDraft> {
         self.drafts.get(session_id)
     }

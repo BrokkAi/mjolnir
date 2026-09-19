@@ -63,6 +63,14 @@ pub(super) async fn handle_action(
             refresh_runtime_workspaces(state).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::CloseWorkspace { workspace_id } => {
+            state.close_workspace(workspace_id).await?;
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::CancelWorkspaceClose { workspace_id } => {
+            state.cancel_workspace_close(&workspace_id)?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::DeleteWorkspace { workspace_id } => {
             ensure!(
                 !state.workspace_has_active_resume(&workspace_id),
