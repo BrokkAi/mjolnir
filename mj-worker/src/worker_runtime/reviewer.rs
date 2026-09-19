@@ -870,6 +870,7 @@ impl ReviewerRole {
         };
         let spec = LaunchSpec {
             clear_context_request: None,
+            context_restore: None,
             goal_recovery: Default::default(),
             command: self.placement.worker_executable.clone(),
             args: vec![

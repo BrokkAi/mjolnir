@@ -13,7 +13,9 @@ Users can compact Codex and Claude conversations without hidden context disablin
 - [x] (2026-09-19) Implement shared complete-name parsing, canonical command spelling, and compaction context retention.
 - [x] (2026-09-19) Implement durable clear admission, native replacement, rollback, settings restoration, and transcript boundary.
 - [x] (2026-09-19) Connect UI/API capabilities and protect checkpoint/handoff/review boundaries.
-- [ ] Run focused, full, and isolated live validation; commit, merge, and push.
+- [x] (2026-09-19) Run focused, full, and isolated live validation; commit implementation and merge current origin/master.
+- [x] (2026-09-19) Finish final lint verification and commit the recovery follow-up.
+- Publication: fast-forward master to this validated branch and push origin/master.
 
 ## Surprises & Discoveries
 
@@ -23,11 +25,11 @@ Codex 1.11.4 handles compact but not clear. Claude ACP 0.79.0 explicitly exclude
 
 Keep Mjolnir identity and old visible history; change native identity and persist a context boundary. This preserves the requested interface without falsifying what the model remembers. Refuse clear while any work is outstanding. Preserve project memory and accepted configuration, but discard pending conversational handoff/shell context. Use shared ACP session creation, never provider-specific textual clear commands.
 
-The clear completion records the new native identity, history boundary, and fresh project-memory context in one journal transition. A pre-adoption crash reports interruption and retains the old identity. Restore all advertised selectors and the execution mode before adoption, including Fast and plan mode. Clear carries an explicit activity timestamp so upgrades cannot interrupt replacement startup. Database migration 41 is breaking because old readers cannot interpret the new persisted command/outcome; relay state is version 8, protocol 15, and archives containing a boundary require schema 5. Kimi clear remains disabled; its existing native background compact behavior is preserved.
+The clear completion records the new native identity, history boundary, and fresh project-memory context in one journal transition. A pre-adoption crash reports interruption and retains the old identity. Restore all advertised selectors and the execution mode before adoption, including Fast and plan mode. Restore those same settings when replacement fails and the old conversation is reloaded. Clear carries an explicit activity timestamp so upgrades cannot interrupt replacement startup. Database migration 41 is breaking because old readers cannot interpret the new persisted command/outcome; relay state is version 8, protocol 15, and archives containing a boundary require schema 5. Kimi clear remains disabled; its existing native background compact behavior is preserved.
 
 ## Outcomes & Retrospective
 
-Implementation is complete; validation and integration are in progress. Focused lifecycle tests cover replacement and startup rollback; the full suite also exercises archive preservation, handoff isolation, relay deduplication, and UI capability gating.
+Implementation and validation are complete. Codex and Claude support idle-only clear with durable history boundaries and configuration-preserving recovery. Compaction no longer consumes pending context. Kimi retains native compact support; clear is not enabled for Kimi. Focused lifecycle tests cover replacement and startup rollback; the full suite also exercises archive preservation, handoff isolation, relay deduplication, and UI capability gating.
 
 ## Context and Orientation
 
@@ -64,3 +66,7 @@ Installed-parser probe: plain `/compact` returned `{name:"compact",rest:""}`; th
 ## Interfaces and Dependencies
 
 Reuse ACP, existing relay commands/events and subprocess supervision; add no crate. Add ClearContext command/completion and capability, and a durable boundary usable by transcript and archive consumers. Share maintenance parsing between admission, UI validation, and compaction detection. Preserve existing normal prompt and queue semantics.
+
+Validation results (2026-09-19): `env -u NO_COLOR cargo test` passed on the merged implementation, including 672 TUI tests, 1489 controller tests, and both native replacement/recovery behavior tests. The shell exports `NO_COLOR=1`, so the unmodified color assertions require it unset. All 38 web unit tests passed outside the sandbox. Formatting and diff whitespace checks passed. Cargo logs are `/mnt/optane/hel4-clear-final-test.log` and `/mnt/optane/hel4-clear-clippy.log`. No personal controller store was upgraded.
+
+Final `cargo clippy --all-targets -- -D warnings` passed after the recovery follow-up (35.67s). The final publication is a fast-forward of the validated merge, not a separate product change.

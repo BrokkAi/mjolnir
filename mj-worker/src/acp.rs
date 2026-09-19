@@ -281,17 +281,18 @@ async fn run_inner(
             .lock()
             .expect("opened session lock poisoned")
             .is_some();
+        if did_open {
+            spec.context_restore = None;
+        }
         if did_open && spec.clear_context_request.is_some() {
             spec.clear_context_request = None;
             rollback = None;
         }
         let restart = match result {
             Err(error) if spec.clear_context_request.is_some() => {
-                let request_id = spec
-                    .clear_context_request
-                    .take()
-                    .expect("pending clear")
-                    .request_id;
+                let reset = spec.clear_context_request.take().expect("pending clear");
+                let request_id = reset.request_id.clone();
+                spec.context_restore = Some(reset);
                 emit_runtime_event(&events, RuntimeEvent::CommandRejected {
                     request_id, message: format!("Could not clear context; restoring the previous conversation: {error:#}"),
                 }).await?;

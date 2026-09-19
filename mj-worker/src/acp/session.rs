@@ -357,7 +357,11 @@ pub(super) async fn serve_session(
             }
         }
     }
-    if let Some(reset) = &spec.clear_context_request {
+    if let Some(reset) = spec
+        .clear_context_request
+        .as_ref()
+        .or(spec.context_restore.as_ref())
+    {
         for (key, value) in &reset.selectors {
             apply_session_selector(
                 connection,

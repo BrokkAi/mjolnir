@@ -3,6 +3,8 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
     pub clear_context_request: Option<ContextReset>,
+    /// Settings to restore when a failed clear reloads the old conversation.
+    pub context_restore: Option<ContextReset>,
     pub goal_recovery: Arc<Mutex<mj_core::goal::GoalRecoveryContext>>,
     pub command: PathBuf,
     pub args: Vec<String>,
