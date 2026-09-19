@@ -97,6 +97,15 @@ pub(super) fn resolve(
     resolution
 }
 
+/// Forget what this host last answered, so the next session asks it again.
+fn forget_resolutions(host: &CacheHost) {
+    let prefix = format!("{}|", host.key());
+    RESOLUTIONS
+        .lock()
+        .expect("mbx resolutions")
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
 /// The targets that can share a host build cache. Apple `container` runs each
 /// container in its own virtual machine, where file locks across the shared
 /// store are unverified, and bare and EC2 targets are out of scope.
@@ -154,6 +163,12 @@ pub fn preview_build_cache(
     let Some(host) = CacheHost::for_machine(machine) else {
         return Ok(None);
     };
+    // The settings screen inspects a host exactly when somebody has just
+    // changed something on it: installed mbx, created the directory, mounted a
+    // volume that clones. A memoized answer would outlive that fix by up to
+    // `RESOLUTION_LIFETIME`, so the preview would report the repair while
+    // sessions kept running on the stale verdict.
+    forget_resolutions(&host);
     let settings = machine.build_cache().cloned().unwrap_or_default();
     if !global.enabled {
         return Ok(Some(BuildCachePreview {
@@ -970,6 +985,41 @@ mod tests {
         assert!(
             !executor.ran().iter().any(|line| line.contains("df -B1")),
             "a host with its own configuration is not measured"
+        );
+    }
+
+    #[test]
+    fn looking_at_the_settings_page_lets_the_next_session_see_a_repaired_host() {
+        let _isolated = isolated();
+        let broken = ProbeExecutor::new(
+            &plain_host()
+                .into_iter()
+                .map(|(needle, status, stdout)| match needle {
+                    "mj-reflink" => (needle, 1, stdout),
+                    _ => (needle, status, stdout),
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            resolve(&podman(None), &BuildCacheConfig::default(), &broken).is_none(),
+            "a volume that cannot clone runs without the cache"
+        );
+
+        // The host is repaired, and the user opens the machine's build cache
+        // page to check.
+        let repaired = ProbeExecutor::new(&plain_host());
+        let preview = preview_build_cache(
+            &configured_local_machine(),
+            &BuildCacheConfig::default(),
+            &repaired,
+        )
+        .expect("the host answers")
+        .expect("a local machine can hold a cache");
+        assert_eq!(preview.off_reason, None);
+
+        assert!(
+            resolve(&podman(None), &BuildCacheConfig::default(), &repaired).is_some(),
+            "the next session asks the repaired host again instead of reusing the old verdict"
         );
     }
 
