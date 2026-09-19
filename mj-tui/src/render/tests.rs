@@ -1778,7 +1778,7 @@ fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
     let lines = drawn(&mut empty, 120, 44).join("\n");
     assert!(lines.contains("No live session"), "{lines}");
     assert!(
-        lines.contains("ctrl+b c to create a session or ctrl+b g to resume one"),
+        lines.contains("ctrl+b c to create a session or ctrl+b g to find one"),
         "{lines}"
     );
 
