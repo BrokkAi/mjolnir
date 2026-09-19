@@ -159,11 +159,20 @@ pub(crate) fn render_new_wizard(
             "Enter validates · Tab moves · Back returns · Esc cancels",
             Style::default().fg(theme::palette().muted),
         ));
+        // The dialog holds two intro rows, the field, the detail rows and the
+        // button row, so it is sized for all of them: a shorter frame lets the
+        // buttons overwrite the last detail rows, which is where the remembered
+        // directories and the key hints live. A completion popup gets its own
+        // rows between the field and the buttons for the same reason.
+        let detail_rows = u16::try_from(lines.len().saturating_sub(2)).unwrap_or(u16::MAX);
+        let content_rows = detail_rows
+            .max(PathField::popup_rows(&wizard.project_directory))
+            .saturating_add(4);
         let popup = centered_modal(
             frame,
             surfaces,
             76,
-            (lines.len() as u16 + 2).clamp(9, 16),
+            content_rows.saturating_add(2).max(9),
             area,
         );
         let content = popup.inner(ratatui::layout::Margin {
@@ -199,8 +208,14 @@ pub(crate) fn render_new_wizard(
                 button_y.saturating_sub(field_y.saturating_add(1)),
             ),
         );
-        PathField::render(
+        PathField::render_within(
             frame,
+            Rect::new(
+                content.x,
+                content.y,
+                content.width,
+                button_y.saturating_sub(content.y),
+            ),
             Rect::new(content.x, field_y, content.width, 1.min(content.height)),
             &wizard.project_directory,
             &mut form,
@@ -314,8 +329,17 @@ pub(crate) fn render_new_wizard(
                 1.min(content.height),
             ),
         );
-        PathField::render(
+        // Two button rows sit at the foot of this dialog; the popup keeps off
+        // both of them.
+        let buttons_y = content.bottom().saturating_sub(2);
+        PathField::render_within(
             frame,
+            Rect::new(
+                content.x,
+                content.y,
+                content.width,
+                buttons_y.saturating_sub(content.y),
+            ),
             Rect::new(
                 content.x,
                 source_label_y.saturating_add(1),
@@ -1174,6 +1198,9 @@ pub(crate) fn render_mount_wizard(
         let row = viewport.row(u16::try_from(index).unwrap_or(u16::MAX), 1);
         frame.render_widget(Paragraph::new(line.clone()), row);
     }
+    // A completion popup may cover the rows below its field, but not the
+    // button row and not the dialog's frame.
+    let popup_bounds = Rect::new(inner.x, inner.y, inner.width, body.height);
     let field_width = inner.width.saturating_sub(12);
     let source_row = viewport.row(info_height, 1);
     frame.render_widget(
@@ -1191,8 +1218,9 @@ pub(crate) fn render_mount_wizard(
         field_width,
         source_row.height,
     );
-    PathField::render(
+    PathField::render_within(
         frame,
+        popup_bounds,
         source_field,
         &mounts.source,
         form,
@@ -1208,8 +1236,9 @@ pub(crate) fn render_mount_wizard(
             destination_row.height,
         ),
     );
-    PathField::render(
+    PathField::render_within(
         frame,
+        popup_bounds,
         Rect::new(
             destination_row.x.saturating_add(10),
             destination_row.y,
@@ -1261,8 +1290,9 @@ pub(crate) fn render_mount_wizard(
     // The completion popup hangs over the rows below the source, so it is
     // drawn again once those rows are on the screen.
     if form.focused() == Some(WizardControl::MountSource) {
-        PathField::render(
+        PathField::render_within(
             frame,
+            popup_bounds,
             source_field,
             &mounts.source,
             form,

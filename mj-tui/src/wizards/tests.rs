@@ -3821,3 +3821,151 @@ fn tab_leaves_the_field_and_closes_the_popup() {
         Some(WizardControl::MountSource)
     );
 }
+
+/// A dashboard on the local project step of the New wizard, with `history`
+/// already remembered for this host.
+fn dashboard_at_local_project_step(history: &[&str]) -> DashboardState {
+    let mut config = config();
+    config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+    let mut state = State::default();
+    for directory in history {
+        state.remember_project_directory("local", std::path::Path::new(directory));
+    }
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::ProjectDirectory),
+        "expected the local project step"
+    );
+    dashboard
+}
+
+/// The row of `lines` holding `label`, panicking with the screen when it is
+/// nowhere on it.
+fn row_of(lines: &[String], label: &str) -> usize {
+    lines
+        .iter()
+        .position(|line| line.contains(label))
+        .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"))
+}
+
+/// The step pre-fills a remembered directory, so it has to draw it with the
+/// caret at its end. A value the field holds but does not show takes every
+/// character typed after it and turns the path into two paths.
+#[test]
+fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
+    let mut dashboard = dashboard_at_local_project_step(&["/work/remembered"]);
+
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the local project step")
+    };
+    assert_eq!(wizard.project_directory, "/work/remembered");
+    assert_eq!(
+        wizard.project_directory.cursor(),
+        "/work/remembered".len(),
+        "typing must continue at the end of what is drawn"
+    );
+
+    let lines = drawn(&mut dashboard, 140, 40);
+    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    assert!(
+        lines[field].contains("/work/remembered"),
+        "the field draws its value: {:?}",
+        lines[field]
+    );
+}
+
+/// Everything the step composes has to be on the screen. The remembered
+/// directories and the key hints are the last rows it writes, so a dialog that
+/// is not sized for its own field and buttons loses exactly those.
+#[test]
+fn the_project_step_draws_its_recent_list_and_hints_above_the_buttons() {
+    let mut dashboard = dashboard_at_local_project_step(&["/work/newer", "/work/older"]);
+    for character in "/work/newer".chars() {
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
+    }
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the local project step")
+    };
+    let typed = wizard.project_directory.to_string();
+    dashboard.apply_project_directory_validation(
+        &typed,
+        Err("project directory does not exist or is not a directory".into()),
+    );
+
+    let lines = drawn(&mut dashboard, 140, 40);
+    let buttons = row_of(&lines, "Cancel");
+    for label in [
+        "Error: project directory does not exist",
+        "Recent on this host",
+        "/work/older",
+        "Enter validates",
+    ] {
+        assert!(
+            row_of(&lines, label) < buttons,
+            "{label:?} is drawn above the button row: {lines:#?}"
+        );
+    }
+}
+
+/// The completion popup belongs to the dialog that owns the field: it may cover
+/// the rows under the field, but the button row and the dialog's frame stay
+/// readable, and no candidate is drawn on the dashboard behind the modal.
+#[test]
+fn the_completion_popup_keeps_off_the_project_steps_button_row() {
+    let mut dashboard = dashboard_at_local_project_step(&[]);
+    for character in "/srv/pro".chars() {
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
+    }
+    assert_eq!(
+        ready_key(&mut dashboard, ctrl_space()),
+        DashboardAction::CompletePath {
+            host: CompletionHost::Target("localhost".into()),
+            kind: CompletionKind::Directories,
+            prefix: "/srv/pro".into(),
+        }
+    );
+    dashboard.apply_path_completions(
+        &dashboard.path_input_context(),
+        "/srv/pro",
+        PathCompletion {
+            candidates: vec!["/srv/profile/".into(), "/srv/project/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+
+    let lines = drawn(&mut dashboard, 140, 40);
+    let field = row_of(&lines, "New session · 3/4 local project") + 3;
+    let buttons = row_of(&lines, "Cancel");
+    assert!(
+        lines[field].contains("/srv/pro"),
+        "the popup leaves the field readable: {:?}",
+        lines[field]
+    );
+    for candidate in ["/srv/profile/", "/srv/project/"] {
+        let row = row_of(&lines, candidate);
+        assert!(
+            row > field && row < buttons,
+            "{candidate} is drawn between the field and the buttons: {lines:#?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| line.contains(candidate)).count(),
+            1,
+            "{candidate} is drawn once: {lines:#?}"
+        );
+    }
+    assert!(
+        lines[buttons].contains("Back") && lines[buttons].contains("Next"),
+        "the button row is whole: {:?}",
+        lines[buttons]
+    );
+    assert!(
+        !lines[buttons].contains('\u{2500}'),
+        "no popup border is drawn through the buttons: {:?}",
+        lines[buttons]
+    );
+}
