@@ -474,6 +474,27 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
     schema::label(key)
 }
 
+/// The trail of page names above `path`, starting at the first page.
+///
+/// Each segment is named the way the page above it names its rows, so a name
+/// the user chose is shown as they wrote it and only schema keys reach the
+/// label table: a machine called `local` is that machine, not the "Local
+/// repository directory" setting that shares the key.
+fn breadcrumb(path: &[String], draft: &Value) -> String {
+    let mut segments = vec!["Settings".to_owned()];
+    let mut parent: Vec<String> = Vec::new();
+    for key in path {
+        let mut child = parent.clone();
+        child.push(key.clone());
+        segments.push(match draft.pointer(&pointer(&parent)) {
+            Some(value) => row_label(&parent, value, key, draft.pointer(&pointer(&child))),
+            None => schema::label(key),
+        });
+        parent = child;
+    }
+    segments.join(" › ")
+}
+
 /// A size string as the whole number of GB the field is measured in, or the
 /// string itself when it is not a size at all.
 fn build_cache_gigabytes_label(size: &str) -> String {
@@ -568,11 +589,7 @@ fn preferred_size(draft: &Value) -> SetupSize {
             return;
         };
         let keys = visible_keys(path, value);
-        let breadcrumb = std::iter::once("Settings".to_owned())
-            .chain(path.iter().map(|key| schema::label(key)))
-            .collect::<Vec<_>>()
-            .join(" › ");
-        *max_width = (*max_width).max(Line::raw(breadcrumb).width());
+        *max_width = (*max_width).max(Line::raw(breadcrumb(path, draft)).width());
         *max_height = (*max_height).max(
             u16::try_from(page_plan(path, &keys).len())
                 .unwrap_or(u16::MAX)
@@ -2339,12 +2356,8 @@ pub(crate) fn render_setup(
     };
     let nested = !path.is_empty();
     if nested {
-        let breadcrumb = std::iter::once("Settings".to_owned())
-            .chain(path.iter().map(|key| schema::label(key)))
-            .collect::<Vec<_>>()
-            .join(" › ");
         frame.render_widget(
-            Paragraph::new(breadcrumb).style(theme::title(true)),
+            Paragraph::new(breadcrumb(path, &dialog.draft)).style(theme::title(true)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
     }

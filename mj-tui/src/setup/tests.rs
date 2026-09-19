@@ -1685,6 +1685,29 @@ fn escape_returns_from_a_settings_subpage_and_closes_only_from_the_first_page() 
     );
 }
 
+/// The breadcrumb names each page the way the page above it named its row, so
+/// a machine the user called `local` is not retitled as the repository setting
+/// that shares the key.
+#[test]
+fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(text.contains("Settings › Machines › local"), "{text}");
+    assert!(
+        !text.contains("Local repository directory"),
+        "the machine's name went through the label table:\n{text}"
+    );
+    choose(&mut dashboard, "build_cache");
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    assert!(
+        text.contains("Settings › Machines › local › Build cache (mbx)"),
+        "a schema key below it still gets its label:\n{text}"
+    );
+}
+
 #[test]
 fn empty_archive_after_days_renders_as_never() {
     let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});
