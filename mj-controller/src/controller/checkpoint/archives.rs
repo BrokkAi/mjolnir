@@ -18,7 +18,12 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
                 .insert(format!("move:{}", operation.operation_id), session);
         }
     }
-    reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state)
+    let removed = reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state)?;
+    // This scan is the last thing that removes an archive nothing references, so
+    // it is also where a finished move's row stops being able to act. Sweeping
+    // here means the startup load below this call already sees a clean store.
+    super::reap_finished_move_intents();
+    Ok(removed)
 }
 
 pub(super) fn reconcile_managed_checkpoint_archives_in(
