@@ -474,6 +474,15 @@ pub enum DashboardAction {
         workspace_id: String,
     },
     ExitSubagentWorkspace,
+    LoadNativeAgentHistory {
+        owner: String,
+        child: String,
+        before: Option<(u64, String)>,
+    },
+    StopNativeAgent {
+        owner: String,
+        child: String,
+    },
     /// Load the workspace list and detached drafts for the workspace manager.
     LoadWorkspaceManagement {
         generation: u64,
@@ -870,6 +879,7 @@ pub struct DashboardState {
     active_workspace_id: Option<String>,
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
     subagent_parent_id: Option<String>,
+    pub(crate) native_agents: BTreeMap<String, native_agents::NativeAgentPane>,
     /// Dashboard-only state retained while the user switches tabs.
     workspace_views: BTreeMap<String, WorkspaceViewState>,
     /// A pane-size update from the controller may not overwrite a local edit
@@ -933,6 +943,7 @@ mod dashboard_sessions;
 pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
 mod dashboard_standby;
 mod dashboard_workspaces;
+mod native_agents;
 
 impl DashboardState {
     pub fn finish_spinner_style_save(&mut self) {
@@ -1015,6 +1026,7 @@ impl DashboardState {
             workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
             subagent_parent_id: None,
+            native_agents: BTreeMap::new(),
             workspace_views: BTreeMap::new(),
             workspace_pane_sizes_modified: BTreeSet::new(),
             workspace_layouts_modified: BTreeSet::new(),

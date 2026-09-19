@@ -7,6 +7,7 @@
 mod claude_tasks;
 mod drive;
 mod launch;
+mod native_agents;
 mod permissions;
 mod session;
 mod session_config;

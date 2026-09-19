@@ -1158,6 +1158,9 @@ impl ProjectionPage<'_> {
             );
         }
 
+        if let Some(event) = &mutation.native_agent {
+            native_agents::apply_native_agent_event(&self.transaction, session_id, event)?;
+        }
         if let Some(activity_at_ms) = mutation.last_activity_at_ms {
             self.pending.last_activity_at_ms = Some(
                 self.pending

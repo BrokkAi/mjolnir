@@ -335,6 +335,40 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: native child projections and relay observations must be preserved
+    // by every reader/writer; older builds cannot interpret their lifecycle.
+    if version < 40 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE native_agents (
+                 owner TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 child TEXT NOT NULL,
+                 staging INTEGER NOT NULL CHECK(staging IN (0,1)),
+                 body TEXT NOT NULL CHECK(json_valid(body)),
+                 PRIMARY KEY(owner, child, staging)
+             ) STRICT;
+             CREATE TABLE native_agent_transcript (
+                 owner TEXT NOT NULL,
+                 child TEXT NOT NULL,
+                 staging INTEGER NOT NULL,
+                 stable_id TEXT NOT NULL,
+                 position INTEGER NOT NULL,
+                 body TEXT NOT NULL CHECK(json_valid(body)),
+                 PRIMARY KEY(owner, child, staging, stable_id),
+                 FOREIGN KEY(owner, child, staging) REFERENCES native_agents(owner, child, staging)
+                     ON DELETE CASCADE ON UPDATE CASCADE
+             ) STRICT;
+             CREATE INDEX native_agent_transcript_position ON native_agent_transcript(owner, child, staging, position);
+             CREATE TABLE native_agent_replay (
+                 owner TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE
+             ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 40 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (40, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 40;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -413,8 +447,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 39 permits unstructured input-required events.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 39;
+    /// `SCHEMA_VERSION`. Migration 40 adds native child projections.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 40;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -446,14 +480,17 @@ mod reader_tests {
     }
 
     #[test]
-    fn unstructured_input_events_raise_the_store_compatibility_floor() {
+    fn native_agents_and_unstructured_input_raise_the_store_compatibility_floor() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
-             DELETE FROM schema_migrations WHERE version = 39;
+             DROP TABLE native_agent_transcript;
+             DROP TABLE native_agents;
+             DROP TABLE native_agent_replay;
+             DELETE FROM schema_migrations WHERE version >= 39;
              UPDATE schema_compatibility SET minimum_compatible_version = 32;
              PRAGMA user_version = 38;
              COMMIT;",
@@ -461,8 +498,8 @@ mod reader_tests {
             .unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 39);
-        assert_eq!(state.minimum_compatible, Some(39));
+        assert_eq!(state.revision, 40);
+        assert_eq!(state.minimum_compatible, Some(40));
         let event = ApiEventData::InputRequired {
             request: None,
             turn_id: Some(1),

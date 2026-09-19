@@ -206,12 +206,7 @@ impl DashboardState {
                 }
             }),
             harness_kind: session.as_ref().map(|session| session.harness_kind),
-            subagent_count: self
-                .state
-                .subagents
-                .values()
-                .filter(|record| record.parent_session_id == session_id)
-                .count(),
+            subagent_count: self.subagent_count_for(session_id),
         }
     }
 

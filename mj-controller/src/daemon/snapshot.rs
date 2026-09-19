@@ -271,6 +271,15 @@ impl RuntimeState {
                 .into_iter()
                 .collect()
         };
+        let native_owners = session_ids.clone();
+        let native_agents = blocking(move || {
+            let mut agents = Vec::new();
+            for owner in native_owners {
+                agents.extend(crate::database::load_native_agents(&owner, 200)?);
+            }
+            Ok(agents)
+        })
+        .await?;
         let sessions = self
             .sessions
             .lock()
@@ -333,6 +342,7 @@ impl RuntimeState {
         let records = runtime_records_for_workspace(&controller, &session_ids);
         let subagents = runtime_subagents_for_workspace(&controller, &records);
         Ok(RuntimeSnapshot {
+            native_agents,
             workspace_names,
             moves: moves
                 .into_iter()

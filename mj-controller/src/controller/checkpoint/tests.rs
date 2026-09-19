@@ -266,6 +266,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            native_agent_count: 0,
             expected_continuation: None,
             goal: serde_json::from_value(
                 serde_json::json!({"known":true,"execution":{"version":1,"status":"idle"}}),

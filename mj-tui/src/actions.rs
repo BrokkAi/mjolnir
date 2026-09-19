@@ -1188,6 +1188,21 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
             Some(scope) => spec.scope == scope,
             None => scope_applies(spec.scope, dashboard.focus),
         })
+        .filter(|spec| {
+            !(dashboard
+                .selected_session_id()
+                .is_some_and(|id| dashboard.is_native_agent(id))
+                && matches!(
+                    spec.id,
+                    CommandId::RestartSession
+                        | CommandId::RenameSession
+                        | CommandId::ContainerSettings
+                        | CommandId::ChangedFiles
+                        | CommandId::MoveSession
+                        | CommandId::StopSession
+                        | CommandId::ForceDestroySession
+                ))
+        })
         .filter(|spec| (spec.available)(dashboard) == Availability::Ready)
         .map(|spec| spec.id)
         .collect()
@@ -1230,6 +1245,23 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        if self
+            .selected_session_id()
+            .is_some_and(|selected| self.is_native_agent(selected))
+            && matches!(
+                id,
+                CommandId::RestartSession
+                    | CommandId::RenameSession
+                    | CommandId::ContainerSettings
+                    | CommandId::ChangedFiles
+                    | CommandId::MoveSession
+                    | CommandId::StopSession
+                    | CommandId::ForceDestroySession
+            )
+        {
+            self.set_notice("Native agents are owned by their parent session");
+            return DashboardAction::None;
+        }
         // Commands a person reaches for by name are worth remembering; the
         // pane keys and the palette itself are not.
         if spec(id).pane_keys.is_empty() && !matches!(id, CommandId::Palette | CommandId::Help) {

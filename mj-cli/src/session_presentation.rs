@@ -183,6 +183,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            native_agent_count: 0,
             expected_continuation: None,
             goal: Default::default(),
             capacity_retry: None,

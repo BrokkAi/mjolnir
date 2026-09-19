@@ -275,6 +275,8 @@ pub struct RuntimeNotice {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshot {
     #[serde(default)]
+    pub native_agents: Vec<mj_core::native_agent::NativeAgentView>,
+    #[serde(default)]
     pub workspace_names: BTreeMap<String, String>,
     #[serde(default)]
     pub moves: Vec<mj_core::state::MoveOperation>,
@@ -382,6 +384,11 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    NativeAgentHistory {
+        owner: String,
+        child: String,
+        before: Option<(u64, String)>,
+    },
     Ping,
     Status,
     WebViewerAccess,
@@ -633,6 +640,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
@@ -1534,6 +1542,25 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected elicitation reply {reply:?}"),
+        }
+    }
+
+    pub async fn native_agent_history(
+        &mut self,
+        owner: String,
+        child: String,
+        before: Option<(u64, String)>,
+    ) -> Result<mj_core::native_agent::NativeAgentHistoryPage> {
+        match self
+            .request(DaemonAction::NativeAgentHistory {
+                owner,
+                child,
+                before,
+            })
+            .await?
+        {
+            DaemonReply::NativeAgentHistory(page) => Ok(page),
+            reply => bail!("unexpected native agent history reply {reply:?}"),
         }
     }
 

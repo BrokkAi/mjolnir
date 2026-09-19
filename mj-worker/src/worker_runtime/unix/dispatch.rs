@@ -352,6 +352,9 @@ pub(crate) fn record_runtime_event(
         RuntimeEvent::SessionModesConfigured { modes } => {
             relay.record_observation(RelayObservation::SessionModesConfigured { modes })?;
         }
+        RuntimeEvent::NativeAgent { event } => {
+            relay.record_observation(RelayObservation::NativeAgent { event })?;
+        }
         RuntimeEvent::SessionUpdate { update } => {
             let typed = serde_json::from_value::<SessionUpdate>(update).map_err(|error| {
                 anyhow::anyhow!("decode ACP session update for relay journal: {error}")
@@ -478,6 +481,9 @@ pub(crate) fn record_runtime_event(
             )?;
         }
         RuntimeEvent::CloseApplied { request_id } => {
+            relay.record_observation(RelayObservation::NativeAgent {
+                event: mj_core::native_agent::NativeAgentEvent::Disconnected,
+            })?;
             in_flight.remove(&request_id);
             relay.record_command_completed(&request_id, RelayCommandOutcome::Closed)?;
             relay.record_observation(RelayObservation::Closed)?;
@@ -486,6 +492,9 @@ pub(crate) fn record_runtime_event(
             relay.record_observation(RelayObservation::Warning { message })?;
         }
         RuntimeEvent::HarnessRestarting { message } => {
+            relay.record_observation(RelayObservation::NativeAgent {
+                event: mj_core::native_agent::NativeAgentEvent::Disconnected,
+            })?;
             relay.clear_agent_terminals()?;
             relay.record_observation(RelayObservation::Warning {
                 message: message.clone(),
@@ -554,6 +563,9 @@ pub(crate) fn record_runtime_event(
                 .record_command_completed(&request_id, RelayCommandOutcome::UserShell { result })?;
         }
         RuntimeEvent::Stopped => {
+            relay.record_observation(RelayObservation::NativeAgent {
+                event: mj_core::native_agent::NativeAgentEvent::Disconnected,
+            })?;
             relay.clear_acp_readiness();
             relay.clear_agent_terminals()?;
             relay.record_observation(RelayObservation::ElicitationsCleared)?;

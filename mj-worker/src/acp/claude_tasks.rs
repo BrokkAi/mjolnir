@@ -7,6 +7,8 @@ pub(super) struct ClaudeBackgroundTaskPayload {
     task_id: String,
     description: String,
     #[serde(default)]
+    task_type: Option<String>,
+    #[serde(default)]
     ambient: bool,
 }
 
@@ -127,7 +129,7 @@ pub(super) fn claude_background_tasks(
     Ok(Some(
         payload
             .into_iter()
-            .filter(|task| !task.ambient)
+            .filter(|task| !task.ambient && task.task_type.as_deref() != Some("local_agent"))
             .map(|task| ClaudeBackgroundTask {
                 task_id: task.task_id,
                 description: task.description,
@@ -145,6 +147,25 @@ pub(super) async fn stop_background_task(
     target: mj_core::relay::BackgroundTaskStopTarget,
 ) -> std::result::Result<(), String> {
     match target {
+        mj_core::relay::BackgroundTaskStopTarget::NativeAgent {
+            session_id: child_id,
+        } => {
+            let request = NativeAgentCancelRequest {
+                session_id: session_id.clone(),
+                subagent_session_id: child_id,
+            };
+            match tokio::time::timeout(
+                BACKGROUND_TASK_STOP_TIMEOUT,
+                connection.send_request(request).block_task(),
+            )
+            .await
+            {
+                Ok(Ok(response)) if response.cancelled => Ok(()),
+                Ok(Ok(_)) => Err("native agent is no longer running".into()),
+                Ok(Err(error)) => Err(format!("cancel native agent: {error}")),
+                Err(_) => Err("timed out cancelling native agent".into()),
+            }
+        }
         mj_core::relay::BackgroundTaskStopTarget::HostedTerminal { terminal_id } => {
             if terminals.kill(&terminal_id) {
                 Ok(())
@@ -187,4 +208,18 @@ pub(super) async fn resolve_background_task_stop(
             "background task stop receiver was already closed"
         );
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
+#[request(method = "_session/subagent/cancel", response = NativeAgentCancelResponse)]
+struct NativeAgentCancelRequest {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+    #[serde(rename = "subagentSessionId")]
+    subagent_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
+struct NativeAgentCancelResponse {
+    cancelled: bool,
 }

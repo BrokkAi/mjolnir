@@ -377,6 +377,7 @@ impl DashboardState {
     ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.subagents.contains_key(&session.id)
+            && !self.native_agents.contains_key(&session.id)
             && (session.state.is_active()
                 || self.transition_kind(&session.id).is_some()
                 || (self.config.advanced.show_stopped_sessions
@@ -392,6 +393,12 @@ impl DashboardState {
                 .filter(|record| record.parent_session_id == parent_id)
                 .filter_map(|record| self.state.sessions.get(&record.child_session_id))
                 .collect::<Vec<_>>();
+            children.extend(
+                self.native_agents
+                    .iter()
+                    .filter(|(_, pane)| pane.agent.parent_view_id() == parent_id)
+                    .filter_map(|(id, _)| self.state.sessions.get(id)),
+            );
             children.sort_by_cached_key(|session| session.creation_order_key());
             return children;
         }

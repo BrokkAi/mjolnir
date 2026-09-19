@@ -125,6 +125,7 @@ fn advertised(models: &[&str], efforts: &[&str]) -> Vec<SessionConfigOption> {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        native_agent_count: 0,
         expected_continuation: None,
         goal: Default::default(),
         capacity_retry: None,

@@ -390,3 +390,35 @@ fn apply_committed_projection_event_inner(
 
 #[cfg(test)]
 mod tests;
+
+/// Project a child-addressed update using the same transcript rules as a root.
+/// The owning relay has already validated ordering; child events are a sparse
+/// subsequence of that relay, so their local frontier may skip owner ordinals.
+pub fn project_native_update(
+    current: &MaterializedSession,
+    event: &RelayEvent,
+    update: &agent_client_protocol::schema::v1::SessionUpdate,
+) -> Result<MaterializedSessionMutation> {
+    let mut mutation = MaterializedSessionMutation {
+        last_activity_at_ms: Some(event.recorded_at_ms),
+        ..Default::default()
+    };
+    if let agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(chunk) = update {
+        mutation
+            .transcript
+            .push(TranscriptMutation::Upsert(TranscriptItem {
+                stable_id: format!("native-user:{}", event.ordinal),
+                position: event.ordinal,
+                latest_content_event_ordinal: None,
+                created_at_ms: event.recorded_at_ms,
+                last_changed_at_ms: event.recorded_at_ms,
+                body: TranscriptBody::User {
+                    content: vec![serde_json::to_value(&chunk.content)?],
+                },
+            }));
+        return Ok(mutation);
+    }
+    let index = ProjectionIndex::new(current);
+    session_update::project_session_update(current, &index, event, update, &mut mutation)?;
+    Ok(mutation)
+}

@@ -466,6 +466,9 @@ pub struct ClaudeBackgroundTask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    NativeAgent {
+        event: crate::native_agent::NativeAgentEvent,
+    },
     ContinuationExpected {
         since_ms: i64,
         note: String,

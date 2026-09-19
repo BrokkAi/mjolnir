@@ -20,7 +20,13 @@ impl DashboardState {
             .subagents
             .values()
             .find(|record| record.parent_session_id == parent_id)
-            .map(|record| record.child_session_id.clone());
+            .map(|record| record.child_session_id.clone())
+            .or_else(|| {
+                self.native_agents
+                    .iter()
+                    .find(|(_, pane)| pane.agent.parent_view_id() == parent_id)
+                    .map(|(id, _)| id.clone())
+            });
         self.set_current_session(None);
         self.focus = Focus::Sessions;
         self.clamp_selections();
@@ -30,6 +36,10 @@ impl DashboardState {
         let Some(parent_id) = self.subagent_parent_id.take() else {
             return;
         };
+        self.subagent_parent_id = self
+            .native_agents
+            .get(&parent_id)
+            .map(|pane| pane.agent.parent_view_id());
         self.selected_session_id = Some(parent_id);
         self.set_current_session(None);
         self.clamp_selections();

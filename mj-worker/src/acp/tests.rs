@@ -5750,3 +5750,133 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
     bridge.abort();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() {
+    use mj_core::native_agent::NativeAgentEvent;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(bridge_stream);
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap_or("");
+                let result = match method {
+                    "initialize" => {
+                        assert!(request["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"]
+                            .as_array().unwrap().iter().any(|v| v == "nativeSubagentSessions"));
+                        serde_json::json!({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}},
+                            "_meta":{"jetbrains":{"air":{"version":1,"capabilities":["nativeSubagentSessions"]}}}})
+                    }
+                    "session/load" => {
+                        // Exceed the pipe capacity so the driver must drain history
+                        // concurrently with the load response.
+                        for (address, update) in [
+                            (
+                                "root",
+                                serde_json::json!({"sessionUpdate":"subagent_spawned","subagentSessionId":"child","name":"review","task":"inspect","capabilities":{}}),
+                            ),
+                            (
+                                "child",
+                                serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x".repeat(80000)}}),
+                            ),
+                            (
+                                "root",
+                                serde_json::json!({"sessionUpdate":"subagent_state_update","subagentSessionId":"child","state":"completed"}),
+                            ),
+                        ] {
+                            let notification = serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":address,"update":update}});
+                            write
+                                .write_all(format!("{notification}\n").as_bytes())
+                                .await
+                                .unwrap();
+                        }
+                        serde_json::json!({"modes":{"currentModeId":"auto","availableModes":[{"id":"auto","name":"Auto"},{"id":"agent","name":"Agent"}]}})
+                    }
+                    "session/resume" => panic!("native recovery must load child history"),
+                    "session/set_mode" | "session/set_config_option" => serde_json::json!({}),
+                    _ => continue,
+                };
+                let response =
+                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result});
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let (request_tx, mut request_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let step_clock = crate::acp::StepClock::default();
+        let spec = LaunchSpec {
+            bridge_spec_path: None,
+            tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource::Direct {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
+            stall_policy: None,
+            subagent_mcp_socket: None,
+            goal_recovery: Default::default(),
+            command: "scripted".into(),
+            args: Vec::new(),
+            environment: BTreeMap::new(),
+            cwd: std::env::current_dir().unwrap(),
+            additional_directories: Vec::new(),
+            extra_mcp_servers: Vec::new(),
+            project_memory: None,
+            resume_session: Some("root".into()),
+            native_session_may_have_history: false,
+            accepted_config: Default::default(),
+            harness,
+            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            acp_activity: AcpActivityClock::default(),
+            step_clock,
+        };
+
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
+            .await
+        });
+        let mut children = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    RuntimeEvent::NativeAgent { event } => {
+                        let done = matches!(event, NativeAgentEvent::ReplayCommit);
+                        children.push(event);
+                        if done {
+                            break;
+                        }
+                    }
+                    RuntimeEvent::SessionUpdate { update } => {
+                        assert_ne!(update["sessionUpdate"], "agent_message_chunk")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("child history load finishes");
+        assert_eq!(children.len(), 5);
+        assert!(matches!(children[0], NativeAgentEvent::ReplayBegin));
+        assert!(matches!(children[1], NativeAgentEvent::Spawned { .. }));
+        assert!(matches!(children[2], NativeAgentEvent::Update { .. }));
+        assert!(matches!(children[3], NativeAgentEvent::State { .. }));
+        drop(request_tx);
+        driver.await.unwrap().unwrap();
+        bridge.abort();
+    }
+}

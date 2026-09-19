@@ -1989,6 +1989,7 @@ fn kimi_task_queries_reconcile_by_native_identity_in_either_event_order() {
             SessionUpdate::ToolCall(call)
         };
         let native = crate::acp::KimiBackgroundTask {
+            is_agent: false,
             task_id: "bash-tlqj0v63".into(),
             description: "validation".into(),
             started_at_ms: 1_000,
@@ -2060,6 +2061,7 @@ fn kimi_background_shell_card(
 
 fn kimi_process_task(parent_tool_call_id: &str) -> crate::acp::KimiBackgroundTask {
     crate::acp::KimiBackgroundTask {
+        is_agent: false,
         task_id: "bash-r5ae".into(),
         description: "Build release runner".into(),
         started_at_ms: 2_000,
@@ -2210,6 +2212,7 @@ fn unmatched_kimi_provisional_work_survives_empty_native_scan_until_evidence_or_
     relay
         .kimi_background_tasks_changed(
             vec![crate::acp::KimiBackgroundTask {
+                is_agent: false,
                 task_id: "agent-deadbeef".into(),
                 description: "Fix memory use".into(),
                 started_at_ms: 1_000,
@@ -2279,6 +2282,7 @@ fn kimi_background_agent_survives_its_parent_prompt_until_native_termination() {
     relay
         .kimi_background_tasks_changed(
             vec![crate::acp::KimiBackgroundTask {
+                is_agent: false,
                 task_id: "agent-deadbeef".into(),
                 description: "Fix memory use".into(),
                 started_at_ms: 1_000,
@@ -2314,6 +2318,7 @@ fn kimi_tracker_failure_retains_work_and_blocks_replacement() {
     relay
         .kimi_background_tasks_changed(
             vec![crate::acp::KimiBackgroundTask {
+                is_agent: false,
                 task_id: "agent-deadbeef".into(),
                 description: "Fix memory use".into(),
                 started_at_ms: 1_000,

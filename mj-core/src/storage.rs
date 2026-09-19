@@ -98,6 +98,7 @@ pub enum TranscriptMutation {
 /// the nested option on `session_title` permits explicitly clearing it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaterializedSessionMutation {
+    pub native_agent: Option<crate::relay::RelayEvent>,
     /// Relay receipt time for this event. Persistence and the actor cache both
     /// take a monotonic maximum so removing detail rows cannot move activity
     /// backwards.

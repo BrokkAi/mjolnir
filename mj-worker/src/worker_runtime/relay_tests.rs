@@ -1199,7 +1199,8 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
         .unwrap();
 
     let running = relay.lock().unwrap().operational_state();
-    assert_eq!(running.background_commands.len(), 1);
+    assert!(running.background_commands.is_empty());
+    assert_eq!(running.native_agent_count, 1);
     assert!(!running.safe_to_replace(HarnessKind::Kimi));
 
     let terminated = serde_json::json!({
@@ -1231,6 +1232,7 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
         .unwrap();
     let finished = relay.lock().unwrap().operational_state();
     assert!(finished.background_commands.is_empty());
+    assert_eq!(finished.native_agent_count, 0);
     assert!(finished.safe_to_replace(HarnessKind::Kimi));
 }
 
@@ -1289,13 +1291,8 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
     assert_eq!(
-        relay
-            .lock()
-            .unwrap()
-            .operational_state()
-            .background_commands[0]
-            .command,
-        "old-agent"
+        relay.lock().unwrap().operational_state().native_agent_count,
+        1
     );
 
     std::fs::write(
@@ -1310,8 +1307,8 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
     monitor.refresh(&relay, true).await.unwrap();
 
     let state = relay.lock().unwrap().operational_state();
-    assert_eq!(state.background_commands.len(), 1);
-    assert_eq!(state.background_commands[0].command, "new-agent");
+    assert!(state.background_commands.is_empty());
+    assert_eq!(state.native_agent_count, 1);
 }
 
 #[tokio::test]
@@ -1369,7 +1366,8 @@ async fn kimi_native_task_monitor_retains_tasks_and_deduplicates_failure_warning
 
     monitor.refresh(&relay, true).await.unwrap();
     let after_failure = relay.lock().unwrap().operational_state();
-    assert_eq!(after_failure.background_commands.len(), 1);
+    assert!(after_failure.background_commands.is_empty());
+    assert_eq!(after_failure.native_agent_count, 1);
     assert_eq!(after_failure.background_work_known, Some(false));
     assert!(!after_failure.safe_to_replace(HarnessKind::Kimi));
 

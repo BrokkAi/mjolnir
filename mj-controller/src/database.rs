@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 39;
+const SCHEMA_VERSION: i64 = 40;
 
 mod session_move;
 pub use session_move::*;
@@ -57,6 +57,8 @@ mod state_io;
 pub use state_io::*;
 mod sessions;
 pub use sessions::*;
+mod native_agents;
+pub use native_agents::*;
 mod materialized;
 pub use materialized::*;
 mod mounts;

@@ -96,6 +96,16 @@ pub(crate) enum DashboardIoUpdate {
     },
     /// The daemon refused a review action. The message is a sentence for the
     /// person who pressed the key, so it goes back to the chat that sent it.
+    NativeAgentHistory {
+        owner: String,
+        child: String,
+        result: std::result::Result<mj_core::native_agent::NativeAgentHistoryPage, String>,
+    },
+    NativeAgentStopped {
+        owner: String,
+        child: String,
+        result: std::result::Result<(), String>,
+    },
     ReviewRefused {
         session_id: String,
         message: String,
@@ -501,6 +511,22 @@ impl DashboardContext {
                         .finish_workspace_management(generation, Err(error));
                 }
             },
+            DashboardIoUpdate::NativeAgentHistory {
+                owner,
+                child,
+                result,
+            } => {
+                self.dashboard
+                    .native_agent_history_loaded(&owner, &child, result);
+            }
+            DashboardIoUpdate::NativeAgentStopped {
+                owner,
+                child,
+                result,
+            } => {
+                self.dashboard
+                    .native_agent_stop_finished(&owner, &child, result);
+            }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
                 message,

@@ -32,6 +32,8 @@ const LEGACY_TASK_TERMINATED: &str = "background.task.terminated";
 /// wire log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KimiBackgroundTask {
+    #[serde(default)]
+    pub is_agent: bool,
     pub task_id: String,
     pub description: String,
     pub started_at_ms: i64,
@@ -43,6 +45,8 @@ pub struct KimiBackgroundTask {
 /// a relay may see the ACP tool call before it catches up with this stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KimiTaskSnapshot {
+    pub native_agents:
+        BTreeMap<String, (KimiBackgroundTask, mj_core::native_agent::NativeAgentState)>,
     pub tasks: Vec<KimiBackgroundTask>,
     pub provider_tool_ids: BTreeSet<String>,
     /// Native task identities, retained after termination to reconcile late ACP queries.
@@ -352,6 +356,7 @@ pub fn full_scan(wire_path: &Path) -> Result<KimiTaskSnapshot> {
 
 #[derive(Debug, Clone, Default)]
 struct TaskTracker {
+    native_agents: BTreeMap<String, (KimiBackgroundTask, mj_core::native_agent::NativeAgentState)>,
     turn: Option<NativeTurn>,
     active: BTreeMap<String, KimiBackgroundTask>,
     provider_tool_ids: BTreeSet<String>,
@@ -456,6 +461,7 @@ fn parse_usage_record(record: &Value) -> Option<(String, NativeUsage)> {
 impl TaskTracker {
     fn snapshot(&self) -> KimiTaskSnapshot {
         KimiTaskSnapshot {
+            native_agents: self.native_agents.clone(),
             tasks: self.active.values().cloned().collect(),
             provider_tool_ids: self.provider_tool_ids.clone(),
             observed_task_ids: self.observed_task_ids.clone(),
@@ -469,9 +475,21 @@ impl TaskTracker {
         match event.kind {
             TaskEventKind::Started(task) => {
                 self.observed_task_ids.insert(task.task_id.clone());
+                if task.is_agent {
+                    self.native_agents.insert(
+                        task.task_id.clone(),
+                        (
+                            task.clone(),
+                            mj_core::native_agent::NativeAgentState::Running,
+                        ),
+                    );
+                }
                 self.active.insert(task.task_id.clone(), task);
             }
-            TaskEventKind::Terminated { task_id } => {
+            TaskEventKind::Terminated { task_id, state } => {
+                if let Some((_, agent_state)) = self.native_agents.get_mut(&task_id) {
+                    *agent_state = state;
+                }
                 self.observed_task_ids.insert(task_id.clone());
                 self.active.remove(&task_id);
             }
@@ -488,7 +506,10 @@ struct TaskEvent {
 #[derive(Debug, Clone)]
 enum TaskEventKind {
     Started(KimiBackgroundTask),
-    Terminated { task_id: String },
+    Terminated {
+        task_id: String,
+        state: mj_core::native_agent::NativeAgentState,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -824,6 +845,7 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
             }
             Ok(Some(TaskEvent {
                 kind: TaskEventKind::Started(KimiBackgroundTask {
+                    is_agent: info.get("kind").and_then(Value::as_str) == Some("agent"),
                     task_id,
                     description,
                     started_at_ms,
@@ -839,7 +861,19 @@ fn parse_task_event(record: &Value, event_kind: TaskEventType) -> Result<Option<
                     .context("task lifecycle record status is not a string")?;
             }
             Ok(Some(TaskEvent {
-                kind: TaskEventKind::Terminated { task_id },
+                kind: TaskEventKind::Terminated {
+                    task_id,
+                    state: match info.get("status").and_then(Value::as_str) {
+                        Some("completed" | "done") => {
+                            mj_core::native_agent::NativeAgentState::Completed
+                        }
+                        Some("failed" | "error") => mj_core::native_agent::NativeAgentState::Failed,
+                        Some("cancelled" | "canceled" | "stopped") => {
+                            mj_core::native_agent::NativeAgentState::Cancelled
+                        }
+                        _ => mj_core::native_agent::NativeAgentState::Disconnected,
+                    },
+                },
                 parent_tool_call_id,
             }))
         }

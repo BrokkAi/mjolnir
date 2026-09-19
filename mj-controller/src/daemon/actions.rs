@@ -482,6 +482,16 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::NativeAgentHistory {
+            owner,
+            child,
+            before,
+        } => {
+            let page =
+                blocking(move || crate::database::native_agent_history(&owner, &child, before))
+                    .await?;
+            Ok(DaemonReply::NativeAgentHistory(page))
+        }
         DaemonAction::StopBackgroundTask {
             session_id,
             background_task_id,

@@ -37,6 +37,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 else { *config = snapshot.config.clone(); true }
                             });
                             state_tx.send_replace(RuntimeStateUpdate {
+                                native_agents: snapshot.native_agents,
                                 workspace_names: snapshot.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,

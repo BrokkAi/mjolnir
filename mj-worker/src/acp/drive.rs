@@ -110,11 +110,32 @@ where
     let session_environment = spec.environment.clone();
     let restart = Arc::new(Mutex::new(None));
     let restart_slot = restart.clone();
+    let native_agents = Arc::new(Mutex::new(native_agents::NativeAgentRouter::default()));
+    let permission_native_agents = native_agents.clone();
+    let elicitation_native_agents = native_agents.clone();
     Client
         .builder()
         .on_receive_notification(
             async move |notification: RawSessionNotification, _cx| {
                 notification_activity.mark();
+                if matches!(notification_harness, HarnessKind::Claude | HarnessKind::Codex) {
+                    let routed = native_agents.lock().expect("native agent router poisoned")
+                        .route(&notification.session_id.to_string(), &notification.update);
+                    match routed {
+                        Ok(Some(event)) => {
+                            notification_events.send(RuntimeEvent::NativeAgent { event }).await
+                                .map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            notification_events.send(RuntimeEvent::Warning {
+                                message: format!("native agent update: {error:#}"),
+                            }).await.map_err(|_| relay_event_channel_error())?;
+                            return Ok(());
+                        }
+                    }
+                }
                 if notification_harness == HarnessKind::Claude {
                     match claude_async_task_control_update(&notification.update) {
                         Ok(Some(ClaudeAsyncTaskControlUpdate::Set { task_id, can_stop })) => {
@@ -291,7 +312,9 @@ where
                 // and route every other harness through plan review first.
                 let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
                     && !permission_policy.is_unconstrained();
-                if !prefer_form_over_plan_review && is_plan_permission(&request) {
+                let native_child = permission_native_agents.lock().expect("native agent router poisoned")
+                    .is_child(&request.session_id.to_string());
+                if !native_child && !prefer_form_over_plan_review && is_plan_permission(&request) {
                     let id = format!(
                         "plan-review-{}",
                         permission_review_ids.fetch_add(1, Ordering::Relaxed)
@@ -437,7 +460,7 @@ where
                 // Prefer the tool call's own title so the card reads like the
                 // action being approved; fall back to the raw payload when a
                 // harness sends no title.
-                let message = match request
+                let mut message = match request
                     .tool_call
                     .fields
                     .title
@@ -449,6 +472,9 @@ where
                     None => serde_json::to_string_pretty(&request.tool_call)
                         .map_err(|_| agent_client_protocol::Error::internal_error())?,
                 };
+                if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    message = format!("Native agent {}: {message}", request.session_id);
+                }
                 let form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
                     "mode": "form", "sessionId": request.session_id.to_string(),
                     "message": format!(
@@ -645,7 +671,10 @@ where
                         "elicitation-{}",
                         next_elicitation_id.fetch_add(1, Ordering::Relaxed)
                     );
-                    let request = match ElicitationRequest::from_acp_params(
+                    let child = request.params().get("sessionId").and_then(serde_json::Value::as_str)
+                        .filter(|id| elicitation_native_agents.lock().expect("native agent router poisoned").is_child(id))
+                        .map(str::to_owned);
+                    let mut request = match ElicitationRequest::from_acp_params(
                         id.clone(),
                         request.params().clone(),
                     ) {
@@ -660,6 +689,9 @@ where
                             );
                         }
                     };
+                    if let Some(child) = child {
+                        request.message = format!("Native agent {child}: {}", request.message);
+                    }
                     let (answer, answer_rx) = oneshot::channel();
                     handler_elicitations
                         .lock()

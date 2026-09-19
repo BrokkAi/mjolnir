@@ -361,6 +361,9 @@ impl DashboardState {
     /// hand-written arms is the input that is not a command: list
     /// navigation, and the two keys whose meaning depends on state.
     pub(crate) fn handle_dashboard_key(&mut self, key: KeyEvent) -> DashboardAction {
+        if let Some(action) = self.native_agent_key(key) {
+            return action;
+        }
         let command = dashboard_accelerator(key.modifiers);
         let plain = !key
             .modifiers
@@ -575,6 +578,11 @@ impl DashboardState {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
+        if self.is_native_agent(&session.id) {
+            return DashboardAction::Open {
+                session_id: session.id.clone(),
+            };
+        }
         if let Some(issue) = session.configuration_issue(&self.config) {
             self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::ConfigurationRepair {
                 session_id: session.id.clone(),

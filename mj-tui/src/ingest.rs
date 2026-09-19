@@ -570,7 +570,14 @@ impl DashboardState {
         self.clamp_selections();
     }
 
-    pub fn set_state(&mut self, state: State) {
+    pub fn set_state(&mut self, mut state: State) {
+        for (id, pane) in &self.native_agents {
+            if state.sessions.contains_key(&pane.agent.owner_session_id)
+                && let Some(row) = self.state.sessions.get(id)
+            {
+                state.sessions.insert(id.clone(), row.clone());
+            }
+        }
         self.state = state;
         self.session_details
             .retain(|session_id, _| self.state.sessions.contains_key(session_id));

@@ -480,6 +480,7 @@ impl DurableRelay {
         state.tools_in_flight = self.foreground_tools.snapshot();
         state.foreground_tool_started_at_ms = self.foreground_tools.newest_started_at_ms();
         state.active_agent_terminals = self.active_agent_terminals.values().cloned().collect();
+        state.native_agent_count = self.native_agent_count();
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;
         // Answer the activity question once, here, where every fact is in
@@ -510,7 +511,7 @@ impl DurableRelay {
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
-        let background_commands = self.background_commands().len();
+        let background_commands = self.background_commands().len() + self.native_agent_count();
         self.turn_context
             .set_counts(background_commands, self.snapshot.queued_prompts.len());
         let expected_continuation = {
@@ -553,7 +554,7 @@ impl DurableRelay {
                         .filter_map(|shell| shell.started_at_ms),
                 )
                 .min(),
-            background_commands: self.background_commands().len(),
+            background_commands: self.background_commands().len() + self.native_agent_count(),
             active_user_shells: self.snapshot.active_user_shells.len(),
             active_agent_terminals: self.active_agent_terminals.len(),
             goal_active: self.snapshot.goal.active(),

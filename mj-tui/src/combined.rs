@@ -828,6 +828,19 @@ fn render_combined_themed(
         .copied()
         .collect::<Vec<_>>()
     {
+        let native_id = dashboard
+            .pane_session(pane_id)
+            .or_else(|| {
+                pane_focused
+                    .then(|| dashboard.selected_session_id())
+                    .flatten()
+            })
+            .filter(|id| dashboard.is_native_agent(id))
+            .map(str::to_owned);
+        if let Some(id) = native_id {
+            dashboard.render_native_agent(frame, &id, transcript_area, prompt_area);
+            continue;
+        }
         if !pane_focused {
             // Every pane but the last carries a close chip, and an unfocused
             // pane only exists while there are several.

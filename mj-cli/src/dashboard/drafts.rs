@@ -86,6 +86,11 @@ impl DashboardContext {
     /// what it shows: the conversation leaving it is saved and dropped, and
     /// the new one is attached in the background.
     pub(crate) fn open_chat_session(&mut self, session_id: &str) {
+        if self.dashboard.is_native_agent(session_id) {
+            self.cancel_chat_open();
+            self.dashboard.set_current_session(Some(session_id));
+            return;
+        }
         if !self.session_in_active_workspace(session_id) {
             return;
         }
@@ -163,13 +168,7 @@ impl DashboardContext {
                 session_record.display_title().to_owned()
             },
             harness_kind: Some(session_record.harness_kind),
-            subagent_count: self
-                .controller
-                .state
-                .subagents
-                .values()
-                .filter(|record| record.parent_session_id == session_record.id)
-                .count(),
+            subagent_count: self.dashboard.subagent_count_for(&session_record.id),
         };
         let sessions = self.worker_commands_tx.clone();
         let notices = self.notices.clone();

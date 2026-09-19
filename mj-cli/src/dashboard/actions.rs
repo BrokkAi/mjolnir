@@ -123,6 +123,50 @@ pub(crate) async fn apply_dashboard_action(
                 context.select_workspace(Some(workspace_id));
             }
         }
+        DashboardAction::LoadNativeAgentHistory {
+            owner,
+            child,
+            before,
+        } => {
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    let mut client = daemon::connect_existing().await?;
+                    client
+                        .native_agent_history(owner.clone(), child.clone(), before)
+                        .await
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentHistory {
+                    owner,
+                    child,
+                    result,
+                }) {
+                    tracing::warn!(%error, "native agent history receiver closed");
+                }
+            });
+        }
+        DashboardAction::StopNativeAgent { owner, child } => {
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    let mut client = daemon::connect_existing().await?;
+                    client
+                        .stop_background_task(owner.clone(), format!("native-agent:{child}"))
+                        .await
+                }
+                .await
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+                if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentStopped {
+                    owner,
+                    child,
+                    result,
+                }) {
+                    tracing::warn!(%error, "native agent stop result receiver closed");
+                }
+            });
+        }
         DashboardAction::ExitSubagentWorkspace => {
             let parent_id = context.dashboard.subagent_parent_id().map(str::to_owned);
             context.dashboard.close_subagent_workspace();

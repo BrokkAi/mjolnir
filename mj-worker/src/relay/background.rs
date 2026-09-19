@@ -143,6 +143,14 @@ impl DurableRelay {
     /// one of our terminals and keeps working, so a terminal its native journal
     /// calls detached is listed mid-turn. That terminal then represents the
     /// job, and the Kimi task entry behind it is left out.
+    pub(super) fn native_agent_count(&self) -> usize {
+        self.snapshot
+            .native_agents
+            .values()
+            .filter(|agent| agent.state == mj_core::native_agent::NativeAgentState::Running)
+            .count()
+    }
+
     pub(super) fn background_commands(&self) -> Vec<BackgroundCommand> {
         let turn_in_flight =
             self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
@@ -270,6 +278,64 @@ impl DurableRelay {
 
     /// Replace Kimi's native task level and reconcile ACP launch or query
     /// evidence against task and launcher identities retained by the wire.
+    pub fn kimi_native_agents_changed(
+        &mut self,
+        agents: &BTreeMap<
+            String,
+            (
+                crate::acp::KimiBackgroundTask,
+                mj_core::native_agent::NativeAgentState,
+            ),
+        >,
+    ) -> Result<()> {
+        use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent};
+        let missing: Vec<_> = self
+            .snapshot
+            .native_agents
+            .iter()
+            .filter(|(id, agent)| {
+                !agents.contains_key(*id)
+                    && agent.state == mj_core::native_agent::NativeAgentState::Running
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for session_id in missing {
+            self.record_observation(RelayObservation::NativeAgent {
+                event: NativeAgentEvent::State {
+                    session_id,
+                    state: mj_core::native_agent::NativeAgentState::Disconnected,
+                },
+            })?;
+        }
+        for (id, (task, state)) in agents {
+            if !self.snapshot.native_agents.contains_key(id) {
+                self.record_observation(RelayObservation::NativeAgent {
+                    event: NativeAgentEvent::Spawned {
+                        session_id: id.clone(),
+                        parent_session_id: None,
+                        name: task.description.clone(),
+                        task: task.description.clone(),
+                        capabilities: NativeAgentCapabilities::default(),
+                    },
+                })?;
+            }
+            if self
+                .snapshot
+                .native_agents
+                .get(id)
+                .is_some_and(|agent| agent.state != *state)
+            {
+                self.record_observation(RelayObservation::NativeAgent {
+                    event: NativeAgentEvent::State {
+                        session_id: id.clone(),
+                        state: *state,
+                    },
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn kimi_background_tasks_changed(
         &mut self,
         tasks: Vec<crate::acp::KimiBackgroundTask>,
@@ -297,6 +363,7 @@ impl DurableRelay {
         });
         self.kimi_background_tasks = tasks
             .into_iter()
+            .filter(|task| !task.is_agent)
             .map(|task| {
                 (
                     task.task_id.clone(),
@@ -349,6 +416,20 @@ impl DurableRelay {
         &mut self,
         requested_id: &str,
     ) -> Result<BackgroundTaskStopTarget> {
+        if let Some(child) = requested_id.strip_prefix("native-agent:") {
+            let agent = self
+                .snapshot
+                .native_agents
+                .get(child)
+                .filter(|agent| {
+                    agent.state == mj_core::native_agent::NativeAgentState::Running
+                        && agent.capabilities.cancel
+                })
+                .ok_or_else(|| anyhow!("native agent is no longer cancellable"))?;
+            return Ok(BackgroundTaskStopTarget::NativeAgent {
+                session_id: agent.session_id.clone(),
+            });
+        }
         let command = self
             .background_commands()
             .into_iter()

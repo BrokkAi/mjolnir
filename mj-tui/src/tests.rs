@@ -4424,3 +4424,54 @@ fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
         "continuation lines under the age column: {lines:#?}"
     );
 }
+
+#[test]
+fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
+    use mj_core::native_agent::*;
+    let parent = running_session();
+    let mut dashboard = dashboard_with_session(parent.clone());
+    let agent = NativeAgent {
+        owner_session_id: parent.id.clone(),
+        session_id: "native-child".into(),
+        parent_session_id: None,
+        name: "Inspect parser".into(),
+        task: "Find parser errors".into(),
+        capabilities: NativeAgentCapabilities {
+            cancel: true,
+            close: false,
+        },
+        state: NativeAgentState::Running,
+    };
+    let id = agent.view_id();
+    let projection = mj_core::state::MaterializedSession::empty(&id);
+    dashboard.set_native_agents(vec![NativeAgentView {
+        generation_ordinal: 1,
+        agent,
+        projection,
+    }]);
+    assert_eq!(dashboard.subagent_count_for(&parent.id), 1);
+    assert!(!dashboard.ordered_sessions().iter().any(|row| row.id == id));
+    dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+    assert_eq!(dashboard.ordered_sessions().len(), 1);
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    dashboard.set_state(state);
+    assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+    assert!(matches!(
+        dashboard.dispatch_command(crate::actions::CommandId::StopSession),
+        DashboardAction::None
+    ));
+    assert!(
+        matches!(dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)), DashboardAction::StopNativeAgent { owner, child } if owner == parent.id && child == "native-child")
+    );
+    assert!(matches!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+        DashboardAction::None
+    ));
+    dashboard.native_agent_stop_finished(&parent.id, "native-child", Err("offline".into()));
+    assert!(matches!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+        DashboardAction::StopNativeAgent { .. }
+    ));
+}

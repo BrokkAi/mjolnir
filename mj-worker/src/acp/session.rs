@@ -22,13 +22,13 @@ pub(super) async fn serve_session(
     if spec.harness == HarnessKind::Codex {
         meta.insert("execution".into(), serde_json::json!({"version":1}));
     }
-    if spec.harness == HarnessKind::Claude {
+    if matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex) {
         meta.insert(
             "jetbrains".into(),
             serde_json::json!({
                 "air": {
                     "version": 1,
-                    "capabilities": ["asyncTasks"]
+                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions"] } else { vec!["nativeSubagentSessions"] }
                 }
             }),
         );
@@ -76,6 +76,18 @@ pub(super) async fn serve_session(
             "the installed Codex adapter cannot pause a goal before explicit resume; update the adapter"
         );
     }
+    let native_children_supported = initialized
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("jetbrains"))
+        .and_then(|value| value.get("air"))
+        .and_then(|value| value.get("capabilities"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|value| value == "nativeSubagentSessions")
+        });
     let steering_supported = steering_supported_from_meta(initialized.meta.as_ref());
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
@@ -99,6 +111,14 @@ pub(super) async fn serve_session(
         },
     )
     .await?;
+
+    if matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex)
+        && !native_children_supported
+    {
+        emit_runtime_event(events, RuntimeEvent::Warning {
+            message: "This adapter does not advertise native agent sessions; native agent details are unavailable.".into(),
+        }).await?;
+    }
 
     let capability = initialized
         .meta
@@ -125,13 +145,25 @@ pub(super) async fn serve_session(
     let native_continuity_lost = false;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
-        // The relay already owns the transcript. Prefer resuming without
-        // replay so a large native history cannot delay worker readiness.
-        let reloaded = if initialized
-            .agent_capabilities
-            .session_capabilities
-            .resume
-            .is_some()
+        // Native children require replay to recover identity and transcripts.
+        // Other adapters can resume without replaying the parent's history.
+        let native_children = native_children_supported
+            && matches!(spec.harness, HarnessKind::Claude | HarnessKind::Codex);
+        if native_children {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::NativeAgent {
+                    event: mj_core::native_agent::NativeAgentEvent::ReplayBegin,
+                },
+            )
+            .await?;
+        }
+        let reloaded = if !native_children
+            && initialized
+                .agent_capabilities
+                .session_capabilities
+                .resume
+                .is_some()
         {
             session_updates_enabled.store(true, Ordering::Release);
             let resumed = connection
@@ -161,7 +193,18 @@ pub(super) async fn serve_session(
         // the session. Replace such a native session only when Mjolnir's own
         // durable state also shows it was never used.
         let reloaded = match reloaded {
-            Ok(reloaded) => Some(reloaded),
+            Ok(reloaded) => {
+                if native_children {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::NativeAgent {
+                            event: mj_core::native_agent::NativeAgentEvent::ReplayCommit,
+                        },
+                    )
+                    .await?;
+                }
+                Some(reloaded)
+            }
             Err(error) => {
                 if !harness_reports_missing_native_session(spec, &error) {
                     return Err(error);

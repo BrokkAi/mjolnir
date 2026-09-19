@@ -102,6 +102,10 @@ impl KimiTaskMonitor {
                 relay
                     .lock()
                     .expect("relay state lock poisoned")
+                    .kimi_native_agents_changed(&snapshot.native_agents)?;
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
                     .kimi_background_tasks_changed(
                         snapshot.tasks,
                         snapshot.provider_tool_ids,

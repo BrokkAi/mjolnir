@@ -39,6 +39,7 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
                 | SessionUpdate::CurrentModeUpdate(_)
                 | SessionUpdate::SessionInfoUpdate(_)
         ),
+        RelayObservation::NativeAgent { event } => !matches!(event, crate::native_agent::NativeAgentEvent::Update { .. } | crate::native_agent::NativeAgentEvent::ReplayCommit),
         RelayObservation::PermissionAutoApproved { .. }
         | RelayObservation::ElicitationRequested { .. }
         | RelayObservation::ElicitationResolved { .. }
@@ -664,6 +665,44 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             _ => {}
         },
+        RelayObservation::NativeAgent { event } => {
+            use crate::native_agent::{NativeAgent, NativeAgentEvent, NativeAgentState};
+            match event {
+                NativeAgentEvent::Spawned {
+                    session_id,
+                    parent_session_id,
+                    name,
+                    task,
+                    capabilities,
+                } => {
+                    snapshot.native_agents.insert(
+                        session_id.clone(),
+                        NativeAgent {
+                            owner_session_id: snapshot.session_id.clone(),
+                            session_id: session_id.clone(),
+                            parent_session_id: parent_session_id.clone(),
+                            name: name.clone(),
+                            task: task.clone(),
+                            capabilities: capabilities.clone(),
+                            state: NativeAgentState::Running,
+                        },
+                    );
+                }
+                NativeAgentEvent::State { session_id, state } => {
+                    if let Some(agent) = snapshot.native_agents.get_mut(session_id) {
+                        agent.state = *state;
+                    }
+                }
+                NativeAgentEvent::ReplayBegin | NativeAgentEvent::Disconnected => {
+                    for agent in snapshot.native_agents.values_mut() {
+                        if agent.state == NativeAgentState::Running {
+                            agent.state = NativeAgentState::Disconnected;
+                        }
+                    }
+                }
+                NativeAgentEvent::Update { .. } | NativeAgentEvent::ReplayCommit => {}
+            }
+        }
         RelayObservation::PermissionAutoApproved { .. }
         | RelayObservation::ElicitationRequested { .. }
         | RelayObservation::ElicitationResolved { .. }

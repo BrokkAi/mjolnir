@@ -7,6 +7,9 @@ pub(super) fn project_observation(
     mutation: &mut MaterializedSessionMutation,
 ) -> Result<()> {
     match &event.observation {
+        RelayObservation::NativeAgent { .. } => {
+            mutation.native_agent = Some(event.clone());
+        }
         RelayObservation::AgentInitialized { .. } => {}
         RelayObservation::SessionOpened { resumed, .. } => {
             mutation.pending_elicitations = Some(Vec::new());

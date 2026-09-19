@@ -57,6 +57,7 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        native_agent_count: 0,
         expected_continuation: None,
         goal: Default::default(),
         capacity_retry: None,
@@ -134,6 +135,7 @@ fn snapshot(
     records: Vec<SessionRecord>,
 ) -> daemon::RuntimeSnapshot {
     daemon::RuntimeSnapshot {
+        native_agents: Vec::new(),
         workspace_names: Default::default(),
         revision,
         config: Config::default(),

@@ -258,6 +258,7 @@ pub struct BackgroundCommand {
 /// against its current live state before handing the target to the ACP bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackgroundTaskStopTarget {
+    NativeAgent { session_id: String },
     HostedTerminal { terminal_id: String },
     ClaudeAsyncTask { task_id: String },
 }
@@ -389,6 +390,8 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default)]
+    pub native_agent_count: usize,
     /// Process-local inference; a restarted worker must forget it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_continuation: Option<i64>,
@@ -568,7 +571,7 @@ impl RelayOperationalState {
                         .filter_map(|shell| shell.started_at_ms),
                 )
                 .min(),
-            background_commands: self.background_commands.len(),
+            background_commands: self.background_commands.len() + self.native_agent_count,
             expected_continuation: self.expected_continuation,
             active_user_shells: self.active_user_shells.len(),
             active_agent_terminals: self.active_agent_terminals.len(),
@@ -679,6 +682,9 @@ pub struct RelayEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    NativeAgent {
+        event: crate::native_agent::NativeAgentEvent,
+    },
     AgentInitialized {
         protocol_version: AcpProtocolVersion,
         capabilities: Box<AgentCapabilities>,
@@ -901,6 +907,8 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub native_agents: BTreeMap<String, crate::native_agent::NativeAgent>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -976,6 +984,7 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            native_agents: BTreeMap::new(),
             goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
@@ -1018,6 +1027,11 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            native_agent_count: self
+                .native_agents
+                .values()
+                .filter(|agent| agent.state == crate::native_agent::NativeAgentState::Running)
+                .count(),
             expected_continuation: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),

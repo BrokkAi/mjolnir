@@ -16,6 +16,7 @@ pub struct RemoteDashboardWorkerPoller {
 /// Records and lifecycle ownership must reach the surface in the same frame.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeStateUpdate {
+    pub native_agents: Vec<mj_core::native_agent::NativeAgentView>,
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,
     pub records: Vec<SessionRecord>,

@@ -299,6 +299,7 @@ impl DashboardContext {
         self.dashboard.set_workspace_names(update.workspace_names);
         self.select_workspace(next_workspace);
         self.apply_runtime_records(update.records, update.subagents);
+        self.dashboard.set_native_agents(update.native_agents);
         self.dashboard.set_move_operations(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
         self.controller_changed = true;
@@ -400,12 +401,7 @@ impl DashboardContext {
             if dashboard.go_mode().is_some() {
                 chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
             }
-            let count = controller
-                .state
-                .subagents
-                .values()
-                .filter(|record| record.parent_session_id == chat.session_id())
-                .count();
+            let count = dashboard.subagent_count_for(chat.session_id());
             chat.set_subagent_count(count);
         }
     }
