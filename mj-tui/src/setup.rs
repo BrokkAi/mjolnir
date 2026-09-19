@@ -2429,6 +2429,9 @@ pub(crate) fn render_setup(
     );
     let mut initial;
     let mut background_offset = form.list_offset(List);
+    // Where a rejected value is reported while a field is being edited: with
+    // the field, not on the dialog's bottom rows far below it.
+    let mut editor_notice = None;
     if text_editor {
         let editor = dialog.editor.as_ref().expect("text editor");
         let label = if editor.adding {
@@ -2445,6 +2448,7 @@ pub(crate) fn render_setup(
             EditorInput::Text(input) => TextField::render(frame, area, input, &mut form, Field),
             EditorInput::Path(input) => PathField::render(frame, area, input, &mut form, Field),
         }
+        let mut next_row = body.y + 2;
         // The archive window's estimate follows the number as it is typed, so
         // it sits right under the input rather than on the notice line.
         if editor
@@ -2456,8 +2460,19 @@ pub(crate) fn render_setup(
         {
             frame.render_widget(
                 Paragraph::new(estimate).style(theme::muted()),
-                Rect::new(body.x, body.y + 2, body.width, 1),
+                Rect::new(body.x, next_row, body.width, 1),
             );
+            next_row += 1;
+        }
+        // The field's own column is narrower than the dialog, so the message
+        // keeps every row left below it to wrap into.
+        if next_row < body.bottom() {
+            editor_notice = Some(Rect::new(
+                body.x,
+                next_row,
+                body.width,
+                body.bottom() - next_row,
+            ));
         }
         initial = Field;
     } else {
@@ -2614,7 +2629,8 @@ pub(crate) fn render_setup(
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            Rect::new(inner.x, inner.bottom() - 4, inner.width, 3),
+            editor_notice
+                .unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
         );
     }
     form.end_frame(initial);

@@ -1708,6 +1708,37 @@ fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     );
 }
 
+/// A refused value is reported with the field it was typed into, not on the
+/// dialog's bottom rows a page below it.
+#[test]
+fn a_rejected_field_value_is_reported_under_the_field() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "max_size");
+    for typed in ['1', '.', '5'] {
+        dashboard.handle_key(key(KeyCode::Char(typed)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.notice.as_deref(),
+        Some("Enter a whole number of gigabytes.")
+    );
+    let lines = drawn(&mut dashboard, 140, 30);
+    let (_, field) = point(&lines, "1.5");
+    let (_, message) = point(&lines, "Enter a whole number of gigabytes.");
+    assert_eq!(
+        message,
+        field + 1,
+        "the message is {} rows from the field:\n{}",
+        i32::from(message) - i32::from(field),
+        lines.join("\n")
+    );
+}
+
 #[test]
 fn empty_archive_after_days_renders_as_never() {
     let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});
