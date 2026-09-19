@@ -58,52 +58,111 @@ pub(super) struct ResolvedBuildCache {
     pub config_file: Option<String>,
 }
 
-/// Cached host answers, keyed by host and per-target settings. Resolution runs
-/// several commands on the host, and a burst of new sessions must not repeat
-/// them for each one.
-type Resolutions = std::collections::BTreeMap<String, (Instant, Option<ResolvedBuildCache>)>;
+/// Cached host inspections, keyed by host and per-target settings. An
+/// inspection runs several commands on the host, and a burst of new sessions
+/// must not repeat them for each one. A failure is remembered too, so a host
+/// that cannot answer is not re-probed by every session in that burst.
+type Resolutions = std::collections::BTreeMap<String, (Instant, Result<Inspection, String>)>;
 
 static RESOLUTIONS: std::sync::LazyLock<std::sync::Mutex<Resolutions>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Resolutions::new()));
 
+/// Whether a caller can be served a memoized answer or needs the host asked
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    /// Provisioning: an answer from the last `RESOLUTION_LIFETIME` will do.
+    Memoized,
+    /// The settings screen, which is read precisely when somebody has just
+    /// changed something on the host. A fresh answer also replaces the
+    /// memoized one, so the next session sees the same thing the screen does.
+    Fresh,
+}
+
+/// The one place a host is inspected. Sessions and the settings screen differ
+/// only in the freshness they ask for, so they cannot drift into reporting
+/// different things about the same host.
+fn inspect(
+    host: &CacheHost,
+    settings: &TargetBuildCache,
+    global: &BuildCacheConfig,
+    freshness: Freshness,
+    executor: &impl CommandExecutor,
+) -> Result<Inspection> {
+    // Asked before the memo and before any host command: a global switch that
+    // is off is the answer, whatever the host would have said.
+    if !global.enabled {
+        return Ok(Inspection {
+            preview: BuildCachePreview {
+                native_mbx: None,
+                directory: None,
+                max_size: None,
+                off_reason: Some(BuildCacheOff::Unavailable(
+                    "the build cache is turned off for every machine".into(),
+                )),
+            },
+            cache: None,
+        });
+    }
+    let key = format!("{}|{settings:?}", host.key());
+    if freshness == Freshness::Memoized
+        && let Some((recorded, inspection)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
+        && recorded.elapsed() < RESOLUTION_LIFETIME
+    {
+        return inspection.clone().map_err(|error| anyhow::anyhow!(error));
+    }
+    let inspection = inspect_host(host, settings, executor);
+    let recorded = match &inspection {
+        Ok(inspection) => Ok(inspection.clone()),
+        Err(error) => Err(format!("{error:#}")),
+    };
+    RESOLUTIONS
+        .lock()
+        .expect("mbx resolutions")
+        .insert(key, (Instant::now(), recorded));
+    inspection
+}
+
 /// Resolve the build cache for one container target, or `None` when this
-/// target runs without one. The answer is cached for ten minutes.
+/// target runs without one.
 pub(super) fn resolve(
     target: &targets::TargetTemplate,
     global: &BuildCacheConfig,
     executor: &impl CommandExecutor,
 ) -> Option<ResolvedBuildCache> {
-    if !global.enabled {
-        return None;
-    }
     let (host, settings) = supported_host(target)?;
-    let key = format!("{}|{settings:?}", host.key());
-    if let Some((recorded, resolution)) = RESOLUTIONS.lock().expect("mbx resolutions").get(&key)
-        && recorded.elapsed() < RESOLUTION_LIFETIME
-    {
-        return resolution.clone();
-    }
-    let resolution = match resolve_host(&host, &settings, executor) {
-        Ok(resolution) => resolution,
+    let inspection = match inspect(&host, &settings, global, Freshness::Memoized, executor) {
+        Ok(inspection) => inspection,
         Err(error) => {
-            tracing::warn!(host = key, "build cache unavailable: {error:#}");
-            None
+            tracing::warn!(host = host.key(), "build cache unavailable: {error:#}");
+            return None;
         }
     };
-    RESOLUTIONS
-        .lock()
-        .expect("mbx resolutions")
-        .insert(key, (Instant::now(), resolution.clone()));
-    resolution
-}
-
-/// Forget what this host last answered, so the next session asks it again.
-fn forget_resolutions(host: &CacheHost) {
-    let prefix = format!("{}|", host.key());
-    RESOLUTIONS
-        .lock()
-        .expect("mbx resolutions")
-        .retain(|key, _| !key.starts_with(&prefix));
+    let Some(cache) = inspection.cache else {
+        if let Some(reason) = &inspection.preview.off_reason {
+            tracing::warn!(
+                directory = inspection
+                    .preview
+                    .directory
+                    .as_ref()
+                    .map(|directory| directory.display().to_string()),
+                "sessions on this target run without the build cache: {reason}"
+            );
+        }
+        return None;
+    };
+    // Creating the directory is the one side effect a session has and the
+    // settings screen does not, so it sits here rather than inside the shared
+    // inspection. It runs per session because a memoized inspection says what
+    // the host looked like, not that the directory still exists.
+    if let Err(error) = create_directory(&host, &cache.directory, executor) {
+        tracing::warn!(
+            directory = %cache.directory.display(),
+            "the build cache directory could not be created: {error:#}"
+        );
+        return None;
+    }
+    Some(cache)
 }
 
 /// The targets that can share a host build cache. Apple `container` runs each
@@ -125,33 +184,6 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
     Some((CacheHost::for_target(target)?, settings))
 }
 
-fn resolve_host(
-    host: &CacheHost,
-    settings: &TargetBuildCache,
-    executor: &impl CommandExecutor,
-) -> Result<Option<ResolvedBuildCache>> {
-    let inspection = inspect_host(host, settings, executor)?;
-    match inspection.cache {
-        Some(cache) => {
-            create_directory(host, &cache.directory, executor)?;
-            Ok(Some(cache))
-        }
-        None => {
-            if let Some(reason) = &inspection.preview.off_reason {
-                tracing::warn!(
-                    directory = inspection
-                        .preview
-                        .directory
-                        .as_ref()
-                        .map(|d| d.display().to_string()),
-                    "sessions on this target run without the build cache: {reason}"
-                );
-            }
-            Ok(None)
-        }
-    }
-}
-
 /// What the settings screen shows for one machine's blank build cache fields:
 /// the same host inspection a session runs, without creating the directory.
 /// `None` when the machine has no standing host to share a cache on.
@@ -163,28 +195,14 @@ pub fn preview_build_cache(
     let Some(host) = CacheHost::for_machine(machine) else {
         return Ok(None);
     };
-    // The settings screen inspects a host exactly when somebody has just
-    // changed something on it: installed mbx, created the directory, mounted a
-    // volume that clones. A memoized answer would outlive that fix by up to
-    // `RESOLUTION_LIFETIME`, so the preview would report the repair while
-    // sessions kept running on the stale verdict.
-    forget_resolutions(&host);
     let settings = machine.build_cache().cloned().unwrap_or_default();
-    if !global.enabled {
-        return Ok(Some(BuildCachePreview {
-            native_mbx: None,
-            directory: None,
-            max_size: None,
-            off_reason: Some(BuildCacheOff::Unavailable(
-                "the build cache is turned off for every machine".into(),
-            )),
-        }));
-    }
-    inspect_host(&host, &settings, executor).map(|inspection| Some(inspection.preview))
+    inspect(&host, &settings, global, Freshness::Fresh, executor)
+        .map(|inspection| Some(inspection.preview))
 }
 
 /// Everything the host says about a target's build cache, read without
 /// changing the host.
+#[derive(Clone)]
 struct Inspection {
     preview: BuildCachePreview,
     /// The cache a session would mount, or `None` when it runs without one.
@@ -1309,11 +1327,18 @@ mod tests {
             first, second,
             "both engines on this machine share one cache"
         );
+        // The inspection is memoized; creating the directory is not, because a
+        // remembered inspection says what the host looked like, not that the
+        // directory still exists.
+        let added = executor.ran()[ran..].to_vec();
         assert_eq!(
-            executor.ran().len(),
-            ran,
-            "the second runtime is answered from the machine's recorded inspection: {:?}",
-            executor.ran()
+            added.len(),
+            1,
+            "the second runtime is answered from the machine's recorded inspection: {added:?}"
+        );
+        assert!(
+            added[0].contains("mkdir -p"),
+            "the one repeated command creates the directory: {added:?}"
         );
     }
 
