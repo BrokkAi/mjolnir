@@ -187,6 +187,14 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     servers
 }
 
+fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
+    let mut servers = extra_mcp(spec);
+    if include_project_memory {
+        servers.extend(project_memory_mcp(spec));
+    }
+    servers
+}
+
 pub(super) fn new_session_request(
     spec: &LaunchSpec,
     include_project_memory: bool,
@@ -194,11 +202,7 @@ pub(super) fn new_session_request(
     let request = NewSessionRequest::new(spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
         .meta(session_request_meta(spec));
-    let mut servers = extra_mcp(spec);
-    if include_project_memory {
-        servers.extend(project_memory_mcp(spec));
-    }
-    request.mcp_servers(servers)
+    request.mcp_servers(session_mcp(spec, include_project_memory))
 }
 
 pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSessionRequest {
@@ -207,11 +211,9 @@ pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> 
         // The servers Mjolnir owns travel on every launch, because a bridge
         // that opens the session again is a new harness process: Codex builds
         // the resumed thread's MCP set from this request and recovers nothing
-        // it was not given (#1085). Project memory stays out: adding Hel's
-        // current memory server to an existing session mutates it, and its
-        // history replay can then emit updates for tools whose creation was
-        // never part of this relay stream.
-        .mcp_servers(extra_mcp(spec))
+        // it was not given (#1085). Replay filtering belongs to the notification
+        // handler; omitting memory here removes its tools after restart.
+        .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec))
 }
 
@@ -221,9 +223,7 @@ pub(super) fn resume_session_request(
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
-        // Same rule as loading: state Mjolnir's own servers again, leave
-        // project memory to new sessions.
-        .mcp_servers(extra_mcp(spec))
+        .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec))
 }
 

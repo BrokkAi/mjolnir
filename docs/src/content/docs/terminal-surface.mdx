@@ -66,6 +66,8 @@ immediately; `Enter` opens its manager actions.
 
 Use `Page Up` and `Page Down` to scroll the transcript from any focused pane. A mouse wheel scrolls the surface under the pointer. Clicking a row selects it, and double-clicking a session opens it. Dragging across transcript or pane text copies that surface's selection to the available system or terminal clipboard.
 
+Over SSH, selection copying uses only the connecting terminal's clipboard through OSC 52. Your terminal must support and allow OSC 52 clipboard writes; any terminal multiplexer must also allow them through.
+
 Each list supports the same navigation keys:
 
 | Keys | Action |

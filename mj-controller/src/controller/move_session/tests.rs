@@ -8,8 +8,6 @@ use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent}
 use anyhow::Result;
 
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
-#[cfg(unix)]
-use crate::controller::test_support::install_fake_command;
 use crate::controller::test_support::{
     IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository, local_bundle,
     managed_raw_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
@@ -26,6 +24,8 @@ use mj_core::state::{
     CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
     TargetLocator,
 };
+#[cfg(unix)]
+use mj_core::test_hooks::install_fake_command;
 
 use mj_core::state::{
     MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, QueuedCommandKind,
@@ -1754,10 +1754,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
 /// the controller as the worker binary to install.
 #[cfg(unix)]
 fn fake_worker_dispatcher() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("fake-command.sh")
+    mj_core::test_hooks::fake_command_dispatcher()
 }
 
 /// A profile whose home is the user's own directory has nothing the session

@@ -166,19 +166,15 @@ fn github_token_requests_install_and_remove_connection_only_state() {
 
 #[test]
 fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
-    use std::os::unix::fs::PermissionsExt;
-
     let worker = tempfile::tempdir().unwrap();
     let real = tempfile::tempdir().unwrap();
     let real_bin = real.path().join("bin");
     std::fs::create_dir(&real_bin).unwrap();
-    let real_gh = real_bin.join("gh");
-    std::fs::write(
-        &real_gh,
-        b"#!/bin/sh\nprintf '%s|%s\\n' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&real_gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &real_bin,
+        "gh",
+        "#!/bin/sh\nprintf '%s|%s\\n' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\"\n",
+    );
 
     let mut environment = BTreeMap::from([(
         "PATH".into(),
@@ -217,17 +213,15 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
 
 #[test]
 fn git_helpers_survive_harness_login_shells_and_credential_shaped_name_scrubs() {
-    use std::os::unix::fs::PermissionsExt;
-
     let worker = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let real = tempfile::tempdir().unwrap();
     let real_bin = real.path().join("bin");
     std::fs::create_dir(&real_bin).unwrap();
-    let real_gh = real_bin.join("gh");
-    std::fs::write(
-        &real_gh,
-        br#"#!/bin/sh
+    mj_core::test_hooks::install_fake_command(
+        &real_bin,
+        "gh",
+        r#"#!/bin/sh
 if [ "${1-}" = auth ] && [ "${2-}" = git-credential ]; then
     cat >/dev/null
     if [ "${3-}" = get ]; then
@@ -237,9 +231,7 @@ else
     printf '%s|%s\n' "${GH_TOKEN-unset}" "${GITHUB_TOKEN-unset}"
 fi
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&real_gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let original_bash_env = home.path().join("original-bash-env");
     std::fs::write(&original_bash_env, b"export ORIGINAL_BASH_ENV=preserved\n").unwrap();
@@ -4367,14 +4359,11 @@ async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open(
 
 #[tokio::test]
 async fn acp_bridge_keeps_the_configured_github_wrapper_and_drops_inherited_tokens() {
-    use std::os::unix::fs::PermissionsExt;
-
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let wrapper = bin.join("gh");
-    std::fs::write(&wrapper, b"#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    mj_core::test_hooks::install_fake_command(&bin, "gh", "#!/bin/sh\nexit 0\n");
     let observed = temp.path().join("observed");
     let script = format!(
         "printf '%s\\n%s|%s\\n' \"$(command -v gh)\" \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" > {}",

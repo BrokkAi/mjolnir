@@ -284,7 +284,6 @@ image = "ubuntu:24.04"
     )
     .expect("write Hel test config");
     if local_target {
-        use std::os::unix::fs::PermissionsExt;
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
         let home = storage.path().join("codex");
@@ -293,9 +292,7 @@ image = "ubuntu:24.04"
         let tools = storage.path().join("tools");
         fs::create_dir_all(&tools).unwrap();
         for name in ["node", "npm"] {
-            let tool = tools.join(name);
-            fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
-            fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+            mj_core::test_hooks::install_fake_command(&tools, name, "#!/bin/sh\nexit 0\n");
         }
         let profile = config.profiles.get_mut("codex").unwrap();
         profile.home = home;
@@ -368,16 +365,11 @@ image = "ubuntu:24.04"
     // failing worker keeps startup independent of installed workers and avoids
     // copying and hashing large debug binaries for every parallel fixture.
     let worker = storage.path().join("fixture-worker");
-    fs::write(
-        &worker,
+    mj_core::test_hooks::install_fake_command(
+        storage.path(),
+        "fixture-worker",
         "#!/bin/sh\necho 'PTY fixture cannot launch workers' >&2\nexit 1\n",
-    )
-    .expect("write fixture worker");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
-            .expect("make fixture worker executable");
-    }
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
     command
         .env("MJ_WORKER_BINARY", worker)

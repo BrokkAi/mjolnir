@@ -411,15 +411,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn user_shell_restores_github_wrapper_after_login_profile() {
-        use std::os::unix::fs::PermissionsExt;
-
         let cwd = tempfile::tempdir().unwrap();
         let worker = tempfile::tempdir().unwrap();
         let bin = worker.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let wrapper = bin.join("gh");
-        std::fs::write(&wrapper, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        mj_core::test_hooks::install_fake_command(&bin, "gh", "#!/bin/sh\nexit 0\n");
         let mut environment = BTreeMap::from([
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("GH_TOKEN".into(), "stale-token".into()),

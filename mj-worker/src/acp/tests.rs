@@ -4457,7 +4457,7 @@ for line in sys.stdin:
 /// bridge restart (#1085).
 #[cfg(unix)]
 #[tokio::test]
-async fn a_relaunched_codex_session_is_opened_with_the_delegation_mcp_server() {
+async fn a_relaunched_codex_session_keeps_delegation_and_memory_tools() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("second-bridge");
     let opens = temp.path().join("opens.txt");
@@ -4535,7 +4535,13 @@ for line in sys.stdin:
         cwd: temp.path().to_path_buf(),
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
-        project_memory: None,
+        project_memory: Some(ProjectMemoryLaunchConfig {
+            project_key: "project".into(),
+            root: temp.path().join("memory"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        }),
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
@@ -4593,8 +4599,8 @@ for line in sys.stdin:
 
     assert_eq!(
         std::fs::read_to_string(&opens).unwrap(),
-        "session/new mj-agents\nsession/resume mj-agents\n",
-        "every launch must carry the delegation server"
+        "session/new mj-agents,mj-memory\nsession/resume mj-agents,mj-memory\n",
+        "every launch must carry delegation and memory servers"
     );
 }
 
@@ -4633,7 +4639,7 @@ while True:
         if method == "session/new":
             assert len(servers) == 1, request
         else:
-            assert not servers, request
+            assert [server['name'] for server in servers] == ['mj-memory'], request
             write({{"jsonrpc": "2.0", "method": "session/update", "params": {{
                 "sessionId": "scripted",
                 "update": {{

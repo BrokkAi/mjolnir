@@ -3552,7 +3552,7 @@ fn fake_docker_environment() -> tempfile::TempDir {
     let state = home.join("fake-docker");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    crate::controller::test_support::install_fake_command(
+    mj_core::test_hooks::install_fake_command(
         &bin,
         "docker",
         r#"#!/bin/sh
