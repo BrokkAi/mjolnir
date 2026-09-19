@@ -97,20 +97,26 @@ impl ConfigPicker {
 }
 
 impl ChatState {
+    /// The values the running session's harness advertises for `key`. Empty
+    /// means it has no selector for that key at all, so no change to it can be
+    /// applied however it is asked for.
+    pub(super) fn advertised_config_values(&self, key: &str) -> &[SessionConfigChoice] {
+        match key {
+            "model" => &self.model_values,
+            "effort" => &self.effort_values,
+            _ => &[],
+        }
+    }
+
     /// Opens the selector for `key`, or reports that the harness advertises
     /// no values to choose from.
     pub(super) fn open_config_picker(&mut self, key: &'static str) -> bool {
-        let (choices, current) = match key {
-            "model" => (
-                self.model_values.clone(),
-                self.current_model().map(str::to_owned),
-            ),
-            "effort" => (
-                self.effort_values.clone(),
-                self.current_effort().map(str::to_owned),
-            ),
+        let current = match key {
+            "model" => self.current_model().map(str::to_owned),
+            "effort" => self.current_effort().map(str::to_owned),
             _ => return false,
         };
+        let choices = self.advertised_config_values(key).to_vec();
         if choices.is_empty() {
             return false;
         }
@@ -272,14 +278,11 @@ pub(super) fn render_config_picker(
     let title = crate::modal::dismissible_modal_title(
         &mut picker.form,
         rect,
-        {
-            let article = if picker.key.starts_with(['a', 'e', 'i', 'o', 'u']) {
-                "an"
-            } else {
-                "a"
-            };
-            format!("Choose {article} {}", picker.key)
-        },
+        format!(
+            "Choose {} {}",
+            mj_core::acp::config_key_article(picker.key),
+            picker.key
+        ),
         theme::title(true),
         true,
     );

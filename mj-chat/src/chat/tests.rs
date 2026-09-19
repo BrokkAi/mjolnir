@@ -1407,6 +1407,10 @@ fn up_and_control_p_peel_queued_prompts_back_into_the_editor() {
 #[test]
 fn model_and_effort_slash_commands_change_live_session_config() {
     let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_config_options(&[
+        select_config_option("model", "gpt-5.6", &["gpt-5.6", "gpt-5.6-luna"]),
+        select_config_option("effort", "high", &["high", "xhigh"]),
+    ]);
     chat.input = "/model gpt-5.6-luna".into();
     assert_eq!(
         chat.handle_key(key(KeyCode::Enter)),
@@ -1423,6 +1427,34 @@ fn model_and_effort_slash_commands_change_live_session_config() {
             key: "effort".into(),
             value: "xhigh".into(),
         }
+    );
+}
+
+/// A harness that advertises no selector cannot apply the change at all, so
+/// the refusal belongs in the footer now rather than in a transcript line that
+/// arrives seconds after "Configuration update accepted". The words are the
+/// runtime's own, and the article follows the key's name.
+#[test]
+fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    // A live session whose harness advertises effort but no model at all.
+    chat.set_config_options(&[select_config_option("effort", "high", &["high", "low"])]);
+
+    chat.input = "/model o3-mini".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert_eq!(
+        chat.notices.current().as_deref(),
+        Some("ACP bridge does not expose a model selector")
+    );
+    // Nothing was sent, so the text stays in the composer to be corrected.
+    assert_eq!(chat.input, "/model o3-mini");
+
+    chat.set_config_options(&[]);
+    chat.input = "/effort xhigh".into();
+    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
+    assert_eq!(
+        chat.notices.current().as_deref(),
+        Some("ACP bridge does not expose an effort selector")
     );
 }
 
@@ -1479,6 +1511,7 @@ fn config_commands_are_queued_while_the_agent_is_busy() {
         Some("The agent does not advertise model values; usage: /model <value>")
     );
 
+    chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
     chat.input = "/model sonnet".into();
     assert_eq!(
         chat.handle_key(key(KeyCode::Enter)),
@@ -1534,6 +1567,7 @@ fn a_queued_config_change_peels_back_into_the_composer() {
 
     // Resubmitting the peeled-back text parses as the same change.
     chat.phase = WorkerPhase::Running;
+    chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
     assert_eq!(
         chat.handle_key(key(KeyCode::Enter)),
         ChatAction::SetConfig {

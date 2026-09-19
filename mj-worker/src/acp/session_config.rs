@@ -252,7 +252,7 @@ pub(super) async fn set_session_config(
     value: &str,
 ) -> Result<()> {
     let option = find_session_config_option(options, key)
-        .with_context(|| format!("ACP bridge does not expose a {key} selector"))?;
+        .with_context(|| mj_core::acp::missing_config_selector_refusal(key))?;
     ensure!(
         select_contains(&option.kind, value),
         "{value:?} is not an available {key} value"
