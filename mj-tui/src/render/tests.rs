@@ -3057,6 +3057,35 @@ fn capacity_pane_renders_grouped_host_load_without_sample_clock() {
     assert!(header.contains("In Use"));
 }
 
+/// `symbols = "ascii"` must reach the Targets pane's own summary text: the
+/// "% CPU · % RAM" join was a literal Unicode dot, so it survived the ASCII
+/// set while every other glyph in the row correctly swapped. The symbol set
+/// is read from the dashboard's own configuration, the way a running session
+/// selects it, rather than through the thread-local override the render
+/// pipeline itself already scopes to that configuration.
+#[test]
+fn ascii_symbols_reach_the_capacity_panes_cpu_and_ram_join() {
+    let mut ascii_config = config();
+    ascii_config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    let mut dashboard = DashboardState::new(ascii_config, State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(host_capacity_usage())),
+        now_epoch_seconds(),
+    );
+    let rendered = drawn_dashboard(&mut dashboard, 200);
+    let cpu_ram_line = rendered
+        .lines()
+        .find(|line| line.contains("% CPU"))
+        .expect("capacity row");
+    assert!(cpu_ram_line.is_ascii(), "{cpu_ram_line:?}");
+    assert!(
+        cpu_ram_line.contains("37% CPU - 75% RAM"),
+        "{cpu_ram_line:?}"
+    );
+}
+
 #[test]
 fn dashboard_colors_named_host_permission_badges() {
     let mut config = config();

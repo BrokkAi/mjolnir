@@ -1588,6 +1588,56 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
     }
 }
 
+/// `symbols = "ascii"` is for a Linux console or a locale without UTF-8. The
+/// composer's own hints were written out with a literal middle dot joining
+/// them, so splitting on the glyph set's separator found nothing under the
+/// ASCII set and the dot reached the screen anyway. Each branch that builds
+/// those hints (idle, queued, and dictating) is checked here.
+#[test]
+fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let draw = |chat: &ChatState| {
+        // Wide enough that no hint gives way to the row's width limit; a
+        // dropped hint would hide the joiner this test exists to check.
+        let mut terminal = Terminal::new(TestBackend::new(200, 1)).expect("terminal");
+        theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_chat_footer(frame, test_footer(area), chat, true);
+                })
+                .expect("draw ascii footer");
+        });
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+
+    let idle = draw(&chat);
+    assert!(idle.is_ascii(), "{idle:?}");
+    assert!(idle.contains("Ctrl-V paste"), "{idle:?}");
+
+    chat.queued_prompts.push_back(queued("queued-1", "next"));
+    let queued_footer = draw(&chat);
+    assert!(queued_footer.is_ascii(), "{queued_footer:?}");
+    assert!(
+        queued_footer.contains("Ctrl-R history"),
+        "{queued_footer:?}"
+    );
+    chat.queued_prompts.clear();
+
+    // The dictating hint keeps its own "…" (unrelated to the separator this
+    // fix addresses), so only the joiner between hints is checked here.
+    chat.voice_active = true;
+    let dictating = draw(&chat);
+    assert!(!dictating.contains('\u{b7}'), "{dictating:?}");
+    assert!(dictating.contains("Listening"), "{dictating:?}");
+}
+
 #[test]
 fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
     use agent_client_protocol::schema::v1::{

@@ -343,18 +343,23 @@ pub(crate) fn render_chat_footer(
         );
         return;
     }
+    // Built with `theme::footer_separator()` rather than a literal dot, so the
+    // split below finds the same glyph the ASCII symbol set draws.
+    let sep = theme::footer_separator();
     let queued_keys = format!(
-        "Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history · Shift-Enter newline · {}",
+        "Up/Ctrl-P edit last queued{sep}Enter send/queue{sep}Ctrl-R history{sep}Shift-Enter newline{sep}{}",
         chat.turn_control_intent().escape_hint(),
     );
     let composer_keys = if !prompt_focused {
-        "Tab pane · PgUp/PgDn transcript"
+        format!("Tab pane{sep}PgUp/PgDn transcript")
     } else if chat.voice_active {
-        "Listening… click the microphone to stop · PgUp/PgDn transcript"
+        format!("Listening… click the microphone to stop{sep}PgUp/PgDn transcript")
     } else if !chat.queued_prompts.is_empty() {
-        &queued_keys
+        queued_keys
     } else {
-        "Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Shift-Enter newline"
+        format!(
+            "Tab pane{sep}Ctrl-V paste{sep}Enter send{sep}Ctrl-R history{sep}Shift-Enter newline"
+        )
     };
     let groups = theme::fit_footer_items(
         [
