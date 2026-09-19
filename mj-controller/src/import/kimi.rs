@@ -94,16 +94,17 @@ fn kimi_named_session_paths(
     };
     for entry in entries {
         let workspace = entry?.path();
-        let metadata = fs::symlink_metadata(&workspace)?;
         let path = workspace.join(native_session_id);
-        if metadata.file_type().is_symlink() {
-            if path.exists() {
-                rejected.push(KIMI_STORE.symlinked_container(&workspace, "workspace directory"));
+        match KIMI_STORE.container(&workspace, "workspace directory") {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                // A workspace that cannot be archived is worth reporting only
+                // when the named session is inside it.
+                if path.exists() {
+                    rejected.push(reason);
+                }
             }
-            continue;
-        }
-        if metadata.is_dir() {
-            paths.push(path);
+            NamedEntry::Importable(_) => paths.push(path),
         }
     }
     Ok(paths)

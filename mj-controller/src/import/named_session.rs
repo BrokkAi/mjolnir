@@ -65,15 +65,33 @@ impl NamedSessionStore {
         self.classify(path, true)
     }
 
+    /// Classify the directory a session sits inside: a Claude project
+    /// directory, a Kimi workspace directory, a Grok working directory.
+    /// `described_as` is how a refusal names it.
+    ///
+    /// Every listing and every by-id lookup asks this, so both agree about what
+    /// can be imported. A symlinked container is refused, because the archive
+    /// step follows no symlink and would store the session as nothing at all.
+    /// Anything there that is not a directory is `Absent`: the harness home
+    /// also holds index and lock files, which are no container at all.
+    pub fn container(self, path: &Path, described_as: &str) -> NamedEntry {
+        let metadata = match entry_metadata(path) {
+            NamedEntry::Importable(metadata) => metadata,
+            unreadable => return unreadable,
+        };
+        if metadata.file_type().is_symlink() {
+            return NamedEntry::Rejected(self.symlinked_container(path, described_as));
+        }
+        if !metadata.is_dir() {
+            return NamedEntry::Absent;
+        }
+        NamedEntry::Importable(metadata)
+    }
+
     fn classify(self, path: &Path, want_directory: bool) -> NamedEntry {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return NamedEntry::Absent;
-            }
-            Err(error) => {
-                return NamedEntry::Rejected(format!("{} cannot be read: {error}", path.display()));
-            }
+        let metadata = match entry_metadata(path) {
+            NamedEntry::Importable(metadata) => metadata,
+            unreadable => return unreadable,
         };
         if metadata.file_type().is_symlink() {
             return NamedEntry::Rejected(format!(
@@ -125,5 +143,17 @@ impl NamedSessionStore {
             "Mjolnir imports only {} stored directly in the {} home",
             self.stored, self.harness
         )
+    }
+}
+
+/// Read one path's own metadata, without following a symlink. A path that is
+/// not there is `Absent`, so the caller keeps looking; one that cannot be read
+/// at all is refused by name. `Importable` only carries the metadata back: what
+/// that metadata describes is still for the caller to judge.
+fn entry_metadata(path: &Path) -> NamedEntry {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => NamedEntry::Importable(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => NamedEntry::Absent,
+        Err(error) => NamedEntry::Rejected(format!("{} cannot be read: {error}", path.display())),
     }
 }

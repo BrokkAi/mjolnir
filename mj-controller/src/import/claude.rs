@@ -76,16 +76,18 @@ pub(super) fn locate_unlisted_claude_sessions(
     for project in fs::read_dir(&projects)? {
         let project = project?;
         let project_path = project.path();
-        let project_metadata = fs::symlink_metadata(&project_path)?;
         let path = project_path.join(format!("{native_session_id}.jsonl"));
-        if project_metadata.file_type().is_symlink() {
-            if path.exists() {
-                rejected.push(CLAUDE_STORE.symlinked_container(&project_path, "project directory"));
+        match CLAUDE_STORE.container(&project_path, "project directory") {
+            NamedEntry::Absent => continue,
+            NamedEntry::Rejected(reason) => {
+                // A project directory the archive cannot use is worth reporting
+                // only when the named session is visible inside it.
+                if path.exists() {
+                    rejected.push(reason);
+                }
+                continue;
             }
-            continue;
-        }
-        if !project_metadata.is_dir() {
-            continue;
+            NamedEntry::Importable(_) => {}
         }
         let metadata = match CLAUDE_STORE.file(&path) {
             NamedEntry::Absent => continue,

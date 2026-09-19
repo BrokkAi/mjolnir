@@ -2475,6 +2475,37 @@ fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
+#[cfg(unix)]
+#[test]
+fn grok_listing_and_lookup_agree_about_a_symlinked_working_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    // The session directory itself is real; only the working directory above it
+    // is a symlink, so the archive step would store nothing for this session.
+    let stored = directory.path().join("stored/%2Fwork%2Fapp");
+    let session = stored.join(NAMED_LOOKUP_ID);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("summary.json"),
+        json!({"info": {"cwd": "/work/app"}}).to_string(),
+    )
+    .unwrap();
+    fs::create_dir_all(directory.path().join("sessions")).unwrap();
+    std::os::unix::fs::symlink(&stored, directory.path().join("sessions/%2Fwork%2Fapp")).unwrap();
+
+    assert!(list_grok_sessions(directory.path()).unwrap().is_empty());
+    let error = locate_grok_session(
+        directory.path(),
+        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("is a symlinked working directory"),
+        "{error}"
+    );
+    assert!(!error.contains("was not found"), "{error}");
+}
+
 #[test]
 fn grok_lookup_by_id_reports_a_session_without_a_cwd() {
     let directory = tempfile::tempdir().unwrap();
