@@ -13,11 +13,11 @@ Turn review and plan second opinion share Settings → Review. Auto chooses anot
 - [x] 2026-09-19: Integrate turn review, Settings, and baseline capture.
 - [x] 2026-09-19: Replace second-opinion picker and remembered choices with shared settings.
 - [x] 2026-09-19: Add behavior tests, update documentation, run required validation before upstream integration.
-- [ ] Commit on current branch, merge upstream as needed, and push to configured upstream as requested.
+- [x] 2026-09-19: Commit on `hel3` (`4502dbd7`), merge upstream (`eb844b3b`), validate the merged code, and push to `origin/master`.
 
 ## Surprises & Discoveries
 
-Turn review rejects the primary profile, but second opinion already allows it. Reviewer processes have private homes/journals under the primary worker and no session records, so profile identity must never be used to hide ordinary user sessions. Utility inference accepts unknown quota and API billing; Claude can reuse its quota classification without needing a utility inference backend.
+Before this change, turn review rejected the primary profile, but second opinion already allowed it. Reviewer processes have private homes/journals under the primary worker and no session records, so profile identity must never be used to hide ordinary user sessions. Utility inference accepts unknown quota and API billing; Claude can reuse its quota classification without needing a utility inference backend.
 
 ## Decision Log
 
@@ -29,11 +29,11 @@ Turn review rejects the primary profile, but second opinion already allows it. R
 
 ## Outcomes & Retrospective
 
-Shared resolution, specialist policy, Settings Auto, direct second-opinion preparation, and cancellation are implemented. Focused review tests pass. Full-suite validation passes with `NO_COLOR` unset; upstream integration remains. No database migration was needed.
+Shared resolution, specialist policy, Settings Auto, direct second-opinion preparation, and cancellation are implemented and published to `origin/master`. Reviewers remain private sidecars; ordinary sessions using a profile named `reviewer` remain visible. Full tests, Clippy, formatting, and diff checks passed on the merged code. No database migration was needed. Live paid provider calls were not required; provider capability and worker behavior are exercised with isolated fixtures.
 
 ## Context and Orientation
 
-`mj-core/src/config.rs` owns the review configuration. `mj-controller/src/utility_llm.rs` contains quota freshness/classification and model version ordering. `mj-controller/src/review_host/` runs turn review; `mj-controller/src/review_settings.rs` discovers supported model/effort choices on real workers. `mj-worker/src/worker_runtime/reviewer.rs` runs separate reviewer processes and applies configuration. `mj-chat/src/chat/active/reviewer.rs` and `second_opinion.rs` implement plan-review startup and rendering. `mj-tui/src/review_settings.rs` edits the shared settings. A reviewer is a supervised process attached to a primary worker, not a main session.
+`mj-core/src/config.rs` owns the review configuration. `mj-controller/src/utility_llm.rs` contains quota freshness/classification; shared model version ordering now lives in `mj-core/src/review/settings.rs`. `mj-controller/src/review_host/` runs turn review; `mj-controller/src/review_settings.rs` discovers supported model/effort choices on real workers. `mj-worker/src/worker_runtime/reviewer.rs` runs separate reviewer processes and applies configuration. `mj-chat/src/chat/active/reviewer.rs` and `second_opinion.rs` implement plan-review startup and rendering. `mj-tui/src/review_settings.rs` edits the shared settings. A reviewer is a supervised process attached to a primary worker, not a main session.
 
 ## Plan of Work
 
@@ -59,7 +59,7 @@ No live-store migration or destructive cleanup is required. Keep historical defa
 
 ## Artifacts and Notes
 
-`cargo test review -- --nocapture` passed across the workspace, including 59 controller and 48 worker tests. `env -u NO_COLOR cargo test -q` passed the full workspace. The initial run failed only color assertions because the runner sets `NO_COLOR=1`; no product change was needed. The latest focused review run passed 60 controller and 48 worker tests, including the new native-session isolation test. Clippy identified one collapsible conditional, now fixed. Upstream gained commit `71ff0559`; merge it into `hel3` and validate the combined result before pushing to `origin/master`.
+`cargo test review -- --nocapture` passed across the workspace, including 59 controller and 48 worker tests. `env -u NO_COLOR cargo test -q` passed the full workspace. The initial run failed only color assertions because the runner sets `NO_COLOR=1`; no product change was needed. The latest focused review run passed 60 controller and 48 worker tests, including the new native-session isolation test. Clippy identified one collapsible conditional, now fixed. Merged upstream commit `71ff0559` without conflicts as `eb844b3b`. On that merged code, `env -u NO_COLOR cargo test -q`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` all passed. The final full run included 558 chat, 1,479 controller, 664 TUI, and 501 worker library tests passing, alongside the remaining unit, integration, and documentation suites. `git push origin HEAD:master` published `eb844b3b` successfully.
 
 ## Interfaces and Dependencies
 
@@ -68,3 +68,5 @@ Add shared typed resolved settings in `mj-core::review` containing profile ID, m
 Revision note: Initial executable plan created from the approved conversation on 2026-09-19.
 
 Revision note (2026-09-19): Implemented all three functional milestones. New requests use relay protocol 14 so unsupported workers are refused before decoding. Generation-scoped cleanup prevents cancelled second-opinion preparations from stopping replacements. Each newly requested second opinion starts a fresh conversation, while persisted active workflows retain their generation; this avoids carrying a previous reviewer identity across settings changes. Preparation remains visible during ordered persistence and is cancellable. Existing native-session discovery scans configured profile homes, while reviewer homes/journals remain worker-private and create no session records.
+
+Revision note (2026-09-19): Recorded final merged validation and successful publication. The initial full-run color failures were environmental (`NO_COLOR=1`); rerunning with that variable unset passed without changing color behavior.
