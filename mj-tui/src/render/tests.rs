@@ -1532,10 +1532,21 @@ fn footer_drops_whole_hints_when_the_width_runs_out() {
         if width >= 20 {
             assert!(footer.contains(": palette"), "{width}: {footer}");
         }
-        // Every hint that survived is a whole hint of the full text.
+        // Every hint that survived is a whole hint of the full text. The
+        // prefix label moves to whichever chord survives first, so it is
+        // set aside before comparing.
+        let unlabeled = |hint: &str| {
+            hint.strip_prefix("ctrl+b then: ")
+                .unwrap_or(hint)
+                .to_owned()
+        };
+        let whole = footer_hints(&full)
+            .iter()
+            .map(|hint| unlabeled(hint))
+            .collect::<Vec<_>>();
         for hint in footer_hints(&footer) {
             assert!(
-                footer_hints(&full).contains(&hint),
+                whole.contains(&unlabeled(&hint)),
                 "{width}: {hint:?} is not a whole hint of {full:?}"
             );
         }
@@ -1598,6 +1609,24 @@ fn footer_hints(footer: &str) -> Vec<String> {
         .filter(|hint| !hint.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// The prefix label rides on the first chord hint, which is also the first
+/// chord a narrow row gives up. The label must outlive it: a row reading
+/// `: palette · ? keys` would say `:` alone opens the palette.
+#[test]
+fn the_prefix_is_still_named_when_only_protected_chords_survive() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    let footer = combined_footer_text(&dashboard, 60);
+    assert_eq!(
+        footer, "Enter open │ ctrl+b then: : palette · ? keys",
+        "{footer}"
+    );
+    assert!(
+        !combined_footer_text(&dashboard, 200).contains("then: : palette"),
+        "a wide row keeps the label on the first chord"
+    );
 }
 
 /// The row is read left to right by someone hunting one key, so the kinds of
@@ -1675,13 +1704,14 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let squeezed = combined_footer_text(&dashboard, 90);
     assert_eq!(
         squeezed,
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: : palette · ? keys"
     );
 
-    // Narrower still, the pane hints give way from the right as well.
+    // Narrower still, the pane hints give way from the right as well, and the
+    // prefix label stays on the first chord left standing.
     assert_eq!(
         combined_footer_text(&dashboard, 52),
-        "Enter open │ : palette · ? keys"
+        "Enter open │ ctrl+b then: : palette · ? keys"
     );
 
     assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
