@@ -1580,7 +1580,10 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
             assert!(text.contains(": palette"), "{width}: {text:?}");
         }
         if width == 32 {
-            assert_eq!(text.trim_end(), ": palette · ? keys");
+            // The chords give way before the composer's own keys, so what a
+            // narrow row keeps is the key that works right here plus the two
+            // hints that lead to everything else.
+            assert_eq!(text.trim_end(), "Tab pane │ : palette · ? keys");
         }
     }
 }

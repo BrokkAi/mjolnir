@@ -1387,7 +1387,9 @@ fn dashboard_stacks_below_80_columns_and_gives_up_below_60() {
         lines.iter().any(|line| line.contains("Conversation")),
         "{lines:#?}"
     );
-    assert!(lines.last().unwrap().contains("ctrl+b"), "{lines:#?}");
+    // Seventy columns has no room for the chord list, so what the row keeps is
+    // the pane's own keys and the two hints that lead to all the others.
+    assert!(lines.last().unwrap().contains("? keys"), "{lines:#?}");
 
     // From 80 columns the sidebar sits beside the conversation again.
     let lines = drawn(&mut dashboard, 80, 30);
@@ -1565,7 +1567,10 @@ fn the_footer_shows_the_prefix_banner_while_a_chord_is_pending() {
         dashboard.cancel_prefix();
         let lines = drawn(&mut dashboard, 120, 40);
         assert!(
-            lines.last().expect("the footer row").contains("q detach"),
+            lines
+                .last()
+                .expect("the footer row")
+                .contains("ctrl+b then:"),
             "{focus:?}"
         );
     }
@@ -1610,6 +1615,28 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
          · : palette · ? keys"
     );
 
+    // At the widths people actually work at, the pane group stays whole and the
+    // chord list gives way from its right-hand end.
+    assert_eq!(
+        combined_footer_text(&dashboard, 160),
+        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
+         · b panes · q detach · u web · shift+r refresh · : palette · ? keys"
+    );
+    assert_eq!(
+        combined_footer_text(&dashboard, 140),
+        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
+         · b panes · q detach · : palette · ? keys"
+    );
+    // The filter letters are what the search hint is there to teach, and 140
+    // columns is an ordinary window, so that hint has to survive at that width.
+    assert!(
+        footer_hints(&combined_footer_text(&dashboard, 140))
+            .iter()
+            .any(|hint| hint.starts_with("/ search")),
+        "{}",
+        combined_footer_text(&dashboard, 140)
+    );
+
     // The cancel chord takes its fixed place before detach, and only while
     // there is something to cancel.
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
@@ -1627,10 +1654,12 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     );
 }
 
-/// Pane hints give way before the prefix chords, and help and palette remain
-/// visible after every other chord has been dropped.
+/// The prefix chords give way before the pane's own hints, and help and palette
+/// remain visible after every other hint has been dropped. The pane group is
+/// the short list of keys that work right here; the chord group is the long one
+/// the palette holds in full, so the long one is what a narrow row gives up.
 #[test]
-fn footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest() {
+fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     dashboard.focus_sessions();
@@ -1641,11 +1670,23 @@ fn footer_drops_pane_hints_before_chord_hints_and_keeps_help_longest() {
         "{full}"
     );
 
-    // Narrow enough to lose the pane group, wide enough to keep chords.
+    // Narrow enough to lose most chords, still wide enough for everything the
+    // focused pane answers.
     let squeezed = combined_footer_text(&dashboard, 90);
-    assert!(!squeezed.contains("Enter open"), "{squeezed}");
-    assert!(squeezed.contains("ctrl+b then: c create"), "{squeezed}");
-    assert!(squeezed.ends_with(": palette · ? keys"), "{squeezed}");
+    assert_eq!(
+        squeezed,
+        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · : palette · ? keys"
+    );
+
+    // Narrower still, the pane hints give way from the right as well.
+    assert_eq!(
+        combined_footer_text(&dashboard, 52),
+        "Enter open · / search │ : palette · ? keys"
+    );
+    assert_eq!(
+        combined_footer_text(&dashboard, 40),
+        "Enter open │ : palette · ? keys"
+    );
 
     assert_eq!(combined_footer_text(&dashboard, 20), ": palette · ? keys");
     assert_eq!(combined_footer_text(&dashboard, 6), "? keys");

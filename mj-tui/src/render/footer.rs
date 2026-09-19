@@ -66,9 +66,12 @@ fn footer_groups(dashboard: &DashboardState) -> [Vec<(crate::CommandId, String)>
 ///
 /// `width` is the row's width in cells. When the hints do not fit, whole
 /// segments are dropped from the right — never truncated mid-word, because
-/// half a hint names a key that does not exist — first from the pane group,
-/// then from the chords, with palette and help retained longest so the user
-/// can find everything the narrow row leaves out.
+/// half a hint names a key that does not exist — first from the chords, then
+/// from the pane group, with palette and help retained longest so the user can
+/// find everything the narrow row leaves out. The pane group is what works
+/// right here and holds three entries; the chord group holds twelve, and the
+/// palette lists all of them, so a narrow row keeps the three and gives up the
+/// twelve.
 ///
 /// The composer's own hints come from the chat itself, because they depend on
 /// what it is doing (a queued prompt, dictation, a history search); this text

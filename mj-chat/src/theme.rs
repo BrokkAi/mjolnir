@@ -600,8 +600,9 @@ pub fn prefix_banner(prefix: &str, help_key: &str) -> Line<'static> {
     ])
 }
 
-/// Keep complete footer hints within the terminal width. Pane hints give way
-/// before the prefix chords; `protected` names the hints that survive longest.
+/// Keep complete footer hints within the terminal width. The prefix chords
+/// give way before the pane's own hints; `protected` names the hints that
+/// survive longest.
 pub fn fit_footer(
     pane: &[&str],
     chords: &[&str],
@@ -623,11 +624,12 @@ pub fn fit_footer(
 /// Fit structured command hints while retaining their identities for hit testing.
 ///
 /// Whole segments are dropped rather than truncated, because half a hint names
-/// a key that does not exist. They give way from the left-hand group first, and
-/// from the right within a group, so the reader loses what the pane offers
-/// before what answers from anywhere. A hint `protected` accepts is dropped
-/// only once nothing else is left, which is how the palette and the help key
-/// stay visible on the narrowest terminal.
+/// a key that does not exist. They give way from the right-hand group first,
+/// and from the right within a group, so the reader keeps the few keys that
+/// work right here and loses the long list that answers from anywhere — a list
+/// the palette holds in full. A hint `protected` accepts is dropped only once
+/// nothing else is left, which is how the palette and the help key stay
+/// visible on the narrowest terminal.
 pub fn fit_footer_items<T>(
     groups: [Vec<T>; 3],
     width: u16,
@@ -643,6 +645,7 @@ pub fn fit_footer_items<T>(
         let victim = groups
             .iter()
             .enumerate()
+            .rev()
             .find_map(|(group, hints)| {
                 hints
                     .iter()
