@@ -1508,6 +1508,80 @@ fn a_workspace_with_no_live_session_never_arms_the_startup_pick() {
     assert!(!startup.ready(start + STARTUP_SESSION_WAIT));
 }
 
+/// Two sessions in two panes, the keyboard in one of them: the split keys
+/// have to make a pane. The selected conversation is the one this pane shows,
+/// nothing came before it here, and every other session is on screen — so
+/// there is nothing to move and the new pane starts empty rather than the key
+/// refusing.
+#[test]
+fn splitting_with_every_session_on_screen_opens_an_empty_pane() {
+    let left = PaneId::from_raw(2);
+    let right = PaneId::from_raw(3);
+    // The split that made these two panes cleared the focused pane's previous
+    // session, which is why this case was unreachable before.
+    assert_eq!(
+        plan_split(right, Some(right), None),
+        SplitPlan::EmptyNewPane
+    );
+    assert_eq!(plan_split(left, Some(left), None), SplitPlan::EmptyNewPane);
+}
+
+/// The other three outcomes, so the empty pane above is not swallowing them:
+/// a session on screen elsewhere moves the keyboard, a session the selection
+/// pulled into this pane moves to the new one, and a session that is not on
+/// screen at all simply opens there.
+#[test]
+fn a_split_moves_the_keyboard_the_conversation_or_neither() {
+    let focused = PaneId::from_raw(1);
+    let other = PaneId::from_raw(4);
+    assert_eq!(
+        plan_split(focused, Some(other), None),
+        SplitPlan::FocusPane(other)
+    );
+    assert_eq!(
+        plan_split(focused, Some(focused), Some("before")),
+        SplitPlan::MoveConversation {
+            restore: "before".to_owned()
+        }
+    );
+    assert_eq!(
+        plan_split(focused, None, Some("before")),
+        SplitPlan::OpenInNewPane
+    );
+}
+
+/// One notice covered three different outcomes and named none of them. Each
+/// one now says why, in a sentence that starts with the session and fits the
+/// readable width of the footer.
+#[test]
+fn each_split_outcome_that_is_not_obvious_says_why() {
+    let session = "5c4d7bfdac2f4f0e";
+    let focus = SplitPlan::FocusPane(PaneId::from_raw(2))
+        .notice(session)
+        .unwrap();
+    let empty = SplitPlan::EmptyNewPane.notice(session).unwrap();
+    assert_ne!(focus, empty);
+    for notice in [&focus, &empty] {
+        assert!(notice.starts_with("5c4d7bfd"), "{notice}");
+        assert!(
+            notice.chars().count() <= 80,
+            "{} columns: {notice}",
+            notice.chars().count()
+        );
+    }
+    assert!(focus.contains("another pane"), "{focus}");
+    assert!(empty.contains("the new pane is empty"), "{empty}");
+    // Moving the conversation where the key asked for it is visible on screen.
+    assert!(SplitPlan::OpenInNewPane.notice(session).is_none());
+    assert!(
+        SplitPlan::MoveConversation {
+            restore: "before".to_owned()
+        }
+        .notice(session)
+        .is_none()
+    );
+}
+
 #[test]
 fn resume_progress_explains_the_blocking_work() {
     assert_eq!(

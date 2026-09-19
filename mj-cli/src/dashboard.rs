@@ -837,6 +837,64 @@ mod drains;
 mod session_state;
 mod surface;
 
+/// What a split key does about the session the Sessions list has selected.
+///
+/// A session is in at most one pane, so a split can never copy a conversation
+/// that is already on screen; the four outcomes are all there are, and each
+/// one reads differently to the person who pressed the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SplitPlan {
+    /// It is on screen in another pane: the keyboard goes there.
+    FocusPane(PaneId),
+    /// The Sessions selection pulled it into the focused pane. The new pane
+    /// takes it and the focused pane goes back to `restore`.
+    MoveConversation { restore: String },
+    /// It is not on screen: the new pane shows it and the focused pane keeps
+    /// what it had.
+    OpenInNewPane,
+    /// It already has the focused pane to itself and nothing came before it
+    /// there, so there is nothing to move out. The new pane starts empty.
+    EmptyNewPane,
+}
+
+impl SplitPlan {
+    /// What the outcome tells the person, when it is not obvious from the
+    /// screen. Moving a conversation into a pane they asked for speaks for
+    /// itself; the two outcomes that do something else have to say why.
+    fn notice(&self, session_id: &str) -> Option<String> {
+        match self {
+            Self::FocusPane(_) => Some(format!(
+                "{}: already open in another pane; the keyboard moved there.",
+                short_id(session_id)
+            )),
+            Self::EmptyNewPane => Some(format!(
+                "{}: already alone in this pane, so the new pane is empty.",
+                short_id(session_id)
+            )),
+            Self::MoveConversation { .. } | Self::OpenInNewPane => None,
+        }
+    }
+}
+
+/// Decides the split from where the session is now and what the focused pane
+/// showed before it.
+fn plan_split(
+    focused: PaneId,
+    showing: Option<PaneId>,
+    previous_in_focused: Option<&str>,
+) -> SplitPlan {
+    match showing {
+        Some(pane) if pane != focused => SplitPlan::FocusPane(pane),
+        Some(_) => match previous_in_focused {
+            Some(restore) => SplitPlan::MoveConversation {
+                restore: restore.to_owned(),
+            },
+            None => SplitPlan::EmptyNewPane,
+        },
+        None => SplitPlan::OpenInNewPane,
+    }
+}
+
 impl DashboardContext {
     pub(crate) fn cancel_session_preflight(&mut self) {
         if let Some((_, cancelled)) = self.session_preflight_cancel.take() {
@@ -959,59 +1017,75 @@ impl DashboardContext {
     /// focused pane, so by the time this runs the session usually sits in the
     /// pane the user wanted it moved out of. The split then gives it the new
     /// pane and returns the pane it came from to the conversation it was
-    /// showing before the selection followed. A session open in a different
-    /// pane moves the focus there instead of appearing twice, and a
-    /// conversation area with no room for two panes says so.
+    /// showing before the selection followed. [`plan_split`] decides which of
+    /// the four outcomes this is, and each one says what it did.
     ///
     /// Every terminal path that names a session opens it first, and
     /// `open_chat_session` already moves the keyboard to the pane showing it.
     /// So when the session is on screen this runs with the keyboard in its
-    /// pane, and the notice says so; the explicit focus move below only
-    /// covers a caller that has not opened the session yet.
+    /// pane; the explicit focus move below only covers a caller that has not
+    /// opened the session yet.
     pub(crate) fn open_session_in_split(&mut self, session_id: &str, direction: Direction) {
         let focused = self.dashboard.focused_pane();
-        if let Some(pane) = self.dashboard.pane_for_session(session_id)
-            && pane != focused
-        {
-            self.dashboard.focus_pane(pane);
-            self.dashboard.set_notice("Already open in this pane");
-            self.sync_opening_session();
-            self.save_active_workspace_layout();
-            return;
-        }
-        let moving = self.dashboard.pane_session(focused) == Some(session_id);
-        let displaced = moving
-            .then(|| self.previous_pane_sessions.get(&focused).cloned())
-            .flatten();
-        if moving && displaced.is_none() {
-            // Nothing came before it in this pane, so a split would only add a
-            // blank pane beside the conversation the user is already in.
-            self.dashboard.set_notice("Already open in this pane");
-            return;
-        }
+        let plan = plan_split(
+            focused,
+            self.dashboard.pane_for_session(session_id),
+            self.previous_pane_sessions
+                .get(&focused)
+                .map(String::as_str),
+        );
+        let notice = plan.notice(session_id);
+        let empty_new_pane = plan == SplitPlan::EmptyNewPane;
+        let restore = match plan {
+            SplitPlan::FocusPane(pane) => {
+                self.dashboard.focus_pane(pane);
+                if let Some(notice) = notice {
+                    self.dashboard.set_notice(notice);
+                }
+                self.sync_opening_session();
+                self.save_active_workspace_layout();
+                return;
+            }
+            SplitPlan::MoveConversation { restore } => Some(restore),
+            SplitPlan::OpenInNewPane | SplitPlan::EmptyNewPane => None,
+        };
         let Some(new_pane) = self.dashboard.split_focused_pane(direction, None) else {
-            self.dashboard.set_notice("Not enough room to split");
+            self.dashboard
+                .set_notice("Not enough room to split this pane.");
             return;
         };
-        if moving {
-            // The conversation is where the selection put it, not where the
-            // user asked for it. Take it out of that pane first; opening it
-            // in the new one reuses it when it is warm and restarts an attach
-            // still in flight for the pane that now owns it.
-            self.dashboard.focus_pane(focused);
-            self.dashboard.set_current_session(None);
-            self.cancel_chat_open();
-            self.previous_pane_sessions.remove(&focused);
+        if empty_new_pane {
+            // The conversation stays where it is, so the new pane starts empty
+            // and its own advice says how to fill it. The Sessions selection
+            // counts as observed for the new pane, because the automatic
+            // follow would otherwise pull that same conversation into it and
+            // take the keyboard back out of the pane just made.
+            self.attachments
+                .entry(new_pane)
+                .or_default()
+                .select(session_id);
+            self.selection.clear();
+        } else {
+            if let Some(restore) = restore {
+                // The conversation is where the selection put it, not where the
+                // user asked for it. Take it out of that pane first; opening it
+                // in the new one reuses it when it is warm and restarts an
+                // attach still in flight for the pane that now owns it.
+                self.dashboard.focus_pane(focused);
+                self.dashboard.set_current_session(None);
+                self.cancel_chat_open();
+                self.previous_pane_sessions.remove(&focused);
+                // The pane the user came from goes back first, so the Sessions
+                // selection ends on the session they asked to split out — which
+                // is what the focused pane shows.
+                self.open_chat_session(&restore);
+            }
+            self.dashboard.focus_pane(new_pane);
+            self.open_chat_session(session_id);
         }
-        // The pane the user came from goes back first, so the Sessions
-        // selection ends on the session they asked to split out — which is
-        // what the focused pane shows.
-        if let Some(previous) = displaced {
-            self.dashboard.focus_pane(focused);
-            self.open_chat_session(&previous);
+        if let Some(notice) = notice {
+            self.dashboard.set_notice(notice);
         }
-        self.dashboard.focus_pane(new_pane);
-        self.open_chat_session(session_id);
         self.sync_opening_session();
         self.save_active_workspace_layout();
     }
@@ -1020,7 +1094,8 @@ impl DashboardContext {
     /// the split keys do when the Sessions list has nothing selected.
     pub(crate) fn split_empty_pane(&mut self, direction: Direction) {
         if self.dashboard.split_focused_pane(direction, None).is_none() {
-            self.dashboard.set_notice("Not enough room to split");
+            self.dashboard
+                .set_notice("Not enough room to split this pane.");
             return;
         }
         self.selection.clear();
