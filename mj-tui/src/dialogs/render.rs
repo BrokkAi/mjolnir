@@ -567,7 +567,10 @@ pub(crate) fn render_changed_files(
         };
         frame.render_widget(Paragraph::new(text).style(theme::muted()), list_area);
     } else {
-        let kind_width = 8;
+        // The longest status word is eight cells (`modified`, `conflict`), so
+        // the column is nine: a word that fills it must still leave a space
+        // before the path.
+        let kind_width = 9;
         let count_width = 12;
         let path_width = usize::from(list_area.width).saturating_sub(kind_width + count_width + 2);
         let rows = files

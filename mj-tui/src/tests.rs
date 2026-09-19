@@ -4074,16 +4074,16 @@ fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
 
     dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
     let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines.iter().any(|line| line.contains("modified")
-            && line.contains("src/main.rs")
-            && line.contains("+12 −3")),
-        "{lines:#?}"
-    );
+    // The longest status word fills its column, so the column has to carry the
+    // separator: `modifiedsrc/main.rs` is not a line anyone can read.
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("new") && line.contains("notes.md")),
+            .any(|line| line.contains("modified src/main.rs") && line.contains("+12 −3")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("new      notes.md")),
         "{lines:#?}"
     );
     assert!(
