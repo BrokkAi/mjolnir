@@ -1619,20 +1619,20 @@ fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
     // chord list gives way from its right-hand end.
     assert_eq!(
         combined_footer_text(&dashboard, 160),
-        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
-         · b panes · q detach · u web · shift+r refresh · : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+         · a read · b panes · q detach · u web · : palette · ? keys"
     );
     assert_eq!(
         combined_footer_text(&dashboard, 140),
-        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · a read · shift+z size \
-         · b panes · q detach · : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then: c create · g sessions \
+         · a read · b panes · q detach · : palette · ? keys"
     );
     // The filter letters are what the search hint is there to teach, and 140
     // columns is an ordinary window, so that hint has to survive at that width.
     assert!(
         footer_hints(&combined_footer_text(&dashboard, 140))
             .iter()
-            .any(|hint| hint.starts_with("/ search")),
+            .any(|hint| hint == "/ search (filter a/b/w/i/d)"),
         "{}",
         combined_footer_text(&dashboard, 140)
     );
@@ -1670,21 +1670,17 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
         "{full}"
     );
 
-    // Narrow enough to lose most chords, still wide enough for everything the
+    // Narrow enough to lose every chord, still wide enough for everything the
     // focused pane answers.
     let squeezed = combined_footer_text(&dashboard, 90);
     assert_eq!(
         squeezed,
-        "Enter open · / search · Tab pane │ ctrl+b then: c create · g resume · : palette · ? keys"
+        "Enter open · / search (filter a/b/w/i/d) · Tab pane │ : palette · ? keys"
     );
 
     // Narrower still, the pane hints give way from the right as well.
     assert_eq!(
         combined_footer_text(&dashboard, 52),
-        "Enter open · / search │ : palette · ? keys"
-    );
-    assert_eq!(
-        combined_footer_text(&dashboard, 40),
         "Enter open │ : palette · ? keys"
     );
 

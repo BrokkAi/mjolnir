@@ -2308,7 +2308,14 @@ fn the_dialog_footer_names_its_own_keys() {
     ] {
         assert!(rendered.contains(hint), "{rendered}");
     }
-    assert!(!rendered.contains("filter"), "{rendered}");
+    // The dashboard's own footer row is drawn behind the modal and names the
+    // Sessions filter letters, so read the dialog's hint row rather than the
+    // whole screen.
+    let dialog_hints = buffer_lines(terminal.backend().buffer())
+        .into_iter()
+        .find(|line| line.contains("←/→ tabs"))
+        .expect("the dialog's hint row");
+    assert!(!dialog_hints.contains("filter"), "{dialog_hints}");
 
     switch_to_import(&mut dashboard);
     terminal

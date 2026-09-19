@@ -3487,14 +3487,16 @@ fn next_attention_reports_an_empty_queue_and_unfolds_a_folded_project() {
 fn the_footer_names_the_next_key_only_while_something_waits() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
-    let lines = drawn(&mut dashboard, 120, 40);
+    // Wide enough for the whole chord list: a narrow row drops the hint for
+    // want of room, which says nothing about whether anything is waiting.
+    let lines = drawn(&mut dashboard, 200, 40);
     let footer = lines.last().unwrap();
     // The hint carries the same badge as the tabs: the most urgent glyph and
     // how many sessions need a person.
     assert!(footer.contains("o next (!3)"), "{footer}");
 
     let mut quiet = dashboard_with_session(running_session());
-    let lines = drawn(&mut quiet, 120, 40);
+    let lines = drawn(&mut quiet, 200, 40);
     assert!(
         !lines.last().unwrap().contains("next ("),
         "{}",
