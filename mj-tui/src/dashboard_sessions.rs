@@ -635,11 +635,6 @@ impl DashboardState {
     /// Moves to the next (`1`) or previous (`-1`) session in the attention
     /// queue, counting from the selected session when it is in the queue and
     /// from the top otherwise.
-    ///
-    /// A session in another workspace is reached by recording it as that
-    /// workspace's selection and asking the host to switch: the host restores
-    /// the selection when the tab changes and opens its conversation, exactly
-    /// as it does for a tab the person clicks.
     pub(crate) fn step_attention(&mut self, delta: isize) -> DashboardAction {
         let queue = self.attention_queue();
         if queue.is_empty() {
@@ -658,13 +653,27 @@ impl DashboardState {
             None if delta < 0 => queue[queue.len() - 1].clone(),
             None => queue[0].clone(),
         };
+        self.focus_session_anywhere(&target.workspace_id, &target.session_id)
+    }
+
+    /// Moves the dashboard to one session, wherever it lives.
+    ///
+    /// A session in another workspace is reached by recording it as that
+    /// workspace's selection and asking the host to switch: the host restores
+    /// the selection when the tab changes and opens its conversation, exactly
+    /// as it does for a tab the person clicks.
+    pub(crate) fn focus_session_anywhere(
+        &mut self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> DashboardAction {
         if self.subagent_parent_id.is_some() {
             self.close_subagent_workspace();
         }
-        if self.active_workspace_id.as_deref() != Some(target.workspace_id.as_str()) {
+        if self.active_workspace_id.as_deref() != Some(workspace_id) {
             let view = self
                 .workspace_views
-                .entry(target.workspace_id.clone())
+                .entry(workspace_id.to_owned())
                 .or_insert_with(|| WorkspaceViewState {
                     selected_session_id: None,
                     sessions_scroll: 0,
@@ -677,13 +686,13 @@ impl DashboardState {
                     collapsed_project_keys: BTreeSet::new(),
                     focus: Focus::Prompt,
                 });
-            view.selected_session_id = Some(target.session_id.clone());
+            view.selected_session_id = Some(session_id.to_owned());
             view.focus = Focus::Prompt;
             return DashboardAction::SelectWorkspace {
-                workspace_id: target.workspace_id,
+                workspace_id: workspace_id.to_owned(),
             };
         }
-        if let Some(session) = self.state.sessions.get(&target.session_id) {
+        if let Some(session) = self.state.sessions.get(session_id) {
             let key = self.project_source(session).key;
             self.collapsed_project_keys.remove(&key);
         }
@@ -692,11 +701,11 @@ impl DashboardState {
         if !self
             .ordered_sessions()
             .iter()
-            .any(|session| session.id == target.session_id)
+            .any(|session| session.id == session_id)
         {
             self.sessions_filter = None;
         }
-        self.select_active_session(&target.session_id);
+        self.select_active_session(session_id);
         self.open_selected_session()
     }
 
