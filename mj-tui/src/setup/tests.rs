@@ -1583,6 +1583,70 @@ fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
     }
 }
 
+/// The saved file keeps only the build cache fields that are set, so the page
+/// has to fill the rest back in: all three stay listed and editable after a
+/// save, and each one can still be handed back to the host.
+#[test]
+fn a_saved_build_cache_field_leaves_the_other_two_on_the_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "max_size");
+    dashboard.handle_key(key(KeyCode::Char('1')));
+    dashboard.handle_key(key(KeyCode::Char('2')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!(
+            "settings must save: {:?}",
+            setup_dialog_mut(&mut dashboard.mode).unwrap().notice
+        );
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    // What the file now holds: the size alone, with the two unset fields gone.
+    assert_eq!(
+        serde_json::to_value(&saved.machines["local"]).unwrap(),
+        json!({"kind":"local","build_cache":{"max_size":"12GB"}})
+    );
+    dashboard.setup_saved(generation, Ok(saved));
+
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    let keys = dialog.keys();
+    for expected in ["enabled", "directory", "max_size"] {
+        assert!(
+            keys.iter().any(|key| key == expected),
+            "{expected:?} is missing from the reopened page: {keys:?}"
+        );
+    }
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    for expected in ["Enabled", "Cache directory", "Cache size limit (GB)", "12"] {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+
+    // The same defaults are what "Use default" hands a field back to, so the
+    // size can be returned to the host's own limits.
+    choose(&mut dashboard, "max_size");
+    activate(&mut dashboard, SetupControl::Clear);
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        dialog.draft["machines"]["local"]["build_cache"]["max_size"],
+        Value::Null,
+        "Use default must hand an optional field back: {:?}",
+        dialog.notice
+    );
+}
+
 #[test]
 fn empty_archive_after_days_renders_as_never() {
     let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});

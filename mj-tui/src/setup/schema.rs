@@ -32,6 +32,11 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
+        // The build cache is its own page, and the saved file keeps only the
+        // fields that are set, so the page needs these defaults in its own
+        // right: the machine's arm above never sees a section that is already
+        // there.
+        "machines" if path.len() == 3 && key == "build_cache" => build_cache_defaults(),
         "targets" if path.len() == 2 => target_defaults(value["kind"].as_str().unwrap_or("podman")),
         "targets" if key == "workspace_storage" => {
             if value["kind"] == "host-helper" {
