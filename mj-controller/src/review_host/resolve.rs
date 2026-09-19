@@ -7,6 +7,13 @@ impl HostState {
         session_id: &str,
         resolution: Resolution,
     ) -> Result<(), String> {
+        if resolution == Resolution::Cancelled
+            && let Some(flag) = self.preparation_cancellation.get(session_id)
+        {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            release_prompts(session_id);
+            return Ok(());
+        }
         let (requests, pending_state) = {
             let Some(slot) = self.reviews.get_mut(session_id) else {
                 return Err("no review is open for that session".to_owned());

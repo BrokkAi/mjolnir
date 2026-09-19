@@ -1,12 +1,7 @@
 use super::*;
 use crate::chat::test_support::{drawn_transcript, key, snapshot};
 use crate::chat::{ChatAction, ChatState};
-use agent_client_protocol::schema::v1::{
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-    SessionConfigSelectOptions,
-};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use mj_core::second_opinion::{HARNESS_DEFAULT_VALUE, ReviewerDefaults, ReviewerProfileChoice};
 use mj_core::transcript::ChatRole;
 
 fn plan_review() -> ElicitationRequest {
@@ -24,38 +19,9 @@ fn captured() -> CapturedProposal {
     CapturedProposal { request, proposal }
 }
 
-fn profiles() -> Vec<ReviewerProfileChoice> {
-    vec![
-        ReviewerProfileChoice {
-            id: "codex".into(),
-            harness: "codex".into(),
-        },
-        ReviewerProfileChoice {
-            id: "claude".into(),
-            harness: "claude".into(),
-        },
-    ]
-}
-
-fn config_option(id: &str, category: SessionConfigOptionCategory) -> SessionConfigOption {
-    SessionConfigOption::select(
-        id.to_owned(),
-        id.to_owned(),
-        id.to_owned(),
-        SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
-            id.to_owned(),
-            id.to_owned(),
-        )]),
-    )
-    .category(category)
-}
-
 fn chat_in_setup() -> ChatState {
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.open_second_opinion(
-        captured(),
-        ReviewerSetup::new("workspace-1", profiles(), ReviewerDefaults::default()),
-    );
+    chat.open_second_opinion(captured());
     chat
 }
 
@@ -85,7 +51,6 @@ fn answer_plan_review(steps: usize) -> ChatAction {
 #[test]
 fn cancelling_reviewer_setup_restores_the_unanswered_plan() {
     let mut chat = chat_in_setup();
-    press(&mut chat, KeyCode::Enter);
     press(&mut chat, KeyCode::Esc);
     assert!(!chat.second_opinion_active());
     assert_eq!(
@@ -156,110 +121,7 @@ fn every_dialect_offers_the_second_opinion() {
 }
 
 #[test]
-fn the_waterfall_asks_the_session_to_probe_the_chosen_profile() {
-    let mut chat = chat_in_setup();
-    assert!(chat.second_opinion_active());
-
-    chat.handle_key(key(KeyCode::Down));
-    let action = press(&mut chat, KeyCode::Enter);
-    let ChatAction::SecondOpinion(SecondOpinionIntent::Setup(requests)) = action else {
-        panic!("confirming a profile probes it: {action:?}");
-    };
-    assert_eq!(
-        requests,
-        vec![SetupRequest::Probe {
-            generation: 1,
-            profile_id: "claude".into(),
-        }]
-    );
-}
-
-#[test]
-fn immediate_default_model_advance_focuses_effort_options() {
-    let mut chat = chat_in_setup();
-    let _ = press(&mut chat, KeyCode::Enter);
-    if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
-        assert!(setup.probe_succeeded(1, &[]).is_none());
-    } else {
-        panic!("the reviewer setup remains open while discovery completes");
-    }
-
-    let _ = press(&mut chat, KeyCode::Tab);
-    assert_eq!(press(&mut chat, KeyCode::Enter), ChatAction::None);
-    let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
-        panic!("the reviewer setup remains open at the effort step");
-    };
-    assert_eq!(setup.stage(), SetupStage::Effort);
-    assert_eq!(form.focused(), Some(SetupControl::Options));
-}
-
-#[test]
-fn backing_to_profile_focuses_profile_options() {
-    let mut chat = chat_in_setup();
-    let _ = press(&mut chat, KeyCode::Enter);
-    if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
-        assert!(setup.probe_succeeded(1, &[]).is_none());
-    } else {
-        panic!("the reviewer setup remains open while discovery completes");
-    }
-
-    let _ = press(&mut chat, KeyCode::Tab);
-    let _ = press(&mut chat, KeyCode::Tab);
-    let _ = press(&mut chat, KeyCode::Enter);
-
-    let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
-        panic!("backing up keeps the reviewer setup open");
-    };
-    assert_eq!(setup.stage(), SetupStage::Profile);
-    assert_eq!(form.focused(), Some(SetupControl::Options));
-}
-
-#[test]
-fn backing_to_model_focuses_model_options() {
-    let mut chat = chat_in_setup();
-    let _ = press(&mut chat, KeyCode::Enter);
-    if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
-        assert!(
-            setup
-                .probe_succeeded(
-                    1,
-                    &[config_option("model", SessionConfigOptionCategory::Model)]
-                )
-                .is_none()
-        );
-    } else {
-        panic!("the reviewer setup remains open while discovery completes");
-    }
-    let _ = press(&mut chat, KeyCode::Enter);
-    if let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion_mut() {
-        assert!(
-            setup
-                .model_applied(
-                    1,
-                    &[
-                        config_option("model", SessionConfigOptionCategory::Model),
-                        config_option("effort", SessionConfigOptionCategory::ThoughtLevel,),
-                    ]
-                )
-                .is_none()
-        );
-    } else {
-        panic!("the reviewer setup remains open while model configuration completes");
-    }
-
-    let _ = press(&mut chat, KeyCode::Tab);
-    let _ = press(&mut chat, KeyCode::Tab);
-    let _ = press(&mut chat, KeyCode::Enter);
-
-    let Some(SecondOpinion::Setup { setup, form, .. }) = chat.second_opinion() else {
-        panic!("backing up keeps the reviewer setup open");
-    };
-    assert_eq!(setup.stage(), SetupStage::Model);
-    assert_eq!(form.focused(), Some(SetupControl::Options));
-}
-
-#[test]
-fn cancelling_the_waterfall_leaves_the_captured_plan_alone() {
+fn cancelling_preparation_leaves_the_captured_plan_alone() {
     let mut chat = chat_in_setup();
     let action = press(&mut chat, KeyCode::Esc);
 
@@ -320,10 +182,7 @@ fn the_split_cycles_its_actions_and_gates_transfer() {
     let captured = captured();
     let (workflow, _) =
         ReviewWorkflow::start(captured.id(), captured.proposal.clone(), "context-1");
-    chat.open_second_opinion(
-        captured,
-        ReviewerSetup::new("workspace-1", profiles(), ReviewerDefaults::default()),
-    );
+    chat.open_second_opinion(captured);
     chat.second_opinion_mut()
         .expect("the view is open")
         .begin_review(workflow, "waiting", 0);
@@ -354,10 +213,7 @@ fn the_split_cycles_its_actions_and_gates_transfer() {
 fn cancelling_the_split_asks_for_the_captured_decision_back() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let (workflow, _) = ReviewWorkflow::start("plan-review-1", "the plan", "context-1");
-    chat.open_second_opinion(
-        captured(),
-        ReviewerSetup::new("workspace-1", profiles(), ReviewerDefaults::default()),
-    );
+    chat.open_second_opinion(captured());
     chat.second_opinion_mut()
         .expect("the view is open")
         .begin_review(workflow, "waiting", 0);
@@ -449,10 +305,7 @@ fn drawn_split() -> (ChatState, ratatui::layout::Rect) {
         ReviewWorkflow::start(captured.id(), captured.proposal.clone(), "context-1");
     workflow.primary_context_completed("context-1", "context", "review-1");
     workflow.reviewer_turn_completed("review-1", "the plan misses error handling");
-    chat.open_second_opinion(
-        captured,
-        ReviewerSetup::new("workspace-1", profiles(), ReviewerDefaults::default()),
-    );
+    chat.open_second_opinion(captured);
     chat.second_opinion_mut()
         .expect("the view is open")
         .begin_review(workflow, "ready", 0);
@@ -669,32 +522,6 @@ fn an_empty_reviewer_has_no_answer_to_transfer() {
 }
 
 #[test]
-fn a_harness_default_selection_is_stored_under_its_sentinel() {
-    let selection = mj_core::second_opinion::ReviewerSelection {
-        profile_id: "codex".into(),
-        model: None,
-        effort: Some("high".into()),
-    };
-    assert_eq!(
-        selection.stored_values(),
-        ("codex", HARNESS_DEFAULT_VALUE, "high")
-    );
-
-    let mut defaults = ReviewerDefaults::default();
-    let (profile, model, effort) = selection.stored_values();
-    defaults.restore("workspace-1", profile, model, effort);
-    assert_eq!(defaults.profile("workspace-1"), Some("codex"));
-    assert_eq!(
-        defaults.model("workspace-1", "codex"),
-        Some(HARNESS_DEFAULT_VALUE)
-    );
-    assert_eq!(
-        defaults.effort("workspace-1", "codex", HARNESS_DEFAULT_VALUE),
-        Some("high")
-    );
-}
-
-#[test]
 fn a_review_ignores_a_context_answer_that_predates_its_request() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(ChatEntry::plain(
@@ -711,4 +538,34 @@ fn a_review_ignores_a_context_answer_that_predates_its_request() {
     );
 
     let _ = KeyModifiers::NONE;
+}
+
+#[test]
+fn preparation_explains_shared_settings_and_retries_without_a_selector() {
+    let mut chat = chat_in_setup();
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("Settings"));
+    assert!(!screen.contains("Choose a reviewer"));
+    chat.second_opinion_mut()
+        .unwrap()
+        .report_failure("No usable Auto reviewer");
+    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
+    assert!(screen.contains("No usable Auto reviewer"));
+    assert!(screen.contains("Retry"));
+    assert_eq!(
+        press(&mut chat, KeyCode::Char('r')),
+        ChatAction::SecondOpinion(SecondOpinionIntent::Retry)
+    );
+    let Some(SecondOpinion::Setup { setup, .. }) = chat.second_opinion() else {
+        panic!("still preparing");
+    };
+    assert!(setup.failure.is_none());
+    assert!(matches!(
+        press(&mut chat, KeyCode::Esc),
+        ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
+    ));
+    assert_eq!(
+        chat.elicitation.as_ref().unwrap().request(),
+        &captured().request
+    );
 }

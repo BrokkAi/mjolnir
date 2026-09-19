@@ -275,16 +275,30 @@ impl ReviewSettingsDialog {
                 "Profile",
                 self.profiles
                     .iter()
-                    .map(|value| {
-                        value
-                            .clone()
-                            .unwrap_or_else(|| "No reviewer profile".into())
-                    })
+                    .map(|value| value.clone().unwrap_or_else(|| "Auto".into()))
                     .collect(),
                 self.profile_index(),
             ),
-            (Model, "Model", models, model),
-            (Effort, "Effort", efforts, effort),
+            (
+                Model,
+                "Model",
+                if self.review.profile.is_none() {
+                    vec!["Auto policy".into()]
+                } else {
+                    models
+                },
+                model,
+            ),
+            (
+                Effort,
+                "Effort",
+                if self.review.profile.is_none() {
+                    vec!["Auto policy".into()]
+                } else {
+                    efforts
+                },
+                effort,
+            ),
         ]
     }
 
@@ -301,7 +315,7 @@ impl ReviewSettingsDialog {
                     selected: self.combo.selection(id, selected),
                     expanded: self.combo.is_open(id),
                 },
-                !self.saving,
+                !self.saving && (self.review.profile.is_some() || !matches!(id, Model | Effort)),
             );
         }
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
@@ -322,7 +336,7 @@ impl ReviewSettingsDialog {
             return true;
         }
         let Some(profile) = self.review.profile.as_deref() else {
-            return false;
+            return self.review.model.is_none() && self.review.effort.is_none();
         };
         if !self
             .profiles
@@ -621,6 +635,8 @@ impl ReviewSettingsDialog {
                     DashboardAction::None
                 } else {
                     self.review.profile = profile;
+                    self.review.model = None;
+                    self.review.effort = None;
                     self.start_discovery(dashboard, ReviewSettingsDiscoveryKind::Profile)
                 }
             }
@@ -820,7 +836,7 @@ pub(crate) fn render_review_settings(
     } else if let Some(error) = &dialog.discovery_error {
         format!("Choices unavailable: {error}")
     } else if dialog.review.profile.is_none() {
-        "Choose a reviewer profile".to_owned()
+        "Auto resolves a reviewer when review starts".to_owned()
     } else {
         "Choices not loaded".to_owned()
     };
@@ -856,10 +872,17 @@ pub(crate) fn render_review_settings(
             Style::default().fg(theme::palette().warning),
         ));
     }
-    if dialog.review.profile.is_none() && dialog.review.enabled {
-        notes.push(Line::raw(
-            "Choose a profile before enabling automatic review.",
-        ));
+    if dialog.review.profile.is_none() {
+        for line in [
+            "Auto prefers another provider, then another profile, then the primary.",
+            "Healthy quota before reserve/unknown; exhausted profiles are skipped.",
+            "Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.",
+            "Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.",
+            "Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.",
+            "These settings also choose the plan second-opinion reviewer.",
+        ] {
+            notes.push(Line::raw(line));
+        }
     } else if dialog.review.enabled {
         if dialog.model_choices_discovered
             && dialog.review.model.as_deref().is_some_and(|model| {
@@ -969,7 +992,7 @@ pub(crate) fn render_review_settings(
             &options,
             selected,
             false,
-            !dialog.saving,
+            !dialog.saving && (dialog.review.profile.is_some() || !matches!(id, Model | Effort)),
             " values · ↑/↓ select · Tab/Enter accept ",
             PopupSide::Below,
             &mut form,
@@ -1036,7 +1059,7 @@ pub(crate) fn render_review_settings(
             &options,
             selected,
             true,
-            !dialog.saving,
+            !dialog.saving && (dialog.review.profile.is_some() || !matches!(id, Model | Effort)),
             " values · ↑/↓ select · Tab/Enter accept ",
             PopupSide::Below,
             &mut form,

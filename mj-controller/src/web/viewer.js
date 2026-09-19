@@ -3231,6 +3231,10 @@ async function restoreRoute() {
 }
 
 function renderQueue(session) {
+  if (typeof reconcileSubmissions === 'function') {
+    reconcileSubmissions(session.id, [...(session.queued_prompts || []), ...(session.active_user_shells || [])].map(item => item.id));
+    renderPendingSubmissions();
+  }
   const backgroundTaskContainer =
     typeof backgroundTasks === 'undefined' ? null : backgroundTasks;
   const pending = typeof pendingActions === 'undefined' ? new Set() : pendingActions;
@@ -3829,7 +3833,9 @@ function composerText() {
   append(promptText);
   return text.replace(/\r\n?/g, '\n');
 }
+let composerGeneration = 0;
 function setComposerText(text) {
+  composerGeneration += 1;
   promptText.textContent = text;
 }
 function placeComposerCaretAtEnd() {
@@ -4864,15 +4870,15 @@ async function runLocalCommand(text) {
         return true;
       }
       const active = name === 'plan' ? !session.plan_mode_active : false;
-      await sendAction({ action: 'set-plan-mode', session_id: currentSession, active });
-      // A trailing instruction is a prompt to send once the mode has changed.
       if (argument) {
-        await sendAction({
-          action: 'prompt',
-          session_id: currentSession,
-          text: argument,
-          images: [],
-        });
+        const sessionId = currentSession;
+        setComposerText('');
+        saveDraft();
+        await sendSubmission({ action: 'prompt', session_id: sessionId, text: argument, images: [] }, [], async () => {
+          await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'set-plan-mode', session_id: sessionId, active }) });
+        }, text);
+      } else {
+        await sendAction({ action: 'set-plan-mode', session_id: currentSession, active });
       }
       return true;
     }
@@ -4887,20 +4893,102 @@ async function runLocalCommand(text) {
 async function sendAction(body) {
   const error = document.querySelector('#conversation-error');
   const sessionId = body.session_id;
+  const submittedGeneration = composerGeneration;
   try {
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
     // Do not let an action that completed after navigation clear the next
     // conversation's draft or error state.
-    if (!sessionId || currentSession === sessionId) {
+    if ((!sessionId || currentSession === sessionId) && composerGeneration === submittedGeneration) {
       setComposerText('');
       error.textContent = '';
     }
     await refresh();
     return true;
   } catch (err) {
-    if (!sessionId || currentSession === sessionId) error.textContent = err.message;
+    if ((!sessionId || currentSession === sessionId) && composerGeneration === submittedGeneration) error.textContent = err.message;
     return false;
   }
+}
+
+// Pending content belongs to its session, even while another conversation is open.
+const pendingSubmissions = new Map();
+
+function reconcileSubmissions(sessionId, ids) {
+  for (const id of ids) {
+    const pending = pendingSubmissions.get(id);
+    if (pending?.sessionId !== sessionId) continue;
+    pending.represented = true;
+    if (pending.finished) pendingSubmissions.delete(id);
+  }
+}
+
+function renderPendingSubmissions() {
+  const container = document.querySelector('#pending-submissions');
+  if (!container) return;
+  const wasAtTail = atTail();
+  container.replaceChildren();
+  for (const pending of pendingSubmissions.values()) {
+    if (pending.sessionId !== currentSession || pending.represented) continue;
+    const row = el('article', 'entry tone-user');
+    row.dataset.commandId = pending.id;
+    row.append(el('strong', 'entry-label', 'You'));
+    const body = el('div', 'entry-body');
+    body.append(renderMarkdown(pending.text));
+    for (const image of pending.images) {
+      body.append(el('span', 'attachment-name', image.name || '[Image]'));
+    }
+    row.append(body, el('span', 'entry-time', pending.status));
+    if (pending.failed) {
+      const restore = button('Put back in composer', 'secondary', {});
+      restore.addEventListener('click', () => {
+        if (composerText() || promptImages.length) {
+          document.querySelector('#conversation-error').textContent = 'Empty the composer before restoring this submission.';
+          return;
+        }
+        setComposerText(pending.recoveryText ?? pending.text);
+        promptImages = pending.images;
+        pendingSubmissions.delete(pending.id);
+        renderPendingSubmissions();
+        renderAttachments();
+        saveDraft();
+      });
+      row.append(restore);
+    }
+    container.append(row);
+  }
+  if (wasAtTail) scrollToTail();
+}
+
+async function sendSubmission(body, images = [], prerequisite = null, recoveryText = null) {
+  const entropy = crypto.getRandomValues(new Uint8Array(16));
+  const id = `web-${body.action}-${Array.from(entropy, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  body.command_id = id;
+  const pending = {
+    id, sessionId: body.session_id, text: body.action === 'run-shell' ? `!${body.command}` : body.text,
+    images, recoveryText, status: prerequisite ? 'Changing mode…' : 'Sending…', represented: false, finished: false,
+  };
+  pendingSubmissions.set(id, pending);
+  renderPendingSubmissions();
+  let submissionStarted = false;
+  try {
+    if (prerequisite) await prerequisite();
+    pending.status = 'Sending…';
+    renderPendingSubmissions();
+    submissionStarted = true;
+    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    pending.finished = true;
+    pending.status = 'Queued';
+    if (pending.represented) pendingSubmissions.delete(id);
+  } catch (err) {
+    pending.finished = true;
+    if (pending.represented) pendingSubmissions.delete(id);
+    else {
+      pending.failed = !submissionStarted || Boolean(err.status && err.status < 500);
+      pending.status = `${pending.failed ? 'Not sent' : 'Delivery unconfirmed'}: ${err.message}`;
+    }
+  }
+  renderPendingSubmissions();
+  await refresh();
 }
 
 /// Guard against sending twice.
@@ -4921,6 +5009,7 @@ async function submitPrompt() {
     return;
   }
 
+  let ownsSubmitGuard = true;
   promptInFlight = true;
   sendButton.disabled = true;
   try {
@@ -4949,9 +5038,6 @@ async function submitPrompt() {
       error.textContent = 'Prompt attachments exceed the 32 MiB request limit.';
       return;
     }
-    await request('/api/actions', { method: 'POST', body: payload });
-    // The composer is cleared only once the daemon has taken the prompt, so a
-    // refusal leaves the text where it can be edited and sent again.
     setComposerText('');
     clearPromptImages();
     updateCommandPalette();
@@ -4959,11 +5045,14 @@ async function submitPrompt() {
     // back a prompt that has already run.
     saveDraft();
     error.textContent = '';
-    await refresh();
+    promptInFlight = false;
+    ownsSubmitGuard = false;
+    syncSendButtonDisabled();
+    await sendSubmission(body, images.map(image => ({ ...image, preview_url: null, cancelled: false })));
   } catch (err) {
     error.textContent = err.message;
   } finally {
-    promptInFlight = false;
+    if (ownsSubmitGuard) promptInFlight = false;
     syncSendButtonDisabled();
     renderAttachments();
   }
@@ -5078,6 +5167,7 @@ function unansweredPromptFor(entry, lastUserText) {
 }
 
 function renderEntries(entries, replace) {
+  if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
   if (replace) {
     feed.replaceChildren();
@@ -5104,6 +5194,7 @@ function renderEntries(entries, replace) {
   }
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
+  if (typeof renderPendingSubmissions === 'function') renderPendingSubmissions();
 }
 
 /// A counter that retires an in-flight request when the conversation changes.
@@ -5729,6 +5820,7 @@ voiceInput.onclick = () => {
 };
 voiceCancel.onclick = () => cancelVoiceInput();
 promptText.addEventListener('input', () => {
+  composerGeneration += 1;
   composerInputChanged();
   if (historyOpen) {
     searchHistory(composerText());

@@ -877,6 +877,27 @@ impl DurableRelay {
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
+        // Report confirmed changes in the conversation on every surface.
+        // The command identity makes retries of this append project only once.
+        let notice = self
+            .snapshot
+            .dispatches
+            .get(command_id)
+            .and_then(|dispatch| match (&dispatch.command, &outcome) {
+                (RelayCommand::SetConfig { key, value }, RelayCommandOutcome::Configured) => {
+                    Some(format!("{key} set to {value}"))
+                }
+                (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
+                    Some(format!("Session mode: {mode_id}"))
+                }
+                (RelayCommand::GoalControl { action }, RelayCommandOutcome::GoalControlled) => {
+                    Some(format!("Goal: {}", action.as_str()))
+                }
+                _ => None,
+            });
+        if let Some(message) = notice {
+            self.append_relay_event(Some(command_id), RelayObservation::Notice { message })?;
+        }
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {

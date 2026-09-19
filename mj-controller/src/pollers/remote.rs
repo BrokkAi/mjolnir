@@ -105,7 +105,10 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
                     .await
             }
             .await
-            .map_err(|error| format!("{error:#}"));
+            .map_err(|error| mj_client::session::SubmitFailure {
+                unconfirmed: true,
+                message: format!("{error:#}"),
+            });
             let _ = reply.send(result);
         }
         RemoteSessionRequest::Sync { session_id, reply } => {

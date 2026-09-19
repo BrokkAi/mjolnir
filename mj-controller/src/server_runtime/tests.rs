@@ -854,6 +854,7 @@ fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() 
 
 fn prompt_action() -> ControllerAction {
     ControllerAction::Prompt {
+        command_id: None,
         session_id: "session-1".into(),
         text: "ship it".into(),
         images: Vec::new(),
@@ -1481,4 +1482,26 @@ async fn forgotten_projection_cannot_repopulate_after_a_same_cursor_resume() {
         .expect("projection result channel closed");
     assert!(dispatcher.finish(current, true).is_some());
     assert!(dispatcher.in_flight.is_empty());
+}
+
+#[test]
+fn correlated_prompt_reply_waits_for_relay_submission_without_delaying_legacy_admission() {
+    let mut replies = PendingActionReplies::default();
+    let mut action = prompt_action();
+    let ControllerAction::Prompt { command_id, .. } = &mut action else {
+        unreachable!()
+    };
+    *command_id = Some("web-prompt-example".into());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    replies.accept(7, &action, tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    replies.resolve(7, ActionOutcome::accepted());
+    assert_eq!(rx.try_recv().unwrap(), ActionOutcome::accepted());
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    replies.accept(8, &prompt_action(), tx);
+    assert_eq!(rx.try_recv().unwrap(), ActionOutcome::accepted());
 }

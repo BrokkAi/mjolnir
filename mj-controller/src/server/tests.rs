@@ -2623,6 +2623,7 @@ async fn image_prompt_reaches_the_controller_with_its_images() {
     let cookie = login_cookie(&app).await;
     let image = sample_valid_image();
     let body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: None,
         session_id: "session-1".into(),
         text: String::new(),
         images: vec![image.clone(), image.clone()],
@@ -2635,6 +2636,7 @@ async fn image_prompt_reaches_the_controller_with_its_images() {
         session_id,
         text,
         images,
+        ..
     } = action
     else {
         panic!("expected a prompt action")
@@ -2688,6 +2690,7 @@ async fn multi_image_prompts_are_accepted_over_the_general_body_limit() {
     let cookie = login_cookie(&app).await;
     let image = sample_valid_image();
     let mut body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: None,
         session_id: "session-1".into(),
         text: "look at these".into(),
         images: vec![image.clone(), image],
@@ -2708,6 +2711,7 @@ async fn a_body_over_the_prompt_limit_is_still_refused() {
     let cookie = login_cookie(&app).await;
     let image = sample_image(MAX_PROMPT_BODY_BYTES);
     let body = serde_json::to_string(&ControllerAction::Prompt {
+        command_id: None,
         session_id: "session-1".into(),
         text: String::new(),
         images: vec![image],
@@ -2730,6 +2734,7 @@ async fn malformed_image_payloads_never_reach_the_controller() {
         let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
         let cookie = login_cookie(&app).await;
         let body = serde_json::to_string(&ControllerAction::Prompt {
+            command_id: None,
             session_id: "session-1".into(),
             text: String::new(),
             images: vec![ViewerPromptImage {
@@ -2756,6 +2761,7 @@ fn image_prompts_need_text_or_an_image_and_an_agent_that_takes_them() {
     let (config, state) = sample_config_state();
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let prompt = |text: &str, images: Vec<ViewerPromptImage>| ControllerAction::Prompt {
+        command_id: None,
         session_id: "session-1".into(),
         text: text.into(),
         images,
@@ -2873,6 +2879,7 @@ async fn valid_action_is_typed_and_forwarded() {
     assert_eq!(
         action.action,
         ControllerAction::Prompt {
+            command_id: None,
             session_id: "session-1".into(),
             text: "ship it".into(),
             images: Vec::new(),
@@ -2990,6 +2997,7 @@ async fn shell_action_is_typed_and_forwarded() {
     assert_eq!(
         action.action,
         ControllerAction::RunShell {
+            command_id: None,
             session_id: "session-1".into(),
             command: "cargo test".into(),
         }
@@ -3008,6 +3016,7 @@ fn shell_action_validation_reserves_bang_prompts_and_checks_cancellation_ids() {
     assert!(
         validate_action(
             &ControllerAction::Prompt {
+                command_id: None,
                 session_id: "session-1".into(),
                 text: "!cargo test".into(),
                 images: Vec::new(),
@@ -3019,6 +3028,7 @@ fn shell_action_validation_reserves_bang_prompts_and_checks_cancellation_ids() {
     assert!(
         validate_action(
             &ControllerAction::RunShell {
+                command_id: None,
                 session_id: "session-1".into(),
                 command: "cargo test".into(),
             },
@@ -3519,6 +3529,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         reset: false,
         entries: vec![
             BrowserTranscriptEntry {
+                command_id: None,
                 id: 3,
                 updated_seq: 3,
                 role: "user",
@@ -3531,6 +3542,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 diffstats: Vec::new(),
             },
             BrowserTranscriptEntry {
+                command_id: None,
                 id: 7,
                 updated_seq: 8,
                 role: "agent",
@@ -3590,6 +3602,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         window_start_seq: 1,
         reset: false,
         entries: vec![BrowserTranscriptEntry {
+            command_id: None,
             id: 1,
             updated_seq: 1,
             role: "agent",

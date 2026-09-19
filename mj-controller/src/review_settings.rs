@@ -104,7 +104,7 @@ pub async fn discover_review_settings(
     .await
 }
 
-async fn discover_selected_worker(
+pub(crate) async fn discover_selected_worker(
     controller: Arc<Controller>,
     session_id: String,
     generation: u64,

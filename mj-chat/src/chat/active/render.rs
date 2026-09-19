@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::rendering::sanitize_terminal_text;
 
 /// Draws a chat across a whole frame, the way the combined surface lays it out
 /// when nothing else is competing for the rows.
@@ -298,7 +299,7 @@ pub(crate) fn render_in(
         form,
     }) = chat.second_opinion_mut()
     {
-        // The waterfall owns this pane's interaction, so the chat behind it
+        // The preparation owns this pane's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
         let area = crate::modal::centered_modal_rect_fixed(frame, 60, 16, inner);
         let body = render_setup(
@@ -458,14 +459,6 @@ pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     }
 }
 
-/// A remembered configuration value, or `None` when it stands for the
-/// harness's own default and nothing should be applied.
-pub(crate) fn remembered_value(stored: Option<&str>) -> Option<String> {
-    stored
-        .filter(|value| *value != mj_core::second_opinion::HARNESS_DEFAULT_VALUE)
-        .map(str::to_owned)
-}
-
 /// Draws the composer band: the title, borders, queued-prompt previews,
 /// input, and cursor. The full chat render calls this for its ordinary
 /// prompt, and hosts call it through
@@ -481,6 +474,39 @@ pub(crate) fn render_composer_band(
     prompt_focused: bool,
     note: Option<Line<'static>>,
 ) {
+    let prompt_area = if let Some(feedback) = chat
+        .feedback
+        .current()
+        .or_else(|| {
+            (!chat.operation_feedback.is_empty()).then(|| {
+                chat.operation_feedback
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
+        })
+        .or_else(|| chat.connection_feedback.clone())
+        .filter(|_| prompt_area.height > 3)
+    {
+        let feedback_area = Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(truncate_line_to_width(
+                Line::from(sanitize_terminal_text(&feedback)),
+                usize::from(prompt_area.width),
+            ))
+            .style(theme::muted()),
+            feedback_area,
+        );
+        Rect::new(
+            prompt_area.x,
+            prompt_area.y + 1,
+            prompt_area.width,
+            prompt_area.height - 1,
+        )
+    } else {
+        prompt_area
+    };
     let prompt_width = prompt_content_width(prompt_area.width);
     let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
     chat.config_chip_areas = config_chips;
@@ -749,7 +775,7 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     // Auto-review changes what happens when this turn ends, so the composer
     // says it is armed rather than surprising the user with a pane.
     let review = chat.review_config();
-    if review.enabled && review.reviewer_profile().is_some() {
+    if review.enabled {
         parts.push(format!("review {}", review.tier.label()));
     }
     parts

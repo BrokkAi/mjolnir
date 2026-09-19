@@ -233,6 +233,7 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
         model: Some("sonnet".into()),
         effort: Some("high".into()),
+        fast_mode: None,
         generation: 2,
         mcp_servers: Vec::new(),
     };
@@ -1837,7 +1838,7 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
 #[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
-) -> oneshot::Receiver<std::result::Result<u64, String>> {
+) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {
     let (reply, mut response) = oneshot::channel();
     actor
         .commands
@@ -1976,8 +1977,8 @@ async fn retirement_rejects_prompts_deferred_during_lease() {
         .expect("actor answered the deferred prompt")
         .expect_err("a retiring actor must not deliver the prompt");
     assert!(
-        error.contains("session target is changing"),
-        "unexpected rejection: {error}"
+        error.message.contains("session target is changing"),
+        "unexpected rejection: {error:?}"
     );
 }
 

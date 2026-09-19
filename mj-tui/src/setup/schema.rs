@@ -257,7 +257,7 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
         }
         // Review needs a named reviewer profile; there is no fallback to a
         // first enabled profile (`ReviewConfig::reviewer_profile`).
-        ["review", "profile"] => "No reviewer; reviews cannot run".to_owned(),
+        ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
         ["review", "model" | "effort"] => match draft["review"]["profile"].as_str() {
             Some(profile) => format!("{profile}'s default"),
             None => "Not set".to_owned(),
@@ -541,7 +541,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => {
-            "Choose an agent profile for reviews. Model and effort can use the profile defaults."
+            "Shared by turn review and plan second opinion. Auto prefers another provider with quota; a named profile allows main model and effort overrides."
         }
         "sessionwiki" => {
             "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."

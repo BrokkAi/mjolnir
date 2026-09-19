@@ -295,7 +295,9 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
                 through_digest: mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned(),
             },
         ))),
-        ReviewerAction::Pause => Ok(ReviewerOutcome::Paused),
+        ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. } => {
+            Ok(ReviewerOutcome::Paused)
+        }
         ReviewerAction::Submit { .. } => Ok(ReviewerOutcome::Accepted { ordinal: 1 }),
         ReviewerAction::Start { .. } => Err("no harness in this test".to_owned()),
         ReviewerAction::RespondElicitation { .. } => Ok(ReviewerOutcome::ElicitationResolved),
@@ -454,6 +456,28 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(())
     }
 
+    fn resolve<'a>(
+        &'a self,
+        _handle: ManagedSessionHandle,
+        config: ReviewConfig,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<
+        'a,
+        Result<mj_core::review::settings::ResolvedReviewSettings, String>,
+    > {
+        Box::pin(async move {
+            Ok(mj_core::review::settings::ResolvedReviewSettings {
+                profile: config.profile.unwrap_or_else(|| "auto-reviewer".into()),
+                main: mj_core::review::settings::ReviewModelSettings {
+                    model: config.model,
+                    effort: config.effort,
+                    fast_mode: false,
+                },
+                ..Default::default()
+            })
+        })
+    }
+
     fn stage(
         &self,
         _session_id: &str,
@@ -475,6 +499,7 @@ impl ReviewEnvironment for FakeEnvironment {
             execution_policy: mj_core::config::ExecutionPolicy::ConfiguredApprovals,
             model: None,
             effort: None,
+            fast_mode: None,
             generation,
             mcp_servers: mcp_servers.to_vec(),
         })
@@ -525,7 +550,7 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
 }
 
 #[test]
-fn the_reviewer_profile_must_be_separate_from_the_primary_profile() {
+fn the_primary_profile_can_run_an_independent_reviewer() {
     let session = mj_core::state::SessionRecord {
         build_cache: None,
         container_workspace: None,
@@ -559,9 +584,8 @@ fn the_reviewer_profile_must_be_separate_from_the_primary_profile() {
         checkpoint: None,
     };
 
-    let refusal = validate_reviewer_assignment("session-1", Some(&session), "primary")
-        .expect_err("one harness profile cannot review its own output independently");
-    assert!(refusal.contains("primary profile"), "{refusal}");
+    validate_reviewer_assignment("session-1", Some(&session), "primary")
+        .expect("same-profile review uses a separate conversation");
     validate_reviewer_assignment("session-1", Some(&session), "reviewer")
         .expect("a separate reviewer profile is accepted");
 }
@@ -602,39 +626,21 @@ async fn finish_a_turn(manager: &FakeManager, host: &TurnReviewHost) {
     }
 }
 
-/// A turn finishing with no reviewer configured says so in the
-/// conversation -- once, not once a turn -- and reviews nothing.
 #[tokio::test]
-async fn an_unconfigured_reviewer_is_reported_once_per_session() {
-    let session = session_id("unreviewable");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
+async fn auto_preparation_is_visible_and_can_be_cancelled() {
+    let session = session_id("autoprepare");
+    let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment.clone());
-
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
     finish_a_turn(&manager, &host).await;
-    let request = manager.next().await;
-    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
-        panic!("the only thing an unreviewable turn does is say so");
-    };
-    let RelayCommand::RecordNotice { text } = command else {
-        panic!("the notice is a controller-authored conversation line");
-    };
-    assert!(
-        text.contains("[review] profile"),
-        "the notice names the key that fixes it: {text}"
-    );
-    let _ = reply.send(Ok(1));
-
-    // A second turn says nothing: one notice per session, not one a turn.
-    finish_a_turn(&manager, &host).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
-            .await
-            .is_err(),
-        "a second unreviewable turn is silent"
-    );
-    assert!(!host.refuses_prompt(session));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    assert!(host.view(&session).unwrap().status.contains("Preparing"));
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    assert!(!host.refuses_prompt(&session));
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    host.shutdown().await.unwrap();
 }
 
 /// A turn the harness starts on its own also runs and then goes idle.
@@ -661,11 +667,10 @@ async fn a_self_started_turn_does_not_arm_an_automatic_review() {
         "a turn the harness started on its own arms nothing"
     );
 
-    // The very next prompt-driven turn still arms one, which for an
-    // unconfigured reviewer is the notice that says so.
+    // The next prompt-driven turn prepares an Auto reviewer.
     finish_a_turn(&manager, &host).await;
     assert!(
-        matches!(manager.next().await, RemoteSessionRequest::Submit { .. }),
+        matches!(manager.next().await, RemoteSessionRequest::Reviewer { .. }),
         "a prompt-driven turn still reaches the automatic edge"
     );
     host.shutdown().await.expect("shutdown the host");
@@ -798,9 +803,13 @@ async fn preparation_rechecks_the_live_actor_after_installing_the_prompt_hold() 
     assert!(host.view(session).is_none());
     assert_eq!(environment.state().active, None);
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            manager
+                .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        )
+        .await
+        .is_err(),
         "stale preparation never starts capture"
     );
     host.shutdown().await.expect("shutdown the host");
@@ -879,7 +888,10 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
         .expect("the host loop remains responsive while persistence blocks")
         .expect_err("the same review is already starting");
     assert!(refusal.0.contains("already starting"), "{refusal}");
-    assert!(host.view(session).is_none(), "open is not exposed early");
+    assert!(
+        host.view(session).is_some(),
+        "preparation is visible while persistence runs"
+    );
 
     open_gate.release();
     let (_, _, _capture_reply) = manager
@@ -995,7 +1007,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         "an unknown delivery cannot be undone"
     );
     reply
-        .send(Err("primary temporarily unavailable".to_owned()))
+        .send(Err("primary temporarily unavailable".into()))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while !host.view(&session).is_some_and(|view| {

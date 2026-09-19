@@ -288,7 +288,7 @@ test('plan command discovers, toggles, sends a request, and retries a rejected a
   await waitForActionCount(state, 3);
   expect(state.actions.slice(1)).toEqual([
     { action: 'set-plan-mode', session_id: SESSION_ID, active: false },
-    { action: 'prompt', session_id: SESSION_ID, text: 'inspect deployment safety', images: [] },
+    { action: 'prompt', command_id: expect.stringMatching(/^web-prompt-/), session_id: SESSION_ID, text: 'inspect deployment safety', images: [] },
   ]);
   await expect(prompt).toHaveText('');
 
@@ -595,4 +595,95 @@ test('custom multi-select answers bypass owner constraints until cleared', async
     elicitation_id: 'custom-regions-question',
     response: { action: 'accept', content: { regions_custom: 'Worldwide' } },
   });
+});
+
+test('submitted content appears while the request is held and a newer draft survives acceptance', async ({ page }) => {
+  await mockViewerApi(page);
+  let held;
+  await page.route('**/api/actions', route => { held = route; });
+  const prompt = page.locator('#prompt-text');
+  await prompt.fill('show this immediately');
+  await page.keyboard.press('Enter');
+  const pending = page.locator('#pending-submissions');
+  await expect(pending).toContainText('show this immediately');
+  await expect(pending).toContainText('Sending');
+  await expect(prompt).toHaveText('');
+  await prompt.fill('a newer draft');
+  await expect.poll(() => Boolean(held)).toBe(true);
+  const body = held.request().postDataJSON();
+  expect(body.command_id).toMatch(/^web-prompt-/);
+  await held.fulfill({ status: 202, body: '' });
+  await expect(pending).toContainText('Queued');
+  await expect(prompt).toHaveText('a newer draft');
+  await page.route(`**/api/conversations/${SESSION_ID}*`, route => {
+    if (new URL(route.request().url()).pathname.endsWith('/read')) return route.fallback();
+    const projected = conversation();
+    projected.reset = true;
+    projected.latest_seq = 2;
+    projected.entries.push({ id: 2, updated_seq: 2, command_id: body.command_id, role: 'user', tone: 'user', label: 'You', glyph: '›', lines: [body.text] });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(projected) });
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(pending.locator('article')).toHaveCount(0);
+  await expect(page.locator('#conversation-feed')).toContainText('show this immediately');
+  await expect(page.locator('#conversation-feed [data-entry-id="2"]')).toHaveCount(1);
+  await expect(prompt).toHaveText('a newer draft');
+});
+
+test('projection before a lost acknowledgement reconciles only the matching identical prompt', async ({ page }) => {
+  const state = await mockViewerApi(page);
+  const held = [];
+  await page.route('**/api/actions', route => { held.push(route); });
+  const prompt = page.locator('#prompt-text');
+  for (let i = 0; i < 2; i += 1) {
+    await prompt.fill('same text');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => held.length).toBe(i + 1);
+  }
+  const first = held[0].request().postDataJSON();
+  const second = held[1].request().postDataJSON();
+  expect(first.command_id).not.toBe(second.command_id);
+  await expect(page.locator('#pending-submissions article')).toHaveCount(2);
+  state.snapshot.sessions[0].queued_prompts = [{ id: first.command_id, text: first.text }];
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(page.locator('#pending-submissions article')).toHaveCount(1);
+  await held[0].abort('connectionclosed');
+  await expect(page.locator('#pending-submissions')).not.toContainText('Delivery unconfirmed');
+  await held[1].fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'session refused the prompt' }) });
+  await expect(page.locator('#pending-submissions')).toContainText('Not sent: session refused the prompt');
+  await page.locator('#pending-submissions button').click();
+  await expect(prompt).toHaveText('same text');
+});
+
+test('a failed mode prerequisite leaves its follow-up unsent and recoverable', async ({ page }) => {
+  await mockViewerApi(page);
+  const actions = [];
+  await page.route('**/api/actions', route => {
+    actions.push(route.request().postDataJSON());
+    return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'mode change failed' }) });
+  });
+  const prompt = page.locator('#prompt-text');
+  await prompt.fill('/plan inspect deployment safety');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#pending-submissions')).toContainText('Not sent: mode change failed');
+  expect(actions.map(action => action.action)).toEqual(['set-plan-mode']);
+  await page.locator('#pending-submissions button').click();
+  await expect(prompt).toHaveText('/plan inspect deployment safety');
+});
+
+test('pending content stays with its session and does not alter drafts after navigation', async ({ page }) => {
+  await mockViewerApi(page);
+  let held;
+  await page.route('**/api/actions', route => { held = route; });
+  const prompt = page.locator('#prompt-text');
+  await prompt.fill('pending through navigation');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#pending-submissions')).toContainText('Sending');
+  await expect.poll(() => Boolean(held)).toBe(true);
+  await page.evaluate(() => { location.hash = '#workspace/workspace-1'; });
+  await held.abort('connectionclosed');
+  await page.locator('#sessions .session h3').click();
+  await expect(page.locator('#pending-submissions')).toContainText('pending through navigation');
+  await expect(page.locator('#pending-submissions')).toContainText('Delivery unconfirmed');
+  await expect(prompt).toHaveText('');
 });

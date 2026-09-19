@@ -3791,3 +3791,35 @@ fn finished_turn_queues_only_one_replied_classification() {
     assert_eq!(evidence.user_prompt_tail, "instructions");
     assert!(relay.pending_replied_verdict().is_none());
 }
+
+#[test]
+fn configuration_notice_is_recorded_only_after_confirmed_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    submit_relay(
+        &mut relay,
+        "change-model",
+        RelayCommand::SetConfig {
+            key: "model".into(),
+            value: "new-model".into(),
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    assert!(
+        !relay
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.observation, RelayObservation::Notice { .. }))
+    );
+    relay
+        .record_command_completed("change-model", RelayCommandOutcome::Configured)
+        .unwrap();
+    let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let events = reopened
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    assert_eq!(events.iter().filter(|event|
+        matches!(&event.observation, RelayObservation::Notice { message } if message == "model set to new-model")
+    ).count(), 1);
+}

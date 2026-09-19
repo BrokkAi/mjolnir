@@ -3,34 +3,58 @@ title: Turn review
 description: Configure an independent quick or extended review and resolve findings between agent turns.
 ---
 
-Turn review asks a separate harness profile to inspect the work completed since the previous review boundary. It is an opt-in second opinion: the reviewer reads the governing user intent, transcript, repository state, and changed code, then reports only material, actionable findings.
+Turn review starts a separate reviewer conversation to inspect the work completed since the previous review boundary. It is an opt-in second opinion: the reviewer reads the governing user intent, transcript, repository state, and changed code, then reports only material, actionable findings.
 
 The daemon owns review execution. A review started in the terminal continues if that terminal detaches, and the same review state is visible from the web viewer.
 
 ## Configure a reviewer
 
-Add a `[review]` table to `config.toml`:
+**Settings → Code Review** configures both turn review and the plan approval dialog's **Second opinion**. Choose **Auto** or a named [harness profile](/profiles/). A named profile may also be the primary session's profile: the reviewer always has its own conversation and private harness home.
+
+Auto is the default. In `config.toml`, omit `profile`, `model`, and `effort`:
 
 ```toml
 [review]
 enabled = true
 tier = "quick"
+```
+
+Auto first tries profiles from a different provider, then other profiles from the primary provider, then the primary profile itself. Within each group it ranks healthy quota before reserve quota before unknown quota, then uses provider order **Codex → Claude → DeepSeek → Kimi**. Remaining quota and profile ID break ties. It uses the same quota rules as utility inference: a known 0% window excludes a profile, 1–10% is reserve, above 10% is healthy, API billing is healthy, and missing or failed quota readings remain eligible as unknown.
+
+| Provider | Auto main reviewer | Specialist lanes, including manual review |
+| --- | --- | --- |
+| OpenAI Codex | Astra / medium | Luna / xhigh; fast mode when available |
+| Claude | Fable / medium | Sonnet / xhigh |
+| DeepSeek | Flash / max | Flash / high |
+| Kimi | Newest K-series / max | Main reviewer's model and effort |
+| Other review-capable providers | Manual selection only | Main reviewer's model and effort |
+
+Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles. Fast mode is optional; its rejection does not prevent review.
+
+The main-reviewer choice is shared by quick review, validation, supervision, intent analysis, and plan second opinion. Specialist lanes use the table's overrides even when you select the main reviewer manually.
+
+To choose manually:
+
+```toml
+[review]
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
 ```
 
-`profile` must name a configured [harness profile](/profiles/) that is different from the primary profile of the session being reviewed. This separation is enforced at runtime; Mjolnir will not let the same profile write and independently review a turn.
-
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Automatically review completed changed turns after the queue drains. |
-| `tier` | `"quick"` | `quick` or `extended`; see the comparison below. |
-| `profile` | none | Profile used for every reviewing role. Required for automatic and one-off review. |
-| `model` | profile default | Optional reviewer model override. |
-| `effort` | profile default | Optional reviewer reasoning-effort override. |
+| `tier` | `"quick"` | Turn review's `quick` or `extended` tier. |
+| `profile` | Auto | Omit for Auto or name an enabled review-capable profile. |
+| `model` | harness default for a named profile | Optional main-reviewer model override; unavailable in Auto. |
+| `effort` | harness default for a named profile | Optional main-reviewer effort override; unavailable in Auto. |
 
-You may leave `enabled = false` while retaining `profile`, `model`, and `effort`; this disables automatic review but keeps one-off `/review` available. Configuration is read when a review starts, so a later review uses your latest settings.
+With `enabled = false`, both `/review` and plan second opinion remain available. Each new review reads current settings; an already-open review keeps its selection. Reviewers do not appear in the main session navigation or Resume list. Ordinary sessions using the same profile remain visible.
+
+## Plan second opinion
+
+Choose **Second opinion** before approving a proposed plan. Mj starts the reviewer from the shared settings, without a separate profile/model/effort picker. It asks the planning agent for context and sends that context plus the captured plan to the reviewer. You can transfer feedback for a revised plan, implement the original plan, or cancel. Preparation supports cancellation and retry; failures leave the plan unapproved. Previously remembered workspace reviewer choices are no longer used.
 
 ## Quick and extended tiers
 
@@ -43,13 +67,13 @@ Both tiers apply the same qualification bar. A concern must have meaningful corr
 
 ## Automatic review
 
-With `enabled = true`, every completed prompt-driven turn arms review. Review runs between turns. If prompts are already queued, Mjolnir lets the queue drain and reviews the resulting batch rather than interleaving a reviewer with active work. The first step captures the repository delta; when nothing changed, the review resolves without launching a reviewer.
+With `enabled = true`, every completed prompt-driven turn arms review. Review runs between turns. If prompts are already queued, Mjolnir lets the queue drain and reviews the resulting batch rather than interleaving a reviewer with active work. Preparation resolves the reviewer settings and captures the repository delta; when nothing changed, review resolves without sending a review prompt.
 
 An open review holds new prompts for that session from preparation through a clean or findings verdict. This prevents more edits from racing ahead of work being inspected. A failed review releases the hold immediately, and other sessions remain independent throughout.
 
 ## Review on demand
 
-With a reviewer profile configured, enter this in Prompt after a turn completes:
+With an Auto-eligible or manually selected reviewer available, enter this in Prompt after a turn completes:
 
 ```text
 /review
@@ -77,8 +101,10 @@ Cancel is also available while review work is still running. It releases the pro
 
 ## Lifecycle behavior
 
+New eligible primary sessions capture a review baseline even when automatic review is off. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
+
 Stopping a session while a reviewer conversation is open preserves its result for reference, but that reviewer's native conversation cannot continue after the target is destroyed. A later review starts a new reviewer conversation.
 
 If Mjolnir restarts during a review, it clears the interrupted in-flight marker, releases the prompt hold, and leaves the reviewed boundary unchanged. The next review therefore covers the same changes instead of silently skipping them.
 
-Turn-review traffic is charged through the configured reviewer profile. A different profile ID may still share account-level limits with the primary profile, so check the Quota pane before selecting an extended review for a large turn. See [configuration](/configuration/#automatic-review-review) for schema details.
+Review traffic is charged through the selected reviewer profile. A different profile ID may still share account-level limits with the primary profile, so check the Quota pane before selecting an extended review for a large turn. See [configuration](/configuration/#automatic-review-review) for schema details.

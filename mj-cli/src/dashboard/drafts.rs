@@ -214,14 +214,6 @@ impl DashboardContext {
                         mj_chat::chat::ChatDaemonRequest::ClearReview { session_id } => {
                             daemon.clear_active_review(session_id).await
                         }
-                        mj_chat::chat::ChatDaemonRequest::RememberReviewerSelection {
-                            workspace_id,
-                            selection,
-                        } => {
-                            daemon
-                                .remember_reviewer_selection(workspace_id, selection)
-                                .await
-                        }
                         mj_chat::chat::ChatDaemonRequest::StartTurnReview { session_id } => {
                             daemon.start_turn_review(session_id).await
                         }

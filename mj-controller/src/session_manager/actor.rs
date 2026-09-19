@@ -330,7 +330,7 @@ pub(super) async fn run_session_actor(
                         });
                         if admission.is_some() && !admitted {
                             let _ = reply.send(Err(
-                                "review delivery admission is no longer valid".to_owned(),
+                                "review delivery admission is no longer valid".into(),
                             ));
                             continue;
                         }
@@ -344,7 +344,7 @@ pub(super) async fn run_session_actor(
                                 %command_id,
                                 "refusing a prompt while a turn review is unresolved"
                             );
-                            let _ = reply.send(Err(refusal.to_owned()));
+                            let _ = reply.send(Err(refusal.to_owned().into()));
                             continue;
                         }
                         if lifecycle.is_leased() {
@@ -795,9 +795,7 @@ pub(super) async fn deliver_submit(
             || admission.command_id() != command_id
             || !crate::review_host::review_delivery_admitted(&target.session_id, admission))
     {
-        let _ = reply.send(Err(
-            "review delivery admission is no longer valid".to_owned()
-        ));
+        let _ = reply.send(Err("review delivery admission is no longer valid".into()));
         return;
     }
     let result = submit_actor_command(target, connection, &command_id, &command).await;
@@ -822,7 +820,10 @@ pub(super) async fn deliver_submit(
     // hear "accepted" needs it first: the caller has an ordinal, and the view
     // it would read is published below anyway.
     if reply
-        .send(result.map_err(|error| format!("{error:#}")))
+        .send(result.map_err(|error| mj_client::session::SubmitFailure {
+            unconfirmed: !is_final_rejection(&error),
+            message: format!("{error:#}"),
+        }))
         .is_err()
     {
         tracing::debug!(
@@ -935,7 +936,10 @@ pub(super) async fn run_reviewer_operation(
     cancelled: tokio_util::sync::CancellationToken,
 ) {
     let operation = action.operation_name();
-    let keep_connection = !matches!(&action, ReviewerAction::Pause);
+    let keep_connection = !matches!(
+        &action,
+        ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. }
+    );
     let result = tokio::select! {
         biased;
         _ = cancelled.cancelled() => Err(anyhow::anyhow!("reviewer operation cancelled for session lifecycle change")),
@@ -1010,6 +1014,10 @@ pub(super) async fn drive_reviewer(
                 .respond_to_reviewer(role, elicitation_id, response)
                 .await?;
             ReviewerOutcome::ElicitationResolved
+        }
+        ReviewerAction::PauseGeneration { generation } => {
+            client.pause_reviewer_generation(role, generation).await?;
+            ReviewerOutcome::Paused
         }
         ReviewerAction::Pause => {
             client.pause_reviewer(role).await?;

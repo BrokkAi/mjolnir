@@ -308,15 +308,25 @@ impl ManagedSessionHandle {
 }
 
 pub struct PendingRelaySubmit {
-    pub(super) response: oneshot::Receiver<std::result::Result<u64, String>>,
+    pub(super) response:
+        oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>>,
 }
 
 impl PendingRelaySubmit {
     pub async fn wait(self) -> Result<u64> {
         self.response
             .await
-            .context("session manager stopped")?
-            .map_err(anyhow::Error::msg)
+            .map_err(|error| {
+                anyhow::Error::new(error).context(mj_client::session::DeliveryUnconfirmed)
+            })?
+            .map_err(|failure| {
+                let error = anyhow::Error::msg(failure.message);
+                if failure.unconfirmed {
+                    error.context(mj_client::session::DeliveryUnconfirmed)
+                } else {
+                    error
+                }
+            })
     }
 }
 

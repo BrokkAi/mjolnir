@@ -436,10 +436,6 @@ pub enum DaemonAction {
     ClearActiveReview {
         session_id: String,
     },
-    RememberReviewerSelection {
-        workspace_id: String,
-        selection: mj_core::second_opinion::ReviewerSelection,
-    },
     SaveWorkspacePaneSizes {
         workspace_id: String,
         sizes: mj_core::workspace::PaneSizes,
@@ -1122,23 +1118,6 @@ impl DaemonClient {
         {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected clear-review reply {reply:?}"),
-        }
-    }
-
-    pub async fn remember_reviewer_selection(
-        &mut self,
-        workspace_id: String,
-        selection: mj_core::second_opinion::ReviewerSelection,
-    ) -> Result<()> {
-        match self
-            .request(DaemonAction::RememberReviewerSelection {
-                workspace_id,
-                selection,
-            })
-            .await?
-        {
-            DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected reviewer-selection reply {reply:?}"),
         }
     }
 

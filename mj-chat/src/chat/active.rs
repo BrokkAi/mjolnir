@@ -73,10 +73,6 @@ pub enum ChatDaemonRequest {
     ClearReview {
         session_id: String,
     },
-    RememberReviewerSelection {
-        workspace_id: String,
-        selection: mj_core::second_opinion::ReviewerSelection,
-    },
     /// Review the turn this session just finished.
     StartTurnReview {
         session_id: String,
@@ -87,11 +83,7 @@ pub enum ChatDaemonRequest {
         resolution: mj_core::review::driver::Resolution,
     },
 }
-use agent_client_protocol::schema::v1::SessionConfigOption;
-use mj_core::second_opinion::{
-    ReviewWorkflow, ReviewerDefaults, ReviewerProfileChoice, ReviewerSelection, ReviewerSetup,
-    SetupRequest, WorkflowRequest,
-};
+use mj_core::second_opinion::{ReviewWorkflow, WorkflowRequest};
 
 const MAX_DIFFSTAT_TASKS: usize = 2;
 /// How long an idle reviewing role waits before reading its journal again. An
@@ -125,16 +117,10 @@ enum ChatIoUpdate {
         result: std::result::Result<Vec<String>, String>,
     },
     SessionReconnected(std::result::Result<ManagedSessionHandle, String>),
-    /// A reviewer setup step finished. `generation` is the probe it belongs
-    /// to, so a result the user has already moved past is discarded.
-    ReviewerProbe {
+    ReviewerPrepared {
         generation: u64,
-        result: std::result::Result<Vec<SessionConfigOption>, String>,
-    },
-    /// A reviewer model change finished.
-    ReviewerConfigured {
-        generation: u64,
-        result: std::result::Result<Vec<SessionConfigOption>, String>,
+        acknowledged: tokio::sync::oneshot::Sender<()>,
+        result: std::result::Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     },
     /// The chosen reviewer is running and the review can begin.
     ReviewerStarted(std::result::Result<(), String>),
@@ -317,8 +303,7 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         } => chat.apply_diffstats(&tool_call_id, revision, result),
         // Reviewer updates are handled where the session handle is, because
         // acting on one starts more reviewer work.
-        ChatIoUpdate::ReviewerProbe { .. }
-        | ChatIoUpdate::ReviewerConfigured { .. }
+        ChatIoUpdate::ReviewerPrepared { .. }
         | ChatIoUpdate::ReviewerStarted(_)
         | ChatIoUpdate::ReviewerEvents { .. }
         | ChatIoUpdate::TurnReviewEvents { .. } => {}
@@ -348,7 +333,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
                 state.activity_reachable = false;
             }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
-            state.set_notice(format!("connection lost: {error:#}"));
+            state.set_connection_notice(format!("connection lost: {error:#}"));
             return false;
         }
     };
@@ -358,6 +343,9 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if state.activity_reachable != activity_reachable {
         state.activity_reachable = activity_reachable;
+    }
+    if view.connected && view.error.is_none() {
+        state.connection_feedback = None;
     }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
@@ -390,15 +378,15 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         match error {
             ViewError::Unreachable(detail) => {
                 tracing::warn!(%detail, "chat session became unreachable");
-                state.set_notice(format!("connection lost: {detail}"))
+                state.set_connection_notice(format!("connection lost: {detail}"))
             }
             ViewError::TargetMissing(detail) => {
                 tracing::warn!(%detail, "chat session target is missing");
-                state.set_notice(format!("managed target lost: {detail}"))
+                state.set_connection_notice(format!("managed target lost: {detail}"))
             }
             ViewError::ProjectionIntegrity(detail) => {
                 tracing::error!(%detail, "chat transcript projection failed");
-                state.set_notice(format!("transcript projection failed: {detail}"))
+                state.set_connection_notice(format!("transcript projection failed: {detail}"))
             }
         }
     }
@@ -422,7 +410,6 @@ fn detach_chat(state: &mut ChatState) -> u64 {
 /// is lost while the user looks elsewhere. Dropping it detaches the proxy and
 /// leaves the target worker alive.
 pub struct ActiveChat {
-    reviewer_defaults: ReviewerDefaults,
     state: ChatState,
     session: ManagedSessionHandle,
     session_manager: SessionManagerControl,
@@ -455,14 +442,11 @@ pub struct ActiveChat {
     /// Preserve the stronger reconnect result when the initial sync, which
     /// independently reacquires the same actor, finishes just afterwards.
     reconnect_notice_pending_sync: bool,
-    /// The reviewer lifetime this session is on. It is bumped only when the
-    /// reviewer's native conversation is lost, never by an ordinary probe, so
-    /// a repeat review reloads the same conversation.
+    /// Each new review gets a fresh conversation; restored reviews retain theirs.
     reviewer_generation: u64,
-    /// The remembered selection a resumed review is starting under, if this
-    /// workspace has already chosen a reviewer. It short-circuits the
-    /// waterfall: the choice is only asked again when this fails.
-    resuming_reviewer: Option<ReviewerSelection>,
+    /// Cancellation for background resolution and startup of a second opinion.
+    reviewer_preparation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    reviewer_preparation_sequence: u64,
     /// Reviewing roles whose journals this chat is already reading. The
     /// daemon runs the review; the terminal only displays it, so this is
     /// display bookkeeping and nothing more.
@@ -495,7 +479,6 @@ pub struct PreparedChat {
     notices: Notices,
     persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
     stored_review: std::result::Result<Option<mj_core::storage::StoredReview>, String>,
-    reviewer_defaults: ReviewerDefaults,
     reviewer: ReviewerPane,
 }
 
@@ -513,7 +496,6 @@ impl PreparedChat {
                     );
                 }
                 self.stored_review = Ok(state.review);
-                self.reviewer_defaults = state.defaults;
             }
             Err(error) => self.stored_review = Err(error),
         }
@@ -620,7 +602,6 @@ impl ActiveChat {
     ) -> PreparedChat {
         let stored_review = Ok(None);
         let reviewer = ReviewerPane::default();
-        let reviewer_defaults = ReviewerDefaults::default();
         PreparedChat {
             session,
             bundle_id: bundle_id.to_owned(),
@@ -631,7 +612,6 @@ impl ActiveChat {
             notices,
             persistence,
             stored_review,
-            reviewer_defaults,
             reviewer,
         }
     }
@@ -647,7 +627,6 @@ impl ActiveChat {
             notices,
             persistence,
             stored_review,
-            reviewer_defaults,
             reviewer,
         } = prepared;
         let view = session.view();
@@ -731,7 +710,7 @@ impl ActiveChat {
         let remote = ChatRemoteSupervisor::spawn(session.clone(), control.clone());
         if needs_initial_sync {
             state.set_transcript_loading(true);
-            state.set_notice("Connecting to session relay…");
+            state.set_connection_notice("Connecting to session relay…");
             queue_chat_remote_operation(remote.operations(), ChatRemoteOperation::Sync, &mut state);
         }
         let mut diffstats_in_flight = 0;
@@ -754,14 +733,7 @@ impl ActiveChat {
                 ),
                 proposal: stored.workflow.proposal().to_owned(),
             };
-            state.open_second_opinion(
-                captured,
-                ReviewerSetup::new(
-                    String::new(),
-                    Vec::new(),
-                    mj_core::second_opinion::ReviewerDefaults::default(),
-                ),
-            );
+            state.open_second_opinion(captured);
             let status = if stored.native_lost {
                 "the reviewer's conversation did not survive; a new review starts fresh"
             } else {
@@ -785,7 +757,6 @@ impl ActiveChat {
             state.set_notice(format!("Recovery copy failed: {detail}"));
         }
         let mut chat = Self {
-            reviewer_defaults,
             state,
             session,
             session_manager: control,
@@ -809,7 +780,8 @@ impl ActiveChat {
             session_retiring: false,
             reconnect_notice_pending_sync: false,
             reviewer_generation,
-            resuming_reviewer: None,
+            reviewer_preparation: None,
+            reviewer_preparation_sequence: 0,
             reviewed_roles: BTreeSet::new(),
             persistence,
             deferred_elicitation_draft: None,
@@ -1011,6 +983,10 @@ impl std::ops::DerefMut for ActiveChat {
 
 impl Drop for ActiveChat {
     fn drop(&mut self) {
+        if let Some(flag) = self.reviewer_preparation.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+
         self.cancel_dictation();
         // A review outlives this view: the daemon owns it, so closing the
         // terminal leaves it running and resolvable from the phone.

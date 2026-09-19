@@ -54,6 +54,25 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.advance_review();
+        self.publish_conversation_notices();
+    }
+
+    pub(super) fn publish_conversation_notices(&mut self) {
+        for notice in &mut self.state.conversation_notices {
+            if notice.submitted {
+                continue;
+            }
+            match self
+                .remote
+                .operations()
+                .try_send(ChatRemoteOperation::RecordNotice {
+                    id: notice.id.clone(),
+                    text: notice.text.clone(),
+                }) {
+                Ok(()) => notice.submitted = true,
+                Err(error) => tracing::warn!(%error, "could not queue conversation notice"),
+            }
+        }
     }
 
     /// Moves a review on when the planner has answered the context request.
@@ -154,23 +173,6 @@ impl ActiveChat {
         }
     }
 
-    /// The configured profiles a reviewer can run under. The waterfall offers
-    /// the same list plan review offers, so a workspace's remembered reviewer
-    /// serves both.
-    pub(crate) fn reviewer_profiles(&self) -> Vec<ReviewerProfileChoice> {
-        let Some(context) = self.context.as_ref() else {
-            return Vec::new();
-        };
-        context
-            .config
-            .enabled_profiles()
-            .map(|(id, profile)| ReviewerProfileChoice {
-                id: id.to_owned(),
-                harness: profile.kind.id().to_owned(),
-            })
-            .collect()
-    }
-
     /// Hands one request to the daemon bridge, or reports that this chat has
     /// none: a chat without a bridge cannot reach the daemon at all, and
     /// silently dropping a review action would leave the pane sitting there.
@@ -203,18 +205,13 @@ impl ActiveChat {
         let Some(result) = self.remote.take_finished().await else {
             return;
         };
-        if let Err(error) = result {
-            if self.state.fail_all_background_stops() {
-                self.state
-                    .set_notice(format!("Background task could not be stopped: {error}"));
-            } else {
-                self.state
-                    .set_notice(format!("Chat background worker failed: {error}"));
-            }
-        } else {
-            self.state
-                .set_notice("Chat background worker stopped unexpectedly");
-        }
+        apply_chat_remote_result(
+            &mut self.state,
+            ChatRemoteResult::WorkerFailed(match result {
+                Err(error) => format!("Chat background worker failed: {error}"),
+                Ok(()) => "Chat background worker stopped unexpectedly".into(),
+            }),
+        );
     }
 
     pub(super) fn apply_io_update(&mut self, update: ChatIoUpdate) {
@@ -223,12 +220,13 @@ impl ActiveChat {
                 self.finish_session_reconnect(result);
                 return;
             }
-            ChatIoUpdate::ReviewerProbe { generation, result } => {
-                self.apply_reviewer_options(generation, result, false);
-                return;
-            }
-            ChatIoUpdate::ReviewerConfigured { generation, result } => {
-                self.apply_reviewer_options(generation, result, true);
+            ChatIoUpdate::ReviewerPrepared {
+                generation,
+                result,
+                acknowledged,
+            } => {
+                self.apply_reviewer_prepared(generation, result);
+                let _ = acknowledged.send(());
                 return;
             }
             ChatIoUpdate::ReviewerStarted(result) => {
@@ -252,8 +250,6 @@ impl ActiveChat {
             ChatIoUpdate::Clipboard { generation, result } => {
                 self.paste_in_flight = false;
                 if generation != self.state.input_generation() {
-                    self.state
-                        .set_notice("Clipboard result discarded because the draft changed");
                     return;
                 }
                 match result {
@@ -463,7 +459,7 @@ impl ActiveChat {
         apply_chat_remote_result(&mut self.state, result);
         if sync_finished {
             if sync_succeeded && self.reconnect_notice_pending_sync {
-                self.state.set_notice("Reconnected to session relay");
+                self.state.connection_feedback = None;
             }
             self.reconnect_notice_pending_sync = false;
         }
@@ -505,7 +501,7 @@ impl ActiveChat {
                 self.apply_deferred_elicitation_draft();
                 if self.session_open {
                     self.reconnect_notice_pending_sync = true;
-                    self.state.set_notice("Reconnected to session relay");
+                    self.state.connection_feedback = None;
                 } else {
                     self.begin_session_reconnect();
                 }
@@ -521,8 +517,9 @@ impl ActiveChat {
                     );
                     return;
                 }
-                self.state
-                    .set_notice(format!("Could not reconnect to session relay: {error}"));
+                self.state.set_connection_notice(format!(
+                    "Could not reconnect to session relay: {error}"
+                ));
                 if self.session_feed_expected {
                     self.begin_session_reconnect();
                 }

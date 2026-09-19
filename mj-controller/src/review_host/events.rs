@@ -121,13 +121,7 @@ pub(super) struct PendingOpen {
     pub(super) prepared: Prepared,
 }
 
-/// Which harness reviews, and how it is configured. Read from `[review]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ReviewerIdentity {
-    pub(super) profile: String,
-    pub(super) model: Option<String>,
-    pub(super) effort: Option<String>,
-}
+pub(super) type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
 
 /// One open review and its execution context.
 pub(super) struct ReviewSlot {
@@ -230,7 +224,7 @@ pub(super) struct HostState {
     pub(super) sessions: BTreeMap<String, SessionWatch>,
     /// Sessions already told that no reviewer is configured. One notice per
     /// session, not one per turn.
-    pub(super) missing_reviewer_reported: BTreeSet<String>,
+    pub(super) preparation_cancellation: BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>,
     /// Sessions whose durable handoff survived a restart and still needs the
     /// primary relay's idempotent acknowledgement reconciled.
     pub(super) recovery_candidates: BTreeSet<String>,

@@ -33,20 +33,23 @@ struct ControllerReviewerStager;
 impl mj_client::session::ReviewerStagerBackend for ControllerReviewerStager {
     fn stage(
         &self,
-        config: mj_core::config::Config,
+        _config: mj_core::config::Config,
         session: mj_core::state::SessionRecord,
         profile_id: String,
         generation: u64,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig> {
         let session_id = session.id.clone();
-        let controller = Controller {
-            config,
-            state: mj_core::state::State {
-                sessions: std::collections::BTreeMap::from([(session_id.clone(), session)]),
-                ..mj_core::state::State::default()
-            },
-        };
-        controller.stage_reviewer_profile(&session_id, &profile_id, generation)
+        let controller = Controller::load()?;
+        let executor = crate::targets::CancellableProcessExecutor::new(cancelled)
+            .with_deadline(std::time::Duration::from_secs(90));
+        controller.stage_reviewer_profile_controlled(
+            &session_id,
+            &profile_id,
+            generation,
+            &[],
+            &executor,
+        )
     }
 }
 
@@ -166,6 +169,7 @@ impl Controller {
             execution_policy,
             model: None,
             effort: None,
+            fast_mode: None,
             generation,
             // A harness that reads its servers from the staged profile must
             // not also be offered them over ACP: it would either duplicate the

@@ -27,12 +27,24 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
             tokio::task::spawn_blocking(move || {
                 Ok(mj_client::session::ReviewState {
                     review: crate::database::active_review(&session_id)?,
-                    defaults: crate::database::reviewer_defaults()?,
                 })
             })
             .await
             .context("review restoration task")?
         })
+    }
+
+    fn resolve_review_settings(
+        &self,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>>
+    {
+        Box::pin(crate::review_selection::resolve(
+            self.0.clone(),
+            None,
+            false,
+            cancelled,
+        ))
     }
 
     fn config_result(

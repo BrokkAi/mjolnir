@@ -84,6 +84,10 @@ pub enum ReviewerAction {
         response: ElicitationResponse,
     },
     Pause,
+    /// Stop only the preparation that owns this generation; stale cleanup must not stop its replacement.
+    PauseGeneration {
+        generation: u64,
+    },
     CaptureDelta {
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
@@ -105,7 +109,7 @@ impl ReviewerAction {
             Self::Acknowledge { .. } => "reviewer_acknowledge",
             Self::Status => "reviewer_status",
             Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
-            Self::Pause => "reviewer_pause",
+            Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
@@ -138,6 +142,36 @@ pub enum ReviewerOutcome {
     },
 }
 
+/// Preserve whether a submit failed before delivery or lost its acknowledgement.
+#[derive(Debug)]
+pub struct SubmitFailure {
+    pub message: String,
+    pub unconfirmed: bool,
+}
+impl From<String> for SubmitFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            unconfirmed: false,
+        }
+    }
+}
+impl From<&str> for SubmitFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+/// Submission lost its acknowledgement; callers must reconcile before retrying.
+#[derive(Debug)]
+pub struct DeliveryUnconfirmed;
+impl std::fmt::Display for DeliveryUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("delivery unconfirmed")
+    }
+}
+impl std::error::Error for DeliveryUnconfirmed {}
+
 pub struct PendingRelaySubmit {
     completion: BoxFuture<'static, Result<u64>>,
 }
@@ -169,7 +203,6 @@ impl PendingRelaySync {
 #[derive(Debug, Default)]
 pub struct ReviewState {
     pub review: Option<mj_core::storage::StoredReview>,
-    pub defaults: mj_core::second_opinion::ReviewerDefaults,
 }
 
 pub trait SessionHandleBackend: Send + Sync {
@@ -180,6 +213,13 @@ pub trait SessionHandleBackend: Send + Sync {
         query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
     fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>>;
+    fn resolve_review_settings(
+        &self,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> BoxFuture<'_, Result<mj_core::review::settings::ResolvedReviewSettings>> {
+        let _ = cancelled;
+        Box::pin(async { anyhow::bail!("review settings resolution is unavailable") })
+    }
 
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>>;
 
@@ -225,6 +265,13 @@ impl SessionHandle {
         self.backend.review_state().await
     }
 
+    pub async fn resolve_review_settings(
+        &self,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<mj_core::review::settings::ResolvedReviewSettings> {
+        self.backend.resolve_review_settings(cancelled).await
+    }
+
     pub fn new(backend: impl SessionHandleBackend + 'static) -> Self {
         Self {
             backend: Box::new(backend),
@@ -257,7 +304,16 @@ impl SessionHandle {
 
     /// Apply a setting and wait for its durable success or rejection.
     pub async fn set_config(&self, key: String, value: String) -> Result<()> {
-        let command_id = new_command_id("set-config")?;
+        self.set_config_with_id(new_command_id("set-config")?, key, value)
+            .await
+    }
+
+    pub async fn set_config_with_id(
+        &self,
+        command_id: String,
+        key: String,
+        value: String,
+    ) -> Result<()> {
         self.submit(command_id.clone(), RelayCommand::SetConfig { key, value })
             .await?;
         tokio::time::timeout(Duration::from_secs(60), async {
@@ -281,6 +337,46 @@ impl SessionHandle {
         })
         .await
         .context("configuration command did not complete within 60 seconds")?
+    }
+
+    /// A follow-up prompt must wait for the mode change, not just admission.
+    pub async fn apply_plan_control(
+        &self,
+        command_id: String,
+        control: mj_core::acp::PlanControl,
+    ) -> Result<()> {
+        match control {
+            mj_core::acp::PlanControl::SetConfig { key, value } => {
+                self.set_config_with_id(command_id, key, value).await
+            }
+            mj_core::acp::PlanControl::SetSessionMode { mode_id } => {
+                self.submit(
+                    command_id,
+                    RelayCommand::SetSessionMode {
+                        mode_id: mode_id.clone(),
+                    },
+                )
+                .await?;
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    loop {
+                        self.sync_now().await?;
+                        if self
+                            .view()
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.operational.modes.as_ref())
+                            .is_some_and(|modes| modes.current_mode_id.to_string() == mode_id)
+                        {
+                            return Ok(());
+                        }
+                        ensure!(!self.is_stopped(), "session stopped while changing mode");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .context("session mode change did not complete within 60 seconds")?
+            }
+        }
     }
 
     pub async fn enqueue_submit(
@@ -402,6 +498,7 @@ pub trait ReviewerStagerBackend: Send + Sync {
         session: SessionRecord,
         profile_id: String,
         generation: u64,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig>;
 }
 
@@ -423,8 +520,10 @@ impl ReviewerStager {
         session: SessionRecord,
         profile_id: String,
         generation: u64,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig> {
-        self.backend.stage(config, session, profile_id, generation)
+        self.backend
+            .stage(config, session, profile_id, generation, cancelled)
     }
 
     #[doc(hidden)]
@@ -448,6 +547,7 @@ impl ReviewerStagerBackend for UnavailableReviewerStager {
         _session: SessionRecord,
         _profile_id: String,
         _generation: u64,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ReviewerLaunchConfig> {
         anyhow::bail!(self.0.clone())
     }

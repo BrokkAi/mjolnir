@@ -313,13 +313,13 @@ profile = "reviewer"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without launching reviewers. |
+| `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without a review prompt. |
 | `tier` | string enum | no | `"quick"` | `quick` or `extended`. |
-| `profile` | string | when enabled | unset | Must name a profile in this file. May be set while disabled to enable one-off `/review`. |
-| `model` | string | no | unset (harness default) | Model applied to every review role when the harness exposes model selection. The config loader does not validate provider model IDs. |
-| `effort` | string | no | unset (harness default) | Effort applied to every review role when supported. The config loader does not validate harness-specific effort names. |
+| `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
+| `model` | string | no | unset (harness default) | Main-reviewer override for a named profile. Auto uses fixed model-family defaults; specialist lanes use provider-specific overrides. |
+| `effort` | string | no | unset (harness default) | Main-reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
 
-Use a reviewer profile different from the profile doing the primary work. The
+These settings also select the plan second-opinion reviewer. Auto prefers another provider, falling back to another profile or the primary profile when needed. The
 quick tier runs one general reviewer and validates reported findings. Extended
 review may add intent analysis, a supervisor, and specialist lanes. See
 [Independent turn review](/turn-review/).

@@ -15,7 +15,6 @@ use super::PromptImage;
 use super::attachments;
 use super::{
     ChatState, PlanControl, PlanReviewFollowup, PromptPayload, TurnControlIntent, UnsentKind,
-    queued_prompt_preview,
 };
 #[cfg(test)]
 use crate::clipboard::ClipboardImage;
@@ -26,6 +25,10 @@ const SESSION_ACTOR_REPLACEMENT_WAIT: std::time::Duration = std::time::Duration:
 #[derive(Debug)]
 pub(super) enum ChatRemoteOperation {
     Sync,
+    RecordNotice {
+        id: String,
+        text: String,
+    },
     Prompt {
         command_id: String,
         text: String,
@@ -73,15 +76,50 @@ pub(super) enum ChatRemoteOperation {
     },
 }
 
+impl ChatRemoteOperation {
+    fn feedback(&self) -> Option<(String, String)> {
+        match self {
+            Self::RemoveQueuedPrompt { id, .. } => {
+                Some((format!("remove:{id}"), "Removing queued prompt…".into()))
+            }
+            Self::GoalControl { action, .. } => {
+                Some((format!("goal:{}", action.as_str()), "Updating goal…".into()))
+            }
+            Self::SetConfig { key, .. } => {
+                Some((format!("config:{key}"), format!("Changing {key}…")))
+            }
+            Self::PlanCommand { command_id, .. } => {
+                Some((format!("plan:{command_id}"), "Changing plan mode…".into()))
+            }
+            Self::Cancel { intent, .. } => Some((
+                "turn-control".into(),
+                match intent {
+                    TurnControlIntent::Cancel => "Stopping turn…",
+                    TurnControlIntent::Steer => "Steering turn…",
+                    TurnControlIntent::ApplyQueued => "Applying queued prompt…",
+                }
+                .into(),
+            )),
+            Self::RespondElicitation { request, .. } => {
+                Some((format!("answer:{}", request.id), "Sending answer…".into()))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum ChatRemoteResult {
     Sync(std::result::Result<(), String>),
+    NoticeRecorded(std::result::Result<(), String>),
     Prompt {
+        command_id: String,
         text: String,
         images: Vec<PromptImage>,
         result: std::result::Result<u64, String>,
     },
     RunShell {
+        command_id: String,
         command: String,
         result: std::result::Result<u64, String>,
     },
@@ -105,6 +143,7 @@ pub(super) enum ChatRemoteResult {
         result: std::result::Result<(), String>,
     },
     PlanCommand {
+        command_id: String,
         original: String,
         requested_active: bool,
         control_applied: bool,
@@ -120,13 +159,38 @@ pub(super) enum ChatRemoteResult {
         answered: bool,
         result: std::result::Result<(), String>,
     },
+    DeliveryUnconfirmed {
+        command_id: String,
+        error: String,
+    },
+    FollowupUnconfirmed {
+        command_id: String,
+        feedback_key: String,
+        desired_plan_active: Option<bool>,
+        plan_command: bool,
+        error: String,
+    },
     WorkerFailed(String),
 }
 
 impl ChatRemoteResult {
+    fn feedback_key(&self) -> Option<String> {
+        match self {
+            Self::FollowupUnconfirmed { feedback_key, .. } => Some(feedback_key.clone()),
+            Self::RemoveQueuedPrompt { id, .. } => Some(format!("remove:{id}")),
+            Self::GoalControl { action, .. } => Some(format!("goal:{}", action.as_str())),
+            Self::SetConfig { key, .. } => Some(format!("config:{key}")),
+            Self::PlanCommand { command_id, .. } => Some(format!("plan:{command_id}")),
+            Self::Cancel { .. } => Some("turn-control".into()),
+            Self::RespondElicitation { request, .. } => Some(format!("answer:{}", request.id)),
+            _ => None,
+        }
+    }
+
     fn failure_message(&self) -> Option<&str> {
         match self {
             Self::Sync(Err(error))
+            | Self::NoticeRecorded(Err(error))
             | Self::Prompt {
                 result: Err(error), ..
             }
@@ -154,6 +218,8 @@ impl ChatRemoteResult {
             | Self::RespondElicitation {
                 result: Err(error), ..
             }
+            | Self::FollowupUnconfirmed { error, .. }
+            | Self::DeliveryUnconfirmed { error, .. }
             | Self::WorkerFailed(error) => Some(error),
             _ => None,
         }
@@ -341,6 +407,24 @@ async fn enqueue_chat_remote_operation(
     attached: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     match operation {
+        ChatRemoteOperation::RecordNotice { id, text } => {
+            let session = session.clone();
+            let results = results.clone();
+            let attached = attached.clone();
+            pending.spawn(async move {
+                let result = session
+                    .submit(id, RelayCommand::RecordNotice { text })
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:#}"));
+                publish_chat_remote_result(
+                    &results,
+                    &attached,
+                    ChatRemoteResult::NoticeRecorded(result),
+                );
+            });
+        }
+
         ChatRemoteOperation::Sync => match session.enqueue_sync().await {
             Ok(response) => {
                 let results = results.clone();
@@ -376,6 +460,7 @@ async fn enqueue_chat_remote_operation(
                         results,
                         attached,
                         ChatRemoteResult::Prompt {
+                            command_id,
                             text,
                             images: original_images,
                             result: Err(format!("prepare image attachments: {error:#}")),
@@ -388,6 +473,7 @@ async fn enqueue_chat_remote_operation(
                         results,
                         attached,
                         ChatRemoteResult::Prompt {
+                            command_id,
                             text,
                             images: original_images,
                             result: Err(format!("image preparation task failed: {error}")),
@@ -409,6 +495,7 @@ async fn enqueue_chat_remote_operation(
                     results,
                     attached,
                     ChatRemoteResult::Prompt {
+                        command_id,
                         text,
                         images: normalized.clone(),
                         result: Err(
@@ -418,7 +505,7 @@ async fn enqueue_chat_remote_operation(
                 );
                 return;
             }
-            let response = session.enqueue_submit(command_id, command).await;
+            let response = session.enqueue_submit(command_id.clone(), command).await;
             match response {
                 Ok(response) => {
                     let results = results.clone();
@@ -427,10 +514,22 @@ async fn enqueue_chat_remote_operation(
                         let ordinal = match response.wait().await {
                             Ok(ordinal) => ordinal,
                             Err(error) => {
+                                if error.is::<mj_client::session::DeliveryUnconfirmed>() {
+                                    publish_chat_remote_result(
+                                        &results,
+                                        &attached,
+                                        ChatRemoteResult::DeliveryUnconfirmed {
+                                            command_id,
+                                            error: format!("{error:#}"),
+                                        },
+                                    );
+                                    return;
+                                }
                                 publish_chat_remote_result(
                                     &results,
                                     &attached,
                                     ChatRemoteResult::Prompt {
+                                        command_id,
                                         text,
                                         images: normalized.clone(),
                                         result: Err(format!("{error:#}")),
@@ -443,6 +542,7 @@ async fn enqueue_chat_remote_operation(
                             &results,
                             &attached,
                             ChatRemoteResult::Prompt {
+                                command_id,
                                 text: text.clone(),
                                 images: normalized.clone(),
                                 result: Ok(ordinal),
@@ -455,6 +555,7 @@ async fn enqueue_chat_remote_operation(
                         results,
                         attached,
                         ChatRemoteResult::Prompt {
+                            command_id,
                             text,
                             images: normalized,
                             result: Err(format!("{error:#}")),
@@ -469,7 +570,7 @@ async fn enqueue_chat_remote_operation(
         } => {
             let response = session
                 .enqueue_submit(
-                    command_id,
+                    command_id.clone(),
                     RelayCommand::RunUserShell {
                         command: command.clone(),
                     },
@@ -480,11 +581,29 @@ async fn enqueue_chat_remote_operation(
                     let results = results.clone();
                     let attached = attached.clone();
                     pending.spawn(async move {
-                        let result = response.wait().await.map_err(|error| format!("{error:#}"));
+                        let result = response.wait().await;
+                        if let Err(error) = &result
+                            && error.is::<mj_client::session::DeliveryUnconfirmed>()
+                        {
+                            publish_chat_remote_result(
+                                &results,
+                                &attached,
+                                ChatRemoteResult::DeliveryUnconfirmed {
+                                    command_id,
+                                    error: format!("{error:#}"),
+                                },
+                            );
+                            return;
+                        }
+                        let result = result.map_err(|error| format!("{error:#}"));
                         publish_chat_remote_result(
                             &results,
                             &attached,
-                            ChatRemoteResult::RunShell { command, result },
+                            ChatRemoteResult::RunShell {
+                                command_id,
+                                command,
+                                result,
+                            },
                         );
                     });
                 }
@@ -492,6 +611,7 @@ async fn enqueue_chat_remote_operation(
                     results,
                     attached,
                     ChatRemoteResult::RunShell {
+                        command_id,
                         command,
                         result: Err(format!("{error:#}")),
                     },
@@ -651,18 +771,10 @@ async fn enqueue_chat_remote_operation(
             let attached = attached.clone();
             pending.spawn(async move {
                 let mut control_applied = false;
-                let control_command = match control {
-                    PlanControl::SetConfig { key, value } => RelayCommand::SetConfig { key, value },
-                    PlanControl::SetSessionMode { mode_id } => {
-                        RelayCommand::SetSessionMode { mode_id }
-                    }
-                };
+                let mut unconfirmed = false;
                 let result = async {
                     session
-                        .enqueue_submit(command_id.clone(), control_command)
-                        .await
-                        .map_err(|error| format!("{error:#}"))?
-                        .wait()
+                        .apply_plan_control(command_id.clone(), control)
                         .await
                         .map_err(|error| format!("{error:#}"))?;
                     control_applied = true;
@@ -682,18 +794,32 @@ async fn enqueue_chat_remote_operation(
                         })?
                         .wait()
                         .await
-                        .map_err(|error| format!("mode changed, but prompt failed: {error:#}"))?;
+                        .map_err(|error| {
+                            unconfirmed = error.is::<mj_client::session::DeliveryUnconfirmed>();
+                            format!("mode changed, but prompt failed: {error:#}")
+                        })?;
                     Ok(Some(ordinal))
                 }
                 .await;
                 publish_chat_remote_result(
                     &results,
                     &attached,
-                    ChatRemoteResult::PlanCommand {
-                        original,
-                        requested_active,
-                        control_applied,
-                        result,
+                    if unconfirmed {
+                        ChatRemoteResult::FollowupUnconfirmed {
+                            command_id: format!("{command_id}-prompt"),
+                            feedback_key: format!("plan:{command_id}"),
+                            desired_plan_active: Some(requested_active),
+                            plan_command: true,
+                            error: result.expect_err("unconfirmed delivery failed"),
+                        }
+                    } else {
+                        ChatRemoteResult::PlanCommand {
+                            command_id,
+                            original,
+                            requested_active,
+                            control_applied,
+                            result,
+                        }
                     },
                 );
             });
@@ -751,6 +877,7 @@ async fn enqueue_chat_remote_operation(
             let attached = attached.clone();
             pending.spawn(async move {
                 let mut answered = false;
+                let mut unconfirmed = false;
                 let desired_plan_active = plan_followup
                     .as_ref()
                     .map(|followup| followup.desired_active);
@@ -764,16 +891,8 @@ async fn enqueue_chat_remote_operation(
                         return Ok(());
                     };
                     if let Some(control) = followup.control {
-                        let command = match control {
-                            PlanControl::SetConfig { key, value } => {
-                                RelayCommand::SetConfig { key, value }
-                            }
-                            PlanControl::SetSessionMode { mode_id } => {
-                                RelayCommand::SetSessionMode { mode_id }
-                            }
-                        };
                         session
-                            .submit(format!("plan-review-{}-mode", request.id), command)
+                            .apply_plan_control(format!("plan-review-{}-mode", request.id), control)
                             .await
                             .map_err(|error| {
                                 format!("review answered, but plan mode was not changed: {error:#}")
@@ -791,9 +910,8 @@ async fn enqueue_chat_remote_operation(
                             )
                             .await
                             .map_err(|error| {
-                                format!(
-                                    "review answered, but revision feedback was not sent: {error:#}"
-                                )
+                                unconfirmed = error.is::<mj_client::session::DeliveryUnconfirmed>();
+                                format!("review answered, but revision feedback failed: {error:#}")
                             })?;
                     }
                     Ok(())
@@ -802,11 +920,21 @@ async fn enqueue_chat_remote_operation(
                 publish_chat_remote_result(
                     &results,
                     &attached,
-                    ChatRemoteResult::RespondElicitation {
-                        request,
-                        desired_plan_active,
-                        answered,
-                        result,
+                    if unconfirmed {
+                        ChatRemoteResult::FollowupUnconfirmed {
+                            command_id: format!("plan-review-{}-feedback", request.id),
+                            feedback_key: format!("answer:{}", request.id),
+                            desired_plan_active,
+                            plan_command: false,
+                            error: result.expect_err("unconfirmed delivery failed"),
+                        }
+                    } else {
+                        ChatRemoteResult::RespondElicitation {
+                            request,
+                            desired_plan_active,
+                            answered,
+                            result,
+                        }
                     },
                 );
             });
@@ -847,10 +975,11 @@ pub(super) fn restore_unsent_prompt(chat: &mut ChatState, text: String, images: 
 }
 
 pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteResult) {
-    // Most failures are intentionally converted into a notice so the user can
-    // keep reading and editing the chat. Keep the diagnostic in the process
-    // log as well; notices are transient and can be overwritten by the next
-    // event.
+    if let Some(key) = result.feedback_key() {
+        chat.operation_feedback.remove(&key);
+    }
+    // Keep diagnostics in the process log as well as in recoverable rows.
+    // Publishing a conversation notice must never recursively publish failure.
     if let Some(error) = result.failure_message() {
         tracing::warn!(
             session_id = %chat.session_id,
@@ -859,57 +988,63 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
         );
     }
     match result {
+        // The local row remains until projection confirms publication; failure
+        // is logged once without recursively trying to publish another notice.
+        ChatRemoteResult::NoticeRecorded(_) => {}
+
         ChatRemoteResult::Sync(Ok(())) => {
+            chat.connection_feedback = None;
             chat.set_transcript_loading(false);
-            chat.set_notice("Connected to session relay");
         }
         ChatRemoteResult::Sync(Err(error)) => {
             chat.set_transcript_loading(false);
-            chat.set_notice(format!("Connection failed: {error}"))
+            chat.set_connection_notice(format!("Connection failed: {error}"))
         }
         ChatRemoteResult::Prompt {
+            command_id,
             text,
             images,
-            result: Ok(ordinal),
+            result: Ok(_),
         } => {
+            chat.finish_submission(&command_id, true);
             // The same text has now reached the relay, so the record of the
             // earlier refusal has nothing left to report.
             chat.clear_unsent_prompt(UnsentKind::Prompt, &text, &images);
-            chat.set_notice(format!(
-                "Prompt accepted by relay at {ordinal}: {}",
-                queued_prompt_preview(&text)
-            ));
         }
         ChatRemoteResult::Prompt {
+            command_id,
             text,
             images,
             result: Err(error),
         } => {
+            if !chat.finish_submission(&command_id, false) {
+                return;
+            }
             restore_unsent_prompt(chat, text.clone(), images.clone());
-            chat.set_notice(format!("{}: {error}", UnsentKind::Prompt.headline()));
+
             chat.record_unsent_prompt(UnsentKind::Prompt, text, images, error);
         }
         ChatRemoteResult::RunShell {
+            command_id,
             command,
-            result: Ok(ordinal),
+            result: Ok(_),
         } => {
+            chat.finish_submission(&command_id, true);
             chat.clear_unsent_prompt(UnsentKind::Shell, &command, &[]);
-            chat.set_notice(format!(
-                "Shell command accepted by relay at {ordinal}: {}",
-                queued_prompt_preview(&command)
-            ));
         }
         ChatRemoteResult::RunShell {
+            command_id,
             command,
             result: Err(error),
         } => {
+            if !chat.finish_submission(&command_id, false) {
+                return;
+            }
             restore_unsent_input(chat, &format!("!{command}"));
-            chat.set_notice(format!("{}: {error}", UnsentKind::Shell.headline()));
+
             chat.record_unsent_prompt(UnsentKind::Shell, command, Vec::new(), error);
         }
-        ChatRemoteResult::RemoveQueuedPrompt { result: Ok(()), .. } => {
-            chat.set_notice("Queued prompt removed")
-        }
+        ChatRemoteResult::RemoveQueuedPrompt { result: Ok(()), .. } => {}
         ChatRemoteResult::RemoveQueuedPrompt {
             id,
             text,
@@ -917,67 +1052,64 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             result: Err(error),
         } => {
             chat.fail_queued_prompt_removal(id, text, kind);
-            chat.set_notice(format!("Queued prompt was not removed: {error}"));
+            chat.conversation_notice(format!("Queued prompt was not removed: {error}"));
         }
-        ChatRemoteResult::StopBackgroundTask { id, result: Ok(()) } => {
+        ChatRemoteResult::StopBackgroundTask { result: Ok(()), .. } => {
             // The provider's acknowledgement only means it accepted the stop
             // request. The next activity snapshot remains authoritative for
             // removing the row and its pending label.
-            if chat.background_stop_pending(&id) {
-                chat.set_notice("Background task stop requested");
-            }
         }
         ChatRemoteResult::StopBackgroundTask {
             id,
             result: Err(error),
         } => chat.fail_background_stop(&id, &error),
         ChatRemoteResult::GoalControl { action, result } => match result {
-            Ok(()) => chat.set_notice(format!("Goal command finished: /goal {}", action.as_str())),
+            Ok(()) => {}
             Err(error) => {
                 restore_unsent_input(chat, &format!("/goal {}", action.as_str()));
-                chat.set_notice(format!("/goal {} failed: {error}", action.as_str()));
+                chat.conversation_notice(format!("/goal {} failed: {error}", action.as_str()));
             }
         },
-        ChatRemoteResult::SetConfig { result: Ok(()), .. } => {
-            chat.set_notice("Configuration update accepted")
-        }
+        ChatRemoteResult::SetConfig { result: Ok(()), .. } => {}
         ChatRemoteResult::SetConfig {
             key,
             value,
             result: Err(error),
         } => {
             restore_unsent_input(chat, &config_command_text(&key, &value));
-            chat.set_notice(format!("Configuration was not changed: {error}"));
+            chat.conversation_notice(format!("Configuration was not changed: {error}"));
         }
         ChatRemoteResult::PlanCommand {
+            command_id,
             requested_active,
-            result: Ok(ordinal),
+            result: Ok(_),
             ..
         } => {
             chat.plan_command_pending = false;
             chat.finish_plan_mode_change(requested_active);
-            chat.set_notice(match ordinal {
-                Some(ordinal) => format!("Prompt accepted by relay at {ordinal}"),
-                None if requested_active => "Plan mode on".to_owned(),
-                None => "Plan mode off".to_owned(),
-            });
+            chat.finish_submission(&format!("{command_id}-prompt"), true);
         }
         ChatRemoteResult::PlanCommand {
+            command_id,
             original,
             requested_active,
             control_applied,
             result: Err(error),
         } => {
+            let unsent = chat.finish_submission(&format!("{command_id}-prompt"), false);
             chat.plan_command_pending = false;
             chat.finish_plan_mode_change(control_applied == requested_active);
-            restore_unsent_input(chat, &original);
-            chat.set_notice(format!("Plan command was not completed: {error}"));
+            if unsent {
+                restore_unsent_input(chat, &original);
+            }
+            chat.conversation_notice(format!("Plan command was not completed: {error}"));
         }
         ChatRemoteResult::Cancel { intent, result } => match result {
-            Ok(()) => chat.set_notice(intent.requested_notice()),
-            Err(error) => chat.set_notice(intent.failure_notice(&error)),
+            Ok(()) => {}
+            Err(error) => chat.conversation_notice(intent.failure_notice(&error)),
         },
         ChatRemoteResult::RespondElicitation {
+            request,
             desired_plan_active,
             result: Ok(()),
             ..
@@ -985,7 +1117,7 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             if let Some(active) = desired_plan_active {
                 chat.finish_plan_mode_change(active);
             }
-            chat.set_notice("Answer sent")
+            chat.finish_submission(&format!("plan-review-{}-feedback", request.id), true);
         }
         ChatRemoteResult::RespondElicitation {
             request,
@@ -993,16 +1125,41 @@ pub(super) fn apply_chat_remote_result(chat: &mut ChatState, result: ChatRemoteR
             result: Err(error),
             ..
         } => {
+            chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
             if !answered {
                 chat.restore_elicitation(request);
             }
-            chat.set_notice(format!("Answer was not sent: {error}"));
+            chat.conversation_notice(if answered {
+                format!("Answer sent; follow-up failed: {error}")
+            } else {
+                format!("Answer was not sent: {error}")
+            });
+        }
+        ChatRemoteResult::FollowupUnconfirmed {
+            command_id,
+            desired_plan_active,
+            plan_command,
+            error,
+            ..
+        } => {
+            if plan_command {
+                chat.plan_command_pending = false;
+            }
+            if let Some(active) = desired_plan_active {
+                chat.finish_plan_mode_change(active);
+            }
+            chat.unconfirm_submission(&command_id, &error);
+        }
+        ChatRemoteResult::DeliveryUnconfirmed { command_id, error } => {
+            chat.unconfirm_submission(&command_id, &error)
         }
         ChatRemoteResult::WorkerFailed(error) => {
+            chat.unconfirm_all_submissions(&error);
+            chat.operation_feedback.clear();
             if chat.fail_all_background_stops() {
-                chat.set_notice(format!("Background task could not be stopped: {error}"));
+                chat.conversation_notice(format!("Background task could not be stopped: {error}"));
             } else {
-                chat.set_notice(error);
+                chat.conversation_notice(error);
             }
         }
     }
@@ -1013,10 +1170,71 @@ pub(super) fn queue_chat_remote_operation(
     operation: ChatRemoteOperation,
     chat: &mut ChatState,
 ) {
+    let feedback_key = operation.feedback().map(|(key, text)| {
+        chat.operation_feedback.insert(key.clone(), text);
+        key
+    });
+    match &operation {
+        ChatRemoteOperation::Prompt {
+            command_id,
+            text,
+            images,
+        } => chat.begin_submission(
+            command_id.clone(),
+            UnsentKind::Prompt,
+            PromptPayload {
+                text: text.clone(),
+                images: images.clone(),
+            },
+            "Sending…",
+        ),
+        ChatRemoteOperation::RunShell {
+            command_id,
+            command,
+        } => chat.begin_submission(
+            command_id.clone(),
+            UnsentKind::Shell,
+            PromptPayload::text(command.clone()),
+            "Sending…",
+        ),
+        ChatRemoteOperation::PlanCommand {
+            command_id,
+            prompt: Some(text),
+            ..
+        } => chat.begin_submission(
+            format!("{command_id}-prompt"),
+            UnsentKind::Prompt,
+            PromptPayload::text(text.clone()),
+            "Changing mode…",
+        ),
+        ChatRemoteOperation::RespondElicitation {
+            request,
+            plan_followup: Some(followup),
+            ..
+        } => {
+            if let Some(text) = &followup.prompt {
+                chat.begin_submission(
+                    format!("plan-review-{}-feedback", request.id),
+                    UnsentKind::Prompt,
+                    PromptPayload::text(text.clone()),
+                    "Sending answer…",
+                );
+            }
+        }
+        _ => {}
+    }
     if let Err(error) = operations.try_send(operation) {
+        if let Some(key) = feedback_key {
+            chat.operation_feedback.remove(&key);
+        }
         let operation = error.into_inner();
         match operation {
-            ChatRemoteOperation::Prompt { text, images, .. } => {
+            ChatRemoteOperation::Prompt {
+                command_id,
+                text,
+                images,
+            } => {
+                chat.finish_submission(&command_id, false);
                 restore_unsent_prompt(chat, text.clone(), images.clone());
                 chat.record_unsent_prompt(
                     UnsentKind::Prompt,
@@ -1025,7 +1243,17 @@ pub(super) fn queue_chat_remote_operation(
                     "session command queue is full".into(),
                 );
             }
-            ChatRemoteOperation::RunShell { command, .. } => {
+            ChatRemoteOperation::RunShell {
+                command_id,
+                command,
+            } => {
+                chat.finish_submission(&command_id, false);
+                chat.record_unsent_prompt(
+                    UnsentKind::Shell,
+                    command.clone(),
+                    Vec::new(),
+                    "session command queue is full".into(),
+                );
                 restore_unsent_input(chat, &format!("!{command}"));
             }
             ChatRemoteOperation::RemoveQueuedPrompt { id, text, kind, .. } => {
@@ -1041,18 +1269,23 @@ pub(super) fn queue_chat_remote_operation(
                 restore_unsent_input(chat, &config_command_text(&key, &value));
             }
             ChatRemoteOperation::PlanCommand {
+                command_id,
                 original,
                 requested_active,
                 ..
             } => {
+                chat.finish_submission(&format!("{command_id}-prompt"), false);
                 chat.plan_command_pending = false;
                 chat.finish_plan_mode_change(!requested_active);
                 restore_unsent_input(chat, &original);
             }
             ChatRemoteOperation::RespondElicitation { request, .. } => {
+                chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
                 chat.restore_elicitation(request)
             }
-            ChatRemoteOperation::Sync | ChatRemoteOperation::Cancel { .. } => {}
+            ChatRemoteOperation::Sync
+            | ChatRemoteOperation::Cancel { .. }
+            | ChatRemoteOperation::RecordNotice { .. } => {}
         }
         chat.set_notice("The session command queue is full; the command was not sent");
     }
@@ -1100,10 +1333,10 @@ mod tests {
                 result: Err("session disconnected".into()),
             },
         );
-        assert_eq!(
-            chat.notice().as_deref(),
-            Some("Steering request failed: session disconnected"),
-        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Steering request failed: session disconnected"
+        ));
     }
 
     #[tokio::test]
@@ -1128,6 +1361,7 @@ mod tests {
         assert!(matches!(
             result,
             ChatRemoteResult::Prompt {
+                command_id: _,
                 text,
                 images,
                 result: Ok(73)
@@ -1175,6 +1409,7 @@ mod tests {
             assert_eq!((reference.width, reference.height), (2, 2));
 
             let Some(ChatRemoteResult::Prompt {
+                command_id: _,
                 images,
                 result: Ok(19),
                 ..
@@ -1206,6 +1441,7 @@ mod tests {
         assert!(matches!(
             result,
             ChatRemoteResult::Prompt {
+                command_id: _,
                 text,
                 images,
                 result: Err(_)
@@ -1246,6 +1482,7 @@ mod tests {
         assert!(matches!(
             result,
             ChatRemoteResult::Prompt {
+                command_id: _,
                 text,
                 images,
                 result: Err(_)
@@ -1311,6 +1548,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::PlanCommand {
+                command_id: "test-submit".into(),
                 original: "/plan inspect this".into(),
                 requested_active: true,
                 control_applied: false,
@@ -1331,6 +1569,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::PlanCommand {
+                command_id: "test-submit".into(),
                 original: "/plan inspect this".into(),
                 requested_active: true,
                 control_applied: true,
@@ -1343,21 +1582,19 @@ mod tests {
     }
 
     #[test]
-    fn relay_acceptance_reports_the_durable_ordinal() {
+    fn relay_acceptance_does_not_emit_transport_chatter() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
+                command_id: "test-submit".into(),
                 text: "ship it".into(),
                 images: Vec::new(),
                 result: Ok(42),
             },
         );
-        assert!(
-            chat.notice()
-                .as_deref()
-                .is_some_and(|notice| notice.contains("accepted by relay at 42"))
-        );
+        assert!(chat.notice().is_none());
+        assert!(chat.conversation_notices.is_empty());
     }
 
     #[test]
@@ -1386,17 +1623,15 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
+                command_id: "test-submit".into(),
                 text: "read the journal\nand summarise it".into(),
                 images: Vec::new(),
                 result: Err("relay attach failed".into()),
             },
         );
 
-        // The transient notice and the composer restore are unchanged.
-        assert_eq!(
-            chat.notice().as_deref(),
-            Some("Prompt was not sent: relay attach failed")
-        );
+        // The failure remains in the conversation and preserves the draft.
+        assert!(chat.notice().is_none());
         assert_eq!(
             chat.input,
             "read the journal\nand summarise it\n\nlater draft"
@@ -1430,6 +1665,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
+                command_id: "test-submit".into(),
                 text: "read the journal".into(),
                 images: Vec::new(),
                 result: Err("relay attach failed".into()),
@@ -1439,6 +1675,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
+                command_id: "test-submit".into(),
                 text: "something else entirely".into(),
                 images: Vec::new(),
                 result: Ok(11),
@@ -1452,6 +1689,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::Prompt {
+                command_id: "test-submit".into(),
                 text: "read the journal".into(),
                 images: Vec::new(),
                 result: Ok(12),
@@ -1467,16 +1705,14 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::RunShell {
+                command_id: "test-submit".into(),
                 command: "cargo test".into(),
                 result: Err("relay attach failed".into()),
             },
         );
 
         assert_eq!(chat.input, "!cargo test");
-        assert_eq!(
-            chat.notice().as_deref(),
-            Some("Shell command was not sent: relay attach failed")
-        );
+        assert!(chat.notice().is_none());
         assert!(transcript_shows(
             &mut chat,
             "Shell command was not sent: relay attach failed"
@@ -1485,6 +1721,7 @@ mod tests {
         apply_chat_remote_result(
             &mut chat,
             ChatRemoteResult::RunShell {
+                command_id: "test-submit".into(),
                 command: "cargo test".into(),
                 result: Ok(4),
             },
@@ -1506,9 +1743,9 @@ mod tests {
         );
 
         assert_eq!(chat.input, "/fast");
-        assert_eq!(
-            chat.notice().as_deref(),
-            Some("Configuration was not changed: rejected")
-        );
+        assert!(transcript_shows(
+            &mut chat,
+            "Configuration was not changed: rejected"
+        ));
     }
 }

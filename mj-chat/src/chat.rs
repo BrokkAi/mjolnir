@@ -12,11 +12,13 @@ mod attachments;
 mod autocomplete;
 mod config_picker;
 mod elicitation;
+mod feedback;
 mod history;
 mod input;
 mod remote;
 mod rendering;
 mod second_opinion;
+mod submissions;
 mod transcript;
 mod turn_review;
 mod viewport;
@@ -131,14 +133,20 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
             review.tier.label()
         ),
         (true, None) => {
-            "[review] enabled = true but no profile is named, so nothing can review".to_owned()
+            format!(
+                "Reviewing every completed turn with Auto ({} tier)",
+                review.tier.label()
+            )
         }
         (false, Some(profile)) => format!(
             "Automatic review is off; /review reviews one turn with {profile:?} ({} tier)",
             review.tier.label()
         ),
         (false, None) => {
-            "Turn review needs a reviewer: set [review] profile in config.toml".to_owned()
+            format!(
+                "Automatic review is off; /review uses Auto ({} tier)",
+                review.tier.label()
+            )
         }
     };
     if open {
@@ -337,22 +345,6 @@ impl TurnControlIntent {
         }
     }
 
-    fn sending_notice(self) -> &'static str {
-        match self {
-            Self::Cancel => "Sending cancellation request…",
-            Self::Steer => "Sending steering request…",
-            Self::ApplyQueued => "Requesting queued prompt…",
-        }
-    }
-
-    fn requested_notice(self) -> &'static str {
-        match self {
-            Self::Cancel => "Cancellation requested",
-            Self::Steer => "Steering requested",
-            Self::ApplyQueued => "Queued prompt requested",
-        }
-    }
-
     fn failure_notice(self, error: &str) -> String {
         let action = match self {
             Self::Cancel => "Cancellation",
@@ -365,9 +357,8 @@ impl TurnControlIntent {
 
 /// A submit the relay refused. The relay never saw it, so it is never
 /// journaled; the chat keeps the record beside the projected entries and
-/// draws it at the end of the transcript. The notice that reports the same
-/// failure is transient, and a user who was away would otherwise believe the
-/// prompt had been sent.
+/// draws it at the end of the transcript, preserving the failure and payload
+/// until the user explicitly retries.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct UnsentPrompt {
     kind: UnsentKind,
@@ -383,6 +374,8 @@ struct SavedChatDraft {
     composer: PromptPayload,
     #[serde(default)]
     unsent: Vec<UnsentPrompt>,
+    #[serde(default)]
+    pending: Vec<submissions::PendingSubmission>,
 }
 
 /// Which submit an [`UnsentPrompt`] stands for. A prompt and a shell command
@@ -549,6 +542,7 @@ pub struct ChatState {
     /// Submits the relay refused, oldest first. Client-local: `apply_materialized`
     /// rebuilds `entries` from the projection, which never saw these.
     unsent_prompts: Vec<UnsentPrompt>,
+    pending_submissions: Vec<submissions::PendingSubmission>,
     /// The command id of the last turn recorded as unanswered, so the same
     /// projection arriving again does not record it twice (#970).
     unanswered_turn: Option<String>,
@@ -617,6 +611,10 @@ pub struct ChatState {
     /// Screen-coordinate targets rebuilt with every transcript frame.
     transcript_tool_click_targets: Vec<TranscriptToolClickTarget>,
     notices: Notices,
+    feedback: Notices,
+    connection_feedback: Option<String>,
+    operation_feedback: BTreeMap<String, String>,
+    conversation_notices: Vec<feedback::ConversationNotice>,
     /// Whether Codex OAuth credentials and the voice helper are available. The runtime
     /// owns discovering this asynchronously; the chat starts disabled until
     /// the host reports a successful probe.
@@ -729,6 +727,7 @@ impl ChatState {
             pending_history_search: None,
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
+            pending_submissions: Vec::new(),
             unanswered_turn: None,
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
@@ -771,6 +770,10 @@ impl ChatState {
             expanded_tool_calls: BTreeSet::new(),
             transcript_tool_click_targets: Vec::new(),
             notices: Notices::default(),
+            feedback: Notices::default(),
+            connection_feedback: None,
+            operation_feedback: BTreeMap::new(),
+            conversation_notices: Vec::new(),
             voice_available: false,
             voice_active: false,
             voice_button_area: None,
@@ -961,6 +964,8 @@ impl ChatState {
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
     ) {
+        self.reconcile_submissions(session);
+        self.reconcile_notices(session);
         let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
         let phase = match session.execution {
             MaterializedExecutionState::Idle => WorkerPhase::Idle,

@@ -137,16 +137,6 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::clear_active_review(&session_id)).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::RememberReviewerSelection {
-            workspace_id,
-            selection,
-        } => {
-            blocking(move || {
-                crate::database::remember_reviewer_selection(&workspace_id, &selection)
-            })
-            .await?;
-            Ok(DaemonReply::Done)
-        }
         DaemonAction::SaveWorkspacePaneSizes {
             workspace_id,
             sizes,

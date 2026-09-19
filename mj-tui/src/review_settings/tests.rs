@@ -176,7 +176,7 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     ));
     assert!(dialog(&dashboard).review.profile.is_none());
     assert!(dialog(&dashboard).review.enabled);
-    assert!(!dialog(&dashboard).can_save());
+    assert!(dialog(&dashboard).can_save());
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None
@@ -692,4 +692,23 @@ fn save_is_local_while_loading_unavailable_or_failed() {
         Err("offline".to_owned()),
     ));
     assert!(dialog(&dashboard).can_save());
+}
+
+#[test]
+fn auto_is_explicit_saveable_and_disables_manual_model_overrides() {
+    let mut dashboard = dashboard_with_session(running_session());
+    open(&mut dashboard);
+    let editor = dialog(&dashboard);
+    let selectors = editor.selectors();
+    assert_eq!(
+        selectors
+            .iter()
+            .find(|(id, _, _, _)| *id == ReviewSettingsFocus::Profile)
+            .unwrap()
+            .2[0],
+        "Auto"
+    );
+    assert!(editor.can_save());
+    assert!(!editor.form.borrow().is_enabled(ReviewSettingsFocus::Model));
+    assert!(!editor.form.borrow().is_enabled(ReviewSettingsFocus::Effort));
 }

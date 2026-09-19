@@ -6,6 +6,17 @@ use super::*;
 pub(super) async fn decode_prompt_images_off_task(
     action: ControllerAction,
 ) -> Result<ControllerAction, ApiError> {
+    if let ControllerAction::Prompt {
+        command_id: Some(id),
+        ..
+    }
+    | ControllerAction::RunShell {
+        command_id: Some(id),
+        ..
+    } = &action
+    {
+        validate_public_id(id)?;
+    }
     let ControllerAction::Prompt { images, .. } = &action else {
         return Ok(action);
     };
@@ -530,6 +541,7 @@ fn validate_action_against(
             session_id,
             text,
             images,
+            ..
         } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
@@ -557,6 +569,7 @@ fn validate_action_against(
         ControllerAction::RunShell {
             session_id,
             command,
+            ..
         } => {
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;

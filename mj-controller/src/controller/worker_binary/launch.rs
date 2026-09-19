@@ -322,11 +322,11 @@ impl Controller {
         }
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
-        // configuration names a reviewer, and that is not a child. A child
+        // configuration has an eligible reviewer, and that is not a child. A child
         // works in its parent's tree, and reviewing it would report the
         // parent's work as the child's.
         launch.review_capture =
-            self.config.review.reviewer_profile().is_some() && subagent.is_none();
+            mj_core::review::settings::can_review(&self.config) && subagent.is_none();
         if let Some(subagent) = &subagent {
             let parent = self
                 .state

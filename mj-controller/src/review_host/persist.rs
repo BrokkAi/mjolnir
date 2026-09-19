@@ -8,11 +8,23 @@ impl HostState {
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
+        let cancelled = self
+            .preparation_cancellation
+            .get(&session_id)
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+        let prepared = if cancelled {
+            Err(StartRefusal("review preparation cancelled".into()))
+        } else {
+            prepared
+        };
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(refusal) => {
+                self.preparation_cancellation.remove(&session_id);
                 self.preparing.remove(&session_id);
                 release_prompts(&session_id);
+                self.record_notice(&session_id, refusal.0.clone());
+                self.publish(&session_id);
                 answer(reply, Err(refusal));
                 return;
             }
@@ -47,6 +59,8 @@ impl HostState {
                 .expect("pending review was just inserted");
             let retry_recovery = pending.prepared.resume_forward.is_some();
             self.preparing.remove(&session_id);
+            self.preparation_cancellation.remove(&session_id);
+            self.publish(&session_id);
             if retry_recovery {
                 self.recovery_candidates.insert(session_id.clone());
             }
@@ -72,11 +86,30 @@ impl HostState {
                     return;
                 };
                 self.preparing.remove(&session_id);
+                let cancelled = self
+                    .preparation_cancellation
+                    .remove(&session_id)
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+                if cancelled && result.is_ok() {
+                    let mut state = pending.prepared.state;
+                    state.active = None;
+                    if let Err(error) = self.persist(session_id.clone(), state, None) {
+                        tracing::warn!(%session_id, %error, "could not clear cancelled review preparation");
+                    }
+                    release_prompts(&session_id);
+                    self.publish(&session_id);
+                    answer(
+                        pending.reply,
+                        Err(StartRefusal("review preparation cancelled".into())),
+                    );
+                    return;
+                }
                 if let Err(error) = result {
                     if pending.prepared.resume_forward.is_some() {
                         self.recovery_candidates.insert(session_id.clone());
                     }
                     release_prompts(&session_id);
+                    self.publish(&session_id);
                     answer(
                         pending.reply,
                         Err(StartRefusal(format!(

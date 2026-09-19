@@ -45,7 +45,7 @@ impl ReviewSlot {
             tier: self.driver.tier(),
             phase: self.driver.phase().clone(),
             roles: self.driver.roles(),
-            status: self.driver.status().to_owned(),
+            status: format!("{} · {}", self.reviewer.description(), self.driver.status()),
             verdict,
         }
     }

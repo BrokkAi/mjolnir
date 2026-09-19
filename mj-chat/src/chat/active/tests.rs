@@ -199,17 +199,8 @@ fn prepare_storage_test_chat() -> PreparedChat {
 }
 
 #[tokio::test]
-async fn client_review_state_restores_workflow_and_remembered_selection() {
+async fn client_review_state_restores_workflow_without_profile_defaults() {
     let (workflow, _) = ReviewWorkflow::start("proposal", "Review this plan", "context");
-    let mut defaults = ReviewerDefaults::default();
-    defaults.remember(
-        "workspace",
-        &ReviewerSelection {
-            profile_id: "reviewer".into(),
-            model: Some("model".into()),
-            effort: None,
-        },
-    );
     let chat = prepare_storage_test_chat()
         .with_review_state(Ok(mj_client::session::ReviewState {
             review: Some(mj_core::storage::StoredReview {
@@ -219,14 +210,9 @@ async fn client_review_state_restores_workflow_and_remembered_selection() {
                 native_lost: false,
                 reviewer_transcript: Vec::new(),
             }),
-            defaults,
         }))
         .open();
     assert_eq!(chat.reviewer_generation, 7);
-    assert_eq!(
-        chat.reviewer_defaults.profile("workspace"),
-        Some("reviewer")
-    );
     assert_eq!(
         chat.state.second_opinion().unwrap().captured().proposal,
         "Review this plan"
@@ -850,10 +836,7 @@ async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft(
     .expect("the replacement actor became the live chat feed");
 
     assert_eq!(chat.draft(), "half-written prompt");
-    assert_eq!(
-        chat.state.notice().as_deref(),
-        Some("Reconnected to session relay")
-    );
+    assert!(chat.state.notice().is_none());
 }
 
 #[tokio::test]
@@ -1041,41 +1024,7 @@ fn chat_context(
     }
 }
 
-/// The reviewer waterfall offers what the session's own configuration
-/// holds. A chat opened without that context offers nothing, which leaves
-/// `/review` and the second opinion with no harness to run.
-#[tokio::test]
-async fn reviewer_profiles_lists_only_enabled_context_profiles_for_the_waterfall() {
-    use mj_core::config::HarnessKind;
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-profiles", 80);
-    let mut context = chat_context(
-        "session-profiles",
-        &[
-            ("codex-1", HarnessKind::Codex),
-            ("claude-1", HarnessKind::Claude),
-        ],
-    );
-    context.config.profiles.get_mut("claude-1").unwrap().enabled = false;
-    let chat = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(context),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-
-    let offered = chat
-        .reviewer_profiles()
-        .into_iter()
-        .map(|choice| (choice.id, choice.harness))
-        .collect::<Vec<_>>();
-
-    assert_eq!(offered, vec![("codex-1".to_owned(), "codex".to_owned())]);
-}
-
+/// Both review surfaces reflect the shared settings as configuration changes.
 #[tokio::test]
 async fn review_status_configuration_is_applied_on_open_and_refresh() {
     use mj_core::review::lanes::ReviewTier;
@@ -1142,10 +1091,9 @@ async fn a_recorded_checkpoint_error_reaches_the_notice_when_the_chat_opens() {
     );
 }
 
-/// A captured plan opens the waterfall over the profiles the context
-/// holds, and says so plainly when the context holds none.
+/// A captured plan starts preparation directly; the controller resolves current settings.
 #[tokio::test]
-async fn a_second_opinion_opens_the_reviewer_waterfall_from_the_context() {
+async fn a_second_opinion_opens_the_reviewer_preparation_from_the_context() {
     use mj_core::config::HarnessKind;
 
     let request = ElicitationRequest {
@@ -1173,16 +1121,10 @@ async fn a_second_opinion_opens_the_reviewer_waterfall_from_the_context() {
     chat.open_second_opinion(request.clone(), "the plan".into());
 
     let Some(SecondOpinion::Setup { setup, .. }) = chat.state.second_opinion() else {
-        panic!("a captured plan opens the reviewer waterfall");
+        panic!("second opinion opens preparation, not a selector");
     };
-    assert_eq!(
-        setup
-            .profiles()
-            .iter()
-            .map(|choice| choice.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["claude-1"]
-    );
+    assert!(setup.failure.is_none());
+    assert!(chat.reviewer_preparation.is_some());
 
     let fixture = mj_client::session::replacement_session_test_fixture("session-alone", 84);
     let mut alone = ActiveChat::open(
@@ -1197,18 +1139,70 @@ async fn a_second_opinion_opens_the_reviewer_waterfall_from_the_context() {
 
     alone.open_second_opinion(request, "the plan".into());
 
-    assert!(alone.state.second_opinion().is_none());
-    assert_eq!(
-        alone.state.notice().as_deref(),
-        Some("Configure a second profile to review plans with")
+    assert!(matches!(
+        alone.state.second_opinion(),
+        Some(SecondOpinion::Setup { .. })
+    ));
+    assert!(alone.reviewer_preparation.is_some());
+}
+
+/// Late startup results cannot consume a replacement plan decision.
+#[tokio::test]
+async fn second_opinion_ignores_stale_preparation_and_uses_resolved_settings() {
+    use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
+    let fixture = mj_client::session::replacement_session_test_fixture("session-prepared", 86);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(chat_context("session-prepared", &[])),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
     );
+    let request = ElicitationRequest {
+        id: "new-plan".into(),
+        message: "Proceed?".into(),
+        title: None,
+        description: None,
+        fields: Vec::new(),
+    };
+    chat.state.open_second_opinion(CapturedProposal {
+        request,
+        proposal: "the new plan".into(),
+    });
+    chat.reviewer_preparation_sequence = 2;
+    let resolved = ResolvedReviewSettings {
+        profile: "only-profile".into(),
+        generation: 42,
+        main: ReviewModelSettings {
+            model: Some("gpt-6-astra".into()),
+            effort: Some("medium".into()),
+            fast_mode: false,
+        },
+        automatic: true,
+        same_provider: true,
+        ..Default::default()
+    };
+    chat.apply_reviewer_prepared(1, Ok(resolved.clone()));
+    assert!(matches!(
+        chat.state.second_opinion(),
+        Some(SecondOpinion::Setup { .. })
+    ));
+    assert_ne!(chat.reviewer_generation, 42);
+    chat.apply_reviewer_prepared(2, Ok(resolved));
+    assert_eq!(chat.reviewer_generation, 42);
+    assert!(matches!(
+        chat.state.second_opinion(),
+        Some(SecondOpinion::Review(_))
+    ));
 }
 
 /// The chat snapshots the configuration when it opens, so a reload has to
 /// be handed to it; otherwise a long-lived conversation goes on offering
 /// the profiles that existed when it was opened.
 #[tokio::test]
-async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
+async fn a_refreshed_config_updates_context_for_review() {
     use mj_core::config::HarnessKind;
 
     let fixture = mj_client::session::replacement_session_test_fixture("session-refresh", 85);
@@ -1224,7 +1218,7 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
         String::new(),
         Notices::default(),
     );
-    assert_eq!(chat.reviewer_profiles().len(), 1);
+    assert_eq!(chat.context.as_ref().unwrap().config.profiles.len(), 1);
 
     let reloaded = config_with_profiles(&[
         ("codex-1", HarnessKind::Codex),
@@ -1234,9 +1228,13 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
     chat.refresh_context(&reloaded, Some(&moved), Some(&moved));
 
     assert_eq!(
-        chat.reviewer_profiles()
-            .into_iter()
-            .map(|choice| choice.id)
+        chat.context
+            .as_ref()
+            .unwrap()
+            .config
+            .profiles
+            .keys()
+            .cloned()
             .collect::<Vec<_>>(),
         vec!["claude-1".to_owned(), "codex-1".to_owned()]
     );
@@ -1269,7 +1267,7 @@ async fn a_refreshed_config_changes_the_offered_reviewer_profiles() {
         Notices::default(),
     );
     bare.refresh_context(&reloaded, None, None);
-    assert!(bare.reviewer_profiles().is_empty());
+    assert!(bare.context.is_none());
 }
 
 #[tokio::test]
@@ -1370,10 +1368,7 @@ async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     .expect("the active runtime record restarted the session handoff");
 
     assert_eq!(chat.draft(), "still drafting");
-    assert_eq!(
-        chat.state.notice().as_deref(),
-        Some("Reconnected to session relay")
-    );
+    assert!(chat.state.notice().is_none());
 }
 
 #[tokio::test]
@@ -1728,26 +1723,26 @@ async fn escape_names_steering_through_submission_and_acceptance() {
 
     use mj_core::relay::{ActiveRelayPrompt, RelayCommand};
 
-    for (supported, queue_kind, hint, sending, requested) in [
+    for (supported, queue_kind, hint, sending, _requested) in [
         (
             Some(true),
             Some(QueuedCommandKind::Prompt),
             "Esc steers next",
-            "Sending steering request…",
+            "Steering turn…",
             "Steering requested",
         ),
         (
             Some(false),
             Some(QueuedCommandKind::Prompt),
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
         (
             None,
             Some(QueuedCommandKind::Prompt),
             "Esc applies next",
-            "Requesting queued prompt…",
+            "Applying queued prompt…",
             "Queued prompt requested",
         ),
         (
@@ -1757,14 +1752,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                 value: "next-model".into(),
             }),
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
         (
             Some(true),
             None,
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
     ] {
@@ -1801,8 +1796,11 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         let screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
         assert!(screen.contains(hint), "{screen}");
 
+        let previous_feedback = chat.state.notice();
         chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert_eq!(chat.state.notice().as_deref(), Some(sending));
+        assert_eq!(chat.state.notice(), previous_feedback);
+        let pending_screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
+        assert!(pending_screen.contains(sending), "{pending_screen}");
 
         let result = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -1827,7 +1825,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         // must still describe the request that was actually submitted.
         chat.state.queued_prompts.clear();
         apply_chat_remote_result(&mut chat.state, result);
-        assert_eq!(chat.state.notice().as_deref(), Some(requested));
+        assert_eq!(chat.state.notice(), previous_feedback);
     }
 }
 

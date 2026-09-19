@@ -1,5 +1,6 @@
 //! Direct, tool-free utility-model selection and inference for compaction.
 
+use mj_core::review::settings::model_version_cmp;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -191,7 +192,7 @@ impl UtilityLlmRuntime {
         Ok(backend)
     }
 
-    async fn quotas(
+    pub(crate) async fn quotas(
         &self,
         config: &Config,
         profiles: &[(&str, &HarnessProfile)],
@@ -425,7 +426,7 @@ fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequ
     )
 }
 
-fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
+pub(crate) fn classify_quota(report: &ProfileQuota) -> Option<(UtilityQuotaClass, u8)> {
     if report.is_usage_priced() {
         return Some((UtilityQuotaClass::Healthy, 100));
     }
@@ -552,26 +553,6 @@ fn muse_spark_model(id: &str) -> bool {
         && version.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
         })
-}
-
-fn model_version_cmp(left: &str, right: &str) -> Ordering {
-    let alias = |id: &str| {
-        u8::from(
-            id.split(['-', '_', '.'])
-                .any(|part| matches!(part, "latest" | "next")),
-        )
-    };
-    alias(left)
-        .cmp(&alias(right))
-        .then_with(|| numeric_parts(left).cmp(&numeric_parts(right)))
-        .then_with(|| left.cmp(right))
-}
-
-fn numeric_parts(id: &str) -> Vec<u64> {
-    id.split(|character: char| !character.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse().ok())
-        .collect()
 }
 
 fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBackend>>> {
@@ -964,6 +945,27 @@ mod tests {
             resets_at_epoch_seconds: None,
         });
         assert_eq!(classify_quota(&report), None);
+        report.windows[0].remaining_percent = Some(10);
+        assert_eq!(
+            classify_quota(&report),
+            Some((UtilityQuotaClass::Reserve, 10))
+        );
+        report.windows[0].remaining_percent = Some(11);
+        assert_eq!(
+            classify_quota(&report),
+            Some((UtilityQuotaClass::Healthy, 11))
+        );
+        report.windows[0].remaining_percent = None;
+        assert_eq!(
+            classify_quota(&report),
+            Some((UtilityQuotaClass::Unknown, 0))
+        );
+        report.windows[0].remaining_percent = Some(0);
+        report.error = Some("quota refresh failed".into());
+        assert_eq!(
+            classify_quota(&report),
+            Some((UtilityQuotaClass::Unknown, 0))
+        );
     }
 
     /// Exercises paid, authenticated provider paths. This is intentionally

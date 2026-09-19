@@ -1112,72 +1112,6 @@ fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
 }
 
 #[test]
-fn a_workspace_remembers_the_reviewer_it_last_confirmed() {
-    use mj_core::second_opinion::{HARNESS_DEFAULT_VALUE, ReviewerSelection};
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-
-    remember_reviewer_selection_in(
-        &database,
-        "workspace-1",
-        &ReviewerSelection {
-            profile_id: "claude".into(),
-            model: Some("sonnet".into()),
-            effort: Some("high".into()),
-        },
-    )
-    .unwrap();
-    // A harness that advertises no model stores its default under the
-    // sentinel, so the same row is preselected next time.
-    remember_reviewer_selection_in(
-        &database,
-        "workspace-2",
-        &ReviewerSelection {
-            profile_id: "codex".into(),
-            model: None,
-            effort: None,
-        },
-    )
-    .unwrap();
-
-    let defaults = reviewer_defaults_in(&database).unwrap();
-    assert_eq!(defaults.profile("workspace-1"), Some("claude"));
-    assert_eq!(defaults.model("workspace-1", "claude"), Some("sonnet"));
-    assert_eq!(
-        defaults.effort("workspace-1", "claude", "sonnet"),
-        Some("high")
-    );
-    assert_eq!(defaults.profile("workspace-2"), Some("codex"));
-    assert_eq!(
-        defaults.model("workspace-2", "codex"),
-        Some(HARNESS_DEFAULT_VALUE)
-    );
-    // Workspaces do not share a reviewer.
-    assert_eq!(defaults.model("workspace-2", "claude"), None);
-
-    // Confirming a different profile replaces the workspace's choice rather
-    // than leaving two remembered reviewers behind.
-    remember_reviewer_selection_in(
-        &database,
-        "workspace-1",
-        &ReviewerSelection {
-            profile_id: "codex".into(),
-            model: Some("deep".into()),
-            effort: None,
-        },
-    )
-    .unwrap();
-    let defaults = reviewer_defaults_in(&database).unwrap();
-    assert_eq!(defaults.profile("workspace-1"), Some("codex"));
-    assert_eq!(defaults.model("workspace-1", "claude"), None);
-    assert_eq!(defaults.model("workspace-1", "codex"), Some("deep"));
-    // The other workspace is untouched.
-    assert_eq!(defaults.profile("workspace-2"), Some("codex"));
-}
-
-#[test]
 fn an_open_review_survives_a_restart_and_a_finished_one_does_not() {
     use mj_core::second_opinion::ReviewWorkflow;
 
@@ -1271,25 +1205,6 @@ fn losing_the_target_ends_the_reviewer_conversation_and_bumps_its_generation() {
         lose_reviewer_continuity_in(&database, "session-1").unwrap(),
         4
     );
-}
-
-#[test]
-fn a_workspaceless_reviewer_selection_is_refused() {
-    use mj_core::second_opinion::ReviewerSelection;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let error = remember_reviewer_selection_in(
-        &database,
-        "  ",
-        &ReviewerSelection {
-            profile_id: "codex".into(),
-            model: None,
-            effort: None,
-        },
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("workspace"));
 }
 
 #[test]

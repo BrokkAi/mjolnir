@@ -1,7 +1,7 @@
-//! The chat's second-opinion view: choosing a reviewer, then the split.
+//! Shared-settings preparation and the second-opinion conversation split.
 //!
 //! Two shapes share this module because they are two states of one thing. The
-//! waterfall picks a reviewer; once one is running the view becomes a split
+//! preparation resolves shared settings; once running, the view becomes a split
 //! with the primary conversation on the left and the reviewer's on the right.
 //!
 //! The reviewer's pane owns its own wrapped rows, its own scroll and its own
@@ -15,17 +15,15 @@ use crate::theme;
 use crossterm::event::{Event, KeyEvent, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::components::{ButtonRow, ChoiceList, ControlKind, Form, Interaction};
+use crate::components::{ButtonRow, ControlKind, Form, Interaction};
 use crate::selection::{SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::relay::RelayEvent;
-use mj_core::second_opinion::{
-    ReviewStage, ReviewWorkflow, ReviewerSetup, SetupRequest, SetupStage, WorkflowRequest,
-};
+use mj_core::second_opinion::{ReviewStage, ReviewWorkflow, WorkflowRequest};
 use mj_core::state::MaterializedSession;
 use mj_core::transcript::ChatEntry;
 use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
@@ -89,9 +87,6 @@ impl SplitAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SetupControl {
-    Options,
-    Confirm,
-    Back,
     Retry,
     Cancel,
 }
@@ -101,22 +96,6 @@ pub(super) enum SplitControl {
     Transfer,
     Implement,
     Cancel,
-}
-
-enum SetupInteraction {
-    Select(usize),
-    Activate(SetupControl),
-}
-
-impl From<Interaction<SetupControl>> for SetupInteraction {
-    fn from(interaction: Interaction<SetupControl>) -> Self {
-        match interaction {
-            Interaction::Select(SetupControl::Options, selected) => Self::Select(selected),
-            Interaction::Activate(control) => Self::Activate(control),
-            Interaction::Cancel => Self::Activate(SetupControl::Cancel),
-            _ => Self::Activate(SetupControl::Options),
-        }
-    }
 }
 
 enum SplitInteraction {
@@ -136,17 +115,17 @@ impl From<Interaction<SplitControl>> for SplitInteraction {
 /// Where the second-opinion view has got to.
 #[derive(Debug)]
 pub(super) enum SecondOpinion {
-    /// Choosing which harness reviews the plan.
+    /// Resolving shared settings and starting an independent reviewer.
     Setup {
         captured: CapturedProposal,
-        setup: Box<ReviewerSetup>,
+        setup: Preparation,
         form: Box<Form<SetupControl>>,
     },
     /// The reviewer is running; the split is up.
     Review(Box<ActiveReview>),
 }
 
-/// A review in progress, boxed so the waterfall state stays small.
+/// A review in progress, boxed so the preparation state stays small.
 #[derive(Debug)]
 pub(super) struct ActiveReview {
     pub(super) captured: CapturedProposal,
@@ -164,18 +143,17 @@ pub(super) struct ActiveReview {
 /// What the second-opinion view asked the session to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SecondOpinionIntent {
-    /// Reviewer setup steps, in order.
-    Setup(Vec<SetupRequest>),
-    /// The user chose a reviewer. Stage it, start it, and begin the review.
-    Confirmed {
-        profile_id: String,
-        model: Option<String>,
-        effort: Option<String>,
-    },
+    /// Retry shared-settings preparation, without reopening a selector.
+    Retry,
     /// Review steps, in order.
     Workflow(Vec<WorkflowRequest>),
     /// The view closed without anything further to do.
     Closed,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Preparation {
+    pub(super) failure: Option<String>,
 }
 
 impl SecondOpinion {
@@ -219,7 +197,7 @@ impl SecondOpinion {
         }
     }
 
-    /// Replaces the waterfall with the split once a reviewer is running.
+    /// Replaces the preparation with the split once a reviewer is running.
     pub(super) fn begin_review(
         &mut self,
         workflow: ReviewWorkflow,
@@ -246,7 +224,7 @@ impl SecondOpinion {
     pub(super) fn report_failure(&mut self, message: impl Into<String>) -> bool {
         match self {
             Self::Setup { setup, .. } => {
-                setup.probe_failed_current(message);
+                setup.failure = Some(message.into());
                 true
             }
             Self::Review(review) => {
@@ -423,53 +401,23 @@ impl ReviewerPane {
     }
 }
 
-fn setup_form(setup: &ReviewerSetup) -> Form<SetupControl> {
+fn setup_form(setup: &Preparation) -> Form<SetupControl> {
     let mut form = Form::new();
     prepare_setup_form(setup, &mut form);
     form
 }
 
-fn prepare_setup_form(setup: &ReviewerSetup, form: &mut Form<SetupControl>) {
-    let options_were_available = form.is_enabled(SetupControl::Options);
-    update_setup_form(setup, form, options_were_available);
-    form.end_frame(SetupControl::Options);
-}
-
-fn update_setup_form(
-    setup: &ReviewerSetup,
-    form: &mut Form<SetupControl>,
-    options_were_available: bool,
-) {
+fn prepare_setup_form(setup: &Preparation, form: &mut Form<SetupControl>) {
     form.begin_update();
-    if setup.failure().is_some() {
+    if setup.failure.is_some() {
         form.declare(SetupControl::Retry, ControlKind::Button);
-    } else if !setup.busy() {
-        form.declare(SetupControl::Options, setup_control_kind(setup));
-        form.declare_with_enabled(
-            SetupControl::Confirm,
-            ControlKind::Button,
-            setup.can_confirm(),
-        );
-        form.declare_with_enabled(
-            SetupControl::Back,
-            ControlKind::Button,
-            setup.stage() != SetupStage::Profile,
-        );
     }
     form.declare(SetupControl::Cancel, ControlKind::Button);
-    if !options_were_available && form.is_enabled(SetupControl::Options) && !form.captures_pointer()
-    {
-        form.focus(SetupControl::Options);
-    }
-}
-
-fn setup_control_kind(setup: &ReviewerSetup) -> ControlKind {
-    let (len, selected) = match setup.stage() {
-        SetupStage::Profile => (setup.profiles().len(), setup.profile_index()),
-        SetupStage::Model => (setup.models().len(), setup.model_index()),
-        SetupStage::Effort => (setup.efforts().len(), setup.effort_index()),
-    };
-    ControlKind::ChoiceList { len, selected }
+    form.end_frame(if setup.failure.is_some() {
+        SetupControl::Retry
+    } else {
+        SetupControl::Cancel
+    });
 }
 
 fn split_form() -> Form<SplitControl> {
@@ -479,14 +427,6 @@ fn split_form() -> Form<SplitControl> {
     form.declare(SplitControl::Cancel, ControlKind::Button);
     form.end_frame(SplitControl::Transfer);
     form
-}
-
-fn setup_current_index(setup: &ReviewerSetup) -> usize {
-    match setup.stage() {
-        SetupStage::Profile => setup.profile_index(),
-        SetupStage::Model => setup.model_index(),
-        SetupStage::Effort => setup.effort_index(),
-    }
 }
 
 fn row_text(line: &Line<'_>) -> String {
@@ -523,15 +463,16 @@ impl super::ChatState {
         matches!(self.second_opinion, Some(SecondOpinion::Review(_)))
     }
 
-    /// Opens the waterfall for `captured`.
-    pub(super) fn open_second_opinion(&mut self, captured: CapturedProposal, setup: ReviewerSetup) {
-        // The waterfall owns the pane; a value selector left open underneath
+    /// Opens the preparation for `captured`.
+    pub(super) fn open_second_opinion(&mut self, captured: CapturedProposal) {
+        // The preparation owns the pane; a value selector left open underneath
         // would fight it for keys when the review closes.
         self.config_picker = None;
+        let setup = Preparation::default();
         self.second_opinion = Some(SecondOpinion::Setup {
             captured,
             form: Box::new(setup_form(&setup)),
-            setup: Box::new(setup),
+            setup,
         });
     }
 
@@ -585,25 +526,13 @@ impl super::ChatState {
                 _ => unreachable!(),
             };
             let consumed = result.consumed;
-            if let Some(interaction) = result.action.map(SetupInteraction::from) {
-                return match interaction {
-                    SetupInteraction::Select(selected) => {
-                        if let Some(SecondOpinion::Setup { setup, form, .. }) =
-                            self.second_opinion.as_mut()
-                        {
-                            let current = setup_current_index(setup);
-                            let delta = if selected >= current { 1 } else { -1 };
-                            for _ in 0..selected.abs_diff(current) {
-                                setup.move_selection(delta);
-                            }
-                            form.set_selected(SetupControl::Options, selected);
-                        }
-                        (true, super::ChatAction::None)
-                    }
-                    SetupInteraction::Activate(control) => {
-                        (true, self.apply_setup_control(control))
-                    }
+            if let Some(action) = result.action {
+                let control = match action {
+                    Interaction::Activate(control) => control,
+                    Interaction::Cancel => SetupControl::Cancel,
+                    _ => return (consumed, super::ChatAction::None),
                 };
+                return (true, self.apply_setup_control(control));
             }
             return (consumed, super::ChatAction::None);
         }
@@ -649,25 +578,6 @@ impl super::ChatState {
             return (consumed, super::ChatAction::None);
         };
         let outcome = match interaction {
-            Interaction::Select(SetupControl::Options, selected) => {
-                if let Some(SecondOpinion::Setup { setup, form, .. }) = self.second_opinion.as_mut()
-                {
-                    let current = setup_current_index(setup);
-                    let delta = if selected >= current { 1 } else { -1 };
-                    let distance = selected.abs_diff(current);
-                    for _ in 0..distance {
-                        setup.move_selection(delta);
-                    }
-                    form.set_selected(SetupControl::Options, selected);
-                }
-                super::ChatAction::None
-            }
-            Interaction::Activate(SetupControl::Options | SetupControl::Confirm) => {
-                self.apply_setup_control(SetupControl::Confirm)
-            }
-            Interaction::Activate(SetupControl::Back) => {
-                self.apply_setup_control(SetupControl::Back)
-            }
             Interaction::Activate(SetupControl::Retry) => {
                 self.apply_setup_control(SetupControl::Retry)
             }
@@ -753,11 +663,10 @@ impl super::ChatState {
         }
         if matches!(self.second_opinion, Some(SecondOpinion::Setup { .. })) {
             let failed = self.second_opinion.as_ref().is_some_and(|view| {
-                matches!(view, SecondOpinion::Setup { setup, .. } if setup.failure().is_some())
+                matches!(view, SecondOpinion::Setup { setup, .. } if setup.failure.is_some())
             });
             return match code {
                 KeyCode::Char('r') if failed => self.apply_setup_control(SetupControl::Retry),
-                KeyCode::Left | KeyCode::Backspace => self.apply_setup_control(SetupControl::Back),
                 KeyCode::Esc => self.apply_setup_control(SetupControl::Cancel),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.apply_setup_control(SetupControl::Cancel)
@@ -797,59 +706,18 @@ impl super::ChatState {
     }
 
     fn apply_setup_control(&mut self, control: SetupControl) -> super::ChatAction {
-        self.apply_setup_operation(|setup| match control {
-            SetupControl::Confirm | SetupControl::Options => setup.confirm(),
-            SetupControl::Back => setup.back(),
-            SetupControl::Retry => setup.retry(),
-            SetupControl::Cancel => setup.cancel(),
-        })
-    }
-
-    fn apply_setup_operation<F>(&mut self, operation: F) -> super::ChatAction
-    where
-        F: FnOnce(&mut ReviewerSetup) -> mj_core::second_opinion::SetupOutcome,
-    {
-        let outcome = match self.second_opinion.as_mut() {
-            Some(SecondOpinion::Setup { setup, form, .. }) => {
-                let previous_stage = setup.stage();
-                let outcome = operation(setup);
-                if setup.stage() != previous_stage && !form.captures_pointer() {
-                    form.focus(SetupControl::Options);
+        match control {
+            SetupControl::Retry => {
+                if let Some(SecondOpinion::Setup { setup, .. }) = self.second_opinion.as_mut() {
+                    setup.failure = None;
                 }
-                outcome
+                super::ChatAction::SecondOpinion(SecondOpinionIntent::Retry)
             }
-            _ => mj_core::second_opinion::SetupOutcome::None,
-        };
-        self.apply_setup_outcome(outcome)
-    }
-
-    fn apply_setup_outcome(
-        &mut self,
-        outcome: mj_core::second_opinion::SetupOutcome,
-    ) -> super::ChatAction {
-        use mj_core::second_opinion::SetupOutcome;
-
-        match outcome {
-            SetupOutcome::None => super::ChatAction::None,
-            SetupOutcome::Requests(requests) => {
-                super::ChatAction::SecondOpinion(SecondOpinionIntent::Setup(requests))
-            }
-            SetupOutcome::Confirmed { selection } => {
-                super::ChatAction::SecondOpinion(SecondOpinionIntent::Confirmed {
-                    profile_id: selection.profile_id,
-                    model: selection.model,
-                    effort: selection.effort,
-                })
-            }
-            SetupOutcome::Cancelled { requests } => {
+            SetupControl::Cancel => {
                 if let Some(SecondOpinion::Setup { captured, .. }) = self.second_opinion.take() {
                     self.restore_elicitation(captured.request);
                 }
-                if requests.is_empty() {
-                    super::ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
-                } else {
-                    super::ChatAction::SecondOpinion(SecondOpinionIntent::Setup(requests))
-                }
+                super::ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
             }
         }
     }
@@ -945,149 +813,56 @@ impl super::ChatState {
     }
 }
 
-/// Draws the waterfall over the chat and reports the rows it owns.
+/// Shows preparation immediately, with retry and cancel after a failure.
 pub(super) fn render_setup(
     frame: &mut ratatui::Frame,
     area: Rect,
     headline: &str,
-    setup: &ReviewerSetup,
+    setup: &Preparation,
     form: &mut Form<SetupControl>,
 ) -> Rect {
-    let options_were_available = form.is_enabled(SetupControl::Options);
     form.begin_frame();
-    update_setup_form(setup, form, options_were_available);
+    prepare_setup_form(setup, form);
     let title = crate::modal::dismissible_modal_title(
         form,
         area,
-        "Choose a reviewer",
+        "Second opinion",
         theme::title(true),
         true,
     );
     let block = theme::modal().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(2),
             Constraint::Length(1),
         ])
         .split(inner);
+    frame.render_widget(Paragraph::new(headline), chunks[0]);
     frame.render_widget(
-        Paragraph::new(headline).style(Style::default().fg(theme::palette().muted)),
-        chunks[0],
-    );
-    let (heading, rows, selected) = match setup.stage() {
-        SetupStage::Profile => (
-            "Profile",
+        Paragraph::new(
             setup
-                .profiles()
-                .iter()
-                .map(|profile| format!("{} ({})", profile.id, profile.harness))
-                .collect::<Vec<_>>(),
-            setup.profile_index(),
-        ),
-        SetupStage::Model => (
-            "Model",
-            setup
-                .models()
-                .iter()
-                .map(|choice| choice.name.clone())
-                .collect(),
-            setup.model_index(),
-        ),
-        SetupStage::Effort => (
-            "Effort",
-            setup
-                .efforts()
-                .iter()
-                .map(|choice| choice.name.clone())
-                .collect(),
-            setup.effort_index(),
-        ),
-    };
-    frame.render_widget(
-        Paragraph::new(heading).style(Style::default().add_modifier(Modifier::BOLD)),
+                .failure
+                .as_deref()
+                .unwrap_or("Preparing reviewer from Settings → Review…"),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[1],
     );
-    if let Some(failure) = setup.failure() {
-        frame.render_widget(
-            Paragraph::new(failure).style(Style::default().fg(theme::palette().error)),
-            chunks[2],
-        );
-        ButtonRow::render(
-            frame,
-            chunks[3],
-            &[
-                (SetupControl::Retry, "Retry", true),
-                (SetupControl::Cancel, "Cancel", true),
-            ],
-            form,
-        );
-        frame.render_widget(
-            Paragraph::new("Enter retry · Esc cancel")
-                .style(Style::default().fg(theme::palette().muted)),
-            chunks[4],
-        );
-        form.end_frame(SetupControl::Retry);
-        return inner;
-    } else if setup.busy() {
-        frame.render_widget(
-            Paragraph::new("Starting the reviewer…")
-                .style(Style::default().fg(theme::palette().warning)),
-            chunks[2],
-        );
-        ButtonRow::render(
-            frame,
-            chunks[3],
-            &[(SetupControl::Cancel, "Cancel", true)],
-            form,
-        );
-        frame.render_widget(
-            Paragraph::new("Waiting for reviewer discovery · Esc cancel")
-                .style(Style::default().fg(theme::palette().muted)),
-            chunks[4],
-        );
-        form.end_frame(SetupControl::Cancel);
-        return inner;
-    } else {
-        let row_lines = rows
-            .iter()
-            .map(|row| Line::from(row.clone()))
-            .collect::<Vec<_>>();
-        ChoiceList::render(
-            frame,
-            chunks[2],
-            &row_lines,
-            selected,
-            form,
-            SetupControl::Options,
-        );
-        ButtonRow::render(
-            frame,
-            chunks[3],
-            &[
-                (SetupControl::Confirm, "Confirm", setup.can_confirm()),
-                (
-                    SetupControl::Back,
-                    "Back",
-                    setup.stage() != SetupStage::Profile,
-                ),
-                (SetupControl::Cancel, "Cancel", true),
-            ],
-            form,
-        );
-        frame.render_widget(
-            Paragraph::new("↑/↓ choose · Tab controls · Enter confirm · Esc cancel")
-                .style(Style::default().fg(theme::palette().muted)),
-            chunks[4],
-        );
+    let mut buttons = Vec::new();
+    if setup.failure.is_some() {
+        buttons.push((SetupControl::Retry, "Retry", true));
     }
-    form.end_frame(SetupControl::Options);
+    buttons.push((SetupControl::Cancel, "Cancel", true));
+    ButtonRow::render(frame, chunks[2], &buttons, form);
+    form.end_frame(if setup.failure.is_some() {
+        SetupControl::Retry
+    } else {
+        SetupControl::Cancel
+    });
     inner
 }
 
