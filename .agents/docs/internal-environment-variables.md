@@ -28,10 +28,10 @@ defaulted to ten minutes for the harnesses that do not mark their own turn ends
 and was withheld from Codex and Claude, which was wrong twice over: silence is
 not evidence that a turn is dead, so the default failed healthy turns (#1020),
 and no harness ends the turn Mjolnir reports without the `session/prompt`
-reply, so the exemption had no basis. Mjolnir now ends a turn on its own only
-when something deterministic says so — the bridge process exited, the transport
-closed, the worker restarted — and publishes the silence age as a fact instead
-of guessing from it. See `mj_core::activity::silent_for_ms` and
+reply, so the exemption had no basis. Without a classifier key or an opted-in
+stall bound, Mjolnir ends a turn automatically only when something deterministic
+says so — the bridge process exited, the transport closed, the worker restarted
+— and publishes the silence age as a fact. See `mj_core::activity::silent_for_ms` and
 `mj_core::activity::silence_note`, which `mj wait`, `mj sessions --session`,
 the TUI and the web viewer all read. An operator who wants an automatic ending
 sets one of these knobs; it then applies to every harness.
@@ -58,3 +58,13 @@ is applying, and its verdict.
 Test-only hooks (`MJ_TEST_*`, `MJ_CHAOS_ISOLATED`) live behind the
 `test-hooks` cargo feature in `mj-core/src/test_hooks.rs` and are not part of
 the default build.
+
+`TYPESAFE_API_KEY` enables Jev turn classification automatically. Shared lookup
+in `mj_core::activity::verdict::api_key` prefers a nonempty environment value,
+then the trimmed `$HOME/.secrets/typesafe_api_key` file. The daemon forwards its
+resolved key to workers through `target_environment`, including container and
+SSH targets. There is no configuration toggle. Without a key or a confident
+successful response, existing behavior is preserved. Requests contain bounded
+recent user and assistant text, tool titles and activity facts. Running-turn
+questions produce `awaiting_input`; completed replies awaiting background work
+publish process-local `Expecting` activity without blocking checkpoints.

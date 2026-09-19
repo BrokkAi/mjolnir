@@ -801,7 +801,8 @@ impl ReviewerRole {
         // it into the spec below before every bridge start; this value is what
         // that runtime starts from.
         let accepted_config = {
-            let relay = relay.lock().expect("reviewer relay lock poisoned");
+            let mut relay = relay.lock().expect("reviewer relay lock poisoned");
+            relay.set_turn_verdict_harness(config.harness);
             let state = relay.operational_state();
             acp::AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
         };
@@ -840,6 +841,7 @@ impl ReviewerRole {
             acp_activity,
             step_clock,
             tools_in_flight,
+            turn_context,
             accepted_config,
         ) = {
             let relay = relay.lock().expect("reviewer relay lock poisoned");
@@ -850,6 +852,7 @@ impl ReviewerRole {
                 relay.acp_activity_clock(),
                 relay.step_clock(),
                 relay.tools_in_flight(),
+                relay.turn_context(),
                 Arc::new(Mutex::new(accepted_config)),
             )
         };
@@ -880,6 +883,8 @@ impl ReviewerRole {
             acp_activity,
             step_clock,
             tools_in_flight,
+            turn_context,
+            verdict: None,
             stall_policy: None,
         };
 

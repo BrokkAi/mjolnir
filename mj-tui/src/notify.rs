@@ -112,6 +112,12 @@ impl DashboardState {
                         .and_then(|review| review.activity_label())
                         .map(str::to_owned)
                 })
+                .or_else(|| {
+                    detail
+                        .and_then(|detail| detail.last_agent_message.as_deref())
+                        .filter(|text| !text.trim().is_empty())
+                        .map(str::to_owned)
+                })
                 .unwrap_or_else(|| "Waiting for your input".to_owned()),
             AttentionLevel::Failed => self
                 .state
@@ -215,6 +221,27 @@ mod tests {
         done.last_agent_message = Some("All tests pass now.\nSecond line".into());
         dashboard.set_current_session(None);
         dashboard
+    }
+
+    #[test]
+    fn unstructured_waiting_uses_agent_text_then_fallback() {
+        let mut dashboard = dashboard();
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.pending_elicitations.clear();
+        detail.last_agent_message = Some("Which branch?".into());
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "Which branch?"
+        );
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .last_agent_message = None;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
     }
 
     #[test]

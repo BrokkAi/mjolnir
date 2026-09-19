@@ -180,6 +180,7 @@ pub enum TurnOutcomeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptCompletion {
+    InputRequired,
     Finished,
     Cancelled,
     QuotaLimit,
@@ -195,6 +196,7 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
         .collect::<String>();
     match normalized.as_str() {
         "endturn" => PromptCompletion::Finished,
+        "awaitinginput" => PromptCompletion::InputRequired,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
         _ if crate::relay::is_capacity_stop_reason(stop_reason) => PromptCompletion::QuotaLimit,

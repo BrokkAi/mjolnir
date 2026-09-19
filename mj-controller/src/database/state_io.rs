@@ -710,7 +710,10 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .transpose()?,
             // Resolved while a session is provisioned and assigned to the
             // record right before this write, so the lifecycle path owns it.
-            build_cache.as_ref().map(serde_json::to_string).transpose()?,
+            build_cache
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     if changed != 1 {

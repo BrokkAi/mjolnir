@@ -65,6 +65,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         acp_activity: Default::default(),
         step_clock: Default::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: None,
         stall_policy: None,
     };
     probe(launch, spec.model).await
@@ -294,6 +296,8 @@ for line in sys.stdin:
             acp_activity: Default::default(),
             step_clock: Default::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: None,
             stall_policy: None,
         };
         let defaults = probe(launch.clone(), None).await.unwrap();

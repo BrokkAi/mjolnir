@@ -389,6 +389,9 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    /// Process-local inference; a restarted worker must forget it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_continuation: Option<i64>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,6 +549,7 @@ impl RelayOperationalState {
                     })
                     .map(|started_at_ms| crate::activity::InFlightToolCall {
                         tool_call_id: String::new(),
+                        title: None,
                         status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
                         started_at_ms,
                     })
@@ -565,6 +569,7 @@ impl RelayOperationalState {
                 )
                 .min(),
             background_commands: self.background_commands.len(),
+            expected_continuation: self.expected_continuation,
             active_user_shells: self.active_user_shells.len(),
             active_agent_terminals: self.active_agent_terminals.len(),
             goal_active: self.goal.active(),
@@ -1013,6 +1018,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            expected_continuation: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,

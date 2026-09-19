@@ -322,6 +322,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    // Breaking: persisted input_required API events can now omit the structured
+    // request. Older readers require it and fail to deserialize the event log;
+    // the shared read/write compatibility floor must advance with the revision.
+    if version < 39 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 39 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (39, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 39;
+             COMMIT;",
+        )?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -400,9 +413,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 32 (ZCode) was the last breaking one; the
-    /// compatible migrations after it leave the floor where it is.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 32;
+    /// `SCHEMA_VERSION`. Migration 39 permits unstructured input-required events.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 39;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -431,6 +443,37 @@ mod reader_tests {
         }
         drop(connection);
         forget_verified_schema(path);
+    }
+
+    #[test]
+    fn unstructured_input_events_raise_the_store_compatibility_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+             DELETE FROM schema_migrations WHERE version = 39;
+             UPDATE schema_compatibility SET minimum_compatible_version = 32;
+             PRAGMA user_version = 38;
+             COMMIT;",
+            )
+            .unwrap();
+        migrate_schema(&connection).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 39);
+        assert_eq!(state.minimum_compatible, Some(39));
+        let event = ApiEventData::InputRequired {
+            request: None,
+            turn_id: Some(1),
+        };
+        #[derive(serde::Deserialize)]
+        struct LegacyInputEvent {
+            #[serde(rename = "request")]
+            _request: mj_core::elicitation::ElicitationRequest,
+        }
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert!(serde_json::from_value::<LegacyInputEvent>(encoded["data"].clone()).is_err());
     }
 
     #[test]

@@ -32,6 +32,11 @@ fn every_launch_request_states_the_mjolnir_owned_mcp_servers() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
@@ -146,6 +151,11 @@ fn native_delegation_tools_are_hidden_only_when_the_subagent_socket_exists() {
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
 
@@ -210,6 +220,11 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let servers = project_memory_mcp(&spec);
@@ -265,6 +280,11 @@ fn claude_session_metadata_subscribes_to_background_task_levels_for_all_policies
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let meta = serde_json::Value::Object(session_request_meta(&spec).unwrap());
@@ -477,6 +497,11 @@ fn resumed_session_request_keeps_load_context() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let load = serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
@@ -634,6 +659,11 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
         let spec = LaunchSpec {
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
             subagent_mcp_socket: None,
             goal_recovery: Default::default(),
@@ -1185,6 +1215,11 @@ async fn answer_to_ext_request(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -1347,6 +1382,11 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -1745,6 +1785,11 @@ async fn config_change_request(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -1920,6 +1965,11 @@ async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -2002,6 +2052,11 @@ async fn policy_is_enforced_before_session_is_reported(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -2188,6 +2243,11 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -2291,6 +2351,11 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -2504,10 +2569,20 @@ async fn silent_after_prompt_bridge(
     observed: mpsc::UnboundedSender<String>,
     open_a_tool_call: bool,
 ) {
+    silent_after_prompt_bridge_with_late_reply(stream, observed, open_a_tool_call, false).await;
+}
+
+async fn silent_after_prompt_bridge_with_late_reply(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    open_a_tool_call: bool,
+    late_reply: bool,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
+    let mut prior_prompt = None;
     while let Some(line) = lines.next_line().await.expect("read bridge input") {
         let request: serde_json::Value =
             serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
@@ -2531,6 +2606,16 @@ async fn silent_after_prompt_bridge(
                 "result": {"sessionId": "scripted"},
             }),
             "session/prompt" => {
+                if late_reply && let Some(prior) = prior_prompt.replace(id) {
+                    let reply = serde_json::json!({"jsonrpc":"2.0", "id":prior, "result":{"stopReason":"end_turn"}});
+                    if write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 if open_a_tool_call {
                     let update = serde_json::json!({
                         "jsonrpc": "2.0",
@@ -2569,7 +2654,7 @@ async fn silent_after_prompt_bridge(
     }
 }
 
-fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
+pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpec {
     LaunchSpec {
         bridge_spec_path: None,
         subagent_mcp_socket: None,
@@ -2590,6 +2675,11 @@ fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -> LaunchSpe
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: Some(stall_policy),
     }
 }
@@ -3045,6 +3135,11 @@ async fn exercise_image_steering(with_images: bool) {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -3180,6 +3275,11 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -3311,6 +3411,11 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let driver = tokio::spawn(async move {
@@ -3395,6 +3500,11 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         }
     }
@@ -3722,6 +3832,11 @@ mod terminals {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         };
         let driver = tokio::spawn(async move {
@@ -4233,6 +4348,11 @@ for line in sys.stdin:
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         },
         request_rx,
@@ -4390,6 +4510,11 @@ for line in sys.stdin:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
@@ -4535,6 +4660,11 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
@@ -4666,6 +4796,11 @@ while True:
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
     let runtime = tokio::spawn(run(spec, request_rx, event_tx));
@@ -4769,6 +4904,11 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     };
 
@@ -4839,6 +4979,11 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         };
 
@@ -5038,6 +5183,7 @@ fn the_daemon_carries_both_stall_knobs_to_its_workers() {
     for name in [
         TURN_STALL_TIMEOUT_VARIABLE,
         TOOL_CALL_STALL_TIMEOUT_VARIABLE,
+        "TYPESAFE_API_KEY",
     ] {
         assert!(
             carried.contains(name),
@@ -5132,6 +5278,11 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     }
 }
@@ -5206,6 +5357,11 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         }
     }
@@ -5335,6 +5491,11 @@ fn missing_native_session_spec(
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     }
 }
@@ -5450,4 +5611,142 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
         "a used thread must never be replaced: {events:?}"
     );
     drop(request_tx);
+}
+
+/// Exercise the real session select loop and the production 60-second cadence.
+#[tokio::test(flavor = "current_thread")]
+async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_session() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let evidence: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(evidence["state"]["phase"], "running");
+        let answer = serde_json::json!({"answers": {
+            "waiting_on":{"type":"choice","choice":"user","confidence":0.95},
+            "asked_question":{"type":"noul","noul":0.95}
+        }})
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(silent_after_prompt_bridge_with_late_reply(
+        bridge_stream,
+        observed_tx,
+        false,
+        true,
+    ));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.verdict = Some(VerdictSource {
+        key: "test-key".into(),
+        endpoint,
+    });
+    let mut driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::from("Ask me which option to use")],
+        })
+        .await
+        .unwrap();
+    let mut methods = Vec::new();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+    let (warned, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
+        let mut warned = false;
+        loop {
+            match event_rx.recv().await.unwrap() {
+                RuntimeEvent::Warning { message } => warned |= message.contains("waiting for you"),
+                RuntimeEvent::PromptFinished {
+                    stop_reason,
+                    diagnostic,
+                    ..
+                } => {
+                    assert_eq!(stop_reason, mj_core::acp::AWAITING_INPUT_STOP_REASON);
+                    break (warned, diagnostic.unwrap());
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(warned, "warning precedes completion");
+    assert_eq!(
+        diagnostic.code.as_deref(),
+        Some(mj_core::acp::AWAITING_INPUT_STOP_REASON)
+    );
+    // A new prompt still reaches the same bridge after dropping the old reply.
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-2".into(),
+            prompt: vec![ContentBlock::from("Use option one")],
+        })
+        .await
+        .unwrap();
+    wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+    assert!(!driver.is_finished());
+    let late = tokio::time::timeout(Duration::from_millis(150), async {
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, RuntimeEvent::PromptFinished { .. }) {
+                return event;
+            }
+        }
+        panic!("session closed after a late reply");
+    })
+    .await;
+    assert!(
+        late.is_err(),
+        "the old reply must not complete the new prompt"
+    );
+    drop(request_tx);
+    if tokio::time::timeout(Duration::from_secs(5), &mut driver)
+        .await
+        .is_err()
+    {
+        driver.abort();
+    }
+    bridge.abort();
+    server.await.unwrap();
 }

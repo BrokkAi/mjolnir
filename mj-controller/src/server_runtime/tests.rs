@@ -291,6 +291,7 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
     use mj_core::relay::{RelayExecutionState, RelayOperationalState};
 
     let operational = |agent_capabilities| RelayOperationalState {
+        expected_continuation: None,
         goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -442,6 +443,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
+        expected_continuation: None,
         goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,

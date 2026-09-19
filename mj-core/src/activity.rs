@@ -29,6 +29,7 @@ use crate::relay::RelayExecutionState;
 use crate::state::MaterializedExecutionState;
 
 mod tools;
+pub mod verdict;
 pub use tools::{InFlightToolCall, ToolsInFlight};
 
 /// Every fact that bears on whether a session is working.
@@ -54,6 +55,8 @@ pub struct ActivityFacts {
     /// Oldest start among background commands and user shells.
     pub background_started_at_ms: Option<i64>,
     pub background_commands: usize,
+    #[serde(default)]
+    pub expected_continuation: Option<i64>,
     pub active_user_shells: usize,
     pub active_agent_terminals: usize,
     pub goal_active: bool,
@@ -97,6 +100,7 @@ impl Default for ActivityFacts {
             tools_in_flight: Vec::new(),
             background_started_at_ms: None,
             background_commands: 0,
+            expected_continuation: None,
             active_user_shells: 0,
             active_agent_terminals: 0,
             goal_active: false,
@@ -165,6 +169,11 @@ pub enum ActivityState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at_ms: Option<i64>,
     },
+    /// The completed reply says unseen background work will resume the agent.
+    /// This inference owns no work and never blocks worker replacement.
+    Expecting {
+        since_ms: i64,
+    },
     /// A native goal owns the session.
     Goal,
     /// The worker is waiting to resubmit a prompt the provider refused for
@@ -202,9 +211,12 @@ impl ActivityState {
         match self {
             Self::Turn { .. } | Self::Tool { .. } | Self::Background { .. } | Self::Closing => true,
             Self::Unknown { last_known, .. } => last_known.is_working(),
-            Self::Idle { .. } | Self::Goal | Self::Retry | Self::Closed | Self::Unrecognized => {
-                false
-            }
+            Self::Expecting { .. }
+            | Self::Idle { .. }
+            | Self::Goal
+            | Self::Retry
+            | Self::Closed
+            | Self::Unrecognized => false,
         }
     }
 
@@ -221,7 +233,10 @@ impl ActivityState {
     /// not `Unknown`, because [`while_disconnected`] keeps the two apart.
     #[must_use]
     pub fn has_work_in_flight(&self) -> bool {
-        !matches!(self, Self::Idle { .. } | Self::Closed)
+        !matches!(
+            self,
+            Self::Expecting { .. } | Self::Idle { .. } | Self::Closed
+        )
     }
 
     /// The four-valued phase the viewer and the API have always reported.
@@ -237,9 +252,11 @@ impl ActivityState {
             Self::Turn { .. } | Self::Tool { .. } | Self::Unrecognized => {
                 RelayExecutionState::Running
             }
-            Self::Background { .. } | Self::Goal | Self::Retry | Self::Idle { .. } => {
-                RelayExecutionState::Idle
-            }
+            Self::Expecting { .. }
+            | Self::Background { .. }
+            | Self::Goal
+            | Self::Retry
+            | Self::Idle { .. } => RelayExecutionState::Idle,
             Self::Unknown { last_known, .. } => last_known.chat_phase(),
         }
     }
@@ -382,6 +399,9 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
         return ActivityState::Background {
             started_at_ms: facts.background_started_at_ms,
         };
+    }
+    if let Some(since_ms) = facts.expected_continuation {
+        return ActivityState::Expecting { since_ms };
     }
     if facts.goal_active || facts.goal_running {
         return ActivityState::Goal;

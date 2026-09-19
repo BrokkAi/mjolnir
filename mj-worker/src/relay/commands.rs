@@ -875,6 +875,8 @@ impl DurableRelay {
             self.capacity_response = CapacityResponse::default();
         }
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
+        let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
+            if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
         let ordinal = self.append_relay_event(
             Some(command_id),
             RelayObservation::CommandCompleted {
@@ -885,6 +887,7 @@ impl DurableRelay {
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
+        self.replied_verdict_pending |= classify_reply;
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }

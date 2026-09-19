@@ -50,6 +50,7 @@ pub(crate) struct SessionOperationDisplay {
 pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
+    pub(crate) awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -236,6 +237,7 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) applied_event_ordinal: u64,
     pub(crate) session_title: Option<String>,
     pub(crate) current_turn_started_at: Option<u64>,
+    pub(crate) awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -432,6 +434,18 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
+        let awaiting_input = session.active_turn.is_none()
+            && session.queued_prompts.is_empty()
+            && session.last_turn_outcome.as_ref().is_some_and(|outcome| {
+                matches!(&outcome.outcome,
+                    mj_core::state::TurnOutcomeKind::Completed { stop_reason }
+                    if mj_core::state::classify_prompt_completion(stop_reason)
+                        == mj_core::state::PromptCompletion::InputRequired)
+                    && !session.transcript.iter().any(|item| {
+                        matches!(item.body, TranscriptBody::User { .. })
+                            && item.position > outcome.completed_ordinal
+                    })
+            });
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -454,6 +468,7 @@ impl PreparedMaterializedSessionDetail {
             applied_event_ordinal,
             session_title,
             current_turn_started_at,
+            awaiting_input,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -968,6 +983,7 @@ impl DashboardState {
         {
             detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
             detail.current_turn_started_at = prepared.current_turn_started_at;
+            detail.awaiting_input = prepared.awaiting_input;
             detail.last_activity_at_ms = prepared.last_activity_at_ms;
             detail.last_agent_message = prepared.last_agent_message;
             detail.last_user_message = prepared.last_user_message;

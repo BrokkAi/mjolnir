@@ -974,13 +974,12 @@ fn timeout_from_environment(name: &str) -> Option<Duration> {
 ///
 /// Mjolnir does not guess that a quiet turn is a dead turn. Silence is not
 /// evidence: a turn waiting on a slow first token or a twenty-minute build
-/// sends nothing at all, and failing it destroys real work (#1020). Every
-/// ending Mjolnir decides on its own is deterministic instead — the bridge
-/// process exited, the transport closed, the worker restarted — and the
+/// sends nothing at all, and failing it destroys real work (#1020). The
+/// optional turn classifier can identify an explicit request for user input; the
 /// silence age is published as a fact for a person or an orchestrator to act
 /// on (`mj_core::activity::ActivityState::silent_for_ms`).
 ///
-/// An operator who wants an automatic ending opts in per session, through the
+/// An operator who wants a fixed timeout opts in per session, through the
 /// worker's environment, by setting [`TURN_STALL_TIMEOUT_VARIABLE`] or
 /// [`TOOL_CALL_STALL_TIMEOUT_VARIABLE`] to a positive number of milliseconds.
 /// The bound then applies to every harness: none of them ends a turn Mjolnir
@@ -1003,6 +1002,8 @@ pub(super) fn turn_stall_timeout() -> Option<Duration> {
 /// when anything last arrived, and which tool calls are open.
 pub(super) fn turn_stall_facts(spec: &LaunchSpec) -> mj_core::activity::ActivityFacts {
     mj_core::activity::ActivityFacts {
+        background_commands: spec.turn_context.counts().0,
+        queued_commands: spec.turn_context.counts().1,
         last_acp_activity_at_ms: spec.acp_activity.last_at_ms(),
         tools_in_flight: spec.tools_in_flight.snapshot(),
         ..mj_core::activity::ActivityFacts::default()

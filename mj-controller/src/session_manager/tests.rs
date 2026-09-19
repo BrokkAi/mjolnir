@@ -809,6 +809,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                expected_continuation: None,
                 goal: Default::default(),
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,

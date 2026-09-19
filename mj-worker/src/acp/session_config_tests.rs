@@ -215,6 +215,11 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
         tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
         stall_policy: None,
     }
 }

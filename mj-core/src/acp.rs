@@ -328,6 +328,9 @@ pub fn session_update_has_native_history(update: &SessionUpdate) -> bool {
 /// string to keep working.
 pub const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
 
+/// The classifier inferred a user handoff while the harness still held its prompt open.
+pub const AWAITING_INPUT_STOP_REASON: &str = "awaiting_input";
+
 /// The progress text an ACP bridge streams while it compacts a session's
 /// context, verbatim from the bridges Mjolnir pins.
 ///
@@ -463,6 +466,11 @@ pub struct ClaudeBackgroundTask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    ContinuationExpected {
+        since_ms: i64,
+        note: String,
+        generation: u64,
+    },
     Connected {
         agent_name: Option<String>,
         agent_version: Option<String>,

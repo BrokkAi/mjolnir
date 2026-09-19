@@ -112,7 +112,9 @@ impl SessionActivity {
         waiting_for_input: bool,
     ) -> bool {
         match self.kind(current_turn_started_at) {
-            SessionActivityKind::Idle | SessionActivityKind::Goal => false,
+            SessionActivityKind::Idle
+            | SessionActivityKind::Goal
+            | SessionActivityKind::Expecting => false,
             SessionActivityKind::Lifecycle => {
                 self.execution == Some(mj_core::relay::RelayExecutionState::Closing)
             }
@@ -138,6 +140,9 @@ impl SessionActivity {
                 .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
         }
         let kind = self.kind(current_turn_started_at);
+        if kind == SessionActivityKind::Expecting {
+            return "expecting the agent to continue".into();
+        }
         if kind == SessionActivityKind::Goal {
             return "Pursuing goal".into();
         }
@@ -252,6 +257,7 @@ impl SessionActivity {
         let label = match kind {
             SessionActivityKind::Lifecycle => Some(self.lifecycle_label().to_owned()),
             SessionActivityKind::Goal => Some("Pursuing goal".into()),
+            SessionActivityKind::Expecting => Some("expecting the agent to continue".into()),
             _ => None,
         };
         SessionActivityDetails {
@@ -313,6 +319,7 @@ impl SessionActivity {
                 .foreground_tool_started_at_ms
                 .map(|started_at_ms| mj_core::activity::InFlightToolCall {
                     tool_call_id: String::new(),
+                    title: None,
                     status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
                     started_at_ms,
                 })
@@ -349,6 +356,7 @@ impl SessionActivity {
             ActivityState::Background { .. } => SessionActivityKind::Background,
             ActivityState::Goal | ActivityState::Retry => SessionActivityKind::Goal,
             ActivityState::Idle { .. } => SessionActivityKind::Idle,
+            ActivityState::Expecting { .. } => SessionActivityKind::Expecting,
             // A state this build does not know is something happening, and
             // "Turn" is the honest way to render an unnamed something.
             ActivityState::Unknown { .. } | ActivityState::Unrecognized => {
@@ -392,6 +400,7 @@ impl SessionActivity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivityKind {
+    Expecting,
     Goal,
     Turn,
     Step,
@@ -491,6 +500,7 @@ pub fn format_activity_columns(
         SessionActivityKind::Lifecycle => vec![activity.lifecycle_label().to_owned()],
         SessionActivityKind::Idle => vec!["[idle]".into()],
         SessionActivityKind::Goal => vec!["Pursuing goal".into()],
+        SessionActivityKind::Expecting => vec!["expecting the agent to continue".into()],
     }
 }
 
@@ -525,12 +535,40 @@ pub fn format_activity_clock(
         SessionActivityKind::Lifecycle => format!("[{}]", activity.lifecycle_label()),
         SessionActivityKind::Idle => "[idle]".into(),
         SessionActivityKind::Goal => "Pursuing goal".into(),
+        SessionActivityKind::Expecting => "expecting the agent to continue".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_continuation_is_visible_without_claiming_running_work() {
+        let activity = SessionActivity {
+            state: Some(mj_core::activity::ActivityState::Expecting { since_ms: 1_000 }),
+            ..Default::default()
+        };
+        assert!(!activity.is_idle(None));
+        assert!(!activity.is_working(None, false));
+        assert_eq!(
+            activity.details(None, None).kind,
+            SessionActivityKind::Expecting
+        );
+        assert_eq!(
+            activity.display_clock(10, None, None, true),
+            "expecting the agent to continue"
+        );
+        assert_eq!(
+            format_activity_clock(10, None, &activity),
+            "expecting the agent to continue"
+        );
+        assert_eq!(
+            format_activity_columns(10, None, None, &activity),
+            vec!["expecting the agent to continue"]
+        );
+        assert!(activity.is_working(Some(1), false));
+    }
 
     #[test]
     fn claude_background_agents_render_bg_until_the_live_set_is_empty() {

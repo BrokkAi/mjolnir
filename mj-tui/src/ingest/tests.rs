@@ -1001,3 +1001,31 @@ fn failed_closing_record_is_recovery_status_not_an_active_transition() {
         Some(mj_core::state::SessionTransitionKind::Stopping)
     );
 }
+
+#[test]
+fn inferred_input_request_clears_when_a_later_prompt_starts() {
+    let mut materialized = MaterializedSession::empty("session-1");
+    materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "prompt".into(),
+        accepted_ordinal: Some(1),
+        turn_start_position: Some(2),
+        completed_ordinal: 3,
+        completed_at_ms: 1000,
+        outcome: mj_core::state::TurnOutcomeKind::Completed {
+            stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
+        },
+    });
+    let prepare = |session| {
+        PreparedMaterializedSessionDetail::from_materialized(session, 0, Default::default())
+    };
+    assert!(prepare(materialized.clone()).awaiting_input);
+    materialized.active_turn = Some(mj_core::state::MaterializedTurn {
+        command_id: "next".into(),
+        accepted_ordinal: Some(4),
+        turn_start_position: 5,
+        started_at_ms: 2000,
+    });
+    assert!(!prepare(materialized).awaiting_input);
+}

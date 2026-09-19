@@ -737,6 +737,34 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
+        if let RelayObservation::CommandStarted { command_id, .. } = &event.observation
+            && let Some(dispatch) = self.snapshot.dispatches.get(command_id)
+            && let RelayCommand::Prompt { prompt } = &dispatch.command
+        {
+            let prompt_text = prompt
+                .iter()
+                .filter_map(|block| match block {
+                    agent_client_protocol::schema::v1::ContentBlock::Text(text) => {
+                        Some(text.text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.turn_context.reset(&prompt_text);
+            self.replied_verdict_pending = false;
+        }
+        if matches!(
+            event.observation,
+            RelayObservation::HarnessTurnStarted { .. }
+        ) || matches!(
+            self.snapshot.execution,
+            mj_core::relay::RelayExecutionState::Closing
+                | mj_core::relay::RelayExecutionState::Closed
+        ) {
+            self.turn_context.invalidate();
+            self.replied_verdict_pending = false;
+        }
         let idle_changed = self.refresh_idle_clock(event.recorded_at_ms);
         self.record_journal_append(&path, &event);
         self.push_hot_event(event);

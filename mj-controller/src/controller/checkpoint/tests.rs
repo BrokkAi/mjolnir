@@ -266,6 +266,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            expected_continuation: None,
             goal: serde_json::from_value(
                 serde_json::json!({"known":true,"execution":{"version":1,"status":"idle"}}),
             )
@@ -741,6 +742,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
     // worker underneath the tool.
     snapshot.operational.execution = RelayExecutionState::Idle;
     snapshot.operational.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
+        title: None,
         tool_call_id: "bash-1".into(),
         status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
         started_at_ms: 1,

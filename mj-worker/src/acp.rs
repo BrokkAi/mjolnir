@@ -10,6 +10,7 @@ mod launch;
 mod permissions;
 mod session;
 mod session_config;
+pub(crate) mod verdict_client;
 use claude_tasks::*;
 use drive::*;
 pub use launch::LaunchSpec;
@@ -17,6 +18,7 @@ use launch::*;
 use permissions::*;
 use session::*;
 use session_config::*;
+pub use verdict_client::VerdictSource;
 
 use mj_core::acp::dialect::grok;
 pub use mj_core::acp::*;

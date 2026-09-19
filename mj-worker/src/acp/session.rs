@@ -385,6 +385,7 @@ pub(super) async fn serve_session(
         config_recovery.is_some(),
     )
     .await?;
+    let verdict_client = verdict_client::VerdictClient::resolve(spec.verdict.as_ref()).await;
     let mut goal_controls = goal::PendingControls::default();
     loop {
         let request = tokio::select! {
@@ -466,6 +467,15 @@ pub(super) async fn serve_session(
                 if first_use {
                     emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
                 }
+                let prompt_text = prompt
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                spec.turn_context.reset(&prompt_text);
                 spec.step_clock.begin_turn();
                 if spec.harness == HarnessKind::Grok {
                     grok_usage.begin(session_id.to_string());
@@ -495,6 +505,14 @@ pub(super) async fn serve_session(
                 let mut prompt_running = true;
                 let mut cancel_deadline = None;
                 let mut pending_steer: Option<PendingSteer> = None;
+                let input_verdict = async {
+                    if let Some(client) = &verdict_client {
+                        verdict_client::await_input_verdict(spec, client).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                tokio::pin!(input_verdict);
                 loop {
                     tokio::select! {
                         biased;
@@ -641,6 +659,20 @@ pub(super) async fn serve_session(
                             .await?;
                             // An acknowledged cancel leaves the bridge in
                             // place; the next prompt goes to the same session.
+                            break;
+                        }
+                        _ = &mut input_verdict, if prompt_running && cancel_deadline.is_none() => {
+                            let message = "mj marked this turn as waiting for you; the harness may still be running".to_owned();
+                            emit_runtime_event(events, RuntimeEvent::Warning { message: message.clone() }).await?;
+                            emit_runtime_event(events, RuntimeEvent::PromptFinished {
+                                request_id,
+                                stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
+                                usage: None,
+                                diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
+                                    message, code: Some(mj_core::acp::AWAITING_INPUT_STOP_REASON.into()),
+                                    http_status: None, reset_at: None,
+                                }),
+                            }).await?;
                             break;
                         }
                         verdict = async {

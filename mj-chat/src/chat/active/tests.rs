@@ -291,6 +291,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
             operational: mj_core::relay::RelayOperationalState {
+                expected_continuation: None,
                 goal: Default::default(),
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,

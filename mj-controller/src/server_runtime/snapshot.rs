@@ -663,7 +663,10 @@ pub(super) fn viewer_activity_details(
             }
             mj_client::usage_format::SessionActivityKind::Idle => ViewerActivityKind::Idle,
             mj_client::usage_format::SessionActivityKind::Lifecycle
-            | mj_client::usage_format::SessionActivityKind::Goal => ViewerActivityKind::Lifecycle,
+            | mj_client::usage_format::SessionActivityKind::Goal
+            | mj_client::usage_format::SessionActivityKind::Expecting => {
+                ViewerActivityKind::Lifecycle
+            }
         },
         turn_started_at_ms: details.turn_started_at_ms,
         step_started_at_ms: details.step_started_at_ms,

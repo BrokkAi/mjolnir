@@ -179,6 +179,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.set_turn_verdict_harness(config.harness);
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
@@ -369,12 +370,13 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // keeps a harness from outliving the session it was reviewing for.
     // One acquisition: a guard taken inside the struct literal below would
     // live until the literal ends and deadlock the next one.
-    let (acp_activity, step_clock, tools_in_flight, accepted_config) = {
+    let (acp_activity, step_clock, tools_in_flight, turn_context, accepted_config) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
             relay.step_clock(),
             relay.tools_in_flight(),
+            relay.turn_context(),
             Arc::new(Mutex::new(accepted_config)),
         )
     };
@@ -423,6 +425,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             acp_activity,
             step_clock,
             tools_in_flight,
+            turn_context,
+            verdict: None,
             stall_policy: None,
         };
         super::record_startup_step(&root, "bridge-start");

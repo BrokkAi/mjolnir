@@ -312,6 +312,8 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // The standalone worker uses the same ring provider as the daemon.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     install_stderr_logging()?;
     let cli = Cli::parse();
     let Command::Worker(args) = &cli.command;

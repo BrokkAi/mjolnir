@@ -1495,7 +1495,12 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
     assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
     // The page otherwise only predicts; this line is the one thing on it that
     // says the cache is being used.
-    for expected in ["155 builds", "12050 compilations from cache", "1h 40m", "44.3"] {
+    for expected in [
+        "155 builds",
+        "12050 compilations from cache",
+        "1h 40m",
+        "44.3",
+    ] {
         assert!(
             checked.contains(expected),
             "missing {expected:?} in\n{checked}"

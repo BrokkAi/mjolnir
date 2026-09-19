@@ -133,6 +133,10 @@ pub struct DurableRelay {
     /// reads the same tool calls, and when it could not, a turn blocked in a
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
+    turn_context: mj_core::activity::verdict::TurnContext,
+    verdict_harness: Option<mj_core::config::HarnessKind>,
+    replied_verdict_pending: bool,
+    expected_continuation: std::sync::Mutex<Option<i64>>,
     /// Codex tool calls explicitly introduced as execute cards, with the
     /// command needed if a later partial update says the process is detached.
     codex_execute_tools: BTreeMap<String, String>,
@@ -366,6 +370,10 @@ impl DurableRelay {
             background_work: BackgroundWorkPolicy::default(),
             capacity_response: CapacityResponse::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
+            turn_context: Default::default(),
+            verdict_harness: None,
+            replied_verdict_pending: false,
+            expected_continuation: std::sync::Mutex::new(None),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
@@ -476,7 +484,9 @@ impl DurableRelay {
         state.background_work_known = self.background_work_known;
         // Answer the activity question once, here, where every fact is in
         // hand. Consumers read this instead of each deriving their own.
-        state.activity = Some(mj_core::activity::classify(&self.activity_facts()));
+        let facts = self.activity_facts();
+        state.expected_continuation = facts.expected_continuation;
+        state.activity = Some(mj_core::activity::classify(&facts));
         state
     }
 
@@ -500,6 +510,26 @@ impl DurableRelay {
     /// the daemon reads; `worker_facts_match_the_published_state` pins them
     /// together.
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
+        let background_commands = self.background_commands().len();
+        self.turn_context
+            .set_counts(background_commands, self.snapshot.queued_prompts.len());
+        let expected_continuation = {
+            let mut expected = self
+                .expected_continuation
+                .lock()
+                .expect("continuation lock poisoned");
+            if background_commands > 0
+                || self.snapshot.active_prompt.is_some()
+                || self.snapshot.harness_turn.is_some()
+                || matches!(
+                    self.snapshot.execution,
+                    RelayExecutionState::Closing | RelayExecutionState::Closed
+                )
+            {
+                *expected = None;
+            }
+            *expected
+        };
         mj_core::activity::ActivityFacts {
             execution: self.snapshot.execution,
             prompt_started_at_ms: self
@@ -509,6 +539,7 @@ impl DurableRelay {
                 .map(|prompt| prompt.started_at_ms),
             harness_turn_started_at_ms: self.snapshot.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.snapshot.activity_turn_started_at_ms,
+            expected_continuation,
             queued_commands: self.snapshot.queued_prompts.len(),
             tools_in_flight: self.foreground_tools.snapshot(),
             background_started_at_ms: self
@@ -587,6 +618,70 @@ impl DurableRelay {
     /// Choose whether agent output with no prompt in flight opens a turn.
     pub fn set_harness_turn_policy(&mut self, policy: HarnessTurnPolicy) {
         self.harness_turns = policy;
+    }
+
+    pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
+        self.verdict_harness = Some(harness);
+    }
+
+    pub fn turn_context(&self) -> mj_core::activity::verdict::TurnContext {
+        self.turn_context.clone()
+    }
+
+    pub fn pending_replied_verdict(
+        &mut self,
+    ) -> Option<(u64, mj_core::activity::verdict::TurnEvidence)> {
+        if !std::mem::take(&mut self.replied_verdict_pending) {
+            return None;
+        }
+        let harness = self.verdict_harness?;
+        let facts = self.activity_facts();
+        if facts.background_commands > 0
+            || facts.goal_running
+            || self.snapshot.active_prompt.is_some()
+            || self.snapshot.harness_turn.is_some()
+            || facts.queued_commands > 0
+            || matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+        {
+            return None;
+        }
+        let evidence = self.turn_context.evidence(
+            harness,
+            mj_core::activity::verdict::TurnPhase::Replied,
+            &facts,
+            epoch_millis(),
+        );
+        Some((self.turn_context.generation(), evidence))
+    }
+
+    pub fn expect_continuation(
+        &mut self,
+        since_ms: i64,
+        _note: String,
+        generation: u64,
+    ) -> Result<()> {
+        let facts = self.activity_facts();
+        if generation != self.turn_context.generation()
+            || facts.background_commands > 0
+            || facts.goal_running
+            || facts.queued_commands > 0
+            || self.snapshot.active_prompt.is_some()
+            || self.snapshot.harness_turn.is_some()
+            || matches!(
+                self.snapshot.execution,
+                RelayExecutionState::Closing | RelayExecutionState::Closed
+            )
+        {
+            return Ok(());
+        }
+        *self
+            .expected_continuation
+            .lock()
+            .expect("continuation lock poisoned") = Some(since_ms);
+        self.persist_activity_transition()
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {
@@ -715,6 +810,7 @@ impl DurableRelay {
     }
 
     pub fn record_session_update(&mut self, mut update: SessionUpdate) -> Result<u64> {
+        self.turn_context.observe(&update);
         // An ACP file edit arrives as the whole file before and the whole file
         // after. Store the patch between them instead: nothing downstream
         // reconstructs a file from those copies, and the patch is proportional
@@ -794,6 +890,7 @@ impl DurableRelay {
                 },
             )?;
             self.finish_turn_activity()?;
+            self.replied_verdict_pending = true;
         }
         Ok(ordinal)
     }

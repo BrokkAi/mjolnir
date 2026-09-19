@@ -2,12 +2,37 @@ use super::*;
 
 pub(crate) async fn run_relay_coordinator_with_shells(
     relay: Arc<Mutex<DurableRelay>>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    dispatch_wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+    user_shells: crate::user_shell::UserShellRegistry,
+    kimi_tasks: Option<KimiTaskMonitor>,
+) -> Result<()> {
+    let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
+    run_relay_coordinator_with_verdict(
+        relay,
+        events,
+        dispatch_wakes,
+        commands,
+        user_shells,
+        kimi_tasks,
+        verdict,
+    )
+    .await
+}
+
+async fn run_relay_coordinator_with_verdict(
+    relay: Arc<Mutex<DurableRelay>>,
     mut events: mpsc::Receiver<RuntimeEvent>,
     mut dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
     mut user_shells: crate::user_shell::UserShellRegistry,
     mut kimi_tasks: Option<KimiTaskMonitor>,
+    verdict: Option<crate::acp::verdict_client::VerdictClient>,
 ) -> Result<()> {
+    // Owned by this coordinator: dropping it cancels HTTP requests on every
+    // exit path, and joining reports panics instead of losing background errors.
+    let mut verdict_tasks = tokio::task::JoinSet::new();
     let mut in_flight = BTreeMap::new();
     let mut session_configured = false;
     let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
@@ -24,6 +49,35 @@ pub(crate) async fn run_relay_coordinator_with_shells(
     // restarting the wait. Only the persisted wall deadline crosses restarts.
     let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
     loop {
+        let pending = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .pending_replied_verdict();
+        if let Some((generation, evidence)) = pending
+            && let Some(client) = verdict.clone()
+        {
+            // Only the most recent completed turn can affect this session.
+            verdict_tasks.abort_all();
+            verdict_tasks.spawn(async move {
+                use mj_core::activity::verdict::{Decision, TurnPhase, decide};
+                match client.ask(&evidence).await {
+                    Ok(answer)
+                        if decide(TurnPhase::Replied, &answer) == Decision::ExpectContinuation =>
+                    {
+                        Some(RuntimeEvent::ContinuationExpected {
+                            since_ms: mj_core::clock::epoch_millis(),
+                            note: "expecting the agent to continue".into(),
+                            generation,
+                        })
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not classify the completed turn");
+                        None
+                    }
+                }
+            });
+        }
         let capacity_deadline = relay
             .lock()
             .expect("relay state lock poisoned")
@@ -114,6 +168,17 @@ pub(crate) async fn run_relay_coordinator_with_shells(
                     .expect("Kimi poll branch is guarded")
                     .refresh(&relay, false)
                     .await?;
+            }
+            result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() => {
+                match result {
+                    Some(Ok(Some(event))) => {
+                        record_runtime_event(&relay, &mut in_flight, event)?;
+                    }
+                    Some(Err(error)) if !error.is_cancelled() => {
+                        tracing::warn!(%error, "completed-turn classifier task failed");
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -336,6 +401,13 @@ pub(crate) fn record_runtime_event(
                     diagnostic,
                 },
             )?;
+        }
+        RuntimeEvent::ContinuationExpected {
+            since_ms,
+            note,
+            generation,
+        } => {
+            relay.expect_continuation(since_ms, note, generation)?;
         }
         RuntimeEvent::ConfigApplied {
             request_id,
@@ -847,3 +919,6 @@ pub(crate) fn wake_dispatch(
         Err(mpsc::error::TrySendError::Closed(())) => bail!("relay coordinator stopped"),
     }
 }
+
+#[cfg(test)]
+mod verdict_tests;

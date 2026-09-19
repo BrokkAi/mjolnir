@@ -1742,6 +1742,7 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
 
     relay.record_session_update(tool_call_update()).unwrap();
 
@@ -1780,6 +1781,14 @@ fn agent_output_at_idle_opens_a_harness_turn_and_the_origin_marker_settles_it() 
         Some(RelayObservation::HarnessTurnSettled { origin, .. })
             if origin.as_deref() == Some("task-notification")
     ));
+    let (_, evidence) = relay
+        .pending_replied_verdict()
+        .expect("settled harness turn is classified");
+    assert_eq!(
+        evidence.phase,
+        mj_core::activity::verdict::TurnPhase::Replied
+    );
+    assert!(relay.pending_replied_verdict().is_none());
 }
 
 #[test]
@@ -3672,4 +3681,108 @@ fn goal_controls_bypass_work_and_checkpoints_without_consuming_prompts() {
             RelayDispatchState::Interrupted
         ));
     }
+}
+
+#[test]
+fn continuation_expectation_is_process_local_and_clears_when_a_harness_turn_opens() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let generation = relay.turn_context().generation();
+    relay
+        .expect_continuation(1_234, "waiting for work".into(), generation)
+        .unwrap();
+    assert!(matches!(
+        relay.operational_state().activity_state(),
+        mj_core::activity::ActivityState::Expecting { since_ms: 1_234 }
+    ));
+    assert_eq!(relay.activity_facts(), relay.operational_state().facts());
+    let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    assert_eq!(reopened.activity_facts().expected_continuation, None);
+    drop(reopened);
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted {
+            started_at_ms: 2_000,
+        })
+        .unwrap();
+    assert_eq!(relay.activity_facts().expected_continuation, None);
+    relay
+        .record_observation(RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+        })
+        .unwrap();
+    assert_eq!(relay.activity_facts().expected_continuation, None);
+}
+
+#[test]
+fn new_prompt_invalidates_a_completed_turn_verdict_and_resets_its_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let old_generation = relay.turn_context().generation();
+    relay
+        .expect_continuation(1_234, String::new(), old_generation)
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "new-prompt",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("new instructions")],
+        },
+    );
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    assert_eq!(relay.activity_facts().expected_continuation, None);
+    let evidence = relay.turn_context().evidence(
+        mj_core::config::HarnessKind::Claude,
+        mj_core::activity::verdict::TurnPhase::Running,
+        &relay.activity_facts(),
+        2_000,
+    );
+    assert_eq!(evidence.user_prompt_tail, "new instructions");
+    relay
+        .record_command_completed(
+            "new-prompt",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    relay
+        .expect_continuation(3_000, String::new(), old_generation)
+        .unwrap();
+    assert_eq!(relay.activity_facts().expected_continuation, None);
+}
+
+#[test]
+fn finished_turn_queues_only_one_replied_classification() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(
+        &mut relay,
+        "prompt-1",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("instructions")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    assert!(relay.pending_replied_verdict().is_none());
+    relay
+        .record_command_completed(
+            "prompt-1",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let (_, evidence) = relay.pending_replied_verdict().unwrap();
+    assert_eq!(
+        evidence.phase,
+        mj_core::activity::verdict::TurnPhase::Replied
+    );
+    assert_eq!(evidence.user_prompt_tail, "instructions");
+    assert!(relay.pending_replied_verdict().is_none());
 }

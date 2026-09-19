@@ -102,7 +102,13 @@ pub(crate) fn attention_level(
     let Some(detail) = detail else {
         return AttentionLevel::Idle;
     };
-    if !detail.activity.is_idle(detail.current_turn_started_at) {
+    if detail.awaiting_input && detail.current_turn_started_at.is_none() {
+        AttentionLevel::Waiting
+    } else if matches!(
+        detail.activity.state().last_known(),
+        mj_core::activity::ActivityState::Expecting { .. }
+    ) || !detail.activity.is_idle(detail.current_turn_started_at)
+    {
         AttentionLevel::Working
     } else if detail.has_unread() {
         AttentionLevel::Unread
@@ -1068,5 +1074,43 @@ impl DashboardState {
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    fn level(detail: &SessionDetail) -> AttentionLevel {
+        attention_level(
+            Some(detail),
+            None,
+            SessionState::Running,
+            false,
+            false,
+            false,
+        )
+    }
+
+    #[test]
+    fn awaiting_input_demands_attention_until_a_new_turn_starts() {
+        let mut detail = SessionDetail {
+            awaiting_input: true,
+            unread_agent_messages: 1,
+            ..Default::default()
+        };
+        assert_eq!(level(&detail), AttentionLevel::Waiting);
+        detail.current_turn_started_at = Some(1);
+        assert_eq!(level(&detail), AttentionLevel::Working);
+    }
+
+    #[test]
+    fn expected_continuation_outranks_unread_output() {
+        let mut detail = SessionDetail {
+            unread_agent_messages: 1,
+            ..Default::default()
+        };
+        detail.activity.state = Some(mj_core::activity::ActivityState::Expecting { since_ms: 1 });
+        assert_eq!(level(&detail), AttentionLevel::Working);
     }
 }

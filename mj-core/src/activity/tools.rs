@@ -25,13 +25,16 @@ use crate::clock::epoch_millis;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InFlightToolCall {
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// `Pending` or `InProgress`; a call in any other status is not in flight.
     pub status: ToolCallStatus,
     pub started_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
+    title: Option<String>,
     status: ToolCallStatus,
     started_at_ms: i64,
 }
@@ -65,6 +68,7 @@ impl ToolsInFlight {
         self.entries().insert(
             tool_call_id.into(),
             Entry {
+                title: None,
                 status: ToolCallStatus::InProgress,
                 started_at_ms,
             },
@@ -84,6 +88,7 @@ impl ToolsInFlight {
             .iter()
             .map(|(tool_call_id, entry)| InFlightToolCall {
                 tool_call_id: tool_call_id.clone(),
+                title: entry.title.clone(),
                 status: entry.status,
                 started_at_ms: entry.started_at_ms,
             })
@@ -121,10 +126,14 @@ impl ToolsInFlight {
     }
 
     fn observe_at(&self, update: &SessionUpdate, now_ms: i64) {
-        let (tool_call_id, status) = match update {
-            SessionUpdate::ToolCall(call) => (call.tool_call_id.0.as_ref(), Some(call.status)),
+        let (tool_call_id, status, title) = match update {
+            SessionUpdate::ToolCall(call) => (
+                call.tool_call_id.0.as_ref(),
+                Some(call.status),
+                Some(call.title.clone()),
+            ),
             SessionUpdate::ToolCallUpdate(call) => {
-                (call.tool_call_id.0.as_ref(), call.fields.status)
+                (call.tool_call_id.0.as_ref(), call.fields.status, None)
             }
             _ => return,
         };
@@ -136,6 +145,9 @@ impl ToolsInFlight {
             entries
                 .entry(tool_call_id.to_owned())
                 .and_modify(|entry| {
+                    if title.is_some() {
+                        entry.title.clone_from(&title);
+                    }
                     // A call that moves from pending to in-progress has begun
                     // a new step, so its clock restarts; repeated updates
                     // under an unchanged status are the same work going on.
@@ -145,6 +157,7 @@ impl ToolsInFlight {
                     }
                 })
                 .or_insert(Entry {
+                    title,
                     status,
                     started_at_ms: now_ms,
                 });
@@ -202,5 +215,22 @@ mod tests {
         assert_eq!(tools.snapshot()[0].started_at_ms, 1_000);
         tools.observe_at(&call("one", ToolCallStatus::InProgress), 9_000);
         assert_eq!(tools.snapshot()[0].started_at_ms, 9_000);
+    }
+    #[test]
+    fn status_updates_preserve_the_original_tool_title() {
+        let tools = ToolsInFlight::default();
+        tools.observe_at(&call("Build", ToolCallStatus::Pending), 1_000);
+        let update = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "Build",
+            "status": "in_progress", "title": "Changed title",
+        }))
+        .unwrap();
+        tools.observe_at(&update, 2_000);
+        assert_eq!(tools.snapshot()[0].title.as_deref(), Some("Build"));
+        let legacy: InFlightToolCall = serde_json::from_value(serde_json::json!({
+            "tool_call_id":"legacy", "status":"in_progress", "started_at_ms":1000,
+        }))
+        .unwrap();
+        assert!(legacy.title.is_none());
     }
 }

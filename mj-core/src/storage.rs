@@ -272,7 +272,9 @@ pub enum ApiEventData {
         command_id: Option<String>,
     },
     InputRequired {
-        request: ElicitationRequest,
+        /// Absent when a completed turn asks for unstructured user input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<ElicitationRequest>,
         turn_id: Option<u64>,
     },
     InputResolved {

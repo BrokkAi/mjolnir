@@ -554,6 +554,11 @@ pub(super) fn worker_launch_config(
             target_environment.insert(name.to_owned(), value);
         }
     }
+    // Resolve the daemon's local key before launching remote or container
+    // workers, whose home directories do not contain its secrets file.
+    if let Some(key) = mj_core::activity::verdict::api_key() {
+        target_environment.insert("TYPESAFE_API_KEY".to_owned(), key);
+    }
     // A worker process carries no other sign of which instance owns it, so
     // `pgrep`, `/proc/<pid>/environ` and a recovery scan cannot attribute one.
     // The worker re-execs with a cleared environment, so this has to travel in

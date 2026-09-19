@@ -350,7 +350,7 @@ mod tests {
         else {
             panic!("question event")
         };
-        assert_eq!(actual, &request);
+        assert_eq!(actual.as_ref(), Some(&request));
         assert_eq!(*turn_id, Some(1));
         assert!(
             matches!(&page.events[2].event, ApiEventData::InputResolved { turn_id: Some(1), action, .. } if action == "accept")

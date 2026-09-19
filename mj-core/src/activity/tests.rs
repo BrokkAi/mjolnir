@@ -13,6 +13,7 @@ const NOW: i64 = 1_000_000_000;
 
 fn tool(id: &str, started_at_ms: i64) -> InFlightToolCall {
     InFlightToolCall {
+        title: None,
         tool_call_id: id.to_owned(),
         status: ToolCallStatus::InProgress,
         started_at_ms,
@@ -574,4 +575,25 @@ fn a_disconnected_session_reports_no_silence_age() {
     assert!(unknown.is_working(), "{unknown:?}");
     assert_eq!(unknown.silent_for_ms(NOW), None);
     assert_eq!(silence_note(&unknown, NOW), None);
+}
+
+#[test]
+fn expected_continuation_yields_to_observed_work_and_owns_no_work() {
+    let mut facts = ActivityFacts {
+        expected_continuation: Some(123),
+        ..Default::default()
+    };
+    let state = classify(&facts);
+    assert_eq!(state, ActivityState::Expecting { since_ms: 123 });
+    assert!(!state.is_working());
+    assert!(!state.has_work_in_flight());
+    assert!(!has_work_in_flight(&facts));
+    assert_eq!(state.chat_phase(), RelayExecutionState::Idle);
+    assert_eq!(chat_phase(&facts), RelayExecutionState::Idle);
+    facts.goal_active = true;
+    assert_eq!(classify(&facts), state);
+    facts.background_commands = 1;
+    assert!(matches!(classify(&facts), ActivityState::Background { .. }));
+    facts.prompt_started_at_ms = Some(100);
+    assert!(matches!(classify(&facts), ActivityState::Turn { .. }));
 }

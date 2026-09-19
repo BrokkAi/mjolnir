@@ -1359,3 +1359,21 @@ fn generated_session_ids_are_valid_and_distinct() {
     assert_eq!(first.len(), 32);
     assert_ne!(first, second);
 }
+
+#[test]
+fn awaiting_input_is_a_handoff_instead_of_an_error() {
+    for reason in [
+        crate::acp::AWAITING_INPUT_STOP_REASON,
+        "AwaitingInput",
+        "awaiting-input",
+    ] {
+        assert_eq!(
+            classify_prompt_completion(reason),
+            PromptCompletion::InputRequired
+        );
+    }
+    assert_eq!(
+        classify_prompt_completion("harness_inactive"),
+        PromptCompletion::Error
+    );
+}

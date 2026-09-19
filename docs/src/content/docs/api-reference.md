@@ -302,7 +302,7 @@ asked about; the wait keeps waiting until that turn actually ends.
 ```
 
 For `mj wait --json` and `mj prompt --wait --json`, stdout contains the JSON
-response even when the command exits unsuccessfully. `finished` and opted-in
+response even when the command exits unsuccessfully. `finished` and
 `input_required` exit **0**. `timeout`, `error`, `cancelled`, `quota_limit`, and
 `stopped` exit **1**, with a diagnostic on stderr. A timeout does not cancel the
 turn. Transport or authentication failures may have no JSON response.
@@ -710,7 +710,7 @@ data: {"seq":42,"session_id":"SESSION","recorded_at_ms":1789200000000,"type":"in
 | `turn_started` | `turn`: prompt command ID, `accepted_ordinal` (the API turn ID, when known), transcript start position, and start timestamp. |
 | `turn_ended` | `turn`: command and turn identity, completion ordinal and timestamp, outcome, and optional reported usage. |
 | `error` | `message` and nullable `command_id`, covering command failures and recorded session/startup failures. |
-| `input_required` | `request`: the normalized ACP elicitation, including its response schema, and nullable `turn_id`. |
+| `input_required` | Nullable `turn_id`; `request` contains the normalized ACP elicitation and response schema for structured input. It is absent when Jev ends a turn with `awaiting_input`. |
 | `input_resolved` | `elicitation_id`, nullable `turn_id`, and `action`; `cleared` means the request disappeared without an explicit response observation. |
 | `activity_changed` | `activity`: the UI's `state`, nullable `details`, `is_idle`, `waiting_for_input`, and `capacity_retry`. |
 
@@ -793,7 +793,9 @@ above. Choice questions and plan approvals use the schema supplied by the harnes
 inspect the pending request before constructing the response. These explicit
 requests emit `input_required`, and their resolution emits `input_resolved` on
 the event stream. An assistant question written only in chat text is not an ACP
-elicitation and does not create an input event.
+elicitation. When Jev confidently identifies such a question during a quiet turn,
+an `input_required` event without `request` precedes `turn_ended`; answer with a
+new prompt instead of the elicitation response endpoint.
 
 The response is checked against the actual request, including required fields
 and allowed choices, before dispatch. Successful dispatch returns 202; an
@@ -802,8 +804,9 @@ unknown request returns 404 and an invalid answer returns 400.
 Add `"return_on_input": true` to a wait request to return `input_required` with
 `pending_elicitations` when a structured answer is needed. This does not mean
 the turn finished. Send the response, then wait again. Ordinary waits retain
-their existing behavior. Plain-text questions are not classified as structured
-input requests.
+their existing behavior for structured requests. A turn completed with
+`awaiting_input` returns `input_required` even without `return_on_input`; its
+`pending_elicitations` may be empty.
 
 ```sh
 mj put-file --session SESSION --path project/input.json ./input.json
@@ -815,5 +818,5 @@ mj respond --session SESSION --elicitation REQUEST --response-file answer.json
 
 `mj put-file` accepts `-` as the source for binary stdin. `mj respond` accepts a
 positional JSON response or `-` for stdin. `mj prompt --wait` also accepts
-`--return-on-input`. The CLI exits successfully on opted-in `input_required`
+`--return-on-input`. The CLI exits successfully on `input_required`
 results so an orchestrator can answer and resume waiting.

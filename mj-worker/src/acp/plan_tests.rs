@@ -167,6 +167,11 @@ impl PlanProbe {
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
+            turn_context: Default::default(),
+            verdict: Some(crate::acp::VerdictSource {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
             stall_policy: None,
         };
         let driver = tokio::spawn(async move {

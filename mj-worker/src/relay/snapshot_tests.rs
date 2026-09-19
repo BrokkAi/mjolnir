@@ -98,6 +98,7 @@ mod tests {
                 "a foreground tool is still in progress",
                 (|state| {
                     state.tools_in_flight = vec![mj_core::activity::InFlightToolCall {
+                        title: None,
                         tool_call_id: "tool-1".into(),
                         status: ToolCallStatus::InProgress,
                         started_at_ms: 1,

@@ -23,6 +23,8 @@ test-hooks = ["mj-core/test-hooks"]
 workspace = true
 
 [dependencies]
+reqwest = { workspace = true, features = ["json"] }
+rustls.workspace = true
 rusqlite.workspace = true
 getrandom.workspace = true
 flate2.workspace = true

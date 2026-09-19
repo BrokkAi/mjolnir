@@ -46,6 +46,9 @@ pub struct LaunchSpec {
     /// How long a running turn may go without a sign of life. `None` reads the
     /// process environment, which is what every launch does; a test sets it
     /// directly so it does not have to reach for a global.
+    pub turn_context: mj_core::activity::verdict::TurnContext,
+    /// None resolves the optional classifier from the local environment.
+    pub verdict: Option<VerdictSource>,
     pub stall_policy: Option<mj_core::activity::StallPolicy>,
 }
 

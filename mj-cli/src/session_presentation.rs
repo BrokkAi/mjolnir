@@ -183,6 +183,7 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            expected_continuation: None,
             goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,

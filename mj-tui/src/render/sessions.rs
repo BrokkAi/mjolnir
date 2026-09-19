@@ -577,6 +577,13 @@ pub(crate) fn session_activity_line(
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
+    } else if detail.is_some_and(|detail| {
+        matches!(
+            detail.activity.state().last_known(),
+            mj_core::activity::ActivityState::Expecting { .. }
+        )
+    }) {
+        "expecting the agent to continue".to_owned()
     } else if facts.state.is_active() {
         facts.clock(detailed_activity_clocks)
     } else {
@@ -818,7 +825,7 @@ impl SessionRowFacts<'_> {
 
     pub(crate) fn needs_input(&self) -> bool {
         self.detail
-            .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+            .is_some_and(|detail| !detail.pending_elicitations.is_empty() || detail.awaiting_input)
     }
 }
 
@@ -853,7 +860,8 @@ pub(crate) fn session_display_clock(
 
     if session.last_error.is_some()
         || unreachable
-        || detail.is_some_and(|detail| !detail.pending_elicitations.is_empty())
+        || detail
+            .is_some_and(|detail| !detail.pending_elicitations.is_empty() || detail.awaiting_input)
         || review.is_some_and(|review| review.activity_label().is_some())
         || !session.state.is_active()
     {
