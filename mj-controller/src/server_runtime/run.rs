@@ -1289,6 +1289,15 @@ pub async fn run_server(
                         action_sessions.insert(action_id, session_id.clone());
                     }
                     action_replies.accept(action_id, &action, reply);
+                    let notice_action = match &action {
+                        ControllerAction::SetConfig { .. } => Some("Configuration change"),
+                        ControllerAction::CancelTurn { .. } => Some("Cancellation"),
+                        ControllerAction::CancelShell { .. } => Some("Shell cancellation"),
+                        ControllerAction::RemoveQueuedPrompt { .. } => Some("Queued prompt removal"),
+                        ControllerAction::RespondElicitation { .. } => Some("Answer"),
+                        _ => None,
+                    };
+                    let notice_sessions = session_control.clone();
                     tokio::spawn(async move {
                         let joined = tokio::task::spawn_blocking(move || {
                             let result = (|| -> Result<()> {
@@ -1320,8 +1329,24 @@ pub async fn run_server(
                                 "phone action task failed: {error}"
                             ))),
                         };
+                        let notice = match (&result, notice_action, &session_id) {
+                            (Err(failure), Some(action), Some(session_id)) => {
+                                Some((session_id.clone(), failure.conversation_notice(action, action_id)))
+                            }
+                            _ => None,
+                        };
                         if let Err(error) = done.send((action_id, session_id, result)) {
                             tracing::debug!(action_id, %error, "phone action finished after the server stopped");
+                        }
+                        if let Some((session_id, text)) = notice {
+                            let recorded = async {
+                                notice_sessions.session(&session_id).await?
+                                    .submit(new_command_id("action-notice")?, RelayCommand::RecordNotice { text }).await?;
+                                Ok::<_, anyhow::Error>(())
+                            }.await;
+                            if let Err(error) = recorded {
+                                tracing::warn!(%session_id, %error, "could not record failed session action in conversation");
+                            }
                         }
                     });
                 }

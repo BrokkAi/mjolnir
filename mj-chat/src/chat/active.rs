@@ -333,7 +333,7 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
                 state.activity_reachable = false;
             }
             tracing::warn!(error = format!("{error:#}"), "chat session view failed");
-            state.set_notice(format!("connection lost: {error:#}"));
+            state.set_connection_notice(format!("connection lost: {error:#}"));
             return false;
         }
     };
@@ -343,6 +343,9 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     let activity_reachable = view.connected && view.snapshot.is_some() && view.error.is_none();
     if state.activity_reachable != activity_reachable {
         state.activity_reachable = activity_reachable;
+    }
+    if view.connected && view.error.is_none() {
+        state.connection_feedback = None;
     }
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
@@ -375,15 +378,15 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
         match error {
             ViewError::Unreachable(detail) => {
                 tracing::warn!(%detail, "chat session became unreachable");
-                state.set_notice(format!("connection lost: {detail}"))
+                state.set_connection_notice(format!("connection lost: {detail}"))
             }
             ViewError::TargetMissing(detail) => {
                 tracing::warn!(%detail, "chat session target is missing");
-                state.set_notice(format!("managed target lost: {detail}"))
+                state.set_connection_notice(format!("managed target lost: {detail}"))
             }
             ViewError::ProjectionIntegrity(detail) => {
                 tracing::error!(%detail, "chat transcript projection failed");
-                state.set_notice(format!("transcript projection failed: {detail}"))
+                state.set_connection_notice(format!("transcript projection failed: {detail}"))
             }
         }
     }
@@ -707,7 +710,7 @@ impl ActiveChat {
         let remote = ChatRemoteSupervisor::spawn(session.clone(), control.clone());
         if needs_initial_sync {
             state.set_transcript_loading(true);
-            state.set_notice("Connecting to session relay…");
+            state.set_connection_notice("Connecting to session relay…");
             queue_chat_remote_operation(remote.operations(), ChatRemoteOperation::Sync, &mut state);
         }
         let mut diffstats_in_flight = 0;

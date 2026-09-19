@@ -226,7 +226,7 @@ fn kill_and_yank_preserve_images_and_renumber_copies() {
 fn composer_renders_numbered_images_and_advertises_control_v() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    chat.notices.clear();
+    chat.feedback.clear();
     let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
     assert!(screen.contains("[image 1]"));
     assert!(screen.contains("Ctrl-V paste"));
@@ -278,6 +278,7 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
     remote::apply_chat_remote_result(
         &mut chat,
         remote::ChatRemoteResult::Prompt {
+            command_id: "test-submit".into(),
             text: original.text.clone(),
             images: original.images.clone(),
             result: Err("offline".into()),
@@ -974,7 +975,7 @@ fn enter_does_not_send_a_prompt_while_the_worker_is_closing_or_closed() {
         chat.input = "hello".into();
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
         assert_eq!(
-            chat.notices.current().as_deref(),
+            chat.feedback.current().as_deref(),
             Some("The worker is closing; this prompt was not sent")
         );
         assert_eq!(chat.input, "hello");
@@ -1445,7 +1446,7 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     chat.input = "/model o3-mini".into();
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
-        chat.notices.current().as_deref(),
+        chat.feedback.current().as_deref(),
         Some("ACP bridge does not expose a model selector")
     );
     // Nothing was sent, but the command was still handled: the composer
@@ -1457,7 +1458,7 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     chat.input = "/effort xhigh".into();
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
-        chat.notices.current().as_deref(),
+        chat.feedback.current().as_deref(),
         Some("ACP bridge does not expose an effort selector")
     );
     assert_eq!(chat.input, "");
@@ -1512,7 +1513,7 @@ fn config_commands_are_queued_while_the_agent_is_busy() {
     chat.input = "/model".into();
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
-        chat.notices.current().as_deref(),
+        chat.feedback.current().as_deref(),
         Some("The agent does not advertise model values; usage: /model <value>")
     );
 
@@ -1531,7 +1532,7 @@ fn config_commands_are_queued_while_the_agent_is_busy() {
     chat.input = "/model sonnet".into();
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
     assert_eq!(
-        chat.notices.current().as_deref(),
+        chat.feedback.current().as_deref(),
         Some("The worker is closing; this configuration change was not sent")
     );
 }
@@ -1702,7 +1703,7 @@ fn plan_toggles_the_session_mode_for_a_harness_without_a_plan_command() {
         }
     );
     assert!(chat.input.is_empty());
-    assert!(chat.notices.current().unwrap().contains("Plan mode on"));
+    assert!(chat.plan_command_pending);
 
     chat.plan_command_pending = false;
     chat.set_input("/plan".into());
@@ -1717,7 +1718,7 @@ fn plan_toggles_the_session_mode_for_a_harness_without_a_plan_command() {
             prompt: None,
         }
     );
-    assert!(chat.notices.current().unwrap().contains("Plan mode off"));
+    assert!(chat.plan_command_pending);
 }
 
 #[test]
@@ -1834,7 +1835,7 @@ fn plan_is_kept_local_without_a_compatible_mode_surface() {
 
     assert_eq!(chat.submit_input(), ChatAction::None);
     assert_eq!(chat.input, "/plan");
-    assert!(chat.notices.current().unwrap().contains("does not expose"));
+    assert!(chat.feedback.current().unwrap().contains("does not expose"));
 }
 
 #[test]
@@ -1909,7 +1910,7 @@ fn a_harness_without_plan_mode_rejects_plan_and_implement_locally() {
         assert_eq!(chat.submit_input(), ChatAction::None);
         assert_eq!(chat.input, command);
         assert!(
-            chat.notices
+            chat.feedback
                 .current()
                 .unwrap()
                 .contains("does not expose compatible plan/default modes")
@@ -1988,7 +1989,7 @@ fn plan_waits_for_an_idle_agent() {
     chat.set_input("/plan".into());
 
     assert_eq!(chat.submit_input(), ChatAction::None);
-    assert!(chat.notices.current().unwrap().contains("only available"));
+    assert!(chat.feedback.current().unwrap().contains("only available"));
 }
 
 #[test]

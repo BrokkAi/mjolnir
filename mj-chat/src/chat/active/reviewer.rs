@@ -193,7 +193,9 @@ impl ActiveChat {
                 tracing::warn!(%error, "could not queue the open review for persistence");
             }
         } else {
-            self.state.notices.set("Review persistence is unavailable");
+            self.state
+                .feedback
+                .set_failure("Review persistence is unavailable");
         }
     }
 
@@ -206,7 +208,9 @@ impl ActiveChat {
                 tracing::warn!(%error, "could not queue the finished review for persistence");
             }
         } else {
-            self.state.notices.set("Review persistence is unavailable");
+            self.state
+                .feedback
+                .set_failure("Review persistence is unavailable");
         }
     }
 

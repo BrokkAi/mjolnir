@@ -482,7 +482,7 @@ impl ChatState {
         self.phase = WorkerPhase::Running;
         self.prompt_in_flight = true;
         self.goal_prompt_active = prompt_invokes_command(prompt, "goal");
-        self.notices.clear();
+        self.feedback.clear();
         // Local echo: start the clock now so the header moves with the send.
         // The next materialized update replaces this with the recorded start.
         self.turn_started_at_epoch_seconds = Some(epoch_seconds());
@@ -562,12 +562,12 @@ impl ChatState {
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
-        self.notices.set(notice);
+        self.feedback.set(notice);
     }
 
     pub(crate) fn clear_notice(&mut self) {
-        if self.notices.current().is_some() {
-            self.notices.clear();
+        if self.feedback.current().is_some() {
+            self.feedback.clear();
         }
     }
 
@@ -580,8 +580,14 @@ impl ChatState {
         }
     }
 
-    /// The current shared notice, if any.
+    pub(super) fn set_connection_notice(&mut self, text: impl Into<String>) {
+        self.connection_feedback = Some(sanitize_terminal_text(&text.into()));
+    }
+
+    /// Feedback local to this conversation, independent of dashboard notices.
     pub fn notice(&self) -> Option<String> {
-        self.notices.current()
+        self.feedback
+            .current()
+            .or_else(|| self.connection_feedback.clone())
     }
 }

@@ -34,6 +34,15 @@ impl PhoneActionFailure {
         }
     }
 
+    pub(super) fn conversation_notice(&self, action: &str, action_id: u64) -> String {
+        let detail = self
+            .refusal
+            .as_ref()
+            .map(|refusal| refusal.message().to_owned())
+            .unwrap_or_else(|| format!("see daemon log reference {}", action_reference(action_id)));
+        format!("{action} failed: {detail}")
+    }
+
     /// The answer this failure owes the caller. `reference` identifies the log
     /// entry that carries `detail`, and is used only when there is no refusal.
     pub(super) fn outcome(&self, reference: &str) -> ActionOutcome {
@@ -64,8 +73,9 @@ pub(super) struct PhoneActionStarted {
 /// resume and close run for minutes and a request held open that long dies on a
 /// mobile network. `new` is the one action whose acceptance means more than
 /// admission: the phone has no session id until the provisional session is
-/// published, so its reply is parked here until the loop publishes it — or
-/// until the action ends without ever getting that far.
+/// published. Correlated submissions wait for relay acceptance, and mode
+/// changes wait for completion so a follow-up prompt cannot race the change.
+/// Their callers show pending content immediately while awaiting this reply.
 #[derive(Default)]
 pub(super) struct PendingActionReplies(
     std::collections::BTreeMap<u64, tokio::sync::oneshot::Sender<ActionOutcome>>,
@@ -78,7 +88,19 @@ impl PendingActionReplies {
         action: &ControllerAction,
         reply: tokio::sync::oneshot::Sender<ActionOutcome>,
     ) {
-        if matches!(action, ControllerAction::New { .. }) {
+        if matches!(
+            action,
+            ControllerAction::New { .. }
+                | ControllerAction::SetPlanMode { .. }
+                | ControllerAction::Prompt {
+                    command_id: Some(_),
+                    ..
+                }
+                | ControllerAction::RunShell {
+                    command_id: Some(_),
+                    ..
+                }
+        ) {
             self.0.insert(action_id, reply);
         } else {
             if reply.send(ActionOutcome::accepted()).is_err() {
