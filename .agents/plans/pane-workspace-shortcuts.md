@@ -14,7 +14,7 @@ Users can resize conversation splits with prefix+r followed by h/j/k/l or arrows
 - [x] (2026-09-19) Implement supervised workspace close with concurrency protection and recovery tests.
 - [x] (2026-09-19) Full dev-profile suite passed on the combined upstream implementation (4,104 passed, expected ignores retained).
 - [x] (2026-09-19) Final TUI/CLI navigation tests passed (672 TUI and 142 CLI unit tests plus integration tests); formatting and clippy passed.
-- [ ] Commit and push reviewed implementation and validation evidence to origin/master.
+- [x] (2026-09-19) Committed implementation as 981532a2 on hel4 and pushed it to origin/master after integrating 46a98949.
 
 ## Surprises & Discoveries
 
@@ -28,7 +28,7 @@ Resize and swap apply to conversation splits, not the fixed support panels. Swap
 
 ## Outcomes & Retrospective
 
-All requested commands and lifecycle behavior are implemented and validated. The full suite passed after upstream integration; targeted TUI/CLI tests passed after the final navigation adjustment. Formatting and clippy are clean. Publication remains.
+All requested commands and lifecycle behavior are implemented and validated. The full suite passed after upstream integration; targeted TUI/CLI tests passed after the final navigation adjustment. Formatting and clippy are clean. Implementation commit 981532a2 is published on origin/master. All requested behavior is complete; no schema migration or live-store changes were required.
 
 ## Context and Orientation
 
@@ -79,3 +79,5 @@ Initial plan recorded 2026-09-19 from the accepted conversational plan, includin
 2026-09-19 review update: shared transactional finalization now clears unsent legacy input for normal workspace close; client caches are discarded when a workspace is removed so tab switching cannot resurrect its drafts. Added a per-workspace resume admission gate to protect the pre-registration interval and barrier-based concurrent-stop/retry tests. A final navigation adjustment allows dismissing and reopening the progress dialog without interrupting daemon-owned stops.
 
 2026-09-19 validation: `env -u NO_COLOR cargo test --quiet` passed; after the navigation adjustment, `env -u NO_COLOR cargo test -p brokk-mj-tui -p brokk-mjolnir --quiet` passed. `cargo fmt --all -- --check`, `git diff HEAD --check`, and `cargo clippy --all-targets -- -D warnings` passed on the final source tree. Tests used isolated stores; no live-store migration was run.
+
+2026-09-19 completion: committed `981532a2` (Add pane controls and confirmed session/workspace closing), including `Fixes #1093`, and successfully pushed `46a98949..981532a2` to `origin/master`. The branch remained hel4; integration was a fast-forward from the fetched master before the implementation commit. The final documentation-only checkpoint records this publication evidence.
