@@ -13,7 +13,7 @@ Claude and Codex users must see harness-created agents in the same subagents pan
 - [x] (2026-09-19) Negotiate and route Claude/Codex children; retain Kimi agent classification.
 - [x] (2026-09-19) Present native children, paged transcripts, nesting, and capability-gated stop controls.
 - [x] (2026-09-19) Extend Codex cancellation and replay generation recovery; typecheck, 592 tests, build, real guardian/yolo cancellation, and real replay/resumption passed; committed in sibling fork.
-- [ ] Finish Rust validation, merge upstream into current branch, and push both upstreams as requested.
+- [x] (2026-09-19) Finish Rust validation, merge upstream into current branch, and push both upstreams as requested. Implementation reached origin/master at 7f6948f6 and brokkai/main at a95367e.
 
 ## Surprises & Discoveries
 
@@ -25,7 +25,7 @@ The user selected viewing plus supported stop controls, expanded coverage to Cla
 
 ## Outcomes & Retrospective
 
-Implementation is present across the worker, durable relay, database, runtime feed, and TUI. Native children use presentation-only session rows and never enter controller provisioning. Database migration 40 is breaking; all validation uses isolated stores. Final integrated Rust validation is pending.
+Implementation is present across the worker, durable relay, database, runtime feed, and TUI. Native children use presentation-only session rows and never enter controller provisioning. Database migration 40 is breaking; all validation uses isolated stores. Full merged Rust tests passed, as did focused ACP recovery and mixed managed/native navigation tests, cargo fmt, and cargo clippy --all-targets -- -D warnings. The adapter changes are committed and pushed, and the merged mj implementation is committed and pushed.
 
 ## Context and Orientation
 
@@ -43,7 +43,7 @@ Finally extend Codex cancellation using its owned child-to-thread mapping and ac
 
 ## Milestones
 
-The first milestone proves deterministic parent/child separation and persistence through reducer and database tests. The second proves wire negotiation, nested routing, replay and capability handling with adapter fixtures. The third proves pane navigation, transcript rendering and task separation using input/render behavior tests. The final milestone proves Codex child cancellation leaves parent and sibling turns intact, including a live isolated adapter probe.
+The first milestone proves deterministic parent/child separation and persistence through reducer and database tests. The second proves wire negotiation, nested routing, replay and capability handling with adapter fixtures. The third proves pane navigation, transcript rendering and task separation using input/render behavior tests. The final milestone proves Codex child cancellation leaves parent and sibling turns intact, including live isolated guardian and yolo probes plus history replay and resumption. All milestones are complete.
 
 ## Concrete Steps
 
@@ -70,3 +70,6 @@ Rust validation initially exposed two schema fixture assumptions, event ordering
 The published Codex dependency stays at 1.11.4 until a separate release: its existing native viewing works with this mj change, while the new cancellation and replay-generation fix require this fork build or its next release. Claude currently advertises no child stop control; Kimi exposes lifecycle without child transcripts or stop. Permission requests remain on the owning session with native-child attribution; child plan requests cannot change the parent policy.
 
 Plan revised 2026-09-19 during implementation to record migration classification, real validation evidence, recovery discoveries, and the user's merge/push authorization.
+
+
+Final evidence (2026-09-19): `env -u NO_COLOR cargo test` exited 0 (`target/native-final-tests.log`); all ACP tests passed (`target/native-acp-final.log`); the final mixed-ownership pane test passed (`target/native-navigation-final.log`); formatting and all-target clippy exited 0 (`target/native-final-clippy.log`). Additional regression coverage proves unused missing-thread recovery ends its staged replay before live replacement children arrive, and returning from a native child restores its managed owner's ancestor workspace. Both pushes succeeded. No package release, tag, installation, live-store migration, or restart of user sessions was performed.
