@@ -62,7 +62,7 @@ pub enum RemoteSessionRequest {
         command_id: String,
         command: RelayCommand,
         admission: Option<ReviewDeliveryAdmission>,
-        reply: oneshot::Sender<std::result::Result<u64, String>>,
+        reply: oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
     },
     Sync {
         session_id: String,

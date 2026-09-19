@@ -9,6 +9,7 @@ pub(super) async fn prompt(
     {
         let snapshot = state.snapshot_rx.borrow();
         let action = ControllerAction::Prompt {
+            command_id: None,
             session_id: session_id.clone(),
             text: request.text.clone(),
             images: Vec::new(),

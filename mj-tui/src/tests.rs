@@ -958,11 +958,13 @@ fn a_command_in_the_standby_composer_keeps_its_draft() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
     );
-    assert!(dashboard.notice().is_some());
+
     let standby = dashboard
         .standby_prompts
         .get("session-1")
         .expect("standby composer");
+    assert!(standby.notice().is_some());
+    assert!(dashboard.notice().is_none());
     assert_eq!(standby.draft(), "/help");
     assert!(standby.queued_prompt_texts().is_empty());
 }

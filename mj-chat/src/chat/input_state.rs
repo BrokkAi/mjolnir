@@ -28,13 +28,14 @@ impl ChatState {
         self.last_viewport_height = 0;
         self.render_mode = TranscriptRenderMode::Rich;
         self.transcript_scrollbar.clear();
-        if self.notices.current().is_some() {
-            self.notices.clear();
+        if self.feedback.current().is_some() {
+            self.feedback.clear();
         }
         self.voice_active = false;
         self.submitting_images.clear();
         self.pending_attachment_markers.clear();
         self.input_generation = self.input_generation.wrapping_add(1);
+        self.feedback.clear();
     }
 
     pub(crate) fn set_input(&mut self, input: String) {
@@ -62,6 +63,7 @@ impl ChatState {
         self.input_images = payload.images;
         self.input_cursor = next_cursor;
         self.input_generation = self.input_generation.wrapping_add(1);
+        self.feedback.clear();
         self.history_index = None;
         self.preferred_column = None;
         self.update_autocomplete();
@@ -82,7 +84,10 @@ impl ChatState {
                 self.set_input_payload(payload);
                 if let Some(body) = draft.strip_prefix(CHAT_DRAFT_PREFIX) {
                     match serde_json::from_str::<SavedChatDraft>(body) {
-                        Ok(saved) => self.unsent_prompts = saved.unsent,
+                        Ok(saved) => {
+                            self.unsent_prompts = saved.unsent;
+                            self.restore_submissions(saved.pending);
+                        }
                         Err(error) => {
                             self.set_notice(format!("Could not restore unsent drafts: {error}"))
                         }
@@ -142,10 +147,10 @@ impl ChatState {
                 );
                 self.next_image_number += 1;
                 self.input_generation = self.input_generation.wrapping_add(1);
+                self.feedback.clear();
                 self.history_index = None;
                 self.preferred_column = None;
                 self.update_autocomplete();
-                self.set_notice("Image pasted · Backspace removes its marker");
             }
         }
     }
@@ -166,7 +171,8 @@ impl ChatState {
         self.next_image_number = self.next_image_number.saturating_add(1);
         self.pending_attachment_markers.insert(sequence, number);
         self.input_generation = self.input_generation.wrapping_add(1);
-        self.set_notice("Processing image attachment…");
+        self.feedback.clear();
+
         true
     }
 
@@ -192,7 +198,7 @@ impl ChatState {
             Ok(ready) => {
                 self.input_images[index].image = ready;
                 self.input_generation = self.input_generation.wrapping_add(1);
-                self.set_notice("Image attached · Backspace removes its marker");
+                self.feedback.clear();
             }
             Err(error) => {
                 if let Some(command) = command {
@@ -207,6 +213,7 @@ impl ChatState {
                 } else {
                     self.input_images[index].image = ClipboardImage::failed();
                     self.input_generation = self.input_generation.wrapping_add(1);
+                    self.feedback.clear();
                 }
                 self.set_notice(format!("Attachment failed: {error}"));
             }
@@ -233,12 +240,13 @@ impl ChatState {
     }
 
     pub(crate) fn encoded_draft(&self) -> String {
-        if self.unsent_prompts.is_empty() {
+        if self.unsent_prompts.is_empty() && self.pending_submissions.is_empty() {
             return self.draft_payload().encode_draft();
         }
         let saved = SavedChatDraft {
             composer: self.draft_payload(),
             unsent: self.unsent_prompts.clone(),
+            pending: self.pending_submissions.clone(),
         };
         format!(
             "{CHAT_DRAFT_PREFIX}{}",
@@ -509,8 +517,8 @@ impl ChatState {
                     // relay's acceptance in the footer and leave the harness's
                     // refusal to arrive in the transcript seconds later.
                     if self.advertised_config_values(key).is_empty() {
-                        self.set_notice(mj_core::acp::missing_config_selector_refusal(key));
                         self.clear_input();
+                        self.set_notice(mj_core::acp::missing_config_selector_refusal(key));
                         return ChatAction::None;
                     }
                     // A busy agent does not refuse the change: it waits in the
@@ -583,11 +591,7 @@ impl ChatState {
                     self.clear_input();
                     self.begin_plan_mode_change(requested);
                     self.plan_command_pending = true;
-                    self.set_notice(if requested {
-                        "Plan mode on"
-                    } else {
-                        "Plan mode off"
-                    });
+
                     ChatAction::PlanCommand {
                         original: prompt,
                         control,

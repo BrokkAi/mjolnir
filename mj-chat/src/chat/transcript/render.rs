@@ -201,11 +201,7 @@ pub(crate) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
         ));
     }
     for entry in chat.trailing_entries() {
-        lines.extend(render_transcript_entry(
-            &entry,
-            usize::from(width),
-            chat.render_mode,
-        ));
+        lines.extend(chat.render_trailing_entry(&entry, usize::from(width)));
     }
     if lines.is_empty() {
         lines.push(empty_transcript_row(chat.transcript_loading));

@@ -845,7 +845,7 @@ mod tests {
                 } else {
                     assert_eq!(result, ChatAction::None);
                     assert_eq!(chat.input, command);
-                    assert!(chat.notices.current().unwrap().contains("not supported"));
+                    assert!(chat.feedback.current().unwrap().contains("not supported"));
                 }
             }
             chat.input = "/goal pause the migration after testing".into();
@@ -886,7 +886,7 @@ mod tests {
         assert_eq!(chat.input, draft);
         assert_eq!(chat.input_images.len(), 1);
         assert!(
-            chat.notices
+            chat.feedback
                 .current()
                 .unwrap()
                 .contains("delete its marker")

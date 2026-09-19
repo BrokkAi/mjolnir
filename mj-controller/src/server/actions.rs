@@ -90,6 +90,8 @@ pub enum ControllerAction {
         session_id: String,
     },
     Prompt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
         session_id: String,
         text: String,
         /// Images to send with the prompt. The controller turns each one into
@@ -98,6 +100,8 @@ pub enum ControllerAction {
         images: Vec<ViewerPromptImage>,
     },
     RunShell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
         session_id: String,
         command: String,
     },

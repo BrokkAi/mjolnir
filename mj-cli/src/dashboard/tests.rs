@@ -966,7 +966,7 @@ async fn prefix_t_toggles_rendering_of_the_visible_chat_from_a_pane() {
         super::actions::ChatToggle::TranscriptRendering,
     );
     assert_eq!(
-        notices.current().as_deref(),
+        chat.notice().as_deref(),
         Some("Raw transcript source enabled")
     );
     super::actions::apply_chat_toggle(
@@ -975,7 +975,7 @@ async fn prefix_t_toggles_rendering_of_the_visible_chat_from_a_pane() {
         super::actions::ChatToggle::TranscriptRendering,
     );
     assert_eq!(
-        notices.current().as_deref(),
+        chat.notice().as_deref(),
         Some("Rich transcript rendering enabled")
     );
 
@@ -1673,7 +1673,7 @@ fn shutdown_cancels_process_owning_critical_operations() {
 /// Every warm conversation is pumped on every loop iteration, not only the
 /// one the focused pane shows. Each of these chats starts on a stopped
 /// session handle and only reaches its replacement actor while it is being
-/// pumped, so both reporting the reconnection proves both were driven.
+/// pumped, so acquiring both replacement actors proves both were driven.
 #[tokio::test]
 async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
     let mut fixtures = Vec::new();
@@ -1699,11 +1699,10 @@ async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
     }
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !notices.iter().all(|notices| {
-            notices
-                .current()
-                .is_some_and(|notice| notice.contains("Reconnected"))
-        }) {
+        while !chats
+            .values()
+            .all(|chat| chat.session_feed_open() && chat.notice().is_none())
+        {
             super::pump_chats(&mut chats).await;
         }
     })
@@ -1715,4 +1714,5 @@ async fn every_warm_chat_is_pumped_not_only_the_focused_one() {
             .values()
             .all(mj_chat::chat::ActiveChat::session_feed_open)
     );
+    assert!(notices.iter().all(|notices| notices.current().is_none()));
 }

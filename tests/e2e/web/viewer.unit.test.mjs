@@ -470,9 +470,11 @@ test('review action failures return false without leaking errors across sessions
   vm.runInContext(
     `
 let currentSession = 'session-a';
+let composerGeneration = 0;
 const error = { textContent: '' };
 const document = { querySelector() { return error; } };
 async function request() { throw new Error('resolution refused'); }
+function composerText() { return ''; }
 function setComposerText() { throw new Error('a failed action cleared the composer'); }
 async function refresh() {}
 ${actionSource}

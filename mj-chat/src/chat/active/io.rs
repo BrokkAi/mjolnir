@@ -54,6 +54,25 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.advance_review();
+        self.publish_conversation_notices();
+    }
+
+    pub(super) fn publish_conversation_notices(&mut self) {
+        for notice in &mut self.state.conversation_notices {
+            if notice.submitted {
+                continue;
+            }
+            match self
+                .remote
+                .operations()
+                .try_send(ChatRemoteOperation::RecordNotice {
+                    id: notice.id.clone(),
+                    text: notice.text.clone(),
+                }) {
+                Ok(()) => notice.submitted = true,
+                Err(error) => tracing::warn!(%error, "could not queue conversation notice"),
+            }
+        }
     }
 
     /// Moves a review on when the planner has answered the context request.
@@ -203,18 +222,13 @@ impl ActiveChat {
         let Some(result) = self.remote.take_finished().await else {
             return;
         };
-        if let Err(error) = result {
-            if self.state.fail_all_background_stops() {
-                self.state
-                    .set_notice(format!("Background task could not be stopped: {error}"));
-            } else {
-                self.state
-                    .set_notice(format!("Chat background worker failed: {error}"));
-            }
-        } else {
-            self.state
-                .set_notice("Chat background worker stopped unexpectedly");
-        }
+        apply_chat_remote_result(
+            &mut self.state,
+            ChatRemoteResult::WorkerFailed(match result {
+                Err(error) => format!("Chat background worker failed: {error}"),
+                Ok(()) => "Chat background worker stopped unexpectedly".into(),
+            }),
+        );
     }
 
     pub(super) fn apply_io_update(&mut self, update: ChatIoUpdate) {
@@ -252,8 +266,6 @@ impl ActiveChat {
             ChatIoUpdate::Clipboard { generation, result } => {
                 self.paste_in_flight = false;
                 if generation != self.state.input_generation() {
-                    self.state
-                        .set_notice("Clipboard result discarded because the draft changed");
                     return;
                 }
                 match result {
@@ -463,7 +475,7 @@ impl ActiveChat {
         apply_chat_remote_result(&mut self.state, result);
         if sync_finished {
             if sync_succeeded && self.reconnect_notice_pending_sync {
-                self.state.set_notice("Reconnected to session relay");
+                self.state.connection_feedback = None;
             }
             self.reconnect_notice_pending_sync = false;
         }
@@ -505,7 +517,7 @@ impl ActiveChat {
                 self.apply_deferred_elicitation_draft();
                 if self.session_open {
                     self.reconnect_notice_pending_sync = true;
-                    self.state.set_notice("Reconnected to session relay");
+                    self.state.connection_feedback = None;
                 } else {
                     self.begin_session_reconnect();
                 }
@@ -521,8 +533,9 @@ impl ActiveChat {
                     );
                     return;
                 }
-                self.state
-                    .set_notice(format!("Could not reconnect to session relay: {error}"));
+                self.state.set_connection_notice(format!(
+                    "Could not reconnect to session relay: {error}"
+                ));
                 if self.session_feed_expected {
                     self.begin_session_reconnect();
                 }

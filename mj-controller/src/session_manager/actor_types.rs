@@ -12,7 +12,7 @@ pub(super) enum ActorCommand {
         command_id: String,
         command: RelayCommand,
         admission: Option<ReviewDeliveryAdmission>,
-        reply: oneshot::Sender<std::result::Result<u64, String>>,
+        reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
     },
     Sync {
         reply: oneshot::Sender<std::result::Result<(), String>>,
@@ -61,7 +61,7 @@ impl ActorCommand {
     pub(super) fn reject(self, session_id: &str, message: &str) {
         match self {
             Self::Submit { reply, .. } => {
-                if reply.send(Err(message.to_owned())).is_err() {
+                if reply.send(Err(message.to_owned().into())).is_err() {
                     tracing::debug!(
                         %session_id,
                         operation = "submit",
@@ -141,7 +141,7 @@ pub(super) struct DeferredSubmit {
     pub(super) command_id: String,
     pub(super) command: RelayCommand,
     pub(super) admission: Option<ReviewDeliveryAdmission>,
-    pub(super) reply: oneshot::Sender<std::result::Result<u64, String>>,
+    pub(super) reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
 }
 
 #[derive(Debug, Default)]
@@ -212,3 +212,5 @@ pub(super) enum ReconcileAction {
     Keep,
     Retire,
 }
+
+use mj_client::session::SubmitFailure;

@@ -213,13 +213,14 @@ pub(super) async fn apply_phone_action(
             session_id,
             text,
             images,
+            command_id,
         } => {
             services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?
                 .submit(
-                    new_command_id("phone-prompt")?,
+                    command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
                     RelayCommand::Prompt {
                         prompt: phone_prompt_blocks(text, images),
                     },
@@ -230,13 +231,14 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RunShell {
             session_id,
             command,
+            command_id,
         } => {
             services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
                 .await?
                 .submit(
-                    new_command_id("phone-shell")?,
+                    command_id.map_or_else(|| new_command_id("phone-shell"), Ok)?,
                     RelayCommand::RunUserShell { command },
                 )
                 .await?;
@@ -425,17 +427,12 @@ pub(super) async fn apply_phone_action(
                 &operational.config_options,
                 operational.modes.as_ref(),
             );
-            let command = match facts.plan_control(active) {
-                Ok(mj_core::acp::PlanControl::SetConfig { key, value }) => {
-                    RelayCommand::SetConfig { key, value }
-                }
-                Ok(mj_core::acp::PlanControl::SetSessionMode { mode_id }) => {
-                    RelayCommand::SetSessionMode { mode_id }
-                }
-                Err(reason) => bail!("{reason}"),
-            };
+            let control = facts
+                .plan_control(active)
+                .map_err(|reason| anyhow::anyhow!("{reason}"))?;
             handle
-                .submit(new_command_id("phone-plan-mode")?, command)
+                .client()
+                .apply_plan_control(new_command_id("phone-plan-mode")?, control)
                 .await?;
             Ok(())
         }

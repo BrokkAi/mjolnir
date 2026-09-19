@@ -52,7 +52,7 @@ impl ActiveChat {
                     restore_unsent_prompt(&mut self.state, text, images);
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Prompt queued for delivery…");
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::Prompt {
@@ -71,7 +71,7 @@ impl ActiveChat {
                     restore_unsent_input(&mut self.state, &format!("!{command}"));
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Shell command queued…");
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::RunShell {
@@ -86,7 +86,7 @@ impl ActiveChat {
                     self.state.fail_queued_prompt_removal(id, text, kind);
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Removing queued prompt…");
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::RemoveQueuedPrompt {
@@ -110,8 +110,7 @@ impl ActiveChat {
                     restore_unsent_input(&mut self.state, &format!("/goal {}", action.as_str()));
                     return ChatEventOutcome::Handled;
                 };
-                self.state
-                    .set_notice(format!("Sending /goal {}…", action.as_str()));
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::GoalControl { command_id, action },
@@ -123,7 +122,7 @@ impl ActiveChat {
                     restore_unsent_input(&mut self.state, &config_command_text(&key, &value));
                     return ChatEventOutcome::Handled;
                 };
-                self.state.set_notice("Sending configuration update…");
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::SetConfig {
@@ -163,7 +162,7 @@ impl ActiveChat {
                     return ChatEventOutcome::Handled;
                 };
                 let intent = self.state.turn_control_intent();
-                self.state.set_notice(intent.sending_notice());
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::Cancel {
@@ -191,7 +190,7 @@ impl ActiveChat {
             } => self.answer_reviewer(role, elicitation_id, response),
             ChatAction::RespondElicitation { request, response } => {
                 let plan_followup = self.state.plan_review_followup(&request, &response);
-                self.state.set_notice("Sending answer…");
+
                 queue_chat_remote_operation(
                     self.remote.operations(),
                     ChatRemoteOperation::RespondElicitation {

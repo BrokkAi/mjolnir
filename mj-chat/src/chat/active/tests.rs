@@ -849,10 +849,7 @@ async fn an_open_chat_hands_off_to_a_replacement_actor_without_losing_its_draft(
     .expect("the replacement actor became the live chat feed");
 
     assert_eq!(chat.draft(), "half-written prompt");
-    assert_eq!(
-        chat.state.notice().as_deref(),
-        Some("Reconnected to session relay")
-    );
+    assert!(chat.state.notice().is_none());
 }
 
 #[tokio::test]
@@ -1369,10 +1366,7 @@ async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     .expect("the active runtime record restarted the session handoff");
 
     assert_eq!(chat.draft(), "still drafting");
-    assert_eq!(
-        chat.state.notice().as_deref(),
-        Some("Reconnected to session relay")
-    );
+    assert!(chat.state.notice().is_none());
 }
 
 #[tokio::test]
@@ -1727,26 +1721,26 @@ async fn escape_names_steering_through_submission_and_acceptance() {
 
     use mj_core::relay::{ActiveRelayPrompt, RelayCommand};
 
-    for (supported, queue_kind, hint, sending, requested) in [
+    for (supported, queue_kind, hint, sending, _requested) in [
         (
             Some(true),
             Some(QueuedCommandKind::Prompt),
             "Esc steers next",
-            "Sending steering request…",
+            "Steering turn…",
             "Steering requested",
         ),
         (
             Some(false),
             Some(QueuedCommandKind::Prompt),
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
         (
             None,
             Some(QueuedCommandKind::Prompt),
             "Esc applies next",
-            "Requesting queued prompt…",
+            "Applying queued prompt…",
             "Queued prompt requested",
         ),
         (
@@ -1756,14 +1750,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                 value: "next-model".into(),
             }),
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
         (
             Some(true),
             None,
             "Esc cancels",
-            "Sending cancellation request…",
+            "Stopping turn…",
             "Cancellation requested",
         ),
     ] {
@@ -1800,8 +1794,11 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         let screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
         assert!(screen.contains(hint), "{screen}");
 
+        let previous_feedback = chat.state.notice();
         chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert_eq!(chat.state.notice().as_deref(), Some(sending));
+        assert_eq!(chat.state.notice(), previous_feedback);
+        let pending_screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
+        assert!(pending_screen.contains(sending), "{pending_screen}");
 
         let result = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -1826,7 +1823,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         // must still describe the request that was actually submitted.
         chat.state.queued_prompts.clear();
         apply_chat_remote_result(&mut chat.state, result);
-        assert_eq!(chat.state.notice().as_deref(), Some(requested));
+        assert_eq!(chat.state.notice(), previous_feedback);
     }
 }
 

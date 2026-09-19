@@ -995,7 +995,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         "an unknown delivery cannot be undone"
     );
     reply
-        .send(Err("primary temporarily unavailable".to_owned()))
+        .send(Err("primary temporarily unavailable".into()))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while !host.view(&session).is_some_and(|view| {

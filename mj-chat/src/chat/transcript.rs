@@ -843,7 +843,7 @@ impl ChatState {
                 }
             }
             for entry in &trailing {
-                for line in render_transcript_entry(entry, usize::from(width), self.render_mode) {
+                for line in self.render_trailing_entry(entry, usize::from(width)) {
                     if rows.len() == height {
                         break;
                     }
@@ -881,11 +881,7 @@ impl ChatState {
             .trailing_entries()
             .iter()
             .flat_map(|entry| {
-                render_transcript_entry(
-                    entry,
-                    usize::from(self.render_cache.width),
-                    self.render_mode,
-                )
+                self.render_trailing_entry(entry, usize::from(self.render_cache.width))
             })
             .collect::<Vec<_>>();
         let start = trailing.len().saturating_sub(height);
@@ -917,9 +913,23 @@ impl ChatState {
         }
     }
 
-    /// The client-local rows drawn after the projected entries: the live
-    /// terminal card, then every submit the relay refused. Neither is in
-    /// `entries`, which `apply_materialized` rebuilds from the projection.
+    fn render_trailing_entry(&self, entry: &ChatEntry, width: usize) -> Vec<Line<'static>> {
+        let mut rows = render_transcript_entry(entry, width, self.render_mode);
+        if let Some(status) = self.submission_status(entry) {
+            rows.extend(wrap_styled_line(
+                Line::from(Span::styled(
+                    format!("  {}", sanitize_terminal_text(status)),
+                    theme::muted(),
+                )),
+                width,
+                2,
+            ));
+        }
+        rows
+    }
+
+    /// Local activity, submissions, and unpublished notices survive rebuilds
+    /// of the authoritative projection and yield when their durable rows arrive.
     fn trailing_entries(&self) -> Vec<ChatEntry> {
         let mut rows = Vec::from_iter(self.active_terminal_fallback());
         rows.extend(
@@ -927,6 +937,8 @@ impl ChatState {
                 .iter()
                 .map(|unsent| unsent.entry(self.latest_seq)),
         );
+        rows.extend(self.submission_entries());
+        rows.extend(self.notice_entries());
         rows
     }
 

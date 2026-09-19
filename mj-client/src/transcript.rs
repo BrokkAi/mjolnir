@@ -503,6 +503,12 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         entry.text.lines().map(str::to_owned).collect()
     };
     BrowserTranscriptEntry {
+        command_id: entry.source.0.as_ref().and_then(|item| {
+            item.stable_id
+                .strip_prefix("user:")
+                .or_else(|| item.stable_id.strip_prefix("shell:"))
+                .map(str::to_owned)
+        }),
         id: entry.start_seq,
         updated_seq: entry.seq,
         role,

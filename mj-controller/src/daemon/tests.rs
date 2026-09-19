@@ -2281,7 +2281,7 @@ async fn next_submit(
     manager: &mut TestRemoteManager,
 ) -> (
     String,
-    tokio::sync::oneshot::Sender<std::result::Result<u64, String>>,
+    tokio::sync::oneshot::Sender<std::result::Result<u64, mj_client::session::SubmitFailure>>,
 ) {
     let request = tokio::time::timeout(Duration::from_secs(10), manager.requests.recv())
         .await
