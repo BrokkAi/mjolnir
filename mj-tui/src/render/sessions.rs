@@ -475,8 +475,10 @@ pub(crate) fn expanded_session_lines(
     // The branch follows the name when the line has room. A name is rarely as
     // wide as the sidebar, so this is where the branch costs nothing.
     if let Some(git) = git
-        && let Some(text) =
-            fit_git_row_text(git, name_room.saturating_sub(Line::raw(title.as_str()).width() + 2))
+        && let Some(text) = fit_git_row_text(
+            git,
+            name_room.saturating_sub(Line::raw(title.as_str()).width() + 2),
+        )
     {
         title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
     }
