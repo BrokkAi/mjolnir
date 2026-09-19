@@ -3982,6 +3982,45 @@ fn session_rows_carry_the_branch_once_the_checkout_was_read() {
     assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
 }
 
+/// Every session created with a managed worktree gets a `mj/<32 hex>` branch,
+/// which is wider than the sidebar, so dropping the whole marker hid the
+/// feature at the widths people use. The middle of the name is what nobody
+/// reads: elide it and the marker keeps its ahead, behind, and changed counts.
+#[test]
+fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
+    let mut session = running_session();
+    session.session_title_override = Some("alpha".into());
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    });
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.focus_sessions();
+    // The 35 characters a managed worktree's own branch name costs.
+    let branch = "mj/d45dc90af02510176be667cf8b330580";
+    assert_eq!(branch.chars().count(), 35);
+    dashboard.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/work".into(),
+            branch,
+            Some("2\t1"),
+            "12\t3\tsrc/main.rs\n",
+            " M src/main.rs\n?? notes.md\n",
+        )),
+    );
+    // A third of a 100-column terminal, floored at 40, is a 40-column pane.
+    let lines = drawn(&mut dashboard, 100, 40);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("alpha"))
+        .unwrap_or_else(|| panic!("the session row: {lines:#?}"));
+    // The prefix and the last characters of the name survive; the middle does
+    // not, which is what makes room for the counts.
+    assert!(row.contains("⎇ mj/d45dc"), "{row:?}");
+    assert!(row.contains("…"), "{row:?}");
+    assert!(row.contains("80 ↑1 ↓2 ±2"), "{row:?}");
+}
+
 #[test]
 fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     let mut session = running_session();

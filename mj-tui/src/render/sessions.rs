@@ -384,6 +384,63 @@ pub(crate) fn drawn_session_rows_with_options(
     rows
 }
 
+/// The most of the git row text — `⎇ main ↑1 ↓2 ±4` — that fits `free` cells,
+/// or `None` when not even a marker and a readable name fit.
+///
+/// Every session created with a managed worktree gets an `mj/<32 hex>` branch,
+/// which is wider than the sidebar on its own. Giving up the whole marker there
+/// also gave up the counts, which are the part that says the checkout moved, so
+/// the name gives up its middle first: `⎇ mj/d45dc…0580 ±2`. The middle of a
+/// generated name is what nobody reads; its start and its last few characters
+/// are what tells two branches apart.
+fn fit_git_row_text(git: &str, free: usize) -> Option<String> {
+    /// Below this many cells an elided name says nothing worth the room.
+    const NAME_FLOOR: usize = 9;
+    /// Characters of the name's tail that survive the elision.
+    const TAIL: usize = 4;
+
+    if Line::raw(git).width() <= free {
+        return Some(git.to_owned());
+    }
+    // The marker and the branch name are the first two words; a branch name
+    // never contains a space. Whatever follows is the counts, kept with the
+    // space that separates them.
+    let (marker, rest) = git.split_once(' ')?;
+    let (name, counts) = match rest.find(' ') {
+        Some(at) => (&rest[..at], Some(&rest[at..])),
+        None => (rest, None),
+    };
+    let marker_room = Line::raw(marker).width() + 1;
+    let elided = |room: usize| -> Option<String> {
+        if room < NAME_FLOOR {
+            return None;
+        }
+        if Line::raw(name).width() <= room {
+            return Some(name.to_owned());
+        }
+        // The last characters are what tell two generated names apart, so they
+        // are kept and the truncated head carries the ellipsis.
+        let tail = name
+            .chars()
+            .skip(name.chars().count().saturating_sub(TAIL))
+            .collect::<String>();
+        let head = truncate_to_cells(
+            name,
+            room.saturating_sub(Line::raw(tail.as_str()).width()),
+            Truncate::PLAIN,
+        );
+        Some(format!("{head}{tail}"))
+    };
+    // The counts are worth more than the middle of the name, so they are what
+    // the elision makes room for.
+    if let Some(counts) = counts
+        && let Some(name) = elided(free.saturating_sub(marker_room + Line::raw(counts).width()))
+    {
+        return Some(format!("{marker} {name}{counts}"));
+    }
+    elided(free.saturating_sub(marker_room)).map(|name| format!("{marker} {name}"))
+}
+
 /// The four rows an expanded session draws: name, status and identity, and
 /// two wrapped rows of the current output. The output block is always two
 /// rows, even with nothing to say, so every expanded session is the same
@@ -415,27 +472,13 @@ pub(crate) fn expanded_session_lines(
     let name_room = usize::from(title_width).saturating_sub(Line::raw(prefix).width());
     let title = truncate_to_cells(&name, name_room, Truncate::PLAIN);
     let mut title_spans = vec![Span::styled(format!("{prefix}{title}"), style)];
-    // The branch follows the name when the line has room: the whole text,
-    // else the branch alone, else nothing. A name is rarely as wide as the
-    // sidebar, so this is where the branch costs nothing.
-    if let Some(git) = git {
-        let free = name_room.saturating_sub(Line::raw(title.as_str()).width() + 2);
-        // The marker and the branch name are the first two words; a branch
-        // name never contains a space.
-        let branch_only = git
-            .match_indices(' ')
-            .nth(1)
-            .map_or(git, |(at, _)| &git[..at]);
-        let text = if Line::raw(git).width() <= free {
-            Some(git)
-        } else if Line::raw(branch_only).width() <= free {
-            Some(branch_only)
-        } else {
-            None
-        };
-        if let Some(text) = text {
-            title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
-        }
+    // The branch follows the name when the line has room. A name is rarely as
+    // wide as the sidebar, so this is where the branch costs nothing.
+    if let Some(git) = git
+        && let Some(text) =
+            fit_git_row_text(git, name_room.saturating_sub(Line::raw(title.as_str()).width() + 2))
+    {
+        title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
     }
     lines.push(Line::from(title_spans));
     lines.push(session_activity_line(
