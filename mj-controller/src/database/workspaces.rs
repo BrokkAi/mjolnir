@@ -347,6 +347,26 @@ pub fn force_delete_workspace(workspace_id: &str) -> Result<()> {
 }
 
 pub fn force_delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
+    remove_inactive_workspace_at(path, workspace_id, false)
+}
+
+/// Finish a normal workspace close, retaining history but discarding unsent text.
+pub fn close_workspace(workspace_id: &str) -> Result<()> {
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("close_workspace", move |_| {
+        close_workspace_at(&database_path(), &workspace_id)
+    })
+}
+
+pub fn close_workspace_at(path: &Path, workspace_id: &str) -> Result<()> {
+    remove_inactive_workspace_at(path, workspace_id, true)
+}
+
+fn remove_inactive_workspace_at(
+    path: &Path,
+    workspace_id: &str,
+    discard_session_drafts: bool,
+) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let active_count = {
@@ -367,6 +387,13 @@ pub fn force_delete_workspace_at(path: &Path, workspace_id: &str) -> Result<()> 
         active_count == 0,
         "workspace is not empty ({active_count} active sessions remain)"
     );
+    if discard_session_drafts {
+        tx.execute(
+            "UPDATE sessions SET draft_input = '' WHERE session_id IN
+             (SELECT session_id FROM session_contexts WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+    }
     tx.execute(
         "DELETE FROM detached_drafts WHERE workspace_id = ?1",
         [workspace_id],

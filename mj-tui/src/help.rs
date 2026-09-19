@@ -434,7 +434,9 @@ mod tests {
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
 
-        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
+        let mut rendered = drawn(&mut dashboard, 200, 100).join("\n");
+        dashboard.handle_key(key(KeyCode::End));
+        rendered.push_str(&drawn(&mut dashboard, 200, 100).join("\n"));
         for spec in COMMANDS {
             assert!(rendered.contains(spec.label), "missing {}", spec.label);
             if let Some(label) = dashboard.key_labels(spec.id).first() {

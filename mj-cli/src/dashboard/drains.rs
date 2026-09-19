@@ -270,6 +270,11 @@ impl DashboardContext {
             .cloned()
             .collect::<Vec<_>>();
         for id in removed_layouts {
+            // The legacy default is also hidden when merely empty, so its
+            // explicit deletion response owns composer disposal.
+            if id != mj_core::workspace::DEFAULT_WORKSPACE_ID {
+                self.discard_workspace_composers(&id);
+            }
             self.pane_size_persistence.forget(&id);
             self.layout_persistence.forget(&id);
             self.workspace_layouts.remove(&id);

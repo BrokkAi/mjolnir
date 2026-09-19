@@ -131,6 +131,13 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
         );
         return;
     }
+    if dashboard.resize_mode_active() {
+        frame.render_widget(
+            Paragraph::new(resize_banner_line()).style(theme::muted().bg(theme::palette().surface)),
+            area,
+        );
+        return;
+    }
     let notice = dashboard.notices.current();
     let groups = fitted_footer_groups(dashboard, area.width);
     let line = match notice.as_deref() {
@@ -174,6 +181,10 @@ pub(crate) fn render_footer(frame: &mut Frame, area: Rect, dashboard: &Dashboard
             }
         }
     }
+}
+
+pub(crate) fn resize_banner_line() -> Line<'static> {
+    Line::raw("Resize panes: h/j/k/l or arrows · Esc done")
 }
 
 /// The `PREFIX` banner with this dashboard's live prefix and help key.

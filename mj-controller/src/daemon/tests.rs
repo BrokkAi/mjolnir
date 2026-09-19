@@ -691,7 +691,11 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
     let _ = server.await.expect("daemon task panicked");
 }
 
-fn runtime_test_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
+pub(super) fn runtime_test_session(
+    id: &str,
+    workspace_id: &str,
+    state: SessionState,
+) -> SessionRecord {
     SessionRecord {
         build_cache: None,
         container_workspace: None,
@@ -750,7 +754,10 @@ fn runtime_records_include_global_history_but_only_local_active_sessions() {
     assert_eq!(ids, BTreeSet::from(["history", "local"]));
 }
 
-fn runtime_test_subagent(child_session_id: &str, parent_session_id: &str) -> SubagentRecord {
+pub(super) fn runtime_test_subagent(
+    child_session_id: &str,
+    parent_session_id: &str,
+) -> SubagentRecord {
     SubagentRecord {
         child_session_id: child_session_id.into(),
         parent_session_id: parent_session_id.into(),
@@ -2736,5 +2743,197 @@ fn startup_selects_every_record_that_is_only_a_tombstone() {
     assert_eq!(
         tombstone_session_ids(&controller),
         vec!["data-loss".to_owned(), "lost".to_owned()]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_races() {
+    const TEST: &str = "workspace_close_retains_history_discards_drafts_and_refuses_resume_races";
+    const CHILD: &str = "MJ_TEST_WORKSPACE_CLOSE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Close me").unwrap();
+    let mut history = runtime_test_session("history-close", &workspace.id, SessionState::Stopped);
+    history.draft_input = "unsent".into();
+    crate::database::save_session(&history).unwrap();
+    crate::database::save_detached_draft(
+        &workspace.id,
+        Some(&history.id),
+        "terminal",
+        Some(42),
+        "saved draft",
+    )
+    .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let admission = state
+        .workspace_resume_gate(&workspace.id)
+        .read_owned()
+        .await;
+    let error = state
+        .close_workspace(workspace.id.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("resume is in progress"),
+        "{error:#}"
+    );
+    assert_eq!(
+        crate::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        state.workspace_closes.lock().unwrap().is_empty(),
+        "failed close is retryable"
+    );
+    drop(admission);
+    // An unrelated workspace's resume must not prevent this close.
+    let _other_resume = state.workspace_resume_gate("other").read_owned().await;
+    state.close_workspace(workspace.id.clone()).await.unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[&history.id].state, SessionState::Stopped);
+    assert!(stored.sessions[&history.id].draft_input.is_empty());
+    assert!(
+        crate::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        crate::database::list_workspaces()
+            .unwrap()
+            .iter()
+            .all(|w| w.id != workspace.id)
+    );
+}
+
+#[tokio::test]
+async fn workspace_close_cancellation_marks_only_the_requested_operation() {
+    let state = test_runtime_state();
+    let first = Arc::new(AtomicBool::new(false));
+    let second = Arc::new(AtomicBool::new(false));
+    state.workspace_closes.lock().unwrap().extend([
+        ("first".into(), first.clone()),
+        ("second".into(), second.clone()),
+    ]);
+    state.cancel_workspace_close("first").unwrap();
+    assert!(first.load(Ordering::Acquire));
+    assert!(!second.load(Ordering::Acquire));
+    assert!(state.cancel_workspace_close("missing").is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_close_stops_independent_sessions_concurrently_and_retries_after_a_new_create() {
+    const TEST: &str =
+        "workspace_close_stops_independent_sessions_concurrently_and_retries_after_a_new_create";
+    const CHILD: &str = "MJ_TEST_WORKSPACE_CLOSE_CONCURRENCY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Concurrent close").unwrap();
+    for id in ["close-first", "close-second"] {
+        crate::database::save_session(&runtime_test_session(
+            id,
+            &workspace.id,
+            SessionState::Provisioning,
+        ))
+        .unwrap();
+    }
+    crate::database::save_detached_draft(
+        &workspace.id,
+        None,
+        "terminal",
+        Some(42),
+        "do not discard on failure",
+    )
+    .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let finish = Arc::new(tokio::sync::Semaphore::new(0));
+    for id in ["close-first", "close-second"] {
+        let barrier = barrier.clone();
+        let finish = finish.clone();
+        state
+            .start_or_join_lifecycle(
+                id.into(),
+                LifecycleKind::Create,
+                move |_, _, cancelled| async move {
+                    while !cancelled.load(Ordering::Acquire) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    barrier.wait().await;
+                    finish.acquire().await.unwrap().forget();
+                    Ok(DaemonLifecycleResult::Done)
+                },
+            )
+            .unwrap();
+    }
+    let closing = tokio::spawn({
+        let state = state.clone();
+        let id = workspace.id.clone();
+        async move { state.close_workspace(id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .expect("both independent closes must run concurrently");
+    // The user starts another session while the originally confirmed sessions stop.
+    crate::database::save_session(&runtime_test_session(
+        "close-late",
+        &workspace.id,
+        SessionState::Provisioning,
+    ))
+    .unwrap();
+    finish.add_permits(2);
+    let error = tokio::time::timeout(Duration::from_secs(10), closing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("active sessions remain"),
+        "{error:#}"
+    );
+    assert_eq!(
+        crate::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let stored = crate::database::load_state().unwrap();
+    for id in ["close-first", "close-second"] {
+        assert_eq!(stored.sessions[id].state, SessionState::Stopped);
+    }
+    assert_eq!(
+        stored.sessions["close-late"].state,
+        SessionState::Provisioning
+    );
+    state.close_workspace(workspace.id.clone()).await.unwrap();
+    let stored = crate::database::load_state().unwrap();
+    for id in ["close-first", "close-second", "close-late"] {
+        assert_eq!(stored.sessions[id].state, SessionState::Stopped);
+    }
+    assert!(
+        crate::database::list_detached_drafts(&workspace.id)
+            .unwrap()
+            .is_empty()
     );
 }

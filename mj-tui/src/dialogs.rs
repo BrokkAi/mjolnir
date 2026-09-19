@@ -303,6 +303,9 @@ pub(crate) enum Confirmation {
         session_id: String,
         count: usize,
     },
+    CloseSession {
+        session_id: String,
+    },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
@@ -1493,7 +1496,11 @@ impl DashboardState {
                 self.cancel_modal();
                 DashboardAction::Close { session_id }
             }
-            (Confirmation::StopWithSubagents { session_id, .. }, 1) => {
+            (
+                Confirmation::StopWithSubagents { session_id, .. }
+                | Confirmation::CloseSession { session_id },
+                1,
+            ) => {
                 self.cancel_modal();
                 DashboardAction::Close { session_id }
             }

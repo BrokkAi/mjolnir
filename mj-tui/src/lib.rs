@@ -496,6 +496,13 @@ pub enum DashboardAction {
         workspace_id: String,
         name: String,
     },
+    CancelWorkspaceClose {
+        workspace_id: String,
+    },
+    CloseWorkspace {
+        generation: u64,
+        workspace_id: String,
+    },
     DeleteWorkspace {
         generation: u64,
         workspace_id: String,
@@ -703,6 +710,7 @@ pub struct DashboardState {
     /// Whether the prefix key has been pressed and the next key completes a
     /// chord. Cleared by that key, by Esc, and by any mouse press.
     pub(crate) prefix_pending: bool,
+    pub(crate) resize_mode: bool,
     pub(crate) state: State,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
@@ -900,6 +908,7 @@ pub struct DashboardState {
     /// pinned manager button.
     pub(crate) workspace_control_focus: WorkspaceControlFocus,
     workspace_management_generation: u64,
+    closing_workspaces: BTreeSet<String>,
     pub(crate) render_change_snapshot: render_changes::RenderChangeSnapshot,
     /// Whether a handler took responsibility for the event being dispatched.
     last_event_consumed: Cell<bool>,
@@ -954,6 +963,7 @@ impl DashboardState {
         let mut dashboard = Self {
             keybinds: config.keybinds(),
             prefix_pending: false,
+            resize_mode: false,
             config,
             state,
             quotas,
@@ -1036,6 +1046,7 @@ impl DashboardState {
             workspace_hamburger_area: None,
             workspace_control_focus: WorkspaceControlFocus::Tabs,
             workspace_management_generation: 0,
+            closing_workspaces: BTreeSet::new(),
             render_change_snapshot: render_changes::RenderChangeSnapshot::default(),
             last_event_consumed: Cell::new(false),
         };

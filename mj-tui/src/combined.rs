@@ -994,7 +994,12 @@ fn render_combined_themed(
                         .collect::<Vec<_>>();
                     let banner = dashboard
                         .prefix_pending()
-                        .then(|| crate::render::prefix_banner_line(dashboard));
+                        .then(|| crate::render::prefix_banner_line(dashboard))
+                        .or_else(|| {
+                            dashboard
+                                .resize_mode_active()
+                                .then(crate::render::resize_banner_line)
+                        });
                     chat.draw_in(
                         frame,
                         ChatRegions {

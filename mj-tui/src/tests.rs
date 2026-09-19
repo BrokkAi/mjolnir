@@ -4464,6 +4464,14 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
         dashboard.dispatch_command(crate::actions::CommandId::StopSession),
         DashboardAction::None
     ));
+    assert_eq!(
+        chord(&mut dashboard, CommandId::CloseSession),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "native agents close through their parent"
+    );
     assert!(
         matches!(dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)), DashboardAction::StopNativeAgent { owner, child } if owner == parent.id && child == "native-child")
     );
@@ -4504,4 +4512,143 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     );
     assert_eq!(dashboard.subagent_parent_id(), Some("ancestor"));
     assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
+}
+
+#[test]
+fn resize_mode_routes_repeated_motions_consumes_text_and_exits() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    dashboard.focus = Focus::Prompt;
+    chord(&mut dashboard, CommandId::ResizeMode);
+    assert!(dashboard.resize_mode_active());
+    let before = dashboard.conversation_layout_for("default");
+    let repeat = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Repeat,
+        ..key(KeyCode::Char('h'))
+    };
+    route(&mut dashboard, &[repeat, repeat]);
+    assert!(dashboard.resize_mode_active());
+    assert_ne!(dashboard.conversation_layout_for("default"), before);
+    assert_eq!(
+        dashboard.route_bound_key(&key(KeyCode::Char('q'))),
+        KeyRoute::Consumed
+    );
+    assert_eq!(
+        dashboard.route_bound_key_event(&Event::Paste("do not submit".into())),
+        KeyRoute::Consumed
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(lines.last().unwrap().contains("Resize panes:"));
+    route(&mut dashboard, &[key(KeyCode::Esc)]);
+    assert!(!dashboard.resize_mode_active());
+    assert_eq!(
+        dashboard.route_bound_key(&key(KeyCode::Char('h'))),
+        KeyRoute::Forward
+    );
+    chord(&mut dashboard, CommandId::ResizeMode);
+    chord(&mut dashboard, CommandId::Help);
+    assert!(!dashboard.resize_mode_active());
+    dashboard.cancel_modal();
+    assert!(!dashboard.resize_mode_active());
+}
+
+#[test]
+fn resize_mode_respects_custom_commands_and_workspace_changes() {
+    let mut dashboard = dashboard_with_two_sessions();
+    let mut configured = config();
+    configured.keys.resize_mode = "prefix+e".into();
+    configured.keys.refresh = "f5".into();
+    dashboard.set_config(configured);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::ResizeMode),
+        DashboardAction::None
+    );
+    assert!(
+        !dashboard.resize_mode_active(),
+        "a single pane cannot resize"
+    );
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    chord(&mut dashboard, CommandId::ZoomPane);
+    assert!(dashboard.conversation_zoomed());
+    chord(&mut dashboard, CommandId::ResizeMode);
+    assert!(!dashboard.conversation_zoomed());
+    assert_eq!(
+        route(&mut dashboard, &[key(KeyCode::F(5))]),
+        DashboardAction::RefreshAll
+    );
+    assert!(!dashboard.resize_mode_active());
+    chord(&mut dashboard, CommandId::ResizeMode);
+    dashboard.set_active_workspace(None);
+    assert!(!dashboard.resize_mode_active());
+}
+
+#[test]
+fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    let first = dashboard.focused_pane();
+    let second = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
+        .unwrap();
+    let third = dashboard
+        .split_focused_pane(ratatui::layout::Direction::Vertical, None)
+        .unwrap();
+    dashboard.focus_pane(first);
+    let before = dashboard.conversation_panes(dashboard.conversation_area());
+    chord(&mut dashboard, CommandId::SwapPaneRight);
+    assert_eq!(dashboard.focused_pane(), first);
+    assert_eq!(dashboard.pane_session(first), Some("session-1"));
+    assert_eq!(dashboard.pane_session(second), Some("session-2"));
+    assert_eq!(dashboard.pane_session(third), None);
+    let after = dashboard.conversation_panes(dashboard.conversation_area());
+    assert_eq!(
+        before.iter().map(|p| p.rect).collect::<Vec<_>>(),
+        after.iter().map(|p| p.rect).collect::<Vec<_>>()
+    );
+    assert_ne!(
+        before.iter().find(|p| p.id == first).unwrap().rect,
+        after.iter().find(|p| p.id == first).unwrap().rect
+    );
+    let saved = dashboard.conversation_layout_for("default");
+    let mut restored = dashboard_with_two_sessions();
+    restored.cache_workspace_layout("default", saved.clone());
+    assert_eq!(restored.conversation_layout_for("default"), saved);
+    assert_eq!(restored.focused_pane(), first);
+    assert_eq!(restored.pane_session(first), Some("session-1"));
+    chord(&mut dashboard, CommandId::SwapPaneRight);
+    assert_eq!(
+        dashboard.conversation_layout_for("default"),
+        saved,
+        "no neighbor is a no-op"
+    );
+}
+
+#[test]
+fn close_session_always_confirms_and_cancel_is_safe() {
+    let mut dashboard = dashboard_with_session(running_session());
+    assert_eq!(
+        chord(&mut dashboard, CommandId::CloseSession),
+        DashboardAction::None
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::CloseSession { .. }))
+    );
+    // Enter initially activates Cancel, even when the session is idle.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    chord(&mut dashboard, CommandId::CloseSession);
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Close {
+            session_id: "session-1".into()
+        }
+    );
 }

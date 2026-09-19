@@ -144,6 +144,14 @@ pub(crate) fn command_for_action(action: KeyAction) -> CommandId {
         KeyAction::FocusPaneRight => CommandId::FocusPaneRight,
         KeyAction::Zoom => CommandId::ZoomPane,
         KeyAction::LastPane => CommandId::FocusLastPane,
+        KeyAction::ResizeMode => CommandId::ResizeMode,
+        KeyAction::SwapPaneLeft => CommandId::SwapPaneLeft,
+        KeyAction::SwapPaneDown => CommandId::SwapPaneDown,
+        KeyAction::SwapPaneUp => CommandId::SwapPaneUp,
+        KeyAction::SwapPaneRight => CommandId::SwapPaneRight,
+        KeyAction::CloseSession => CommandId::CloseSession,
+        KeyAction::RenameWorkspace => CommandId::RenameWorkspace,
+        KeyAction::CloseWorkspace => CommandId::CloseWorkspace,
         KeyAction::ResizePaneLeft => CommandId::ResizePaneLeft,
         KeyAction::ResizePaneDown => CommandId::ResizePaneDown,
         KeyAction::ResizePaneUp => CommandId::ResizePaneUp,
@@ -238,6 +246,9 @@ impl DashboardState {
     /// runs its command, and anything else is swallowed with a notice saying
     /// so.
     pub fn route_bound_key(&mut self, key: &KeyEvent) -> KeyRoute {
+        if self.modal_open() {
+            self.resize_mode = false;
+        }
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return KeyRoute::Forward;
         }
@@ -257,6 +268,28 @@ impl DashboardState {
                 self.prefix_pending = true;
                 return KeyRoute::Consumed;
             }
+            if self.keybinds.resolve_direct(combo).is_none() && self.resize_mode_active() {
+                let id = if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Char('h') | KeyCode::Left => Some(CommandId::ResizePaneLeft),
+                        KeyCode::Char('j') | KeyCode::Down => Some(CommandId::ResizePaneDown),
+                        KeyCode::Char('k') | KeyCode::Up => Some(CommandId::ResizePaneUp),
+                        KeyCode::Char('l') | KeyCode::Right => Some(CommandId::ResizePaneRight),
+                        KeyCode::Esc => {
+                            self.resize_mode = false;
+                            None
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                return id.map_or(KeyRoute::Consumed, |id| KeyRoute::Command {
+                    id,
+                    index: None,
+                });
+            }
+            self.resize_mode = false;
             return match self.keybinds.resolve_direct(combo) {
                 Some(matched) => KeyRoute::Command {
                     id: command_for_action(matched.action),
@@ -267,13 +300,18 @@ impl DashboardState {
         }
         self.prefix_pending = false;
         if combo == self.keybinds.prefix {
+            if self.resize_mode_active() {
+                return KeyRoute::Consumed;
+            }
             // tmux's rule: the doubled prefix is the literal key.
             return KeyRoute::Forward;
         }
         if combo == KeyCombo::plain(KeyName::Esc) {
+            self.resize_mode = false;
             return KeyRoute::Consumed;
         }
         if let Some(matched) = self.keybinds.resolve_prefix(combo) {
+            self.resize_mode = false;
             return KeyRoute::Command {
                 id: command_for_action(matched.action),
                 index: matched.index,
@@ -293,6 +331,7 @@ impl DashboardState {
     pub fn route_bound_key_event(&mut self, event: &crossterm::event::Event) -> KeyRoute {
         match event {
             crossterm::event::Event::Key(key) => self.route_bound_key(key),
+            crossterm::event::Event::Paste(_) if self.resize_mode_active() => KeyRoute::Consumed,
             _ => KeyRoute::Forward,
         }
     }

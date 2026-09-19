@@ -54,6 +54,14 @@ pub(crate) enum DashboardIoUpdate {
     /// A workspace manager snapshot loaded away from the event loop. The
     /// selection hint is set only by a successful create; the dashboard must
     /// still verify the modal generation before applying it.
+    WorkspaceClosed {
+        generation: u64,
+        workspace_id: String,
+        result: std::result::Result<WorkspaceManagementResult, String>,
+    },
+    WorkspaceCloseCancelled {
+        result: std::result::Result<(), String>,
+    },
     WorkspaceManagement {
         generation: u64,
         result: std::result::Result<WorkspaceManagementResult, String>,
@@ -457,6 +465,29 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Could not load workspace layouts: {error}")),
             },
+            DashboardIoUpdate::WorkspaceClosed {
+                generation,
+                workspace_id,
+                result,
+            } => {
+                let generation = self
+                    .dashboard
+                    .workspace_close_finished(&workspace_id)
+                    .unwrap_or(generation);
+                self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
+                    generation,
+                    result,
+                });
+            }
+            DashboardIoUpdate::WorkspaceCloseCancelled { result } => {
+                self.dashboard.set_notice(match result {
+                    Ok(()) => {
+                        "Workspace close cancellation requested; completed stops cannot be undone."
+                            .into()
+                    }
+                    Err(error) => format!("Could not cancel workspace close: {error}"),
+                });
+            }
             DashboardIoUpdate::WorkspaceManagement { generation, result } => match result {
                 Ok(result) => {
                     let WorkspaceManagementResult {
@@ -475,6 +506,7 @@ impl DashboardContext {
                         .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
                         .collect();
                     if let Some(deleted_workspace_id) = deleted_workspace_id.as_ref() {
+                        self.discard_workspace_composers(deleted_workspace_id);
                         self.pane_size_persistence.forget(deleted_workspace_id);
                         self.layout_persistence.forget(deleted_workspace_id);
                         self.workspace_layouts.remove(deleted_workspace_id);
@@ -507,8 +539,13 @@ impl DashboardContext {
                     }
                 }
                 Err(error) => {
-                    self.dashboard
-                        .finish_workspace_management(generation, Err(error));
+                    if !self
+                        .dashboard
+                        .finish_workspace_management(generation, Err(error.clone()))
+                    {
+                        self.dashboard
+                            .set_notice(format!("Workspace operation failed: {error}"));
+                    }
                 }
             },
             DashboardIoUpdate::NativeAgentHistory {
