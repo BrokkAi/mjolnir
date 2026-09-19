@@ -551,7 +551,7 @@ settings belong to the machine.
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | unset (decided by the machine's filesystem) | `false` runs sessions on this machine without the cache. |
 | `directory` | path string | no | unset (the machine's native mbx cache, else `~/.cache/mbx`) | Must be absolute. It is a path on that machine, not on the controller. |
-| `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. |
+| `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. Caps the whole cache: build outputs, target directories, and incremental state together. |
 
 A section with every field unset is the same as no section at all.
 

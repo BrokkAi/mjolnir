@@ -2274,7 +2274,7 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
     );
     assert_eq!(
         with.target_environment
-            .get("MBX_GC_MAX_SIZE")
+            .get("MBX_GC_MAX_TOTAL_SIZE")
             .map(String::as_str),
         Some("100000000000B")
     );
