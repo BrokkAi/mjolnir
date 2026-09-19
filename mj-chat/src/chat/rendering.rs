@@ -11,10 +11,11 @@ use ratatui::text::{Line, Span};
 use textwrap::WordSplitter;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Text presentation of the microphone glyph. The text variation selector is
-/// intentional: terminals should keep this as a compact text button rather
-/// than selecting an emoji presentation with a potentially different width.
-pub(super) const VOICE_BUTTON_GLYPH: &str = "🎙︎";
+/// The microphone glyph in the symbol set in force, so a console without UTF-8
+/// gets the plain button rather than mojibake in the composer's border.
+pub(super) fn voice_button_glyph() -> &'static str {
+    theme::glyphs().microphone
+}
 
 /// The microphone button is a chip in the upper-left of the prompt's top
 /// border. Keep its geometry derived from the same Unicode width ratatui uses
@@ -23,7 +24,7 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
     if prompt_area.width == 0 || prompt_area.height == 0 {
         return None;
     }
-    let button_width = display_width(&format!(" {VOICE_BUTTON_GLYPH} "));
+    let button_width = display_width(&format!(" {} ", voice_button_glyph()));
     let button_width = u16::try_from(button_width).ok()?;
     let x = prompt_area.x.saturating_add(1);
     (x.saturating_add(button_width) < prompt_area.right())
@@ -47,7 +48,7 @@ pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Li
             .fg(theme::palette().muted)
             .patch(theme::raised())
     };
-    Line::from(Span::styled(format!(" {VOICE_BUTTON_GLYPH} "), style)).left_aligned()
+    Line::from(Span::styled(format!(" {} ", voice_button_glyph()), style)).left_aligned()
 }
 
 pub(super) use mj_client::transcript::TranscriptRenderMode;
@@ -975,9 +976,31 @@ mod tests {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect::<String>(),
-            format!(" {VOICE_BUTTON_GLYPH} ")
+            format!(" {} ", voice_button_glyph())
         );
         assert_eq!(line.width(), 3);
-        assert_eq!(display_width(VOICE_BUTTON_GLYPH), display_width("🎙︎"));
+        assert_eq!(display_width(voice_button_glyph()), display_width("🎙︎"));
+    }
+
+    /// The ASCII set reaches the composer's border, where the microphone was
+    /// the last glyph a console without UTF-8 could not draw.
+    #[test]
+    fn the_ascii_microphone_button_is_plain_text() {
+        theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {
+            let line = voice_button_line(true, false);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(text.is_ascii(), "{text:?}");
+            assert_eq!(
+                u16::try_from(display_width(&text)).unwrap(),
+                voice_button_area(Rect::new(0, 0, 40, 3))
+                    .expect("a chip fits")
+                    .width,
+                "the chip's width follows the glyph"
+            );
+        });
     }
 }

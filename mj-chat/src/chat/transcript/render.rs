@@ -55,13 +55,14 @@ pub(crate) fn render_transcript(
 }
 
 pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line<'static> {
+    let separator = theme::glyphs().footer_separator;
     let review_activity = chat
         .turn_review()
         .and_then(|review| review.view.activity_label());
     let summary = if chat.header_target.is_empty() || chat.header_profile.is_empty() {
         review_activity.map_or_else(
             || "Conversation".to_owned(),
-            |activity| format!("Conversation · {activity}"),
+            |activity| format!("Conversation{separator}{activity}"),
         )
     } else if let Some(activity) = review_activity {
         let mut columns = vec![chat.header_target.clone()];
@@ -106,9 +107,11 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
     }
     let suffix = match (chat.anchor, chat.render_mode) {
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => " ".to_owned(),
-        (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => " · raw source ".to_owned(),
+        (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => {
+            format!("{separator}raw source ")
+        }
         (TranscriptAnchor::Row { entry, .. }, _) => format!(
-            " · message {} of {} · End to follow ",
+            "{separator}message {} of {}{separator}End to follow ",
             entry.saturating_add(1),
             chat.entries.len()
         ),
@@ -278,7 +281,10 @@ pub(crate) fn render_transcript_entry_with_options(
         ),
     ];
     if let Some(time) = time {
-        header.push(Span::styled(format!(" · {time}"), theme::muted()));
+        header.push(Span::styled(
+            format!("{}{time}", theme::glyphs().footer_separator),
+            theme::muted(),
+        ));
     }
     out.extend(wrap_styled_line(
         Line::from(header),
@@ -411,12 +417,28 @@ pub(super) fn entry_logical_lines(
     }
 }
 
+/// The mark a transcript header draws for one entry, in the symbol set in
+/// force. `mj_client::transcript::entry_glyph` keeps the Unicode marks the
+/// browser projection sends; a terminal has to be able to fall back to ASCII.
+fn role_glyph(entry: &ChatEntry) -> &'static str {
+    let glyphs = theme::glyphs();
+    match entry.role {
+        ChatRole::User => glyphs.role_user,
+        ChatRole::Agent => glyphs.role_agent,
+        ChatRole::Thought => glyphs.role_thought,
+        ChatRole::Plan => glyphs.role_plan,
+        ChatRole::PlanProposal => glyphs.role_plan_proposal,
+        ChatRole::System => glyphs.rule,
+        ChatRole::Tool => tool_presentation(entry.tool_status.unwrap_or(ToolStatus::Pending)).0,
+    }
+}
+
 pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
     match entry.role {
         ChatRole::User => {
             let style = Style::default().fg(theme::palette().accent);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: user_label(entry).into(),
                 header_style: style,
                 body_style: Style::default(),
@@ -426,7 +448,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         ChatRole::Agent => {
             let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: "Agent".into(),
                 header_style: style,
                 body_style: Style::default(),
@@ -438,7 +460,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
                 .fg(theme::palette().muted)
                 .add_modifier(Modifier::ITALIC);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: "Thinking".into(),
                 header_style: style,
                 body_style: style,
@@ -455,8 +477,8 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
                 ToolStatus::Running | ToolStatus::Failed => Style::default(),
             };
             EntryVisual {
-                glyph: entry_glyph(entry),
-                label: format!("Tool · {label}"),
+                glyph: role_glyph(entry),
+                label: format!("Tool{}{label}", theme::glyphs().footer_separator),
                 header_style: style,
                 body_style,
                 rail_style: Style::default().fg(theme::palette().border),
@@ -465,7 +487,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         ChatRole::Plan => {
             let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: "Plan".into(),
                 header_style: style,
                 body_style: Style::default(),
@@ -475,7 +497,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         ChatRole::PlanProposal => {
             let style = Style::default().fg(theme::palette().secondary);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: "Proposed plan".into(),
                 header_style: style,
                 body_style: Style::default(),
@@ -485,7 +507,7 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
         ChatRole::System => {
             let style = Style::default().fg(theme::palette().muted);
             EntryVisual {
-                glyph: entry_glyph(entry),
+                glyph: role_glyph(entry),
                 label: "Mjolnir".into(),
                 header_style: style,
                 body_style: style,

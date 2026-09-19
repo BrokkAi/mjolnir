@@ -3702,3 +3702,49 @@ fn capacity_retry_prompt_is_labelled_automatic_without_changing_its_text() {
     assert_eq!(browser_entry(&entry).label, "Automatic · capacity retry");
     assert_eq!(entry.text, "Continue");
 }
+
+/// `symbols = "ascii"` is for a Linux console or a locale without UTF-8, so the
+/// conversation has to reach it as well as the borders and status marks. The
+/// role marks, the header's timestamp separator and the system rule were the
+/// last Unicode a session with one exchange in it still drew.
+#[test]
+fn the_ascii_symbol_set_reaches_the_transcript_role_marks_and_timestamps() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let timed = |seq: u64, role: ChatRole, text: &str| {
+        let mut entry = ChatEntry::plain(seq, role, text);
+        entry.recorded_at_ms = Some(75_600_000);
+        entry
+    };
+    chat.entries = vec![
+        timed(1, ChatRole::User, "ask"),
+        timed(2, ChatRole::Agent, "answer"),
+        ChatEntry::plain(3, ChatRole::Thought, "consider"),
+        timed(4, ChatRole::System, "harness session started"),
+        ChatEntry::tool(5, "Edit", None, ToolStatus::Completed),
+        ChatEntry::plain(6, ChatRole::Plan, "step one"),
+        ChatEntry::plain(7, ChatRole::PlanProposal, "step two"),
+    ];
+    chat.latest_seq = 7;
+
+    let unicode = transcript_text(&mut chat, 60);
+    assert!(
+        unicode.iter().any(|line| line.starts_with("● Agent · ")),
+        "the default set is unchanged: {unicode:#?}"
+    );
+
+    let mut ascii_chat = ChatState::new(&snapshot(), &[]);
+    ascii_chat.entries = chat.entries.clone();
+    ascii_chat.latest_seq = 7;
+    let ascii = crate::theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {
+        transcript_text(&mut ascii_chat, 60)
+    });
+    for line in &ascii {
+        assert!(line.is_ascii(), "{line:?} in {ascii:#?}");
+    }
+    for expected in ["> You - ", "* Agent - ", "o Thinking", "- Mjolnir - "] {
+        assert!(
+            ascii.iter().any(|line| line.starts_with(expected)),
+            "{expected:?} in {ascii:#?}"
+        );
+    }
+}

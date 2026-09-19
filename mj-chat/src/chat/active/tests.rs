@@ -2164,7 +2164,7 @@ fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
         "the transcript's titled border is the region's first row: {:?}",
         row(4)
     );
-    assert!(row(16).contains(VOICE_BUTTON_GLYPH), "{:?}", row(16));
+    assert!(row(16).contains(voice_button_glyph()), "{:?}", row(16));
     assert!(!row(16).contains("Prompt"), "{:?}", row(16));
     assert_eq!(
         row(17).chars().take(4).collect::<String>(),
@@ -2210,7 +2210,10 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
         let prompt_top = usize::from(input.y.saturating_sub(1));
         let prompt_bottom = prompt_top + 1 + usize::from(input.height);
         let prompt_title = &running[prompt_top];
-        assert!(prompt_title.contains(VOICE_BUTTON_GLYPH), "{prompt_title}");
+        assert!(
+            prompt_title.contains(voice_button_glyph()),
+            "{prompt_title}"
+        );
         assert!(!prompt_title.contains("Prompt"), "{prompt_title}");
         assert!(!prompt_title.contains("Running"), "{prompt_title}");
         let spinner_width = prompt_title
