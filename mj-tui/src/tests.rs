@@ -3705,6 +3705,59 @@ fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
     assert!(dashboard.sessions_filter.is_none());
 }
 
+/// A letter that hides every row leaves the pane with no row to select, so the
+/// frame moves the focus to the Create action. The filter must keep answering
+/// from there: the empty pane's own line promises that Esc clears the filter,
+/// and without the letters there is no way back to the sessions at all.
+#[test]
+fn a_state_letter_that_hides_every_row_keeps_answering_the_letters_and_esc() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Nothing is working, so `w` empties the list.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(ids(&dashboard).is_empty());
+    assert!(
+        lines.iter().any(|line| line.contains("No sessions match")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        dashboard.session_action_focus,
+        Some(CommandId::NewSessionWizard),
+        "an empty list leaves the focus on the action row"
+    );
+
+    // `a` widens the filter to everything again, and the rows take the focus
+    // back from the action row.
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+    assert_eq!(dashboard.session_action_focus, None);
+
+    // Another letter still narrows from the empty pane, rather than leaving
+    // the person with one filter and no way to change it.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let _ = drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(ids(&dashboard), ["asks"]);
+
+    // And Esc drops the filter the pane says it drops.
+    dashboard.handle_key(key(KeyCode::Char('w')));
+    let _ = drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(dashboard.sessions_filter.is_none());
+    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
+}
+
 #[test]
 fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
     let mut dashboard = dashboard_with_session(running_session());

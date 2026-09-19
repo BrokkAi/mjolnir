@@ -350,6 +350,12 @@ impl DashboardState {
             _ => return None,
         }
         self.clamp_selections();
+        // A filter that hides every row leaves the focus on the action row,
+        // because there is nothing to select. Once a row is back, it takes the
+        // focus again, so the person lands on a session rather than on Create.
+        if !self.visible_session_indices().is_empty() {
+            self.set_session_action_focus(None);
+        }
         Some(())
     }
 
