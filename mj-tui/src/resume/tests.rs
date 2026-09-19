@@ -1412,6 +1412,68 @@ fn resume_table_has_headers_repeated_profiles_and_last_active_values() {
     assert!(rendered.contains("Search:"), "{rendered}");
 }
 
+/// The Live tab spends the profile and target columns' width on a workspace
+/// column and a wider title instead; the other tabs are unaffected. Dropping
+/// the profile cell must drop its separator too, or the workspace column
+/// opens two cells later than it should.
+#[test]
+fn the_live_tab_shows_a_workspace_column_instead_of_profile_and_target() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    // A stopped session gives the Hel tab a row too, so its row content's
+    // starting column is a reference point for the row-level gap check below.
+    let hel_session = stopped_session();
+    dashboard
+        .state
+        .sessions
+        .insert(hel_session.id.clone(), hel_session);
+    dashboard.show_resume_dialog(1, Vec::new());
+    switch_to_tab(&mut dashboard, ResumeTab::Live);
+
+    let live_lines = drawn(&mut dashboard, 140, 34);
+    let header = live_lines
+        .iter()
+        .find(|line| line.contains("WORKSPACE"))
+        .expect("the Live tab's header names the workspace column");
+    assert!(!header.contains("PROFILE"), "{header}");
+    assert!(!header.contains("TARGET"), "{header}");
+    let (workspace_header_column, header_row) = point(&live_lines, "WORKSPACE");
+
+    // Search below the header row so this does not match the dashboard's own
+    // workspace tab strip, drawn behind the modal and also naming "Default".
+    let row = live_lines[usize::from(header_row) + 1..]
+        .iter()
+        .find(|line| line.contains("Default"))
+        .expect("a Live row names its workspace");
+    let workspace_row_column = cell_column(row, "Default");
+
+    // The Resume (Hel) tab keeps both columns. Its header and its row content
+    // start at the same columns the Live tab's do; if the Live layout still
+    // reserved the profile cell's separator, the Live header and row would
+    // each start two cells later than their Hel-tab counterparts.
+    switch_to_tab(&mut dashboard, ResumeTab::Hel);
+    let hel_lines = drawn(&mut dashboard, 140, 34);
+    let header = hel_lines
+        .iter()
+        .find(|line| line.contains("PROFILE"))
+        .expect("the Resume tab's header keeps PROFILE");
+    assert!(header.contains("TARGET"), "{header}");
+    let (profile_header_column, header_row) = point(&hel_lines, "PROFILE");
+    assert_eq!(
+        profile_header_column, workspace_header_column,
+        "no stray gap should open in the header where the profile cell used to be"
+    );
+
+    let row = hel_lines[usize::from(header_row) + 1..]
+        .iter()
+        .find(|line| line.contains("codex-1"))
+        .expect("the Hel tab lists the stopped session's profile");
+    let profile_row_column = cell_column(row, "codex-1");
+    assert_eq!(
+        profile_row_column, workspace_row_column,
+        "no stray gap should open in Live rows where the profile cell used to be"
+    );
+}
+
 /// The dialog is the only surface for non-live sessions, and the resume chord
 /// opens it from anywhere.
 #[test]

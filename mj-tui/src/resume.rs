@@ -1606,15 +1606,24 @@ struct RowLayout {
     activity: usize,
 }
 
-fn row_layout(width: u16) -> RowLayout {
+fn row_layout(width: u16, tab: ResumeTab) -> RowLayout {
     let width = usize::from(width);
-    let profile = 14.min(width / 5).max(6);
+    // The Live tab has no profile column, so the title also gets back the
+    // two-space gap that would have separated it from the origin cell.
+    let profile = if tab == ResumeTab::Live {
+        0
+    } else {
+        14.min(width / 5).max(6)
+    };
     let origin = 24.min(width / 3).max(8);
     let activity = 14.min(width / 4).max(8);
+    let reserved = if profile == 0 {
+        origin + activity + 6
+    } else {
+        profile + origin + activity + 8
+    };
     RowLayout {
-        title: width
-            .saturating_sub(profile + origin + activity + 8)
-            .max(10),
+        title: width.saturating_sub(reserved).max(10),
         profile,
         origin,
         activity,
@@ -1773,8 +1782,11 @@ pub(crate) fn render_resume_dialog(
         table_rows[0].height,
     );
     let list_area = table_rows[1];
-    let layout = row_layout(list_area.width.saturating_sub(2));
-    frame.render_widget(Paragraph::new(resume_header_line(&layout)), header_area);
+    let layout = row_layout(list_area.width.saturating_sub(2), dialog.tab);
+    frame.render_widget(
+        Paragraph::new(resume_header_line(&layout, dialog.tab)),
+        header_area,
+    );
     let now = chrono::Local::now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
@@ -2154,22 +2166,37 @@ fn wrap_preview_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static
         .collect()
 }
 
-fn resume_header_line(layout: &RowLayout) -> Line<'static> {
+fn resume_header_line(layout: &RowLayout, tab: ResumeTab) -> Line<'static> {
     let style = Style::default()
         .fg(theme::palette().muted)
         .add_modifier(Modifier::BOLD);
-    Line::from(vec![
-        Span::styled(padded_cell("PROFILE", layout.profile), style),
-        Span::raw("  "),
-        Span::styled(padded_cell("TARGET", layout.origin), style),
-        Span::raw("  "),
-        Span::styled(padded_cell("LAST ACTIVE", layout.activity), style),
-        Span::raw("  "),
-        Span::styled(
-            truncate_to_cells("SESSION", layout.title, Truncate::SUMMARY),
-            style,
-        ),
-    ])
+    let origin_label = if tab == ResumeTab::Live {
+        "WORKSPACE"
+    } else {
+        "TARGET"
+    };
+    let mut spans = Vec::new();
+    // A zero-width profile column means the tab has none; drop its cell and
+    // separator together so no stray gap opens at the left of every row.
+    if layout.profile > 0 {
+        spans.push(Span::styled(padded_cell("PROFILE", layout.profile), style));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(
+        padded_cell(origin_label, layout.origin),
+        style,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        padded_cell("LAST ACTIVE", layout.activity),
+        style,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        truncate_to_cells("SESSION", layout.title, Truncate::SUMMARY),
+        style,
+    ));
+    Line::from(spans)
 }
 
 fn padded_cell(text: &str, width: usize) -> String {
@@ -2219,28 +2246,35 @@ where
             marks.push_str("  [move needs recovery]");
         }
     }
-    Line::from(vec![
-        Span::styled(
+    let mut spans = Vec::new();
+    // Matches the zero-width rule in `resume_header_line`, so header and rows
+    // agree on the same layout.
+    if layout.profile > 0 {
+        spans.push(Span::styled(
             padded_cell(&row.profile_id, layout.profile),
             Style::default().fg(theme::palette().secondary),
+        ));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(origin);
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        padded_cell(
+            &format_last_active(now, row.last_activity_ms),
+            layout.activity,
         ),
-        Span::raw("  "),
-        origin,
-        Span::raw("  "),
-        Span::styled(
-            padded_cell(
-                &format_last_active(now, row.last_activity_ms),
-                layout.activity,
-            ),
-            Style::default().fg(theme::palette().muted),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
-            title_style,
-        ),
-        Span::styled(marks, Style::default().fg(theme::palette().muted)),
-    ])
+        Style::default().fg(theme::palette().muted),
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        truncate_to_cells(&row.title, layout.title, Truncate::SUMMARY),
+        title_style,
+    ));
+    spans.push(Span::styled(
+        marks,
+        Style::default().fg(theme::palette().muted),
+    ));
+    Line::from(spans)
 }
 
 /// Placeholder entries so every configured profile shows before its scan
