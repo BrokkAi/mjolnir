@@ -395,10 +395,28 @@ mod tests {
         // session id, phase, whether its archive is still on disk, whether its
         // queue admission is half done, and whether the row must survive.
         let cases = [
-            ("completed-retained", MovePhase::Completed, true, false, true),
+            (
+                "completed-retained",
+                MovePhase::Completed,
+                true,
+                false,
+                true,
+            ),
             ("completed-gone", MovePhase::Completed, false, false, false),
-            ("completed-admitting", MovePhase::Completed, false, true, true),
-            ("cancelled-retained", MovePhase::Cancelled, true, false, true),
+            (
+                "completed-admitting",
+                MovePhase::Completed,
+                false,
+                true,
+                true,
+            ),
+            (
+                "cancelled-retained",
+                MovePhase::Cancelled,
+                true,
+                false,
+                true,
+            ),
             ("cancelled-gone", MovePhase::Cancelled, false, false, false),
             ("failed-gone", MovePhase::Failed, false, false, true),
             (

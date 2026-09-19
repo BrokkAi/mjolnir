@@ -2629,8 +2629,7 @@ pub(crate) fn render_setup(
     if let Some(notice) = notice {
         frame.render_widget(
             Paragraph::new(notice.as_str()).wrap(Wrap { trim: false }),
-            editor_notice
-                .unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
+            editor_notice.unwrap_or_else(|| Rect::new(inner.x, inner.bottom() - 4, inner.width, 3)),
         );
     }
     form.end_frame(initial);
