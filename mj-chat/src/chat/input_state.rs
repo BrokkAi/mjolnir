@@ -510,6 +510,7 @@ impl ChatState {
                     // refusal to arrive in the transcript seconds later.
                     if self.advertised_config_values(key).is_empty() {
                         self.set_notice(mj_core::acp::missing_config_selector_refusal(key));
+                        self.clear_input();
                         return ChatAction::None;
                     }
                     // A busy agent does not refuse the change: it waits in the

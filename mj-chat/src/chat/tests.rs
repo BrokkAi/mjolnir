@@ -1433,7 +1433,9 @@ fn model_and_effort_slash_commands_change_live_session_config() {
 /// A harness that advertises no selector cannot apply the change at all, so
 /// the refusal belongs in the footer now rather than in a transcript line that
 /// arrives seconds after "Configuration update accepted". The words are the
-/// runtime's own, and the article follows the key's name.
+/// runtime's own, and the article follows the key's name. The composer clears
+/// the same as it would for a command that was actually sent, so the next
+/// command typed does not append to the refused one.
 #[test]
 fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1446,8 +1448,10 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
         chat.notices.current().as_deref(),
         Some("ACP bridge does not expose a model selector")
     );
-    // Nothing was sent, so the text stays in the composer to be corrected.
-    assert_eq!(chat.input, "/model o3-mini");
+    // Nothing was sent, but the command was still handled: the composer
+    // clears exactly as it would for an accepted command, so the next
+    // command typed does not append to the refused one.
+    assert_eq!(chat.input, "");
 
     chat.set_config_options(&[]);
     chat.input = "/effort xhigh".into();
@@ -1456,6 +1460,7 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
         chat.notices.current().as_deref(),
         Some("ACP bridge does not expose an effort selector")
     );
+    assert_eq!(chat.input, "");
 }
 
 #[test]
