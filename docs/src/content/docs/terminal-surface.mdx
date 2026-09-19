@@ -24,7 +24,7 @@ the dashboard opens. Set that setting off to leave the workspace empty until
 you choose **Create**. Switching workspace tabs only filters the live session
 list and never creates a session; every workspace continues running
 independently.
-Stopped history is available from **Resume**, including sessions that were
+Stopped history is available from **Open**, including sessions that were
 previously archived by a provider. Provider archive metadata is read-only.
 
 The Workspace pane has one tab row framed by two borders above Sessions. Click a
@@ -35,7 +35,7 @@ deleting workspaces. The Workspaces command remains available in the command
 palette. The selected workspace also determines where **Create** attaches the
 new session.
 
-**Create** opens the full session creation wizard and **Resume** opens the
+**Create** opens the full session creation wizard and **Open** opens the
 session dialog, which starts on the running sessions and keeps the stopped
 history on its other tabs. The command palette opens with `prefix+:`, from the
 clickable `: palette` hint in the footer, or from the **Commands** button on
@@ -79,11 +79,11 @@ These keys work in the support panes, dialogs, and wizards. A focused text
 field keeps them as text, so typing `j` or `Ctrl+U` in a search or name field
 edits the field instead of moving the selection.
 
-The Sessions pane keeps **Create** and **Resume** above the session list. They
+The Sessions pane keeps **Create** and **Open** above the session list. They
 remain available when the list is empty or filtered. Both Create shortcuts open
-the full creation wizard; Resume opens the session dialog described below.
+the full creation wizard; Open opens the session dialog described below.
 
-`prefix+g`, the **Resume** button, and the **Sessions** command all open one
+`prefix+g`, the **Open** button, and the **Sessions** command all open one
 dialog over the dashboard. It opens on **Live**: every running session in every
 workspace on one list, newest activity first, each row naming the workspace it
 belongs to where the other tabs name a profile and a target. `Enter` on a row
@@ -92,15 +92,16 @@ workspace. `←` and `→` reach the three history lists to its right, **Mjolnir
 **Import**, and **Archived**, which list sessions you could have rather than
 sessions you already have.
 
-The search box works on Live without waiting for the search index, because it
+The dialog opens with the list focused, so `j`, `k`, and `Enter` work at once,
+along with the letters below; press `/` to move to the search box instead. The
+search box works on Live without waiting for the search index, because it
 matches the session's name, its ID, and its workspace name from what the
 dashboard already knows. The letters `a`, `b`, `w`, `i`, and `d` narrow the Live
 list by state exactly as they narrow the Sessions pane, and the list title says
-which state is holding. The letters belong to the list, so press `↓` or `Tab` to
-leave the search box before using them; they do nothing on the other tabs,
-whose sessions have no current state. The preview pane under the list is fed by
-the search index, so it shows a running session's conversation only when an
-index search matched that session.
+which state is holding. They do nothing on the other tabs, whose sessions have
+no current state. The preview pane under the list is fed by the search index,
+so it shows a running session's conversation only when an index search matched
+that session.
 
 Press `/` in Sessions to search the live list. Typing narrows it to sessions
 whose name, project, profile, or target contains the text, and the pane title
@@ -363,7 +364,7 @@ while the selected session is actually busy; an idle or stopped session does
 not animate.
 
 Stopped sessions are hidden from the Sessions pane by default and remain
-available through **Resume**. Enable **Setup → Advanced → Show stopped sessions**
+available through **Open**. Enable **Setup → Advanced → Show stopped sessions**
 to include them in the Sessions pane for their workspace.
 
 <figure class="shot">

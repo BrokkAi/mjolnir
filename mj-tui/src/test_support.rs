@@ -338,7 +338,7 @@ pub(crate) fn question(session_id: &str) -> mj_core::elicitation::ElicitationReq
 }
 
 /// Moves the open resume dialog to the Mjolnir tab with its list focused. The
-/// dialog opens on the running sessions with the search box focused, and a
+/// dialog opens on the running sessions with the list itself focused, and a
 /// stopped record is one tab to the right of them.
 pub(crate) fn focus_resume_hel_rows(dashboard: &mut DashboardState) {
     if let crate::Mode::ResumeDialog(dialog) = &mut dashboard.mode {

@@ -96,6 +96,13 @@ fn titles(rows: &[ResumeRow]) -> Vec<&str> {
     rows.iter().map(|row| row.title.as_str()).collect()
 }
 
+fn dialog_focus(dashboard: &DashboardState) -> ResumeFocus {
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    dialog.focused()
+}
+
 #[test]
 fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
     let mut dashboard = DashboardState::new(
@@ -660,37 +667,73 @@ fn apply_ready_rows(dashboard: &mut DashboardState, rows: Vec<WikiRow>) {
     dashboard.apply_wiki_search(request_id, ready_page(rows));
 }
 
-/// The dialog opens wanting a name typed into it, on a tab that matches names
-/// without the index, so the box takes the focus while the index is still
-/// building rather than waiting for an answer it does not need.
+/// The dialog opens on Live with the session list itself focused, not the
+/// search box, so a state letter narrows the list at once rather than being
+/// typed into the box.
 #[test]
-fn the_dialog_focuses_the_search_box_without_waiting_for_the_index() {
+fn the_dialog_opens_with_the_list_focused_and_a_letter_narrows_it_at_once() {
+    let mut dashboard = dashboard_with_live_attention_mix();
+    dashboard.show_resume_dialog(1, Vec::new());
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
+
+    drawn(&mut dashboard, 120, 40);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('b'))),
+        DashboardAction::None
+    );
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("expected the resume dialog");
+    };
+    assert!(
+        dialog.search.is_empty(),
+        "the letter narrowed the list; the search box was never touched"
+    );
+    assert_eq!(
+        rows(&dashboard)
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>(),
+        vec![ResumeRowKey::Live("live-remote".into())],
+        "only the session waiting on a question counts as blocked"
+    );
+}
+
+/// `/` still moves the focus to the search box, and once it has it, typing
+/// narrows the Live list by name.
+#[test]
+fn slash_moves_focus_to_the_search_box_and_typing_narrows_by_name() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard.show_resume_dialog(1, Vec::new());
+    drawn(&mut dashboard, 120, 40);
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('/'))),
+        DashboardAction::None
+    );
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Search);
+
+    for character in "mast".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+}
+
+/// No production path opens the dialog anywhere but Live (see Milestone 5),
+/// so `search_focus_pending` served no purpose and was removed. An index
+/// answer arriving while the dialog is open must still leave the focus
+/// wherever the person put it.
+#[test]
+fn an_index_answer_leaves_the_focused_control_unchanged() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.show_resume_dialog(1, Vec::new());
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
     assert_ne!(dialog.wiki_status.state, WikiIndexState::Ready);
-    assert_eq!(dialog.focused(), ResumeFocus::Search);
-}
+    let focus_before = dialog_focus(&dashboard);
 
-/// The focus is offered to the box once, when the dialog opens. A key moves it
-/// somewhere the person chose, and a later index answer leaves it there.
-#[test]
-fn a_key_before_the_index_is_ready_keeps_the_focus_where_it_was_put() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.show_resume_dialog(1, Vec::new());
-    dashboard.handle_key(key(KeyCode::Tab));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    let chosen = dialog.focused();
-    assert_ne!(chosen, ResumeFocus::Search);
     apply_ready_rows(&mut dashboard, Vec::new());
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.focused(), chosen);
+    assert_eq!(dialog_focus(&dashboard), focus_before);
 }
 
 /// A row is archived only when nothing on this machine still holds the
@@ -1180,8 +1223,8 @@ fn enter_on_a_live_row_moves_the_dashboard_to_that_session() {
         .position(|row| row.key == ResumeRowKey::Live("live-remote".into()))
         .expect("the other workspace's session is listed");
     dashboard.select_resume_row(index);
-    // The dialog opens with the search box focused; Enter acts on the list.
-    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    // The dialog opens with the list itself focused, so Enter already acts on it.
+    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
 
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
@@ -1214,8 +1257,8 @@ fn dashboard_with_live_attention_mix() -> DashboardState {
     dashboard
 }
 
-/// The dialog opens on the running sessions with the search box ready for a
-/// name, and the letters the Sessions pane uses narrow the list by state.
+/// The dialog opens on the running sessions with the list itself focused, and
+/// the letters the Sessions pane uses narrow it by state immediately.
 #[test]
 fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
     let mut dashboard = dashboard_with_live_attention_mix();
@@ -1226,17 +1269,12 @@ fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
     assert_eq!(dialog.tab, ResumeTab::Live, "the dialog opens on Live");
     assert_eq!(
         dialog.focused(),
-        ResumeFocus::Search,
-        "a tab that answers its own search hands the box the focus at once"
+        ResumeFocus::Sessions,
+        "the list has focus from the moment the dialog opens"
     );
     assert_eq!(rows(&dashboard).len(), 3);
 
-    // The letters belong to the list, not to the box, so leave the box first.
     drawn(&mut dashboard, 120, 40);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Down)),
-        DashboardAction::None
-    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('b'))),
         DashboardAction::None
@@ -1275,8 +1313,10 @@ fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
 fn leaving_the_live_tab_asks_the_index_for_the_query_typed_there() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
     dashboard.show_resume_dialog(1, Vec::new());
-    // Drawing registers the dialog's controls; the box already has the focus.
+    // Drawing registers the dialog's controls, so `/` reaches the box; the
+    // dialog itself opens with the list focused, not the box.
     drawn(&mut dashboard, 120, 40);
+    dashboard.handle_key(key(KeyCode::Char('/')));
     for character in "mast".chars() {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char(character))),

@@ -24,7 +24,7 @@ pub(crate) enum SurfaceControl {
 
 pub(crate) const SESSION_ACTIONS: [(CommandId, &str); 2] = [
     (CommandId::NewSessionWizard, "Create"),
-    (CommandId::ResumeDialog, "Resume"),
+    (CommandId::ResumeDialog, "Open"),
 ];
 
 fn session_actions(dashboard: &DashboardState) -> [(CommandId, &'static str); 2] {
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_creation_and_resume_are_clickable_at_every_size() {
+    fn sidebar_creation_and_open_are_clickable_at_every_size() {
         for size in [(80, 20), (100, 24), (120, 30), (140, 40), (200, 60)] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
@@ -375,9 +375,9 @@ mod tests {
             assert!(matches!(dashboard.mode, Mode::New(_)), "{size:?}");
             dashboard.cancel_modal();
             let lines = draw(&mut dashboard, size);
-            let resume = point(&lines, "Resume");
+            let open = point(&lines, "Open");
             assert_eq!(
-                click(&mut dashboard, resume),
+                click(&mut dashboard, open),
                 DashboardAction::OpenResumeDialog
             );
         }
@@ -535,8 +535,8 @@ mod tests {
         dashboard.focus_sessions();
         let lines = draw(&mut dashboard, (120, 40));
         let create = point(&lines, "Create");
-        let resume = point(&lines, "Resume");
-        assert_eq!(create.1, resume.1);
+        let open = point(&lines, "Open");
+        assert_eq!(create.1, open.1);
 
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Up)),
@@ -558,7 +558,7 @@ mod tests {
         dashboard.cancel_modal();
         let lines = draw(&mut dashboard, (120, 40));
         assert_eq!(
-            click(&mut dashboard, point(&lines, "Resume")),
+            click(&mut dashboard, point(&lines, "Open")),
             DashboardAction::OpenResumeDialog
         );
     }

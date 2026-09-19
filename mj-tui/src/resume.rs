@@ -264,11 +264,6 @@ pub(crate) struct ResumeDialog {
     /// What the last answer said about the index: whether it can be searched
     /// at all, and whether a sync is adding to it right now.
     pub(crate) wiki_status: WikiStatus,
-    /// The dialog opens with the search box focused, but the box cannot take
-    /// the focus until the index says it is ready. This stays set until that
-    /// answer arrives, or until the person presses or clicks something first,
-    /// which is a choice about where the focus goes.
-    pub(crate) search_focus_pending: bool,
     /// How many times the current query has been re-issued because a sync was
     /// still running. It picks the wait before the next repeat.
     pub(crate) wiki_top_ups: u32,
@@ -339,17 +334,6 @@ impl ResumeDialog {
             format!("{:?}", rows.iter().map(|row| &row.key).collect::<Vec<_>>()),
         );
         form.end_frame(Sessions);
-    }
-
-    /// Hands the search box the focus the dialog opens with, as soon as the box
-    /// can take it: the index reports ready, or the tab showing answers its own
-    /// search. Clearing the flag makes this a one-time offer, so a press or
-    /// click beforehand leaves the focus where the person put it.
-    fn take_pending_search_focus(&mut self) {
-        if self.search_focus_pending && self.search_enabled() {
-            self.search_focus_pending = false;
-            self.form.get_mut().focus(ResumeFocus::Search);
-        }
     }
 
     /// Whether the search box accepts typing. On the history tabs search is the
@@ -1006,7 +990,6 @@ impl DashboardState {
             wiki: Arc::new(Vec::new()),
             wiki_request_id: 0,
             wiki_status: WikiStatus::default(),
-            search_focus_pending: true,
             wiki_top_ups: 0,
             wiki_pending: false,
             previews: Arc::new(BTreeMap::new()),
@@ -1021,17 +1004,9 @@ impl DashboardState {
         // Record which row the initial selection lands on, so the first
         // incremental scan result cannot slide the selection out from under it.
         self.resync_resume_selection();
-        // The Live tab needs no index, so the box can take the focus now rather
-        // than waiting for a search answer that will never come.
-        self.take_pending_resume_search_focus();
-    }
-
-    /// Gives the open dialog's search box the focus it was promised on open, if
-    /// the box can take it yet.
-    fn take_pending_resume_search_focus(&mut self) {
-        if let Mode::ResumeDialog(dialog) = &mut self.mode {
-            dialog.take_pending_search_focus();
-        }
+        // The dialog opens on Live with nothing focused yet, so the list gets
+        // the default focus `end_frame` hands out; `/` or a click moves it to
+        // the search box from there.
     }
 
     /// Fold one profile's scan result into the open dialog, keeping the
@@ -1080,7 +1055,6 @@ impl DashboardState {
         // The status moves even when the rows do not: a build that finished
         // between two identical answers is what re-enables the search box.
         dialog.wiki_status = page.status;
-        dialog.take_pending_search_focus();
         if *dialog.wiki == page.rows {
             self.rebuild_resume_rows();
             return;
@@ -1346,9 +1320,6 @@ impl DashboardState {
             dialog.row_index = 0;
             self.rebuild_resume_rows();
             self.resync_resume_selection();
-            // Arriving on a tab that answers its own search is the first moment
-            // the box can take the focus the dialog opened wanting to give it.
-            self.take_pending_resume_search_focus();
         }
         if leaving_live_query {
             return self.wiki_search_action();
@@ -1445,17 +1416,9 @@ impl DashboardState {
 
     pub(crate) fn handle_resume_dialog_event(&mut self, event: Event) -> DashboardAction {
         use ResumeFocus::*;
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Mode::ResumeDialog(dialog) = &self.mode else {
             return DashboardAction::None;
         };
-        // A press or click before the index is ready is the person choosing
-        // where the focus goes; the box must not take it back later.
-        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press)
-            || matches!(&event, Event::Mouse(mouse) if !matches!(mouse.kind, MouseEventKind::Moved))
-        {
-            dialog.search_focus_pending = false;
-        }
-        let dialog = &*dialog;
         let focused = dialog.focused();
         if self.scroll_resume_preview(&event, focused) {
             return DashboardAction::None;
@@ -1754,13 +1717,8 @@ pub(crate) fn render_resume_dialog(
 
     let mut form = dialog.form.borrow_mut();
     form.begin_frame();
-    let title_line = dismissible_modal_title(
-        &mut form,
-        popup,
-        "Resume a session",
-        theme::title(true),
-        true,
-    );
+    let title_line =
+        dismissible_modal_title(&mut form, popup, "Sessions", theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
     let tab_labels = resume_tab_labels(dashboard, dialog);
     TabStrip::render(

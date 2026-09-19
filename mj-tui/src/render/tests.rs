@@ -381,7 +381,7 @@ fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
             let sessions = dashboard.pane_areas.expect("dashboard panes")[0];
             assert_eq!(sessions.width, expected_sidebar);
             assert!(rendered.contains("Create"), "{rendered}");
-            assert!(rendered.contains("Resume"), "{rendered}");
+            assert!(rendered.contains("Open"), "{rendered}");
             assert!(rendered.contains("Q"), "{rendered}");
             assert!(
                 dashboard
@@ -398,7 +398,7 @@ fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
     let sessions = minimized.pane_areas.expect("minimized panes")[0];
     assert_eq!(sessions.width, 20);
     assert!(rendered.contains("Create"), "{rendered}");
-    assert!(rendered.contains("Resume"), "{rendered}");
+    assert!(rendered.contains("Open"), "{rendered}");
     assert!(
         minimized
             .session_row_areas
