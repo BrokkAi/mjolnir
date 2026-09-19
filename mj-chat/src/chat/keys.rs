@@ -26,13 +26,13 @@ impl ChatState {
         // wait for ever.
         let reviewing = !self.reviewer_elicitation_open();
 
-        // The second-opinion view owns the frame while it is up: the composer
+        // The second-opinion view owns the pane while it is up: the composer
         // and the plan decision behind it are both part of what it is deciding.
         if reviewing && self.second_opinion_active() {
             return self.handle_second_opinion_event(key);
         }
 
-        // A turn review owns the frame on the same terms. Its actions are the
+        // A turn review owns the pane on the same terms. Its actions are the
         // only input while it is unresolved, which is what holds the primary
         // agent still until the user has answered the findings.
         if reviewing && self.turn_review_active() {

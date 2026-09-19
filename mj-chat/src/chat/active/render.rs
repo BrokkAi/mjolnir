@@ -59,13 +59,13 @@ pub(crate) fn render_in(
 ) {
     chat.footer_command_areas.borrow_mut().clear();
     chat.voice_form.begin_frame();
-    if chat.component_modal_open() || chat.second_opinion_split() || chat.turn_review_split() {
+    if chat.composer_replaced() || chat.second_opinion_split() || chat.turn_review_split() {
         chat.voice_form.cancel_pointer();
     }
     chat.frame_surfaces.clear();
-    chat.frame_surfaces_exclusive = false;
-    // Modals and the completion popup are centred in the whole frame, not
-    // in the band the transcript happens to have been given.
+    // Dialogs and the completion popup are centred in this conversation's own
+    // overlay rectangle, not in the band the transcript happens to have been
+    // given.
     let inner = regions.overlay;
     let mut transcript_area = regions.transcript;
     let prompt_area = regions.prompt;
@@ -285,7 +285,7 @@ pub(crate) fn render_in(
         return;
     }
     if let Some(body) = crate::chat::config_picker::render_config_picker(frame, inner, chat) {
-        // The selector owns the frame's interaction, so the chat behind it
+        // The selector owns this pane's interaction, so the chat behind it
         // stops being selectable. An elicitation dialog still draws over it,
         // matching the key routing that lets the dialog win.
         chat.frame_surfaces.clear();
@@ -298,7 +298,7 @@ pub(crate) fn render_in(
         form,
     }) = chat.second_opinion_mut()
     {
-        // The waterfall owns the frame's interaction, so the chat behind it
+        // The waterfall owns this pane's interaction, so the chat behind it
         // stops being selectable while a reviewer is being chosen.
         let area = crate::modal::centered_modal_rect_fixed(frame, 60, 16, inner);
         let body = render_setup(
@@ -1010,7 +1010,6 @@ pub(crate) fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat:
         render_scrollbar(frame, geometry);
     }
     chat.task_dialog_area = Some(inner);
-    chat.frame_surfaces_exclusive = true;
     chat.frame_surfaces.clear();
     chat.frame_surfaces
         .push(SurfaceFrame::fixed(SurfaceId::ModalBody, inner));

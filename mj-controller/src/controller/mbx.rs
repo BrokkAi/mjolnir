@@ -35,7 +35,7 @@ const MBX_BINARY_ENV: &str = "MJ_MBX_BINARY";
 
 const DEFAULT_CACHE_RELATIVE: &str = ".cache/mbx";
 const HOST_CONFIG_RELATIVE: &str = ".config/mbx/config.toml";
-/// The cap on the computed default budget: 100 GB, in SI bytes.
+/// The cap on the computed default total budget: 100 GB, in SI bytes.
 const DEFAULT_MAX_BYTES: u64 = 100_000_000_000;
 const RESOLUTION_LIFETIME: Duration = Duration::from_secs(600);
 const LABEL: &str = "hel-mbx";
@@ -45,8 +45,10 @@ const LABEL: &str = "hel-mbx";
 pub(super) struct ResolvedBuildCache {
     /// Cache directory on the host, mounted at the same path in the container.
     pub directory: PathBuf,
-    /// `MBX_GC_MAX_SIZE` for the container, or `None` when the host's own mbx
-    /// configuration file already carries the budget.
+    /// `MBX_GC_MAX_TOTAL_SIZE` for the container, or `None` when the host's
+    /// own mbx configuration file already carries the budget. mbx measures
+    /// that variable across the action store, managed target directories, and
+    /// learned incremental state, which is every part of the cache mj mounts.
     pub max_size: Option<String>,
     /// A `[target] root` the host configuration relocates outside the cache
     /// directory, which the container needs mounted at the same path too.
@@ -256,6 +258,23 @@ fn inspect_host(
         ))))));
     }
 
+    // A relocated target root is a separate mount, and a restore into it is a
+    // clone only when it shares one with the store. Copying instead is correct
+    // and much slower, and mbx's materializer falls back to it without saying
+    // so, which makes this the only place it can be noticed. It is reported
+    // rather than disqualifying: a slow cache still beats no cache.
+    if let Some(root) = &target_root {
+        let root_volume = nearest_existing_ancestor(host, root, executor)?;
+        if !cross_reflinks_supported(host, &volume, &root_volume, executor)? {
+            tracing::warn!(
+                cache = %directory.display(),
+                target_root = %root.display(),
+                "the host's mbx target root does not share a mount with the build cache, \
+                 so restoring a cached output copies every byte instead of cloning it"
+            );
+        }
+    }
+
     Ok(Inspection {
         preview: preview(None),
         cache: Some(ResolvedBuildCache {
@@ -267,12 +286,15 @@ fn inspect_host(
     })
 }
 
-/// The `gc.max_size` a host configuration sets, for display only.
+/// The total budget a host configuration sets, for display only. A host that
+/// caps the whole cache with `gc.max_total_size` is showing the same quantity
+/// mj's own setting names, so that is preferred; `gc.max_size` is the older
+/// spelling and bounds the action store alone.
 fn configured_max_size(config_file: &str) -> Option<String> {
     let document: toml::Value = toml::from_str(config_file).ok()?;
-    document
-        .get("gc")?
-        .get("max_size")?
+    let gc = document.get("gc")?;
+    gc.get("max_total_size")
+        .or_else(|| gc.get("max_size"))?
         .as_str()
         .map(str::to_owned)
 }
@@ -425,6 +447,11 @@ fn nearest_existing_ancestor(
 
 /// The budget mj gives a host that has no mbx configuration of its own: the
 /// smaller of 100 GB and a quarter of the free space on the cache volume.
+///
+/// It is passed as `MBX_GC_MAX_TOTAL_SIZE`, so it bounds the whole cache
+/// rather than the action store alone. mbx's own per-part budgets still apply
+/// underneath it; they are fractions of the disk and this total is the
+/// binding constraint whenever it is the smaller number.
 fn default_max_size(
     host: &CacheHost,
     directory: &Path,
@@ -481,6 +508,36 @@ fn reflinks_supported(
         LABEL,
         [volume.to_string_lossy().into_owned()],
         "probe the build cache volume for reflinks",
+    );
+    Ok(executor.execute(&command)?.status == 0)
+}
+
+const CROSS_REFLINK_SCRIPT: &str = r#"src=$1
+dst=$2
+s=$(mktemp -d "$src/.mj-reflink.XXXXXX") || exit 1
+d=$(mktemp -d "$dst/.mj-reflink.XXXXXX") || { rm -rf -- "$s"; exit 1; }
+printf x > "$s/a" && cp --reflink=always "$s/a" "$d/b"
+status=$?
+rm -rf -- "$s" "$d"
+exit $status"#;
+
+/// Whether a cached output can be cloned from the store into the managed
+/// target root instead of copied. `FICLONE` fails across two mounts even when
+/// both are the same filesystem, so this asks the pair rather than each side.
+fn cross_reflinks_supported(
+    host: &CacheHost,
+    store: &Path,
+    target_root: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let command = host.shell_command(
+        CROSS_REFLINK_SCRIPT,
+        LABEL,
+        [
+            store.to_string_lossy().into_owned(),
+            target_root.to_string_lossy().into_owned(),
+        ],
+        "probe the managed target root for reflinks from the build cache",
     );
     Ok(executor.execute(&command)?.status == 0)
 }
@@ -941,6 +998,43 @@ mod tests {
         assert_eq!(
             resolved.target_root,
             Some(PathBuf::from("/mnt/fast/mbx-targets"))
+        );
+    }
+
+    #[test]
+    fn a_target_root_that_cannot_be_cloned_into_still_gets_the_cache() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&[
+            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
+            (
+                "mbx cache dir --json",
+                0,
+                r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
+            ),
+            (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
+            (
+                "[ -f \"$1\" ]",
+                0,
+                "[target]\nroot = \"/mnt/slow/mbx-targets\"\n",
+            ),
+            ("while [ ! -d", 0, "/mnt/fast/mbx-cache"),
+            // Cloning from the store into the relocated root fails; cloning
+            // within the store still works.
+            ("src=$1", 1, ""),
+            ("mj-reflink", 0, ""),
+            ("mkdir -p", 0, ""),
+            ("stat -f -c %T", 0, "xfs"),
+        ]);
+        let resolved = resolve(&podman(None), &BuildCacheConfig::default(), &executor)
+            .expect("a target root that copies instead of cloning is slower, not unusable");
+        assert_eq!(
+            resolved.target_root,
+            Some(PathBuf::from("/mnt/slow/mbx-targets"))
+        );
+        assert!(
+            executor.ran().iter().any(|line| line.contains("src=$1")),
+            "the store and the target root are probed as a pair: {:?}",
+            executor.ran()
         );
     }
 

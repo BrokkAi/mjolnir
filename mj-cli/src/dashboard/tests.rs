@@ -882,28 +882,6 @@ fn the_literal_prefix_reaches_the_composer_as_backward_char() {
     assert!(!dashboard.prefix_pending());
 }
 
-/// A conversation's own modal owns the keyboard, except for the handful of
-/// commands that cannot disturb it.
-#[test]
-fn a_bound_key_is_dropped_while_a_chat_modal_is_open_unless_it_survives_modals() {
-    for id in [
-        CommandId::Help,
-        CommandId::QuitDetach,
-        CommandId::TogglePanePreset,
-        CommandId::Refresh,
-    ] {
-        assert!(mj_tui::survives_chat_modal(id), "{id:?}");
-    }
-    for id in [
-        CommandId::NewSessionWizard,
-        CommandId::ResumeDialog,
-        CommandId::WebViewer,
-        CommandId::OpenConfig,
-    ] {
-        assert!(!mj_tui::survives_chat_modal(id), "{id:?}");
-    }
-}
-
 /// One key refreshes both support panes, from wherever the keyboard is —
 /// including the composer, and including over an open dialog, because
 /// asking for fresh figures cannot disturb what is on screen.
@@ -1173,7 +1151,10 @@ fn the_read_chord_marks_all_read_from_the_targets_pane() {
     dashboard.dispatch_command(command);
     // Nothing here is unread, and saying so is how the command reports it
     // ran from a pane that has no `a` of its own.
-    assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("No unread sessions in this workspace.")
+    );
 }
 
 #[test]

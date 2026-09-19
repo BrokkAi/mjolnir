@@ -21,13 +21,20 @@ fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
 /// Read only when the relay has already failed repeatedly, so the database
 /// work is rare, and on the blocking pool, because the actor's own task also
 /// serves this session's view.
+///
+/// A record that is gone answers `Lost`: the controller discards the record of
+/// a session whose managed target no longer exists, and an actor that read
+/// that as "no answer yet" would reconnect forever. Only a store that could
+/// not be read leaves the question open.
 async fn durable_session_outcome(
     session_id: &str,
 ) -> Option<(mj_core::state::SessionState, Option<String>)> {
     let session_id = session_id.to_owned();
     tokio::task::spawn_blocking(move || {
         let state = crate::database::load_state().ok()?;
-        let record = state.sessions.get(&session_id)?;
+        let Some(record) = state.sessions.get(&session_id) else {
+            return Some((mj_core::state::SessionState::Lost, None));
+        };
         Some((record.state, record.last_error.clone()))
     })
     .await

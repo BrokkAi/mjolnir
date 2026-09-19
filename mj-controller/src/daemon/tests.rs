@@ -2585,3 +2585,148 @@ async fn wait_for_draft(state: &Arc<RuntimeState>, expected: &str) -> String {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+#[cfg(unix)]
+const DISCARD_LOST_TEST_CHILD: &str = "MJ_TEST_DISCARD_LOST_CHILD";
+
+/// A session whose managed target is gone has no checkpoint to resume and no
+/// action but Destroy, so the daemon removes its record rather than leaving a
+/// tombstone for the person to find in the resume dialog. Nothing on that
+/// automatic path may discard work: a checkout with uncommitted changes stays,
+/// with its branch, and the notice says where it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout() {
+    const TEST: &str = "discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout";
+    if std::env::var_os(DISCARD_LOST_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(DISCARD_LOST_TEST_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = crate::controller::test_support::committed_repository();
+    let clean_id = "0123456789abcdef0123456789abcdef";
+    let dirty_id = "fedcba9876543210fedcba9876543210";
+    let mut lost = Vec::new();
+    for session_id in [clean_id, dirty_id] {
+        let mut session =
+            crate::controller::test_support::managed_worktree_session(repository.path(), session_id);
+        session.state = SessionState::Lost;
+        session.checkpoint = None;
+        session.last_error = Some("working directory is gone".into());
+        crate::database::save_session(&session).unwrap();
+        lost.push(session);
+    }
+    let dirty_checkout = repository.path().join(".mj/worktrees").join(dirty_id);
+    std::fs::write(dirty_checkout.join("unsaved.txt"), "work in progress\n").unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    for session in &lost {
+        state.discard_lost_session(session.id.clone()).await;
+    }
+
+    let stored = crate::database::load_state().unwrap().sessions;
+    assert!(
+        !stored.contains_key(clean_id) && !stored.contains_key(dirty_id),
+        "a lost session must not leave a record behind: {:?}",
+        stored.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !repository
+            .path()
+            .join(".mj/worktrees")
+            .join(clean_id)
+            .exists(),
+        "a clean checkout holds nothing, so it goes with the session"
+    );
+    assert!(
+        dirty_checkout.join("unsaved.txt").exists(),
+        "uncommitted work must survive a discard nobody confirmed"
+    );
+    for session_id in [clean_id, dirty_id] {
+        assert_eq!(
+            crate::controller::test_support::test_git(
+                repository.path(),
+                &["branch", "--list", &format!("mj/{session_id}")]
+            )
+            .trim()
+            .trim_start_matches(['*', '+', ' ']),
+            format!("mj/{session_id}"),
+            "a discard keeps every session branch"
+        );
+    }
+    let notices = notice_texts(&state);
+    for session_id in [clean_id, dirty_id] {
+        let expected = format!(
+            "Session {} was lost because its managed target no longer exists; its record was removed.",
+            mj_core::state::short_id(session_id)
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.starts_with(&expected))
+                .count(),
+            1,
+            "each discard reports itself exactly once: {notices:?}"
+        );
+    }
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains(&dirty_checkout.display().to_string())),
+        "the retained checkout must be named where the person will see it: {notices:?}"
+    );
+}
+
+/// A runtime whose controller comes from the real store, for the tests that
+/// exercise a daemon operation end to end in an isolated data directory.
+#[cfg(unix)]
+fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ))
+}
+
+/// The startup sweep picks up tombstones an older build left behind and any
+/// discard a daemon stop interrupted, and nothing else.
+#[test]
+fn startup_selects_every_record_that_is_only_a_tombstone() {
+    let sessions = [
+        runtime_test_session("lost", "workspace", SessionState::Lost),
+        runtime_test_session("data-loss", "workspace", SessionState::DestroyedWithDataLoss),
+        runtime_test_session("stopped", "workspace", SessionState::Stopped),
+        runtime_test_session("running", "workspace", SessionState::Running),
+        runtime_test_session("failed", "workspace", SessionState::Error),
+    ];
+    let controller = Controller {
+        config: Config::default(),
+        state: mj_core::state::State {
+            sessions: sessions
+                .into_iter()
+                .map(|session| (session.id.clone(), session))
+                .collect(),
+            ..mj_core::state::State::default()
+        },
+    };
+
+    assert_eq!(
+        tombstone_session_ids(&controller),
+        vec!["data-loss".to_owned(), "lost".to_owned()]
+    );
+}

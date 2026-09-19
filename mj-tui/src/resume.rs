@@ -146,9 +146,13 @@ pub(crate) enum ResumeRowStatus {
     /// Only SessionWiki's copy is left: Enter restores it into a new session
     /// carrying a summary of the old transcript.
     Restorable,
-    /// The target vanished without a verified checkpoint.
+    /// The target vanished without a verified checkpoint. The controller
+    /// discards such a record as soon as it writes it, so this row is seen
+    /// only when that automatic discard failed and left the record behind.
     Lost,
-    /// Force-destroyed. There is nothing left to restore.
+    /// Force-destroyed by an older build. There is nothing left to restore,
+    /// and, as with [`Self::Lost`], the row is seen only when the automatic
+    /// discard of the leftover record failed.
     DataLoss,
 }
 

@@ -2180,6 +2180,149 @@ fn the_conversation_title_remains_readable_above_its_quiet_rule() {
     );
 }
 
+/// The pane a conversation is drawn into is the whole of what its dialogs
+/// may cover. A host with several panes gives each one a sub-rectangle of
+/// the terminal, so a dialog centred in the frame would paint over its
+/// neighbours.
+#[tokio::test]
+async fn the_task_dialog_and_setup_form_are_centred_within_their_overlay_rect() {
+    use mj_core::config::HarnessKind;
+
+    let pane = Rect::new(50, 2, 48, 26);
+    let regions = || ChatRegions {
+        transcript: Rect::new(50, 2, 48, 19),
+        prompt: Rect::new(50, 21, 48, 7),
+        footer: None,
+        overlay: pane,
+        title_controls: 0,
+        pane_focused: true,
+    };
+    let outside_is_untouched = |terminal: &Terminal<TestBackend>, what: &str| {
+        let buffer = terminal.backend().buffer();
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                if pane.contains(Position::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    buffer[(x, y)],
+                    ratatui::buffer::Cell::default(),
+                    "{what} touched ({x}, {y}) outside its pane"
+                );
+            }
+        }
+    };
+    let modal_body = |chat: &ChatState, what: &str| {
+        let body = chat
+            .frame_surfaces()
+            .surface(SurfaceId::ModalBody)
+            .unwrap_or_else(|| panic!("{what} registers a modal body"))
+            .rect;
+        assert!(
+            pane.contains(Position::new(body.x, body.y))
+                && pane.contains(Position::new(body.right() - 1, body.bottom() - 1)),
+            "{what} body {body:?} must lie inside the pane {pane:?}"
+        );
+        body
+    };
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.task_dialog_open = true;
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+    terminal
+        .draw(|frame| render_in(frame, &mut chat, regions(), false, false))
+        .expect("draw the background-task dialog");
+    modal_body(&chat, "the background-task dialog");
+    outside_is_untouched(&terminal, "the background-task dialog");
+
+    let fixture = mj_client::session::replacement_session_test_fixture("session-pane-modal", 91);
+    let mut reviewed = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(chat_context(
+            "session-pane-modal",
+            &[("claude-1", HarnessKind::Claude)],
+        )),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    reviewed.open_second_opinion(
+        ElicitationRequest {
+            id: "plan-pane".into(),
+            message: "may I run this plan?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        },
+        "the plan".into(),
+    );
+    assert!(
+        reviewed.state.second_opinion().is_some(),
+        "the reviewer setup form is open"
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+    terminal
+        .draw(|frame| reviewed.draw_in(frame, regions(), false, false))
+        .expect("draw the reviewer setup form");
+    modal_body(&reviewed.state, "the reviewer setup form");
+    outside_is_untouched(&terminal, "the reviewer setup form");
+}
+
+/// The background-task dialog used to claim every pointer position on the
+/// screen, which swallowed clicks on the host's own panes beside it. It now
+/// answers only for the rectangle it drew into.
+#[test]
+fn the_task_dialog_claims_only_the_pointer_over_itself() {
+    let pane = Rect::new(50, 2, 48, 26);
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.task_dialog_open = true;
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_in(
+                frame,
+                &mut chat,
+                ChatRegions {
+                    transcript: Rect::new(50, 2, 48, 19),
+                    prompt: Rect::new(50, 21, 48, 7),
+                    footer: None,
+                    overlay: pane,
+                    title_controls: 0,
+                    pane_focused: true,
+                },
+                false,
+                false,
+            )
+        })
+        .expect("draw the background-task dialog");
+
+    let body = chat
+        .frame_surfaces()
+        .surface(SurfaceId::ModalBody)
+        .expect("the dialog registers a modal body")
+        .rect;
+    let click = |column: u16, row: u16| MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(
+        chat.component_handles_mouse(click(body.x, body.y)),
+        "the dialog still answers for its own body"
+    );
+    assert!(
+        !chat.component_handles_mouse(click(2, 6)),
+        "a click on the host's navigator, far from the pane, is not the dialog's"
+    );
+    assert!(
+        !chat.component_handles_mouse(click(pane.x - 1, pane.y + 4)),
+        "a click just outside the pane is not the dialog's"
+    );
+}
+
 /// A host that owns the rest of the frame gives the chat two rectangles;
 /// nothing it draws may leak outside them.
 #[test]

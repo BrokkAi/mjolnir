@@ -480,7 +480,10 @@ fn plain_a_remains_unbound_and_the_wizard_has_its_own_key() {
         chord(&mut dashboard, CommandId::MarkAllRead),
         DashboardAction::None
     );
-    assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("No unread sessions in this workspace.")
+    );
 }
 
 #[test]
@@ -1182,7 +1185,10 @@ fn a_key_press_with_its_own_notice_replaces_a_fresh_one() {
         chord(&mut dashboard, CommandId::MarkAllRead),
         DashboardAction::None
     );
-    assert_eq!(dashboard.notice().as_deref(), Some("No unread sessions."));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("No unread sessions in this workspace.")
+    );
 }
 
 #[test]
@@ -1909,6 +1915,35 @@ fn mark_all_read_includes_a_restart_only_session() {
     let detail = &dashboard.session_details["session-1"];
     assert_eq!(detail.unread_session_restarts, 0);
     assert!(!detail.has_unread());
+}
+
+#[test]
+fn mark_all_read_leaves_another_workspaces_session_unread() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    for id in ["done", "remote"] {
+        apply_materialized_transcript_for(
+            &mut dashboard,
+            id,
+            vec![agent_message(4, "unread response")],
+        );
+        assert!(dashboard.session_details[id].has_unread(), "{id}");
+    }
+
+    assert_eq!(
+        chord(&mut dashboard, CommandId::MarkAllRead),
+        DashboardAction::MarkAllRead {
+            receipts: vec![("done".into(), 4)]
+        }
+    );
+    assert!(
+        dashboard.session_details["remote"].has_unread(),
+        "a session in another workspace keeps its unread marker"
+    );
+    assert_eq!(
+        dashboard.state.sessions["remote"].viewed_through_event_ordinal,
+        0
+    );
 }
 
 #[test]

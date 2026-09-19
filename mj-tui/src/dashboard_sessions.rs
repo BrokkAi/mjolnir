@@ -775,29 +775,40 @@ impl DashboardState {
             .filter(|text| !text.is_empty())
     }
 
+    /// Clears the unread marker on the sessions the active workspace lists,
+    /// which is exactly the set its tab badge counts. A session with no row
+    /// contributes to no badge, so leaving it unread hides nothing.
     pub(crate) fn mark_all_read(&mut self) -> DashboardAction {
+        let listed = self
+            .ordered_sessions_unfiltered()
+            .into_iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
         let mut receipts = Vec::new();
-        for (session_id, detail) in &mut self.session_details {
+        for session_id in listed {
+            let Some(detail) = self.session_details.get_mut(&session_id) else {
+                continue;
+            };
             if !detail.has_unread() {
                 continue;
             }
             let Some(through) = detail.materialized_applied_event_ordinal else {
                 continue;
             };
-            let Some(session) = self.state.sessions.get_mut(session_id) else {
+            let Some(session) = self.state.sessions.get_mut(&session_id) else {
                 continue;
             };
             if through > session.viewed_through_event_ordinal {
                 session.viewed_through_event_ordinal = through;
                 detail.clear_unread();
-                receipts.push((session_id.clone(), through));
+                receipts.push((session_id, through));
             }
         }
         if receipts.is_empty() {
-            self.set_notice("No unread sessions.");
+            self.set_notice("No unread sessions in this workspace.");
             DashboardAction::None
         } else {
-            self.set_notice("Marked all sessions read; questions and failures stay flagged.");
+            self.set_notice("Marked this workspace read; questions and failures stay flagged.");
             DashboardAction::MarkAllRead { receipts }
         }
     }

@@ -1,5 +1,6 @@
 //! Session close, force-stop, and permanent-destruction transitions.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -16,7 +17,9 @@ use super::checkpoint::{
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
 use super::worker_restart::WorkerRestartLeftNoWorker;
-use super::worktree::{cleanup_managed_worktree, retire_managed_worktree};
+use super::worktree::{
+    cleanup_managed_worktree, managed_worktree_checkout_is_dirty, retire_managed_worktree,
+};
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
 /// What destroying a session does with its managed worktree's git branch.
@@ -34,6 +37,18 @@ pub enum BranchDisposition {
     /// would. The archive job uses this so a branch whose work has landed
     /// elsewhere does not pile up forever.
     DeleteIfMerged,
+}
+
+/// What destroying a session does with its managed worktree's checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutDisposition {
+    /// Remove the checkout whatever it holds. Every destroy a person asks for
+    /// takes this path, because the confirmation already covered the loss.
+    Remove,
+    /// Leave the checkout, and its branch, in place when it has uncommitted
+    /// changes. Destruction Mjolnir decides on its own never discards work the
+    /// user has not seen.
+    KeepWhenDirty,
 }
 
 /// What a verified close does with the target the session was running in.
@@ -820,6 +835,27 @@ impl Controller {
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
     ) -> Result<()> {
+        self.destroy_session_controlled_with_checkout(
+            session_id,
+            executor,
+            branch,
+            CheckoutDisposition::Remove,
+        )
+        .map(|_| ())
+    }
+
+    /// The same, with a say in whether a checkout holding uncommitted changes
+    /// survives the destruction.
+    ///
+    /// Answers with the checkout path that was kept, so the caller can name it
+    /// where the person will see it.
+    pub(crate) fn destroy_session_controlled_with_checkout(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+        checkout: CheckoutDisposition,
+    ) -> Result<Option<PathBuf>> {
         let session = self
             .state
             .sessions
@@ -829,9 +865,20 @@ impl Controller {
         if session.state.is_active() {
             bail!("refusing to destroy active session {session_id}");
         }
+        let mut retained_checkout = None;
         if let Some(worktree) = &session.managed_worktree {
-            cleanup_managed_worktree(executor, worktree, branch)
-                .context("remove managed raw-session worktree")?;
+            let keep = checkout == CheckoutDisposition::KeepWhenDirty
+                && managed_worktree_checkout_is_dirty(executor, worktree)
+                    .context("check the managed raw-session worktree for uncommitted changes")?;
+            if keep {
+                // Keeping the checkout keeps its branch with it: the commits
+                // the working tree is based on are the only way back to this
+                // work.
+                retained_checkout = Some(worktree.worktree_root.clone());
+            } else {
+                cleanup_managed_worktree(executor, worktree, branch)
+                    .context("remove managed raw-session worktree")?;
+            }
         }
         if let Some(checkpoint) = &session.checkpoint
             && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
@@ -851,7 +898,7 @@ impl Controller {
             .context("destroy stopped session in database")?;
         self.state.subagents.remove(session_id);
         self.state.destroy_stopped_session(session_id)?;
-        Ok(())
+        Ok(retained_checkout)
     }
 
     /// Permanently destroy a session from any state, without checkpointing

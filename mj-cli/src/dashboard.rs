@@ -601,11 +601,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                     let route = context.dashboard.route_bound_key_event(&event);
                     let route = match route {
                         KeyRoute::Command { id, .. }
-                            if !context.dashboard.command_allowed_now(id)
-                                || (context
-                                    .visible_chat()
-                                    .is_some_and(|chat| chat.component_modal_open())
-                                    && !mj_tui::survives_chat_modal(id)) =>
+                            if !context.dashboard.command_allowed_now(id) =>
                         {
                             KeyRoute::Consumed
                         }
@@ -1739,8 +1735,10 @@ fn chat_is_visible(opening: Option<&str>, chat_session_id: &str) -> bool {
 /// A mouse event goes where the pointer is, not where the keyboard is: the
 /// wheel over a transcript scrolls that transcript, including an unfocused
 /// pane's, and a click there hands the keyboard back to the composer. Keys go
-/// to the modal if one is open, then to the composer if it has focus, and
-/// otherwise to the panes.
+/// to a dashboard modal if one is open, then to the composer if it has focus,
+/// and otherwise to the panes. A conversation's own dialog never gates the
+/// host: it lives inside its pane and takes keys only while that pane's
+/// composer has focus.
 ///
 /// Reports whether the event was consumed, and whether the input batch may
 /// continue: an event that produced work for the loop to run ends the batch so
@@ -1751,19 +1749,14 @@ fn dispatch_event(
     action: &mut DashboardAction,
     chat_outcome: &mut mj_chat::chat::ChatEventOutcome,
 ) -> (bool, bool) {
-    let chat_modal = !context.dashboard.modal_open()
-        && context
-            .visible_chat()
-            .is_some_and(|chat| chat.component_modal_open());
-    let dashboard_pointer = !chat_modal
-        && matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
+    let dashboard_pointer =
+        matches!(&event, Event::Mouse(mouse) if context.dashboard.component_handles_mouse(*mouse));
     // The wheel belongs to the pane under the pointer. Only an unfocused pane
     // needs saying so: over the focused pane the conversation below is the one
     // `visible_chat` already returns.
     let wheel_pane = match &event {
         Event::Mouse(mouse)
             if !dashboard_pointer
-                && !chat_modal
                 && !context.dashboard.modal_open()
                 && matches!(
                     mouse.kind,
@@ -1778,34 +1771,33 @@ fn dispatch_event(
         _ => None,
     };
     let to_chat = !dashboard_pointer
-        && (chat_modal
-            || match &event {
-                Event::Mouse(mouse) if !context.dashboard.modal_open() => {
-                    let over_pane = context
-                        .dashboard
-                        .chat_region_contains(mouse.column, mouse.row);
-                    if let Some(pane) = over_pane
-                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                    {
-                        // A click in a pane takes the keyboard there before
-                        // the event reaches a conversation, so it reaches the
-                        // conversation the user just pointed at.
-                        context.focus_conversation_pane(pane);
-                    }
-                    over_pane.is_some()
-                        || context
-                            .visible_chat()
-                            .is_some_and(|chat| chat.component_handles_mouse(*mouse))
-                        || (matches!(
-                            mouse.kind,
-                            MouseEventKind::Drag(MouseButton::Left)
-                                | MouseEventKind::Up(MouseButton::Left)
-                        ) && context
-                            .visible_chat()
-                            .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
+        && match &event {
+            Event::Mouse(mouse) if !context.dashboard.modal_open() => {
+                let over_pane = context
+                    .dashboard
+                    .chat_region_contains(mouse.column, mouse.row);
+                if let Some(pane) = over_pane
+                    && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                {
+                    // A click in a pane takes the keyboard there before
+                    // the event reaches a conversation, so it reaches the
+                    // conversation the user just pointed at.
+                    context.focus_conversation_pane(pane);
                 }
-                _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
-            });
+                over_pane.is_some()
+                    || context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.component_handles_mouse(*mouse))
+                    || (matches!(
+                        mouse.kind,
+                        MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    ) && context
+                        .visible_chat()
+                        .is_some_and(|chat| chat.transcript_scrollbar_dragging()))
+            }
+            _ => !context.dashboard.modal_open() && context.dashboard.prompt_has_focus(),
+        };
     let chat = match wheel_pane {
         Some(pane) if to_chat => context.pane_chat_mut(pane),
         _ => context.visible_chat().filter(|_| to_chat),

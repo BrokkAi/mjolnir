@@ -83,12 +83,6 @@ impl ChatState {
         &self.frame_surfaces
     }
 
-    /// Whether the last frame's surfaces stand alone, because a modal owned
-    /// the frame.
-    pub fn frame_surfaces_exclusive(&self) -> bool {
-        self.frame_surfaces_exclusive
-    }
-
     /// Whether a shared component should receive this pointer event before
     /// text selection or the host surface. Captured presses remain owned even
     /// after the pointer leaves the control's hitbox.
@@ -99,7 +93,16 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             return dialog.component_handles_mouse_at(mouse.column, mouse.row);
         }
-        if self.task_dialog_open {
+        // The background-task dialog answers for the rectangle it drew,
+        // border included, and for nothing else: outside it the pointer
+        // belongs to whatever the host drew beside this conversation.
+        if self.task_dialog_open
+            && (self.task_dialog_form.captures_pointer()
+                || self.task_dialog_area.is_some_and(|area| {
+                    area.outer(ratatui::layout::Margin::new(1, 1))
+                        .contains(Position::new(mouse.column, mouse.row))
+                }))
+        {
             return true;
         }
         if self
@@ -134,8 +137,9 @@ impl ChatState {
             || self.turn_review_handles_mouse(mouse.column, mouse.row)
     }
 
-    /// Whether a chat-owned modal currently replaces the ordinary composer.
-    pub fn component_modal_open(&self) -> bool {
+    /// Whether a dialog of this conversation's own currently stands in for the
+    /// ordinary composer.
+    pub(super) fn composer_replaced(&self) -> bool {
         self.elicitation.is_some()
             || self.config_picker.is_some()
             || self.task_dialog_open
@@ -379,7 +383,7 @@ impl ChatState {
             return ChatAction::None;
         }
         // Setup modals do not enter the split branch above, but they still
-        // own the frame and must not expose a stale prompt hitbox from the
+        // own the pane and must not expose a stale prompt hitbox from the
         // preceding draw.
         if self.second_opinion_active() || self.turn_review_active() {
             return ChatAction::None;

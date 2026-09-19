@@ -167,8 +167,62 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
-        self.tear_down_stopped_session(session_id, LifecycleKind::DestroyStopped, branch)
+        self.tear_down_stopped_session(
+            session_id,
+            LifecycleKind::DestroyStopped,
+            branch,
+            CheckoutDisposition::Remove,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Discard the record of a session that ended as `Lost`: its managed
+    /// target is gone, it has no checkpoint to resume from, and the only
+    /// action it still offers is Destroy. Keeping it would leave a tombstone
+    /// the person has to find and delete by hand.
+    ///
+    /// The branch stays, and so does a checkout that holds uncommitted
+    /// changes: nothing here was confirmed by a person, so nothing here may
+    /// discard work. A teardown that fails leaves the row where it is, with
+    /// its cause, and says so.
+    pub(crate) async fn discard_lost_session(self: &Arc<Self>, session_id: String) {
+        let short = mj_core::state::short_id(&session_id).to_owned();
+        match self
+            .tear_down_stopped_session(
+                session_id.clone(),
+                LifecycleKind::DestroyStopped,
+                BranchDisposition::Keep,
+                CheckoutDisposition::KeepWhenDirty,
+            )
             .await
+        {
+            Ok(retained) => {
+                let mut text = format!(
+                    "Session {short} was lost because its managed target no longer exists; its record was removed."
+                );
+                if let Some(path) = retained {
+                    text.push_str(&format!(
+                        " Its checkout has uncommitted changes, so it was kept at {}.",
+                        path.display()
+                    ));
+                }
+                self.push_notice(&session_id, text);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    error = format!("{error:#}"),
+                    "could not discard the record of a lost session"
+                );
+                self.push_notice(
+                    &session_id,
+                    format!(
+                        "Session {short} was lost, but its record could not be removed: {error:#}"
+                    ),
+                );
+            }
+        }
     }
 
     /// Archive every stopped session older than `older_than_days` whose
@@ -246,16 +300,20 @@ impl RuntimeState {
             session_id,
             LifecycleKind::ArchiveStopped,
             BranchDisposition::DeleteIfMerged,
+            CheckoutDisposition::Remove,
         )
         .await
+        .map(|_| ())
     }
 
+    /// Answers with the managed checkout the teardown kept, if it kept one.
     async fn tear_down_stopped_session(
         self: &Arc<Self>,
         session_id: String,
         kind: LifecycleKind,
         branch: BranchDisposition,
-    ) -> Result<()> {
+        checkout: CheckoutDisposition,
+    ) -> Result<Option<PathBuf>> {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -280,11 +338,13 @@ impl RuntimeState {
         })
         .await?;
         if !exists {
-            return Ok(());
+            return Ok(None);
         }
-        self.run_lifecycle(
-            session_id,
-            kind,
+        // The retained path is produced inside the lifecycle task, which can
+        // only answer with a `DaemonLifecycleResult`, so it comes back here.
+        let retained = Arc::new(Mutex::new(None));
+        self.run_lifecycle(session_id, kind, {
+            let retained = retained.clone();
             move |state, session_id, cancelled| async move {
                 blocking(move || {
                     let mut controller = Controller::load()?;
@@ -293,14 +353,24 @@ impl RuntimeState {
                         state,
                         session_id.clone(),
                     );
-                    controller.destroy_session_controlled_with(&session_id, &executor, branch)?;
+                    let kept = controller.destroy_session_controlled_with_checkout(
+                        &session_id,
+                        &executor,
+                        branch,
+                        checkout,
+                    )?;
+                    *retained.lock().unwrap_or_else(PoisonError::into_inner) = kept;
                     Ok(DaemonLifecycleResult::Done)
                 })
                 .await
-            },
-        )
+            }
+        })
         .await?;
-        Ok(())
+        let kept = retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Ok(kept)
     }
 
     /// Cancel any in-flight lifecycle for `session_id` and wait for it to

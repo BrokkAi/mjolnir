@@ -639,7 +639,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::MarkAllRead,
         label: "Mark all read",
-        description: "Clear the unread marker on every session at once; questions, failures, and unreachable sessions stay flagged.",
+        description: "Clear the unread marker on every session in this workspace at once; questions, failures, and unreachable sessions stay flagged.",
         scope: Scope::Sessions,
         pane_keys: &[],
         action: Some(KeyAction::MarkAllRead),
@@ -1191,19 +1191,6 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
         .filter(|spec| (spec.available)(dashboard) == Availability::Ready)
         .map(|spec| spec.id)
         .collect()
-}
-
-/// Whether a bound command still answers while the conversation owns a modal
-/// of its own.
-///
-/// Help and detach have always answered from every surface, and the pane
-/// preset only changes the layout underneath, so all three survive it;
-/// refreshing only asks the daemon for fresh figures.
-pub fn survives_chat_modal(id: CommandId) -> bool {
-    matches!(
-        id,
-        CommandId::Help | CommandId::QuitDetach | CommandId::TogglePanePreset | CommandId::Refresh
-    )
 }
 
 impl DashboardState {

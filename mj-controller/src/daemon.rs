@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +30,8 @@ use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
 use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
-    BranchDisposition, Controller, ControllerStoreGuard, SessionLaunchOptions, SessionResumeOptions,
+    BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard, SessionLaunchOptions,
+    SessionResumeOptions,
 };
 use crate::review_host::TurnReviewHost;
 use crate::session_manager::{

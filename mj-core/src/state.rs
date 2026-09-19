@@ -919,8 +919,8 @@ pub struct SessionBuildCache {
     /// different host cannot reuse it, so the decision is made again there.
     pub host: String,
     pub directory: PathBuf,
-    /// An mbx size string passed as `MBX_GC_MAX_SIZE`, or `None` when the
-    /// host's own mbx configuration file already carries the budget.
+    /// An mbx size string passed as `MBX_GC_MAX_TOTAL_SIZE`, or `None` when
+    /// the host's own mbx configuration file already carries the budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// A `[target] root` the host's mbx configuration relocates outside the
@@ -982,10 +982,10 @@ impl std::fmt::Display for BuildCacheOff {
 /// Where a build cache session's size budget comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildCacheLimit {
-    /// An mbx size string passed as `MBX_GC_MAX_SIZE`.
+    /// An mbx size string passed as `MBX_GC_MAX_TOTAL_SIZE`.
     Size(String),
     /// The host's own `~/.config/mbx/config.toml` carries the budget. The
-    /// `gc.max_size` it sets, when it sets one.
+    /// total it sets, when it sets one.
     HostConfiguration(Option<String>),
 }
 
