@@ -18,7 +18,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
     completions: [],
     holdCreate: null, holdLaunch: null,
-    holdPreflight: null,
+    holdPreflight: null, preflightError: null, remoteRepairs: [], resolvedDirectory: null,
     worktreeOptions: { available: true, default_create: true },
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
@@ -45,7 +45,10 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       state.preflights.push(request);
       const bare = state.snapshot.targets.find(target => target.id === request.target_id)?.requires_project_directory === true;
       if (state.holdPreflight) await state.holdPreflight;
+      if (state.preflightError) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: state.preflightError }) });
       return json({
+        remote_repairs: state.remoteRepairs,
+        project_directory: bare ? state.resolvedDirectory : null,
         remote_repositories: bare ? [] : [{ id: request.bundle_id, fetch_url: 'https://github.com/example/repo.git', default_branch: 'main', push_urls: ['https://github.com/example/repo.git'] }],
         local_changes_excluded: !bare,
         managed_worktree: bare ? state.worktreeOptions : { available: false, default_create: false },
@@ -228,6 +231,99 @@ test('leaving a new wizard aborts its stale preflight request', async ({ page })
   await expect.poll(() => state.preflightFailures).toBeGreaterThan(0);
   await expect(page.locator('#new-step')).toContainText('Profile');
   await expect(page.locator('#new-step')).not.toContainText('Local changes');
+});
+
+test('Review is usable during preflight, survives refresh, and gates submission', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page, 'local');
+  let release;
+  state.holdPreflight = new Promise(resolve => { release = resolve; });
+  state.resolvedDirectory = '/resolved/project';
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  await expect(page.locator('#new-step')).toContainText('Checking project…');
+  await expect(page.locator('#new-next')).toBeDisabled();
+  await expect(page.locator('#new-back')).toBeEnabled();
+  const worktree = page.getByRole('checkbox', { name: 'Create managed worktree' });
+  await expect(worktree).toBeDisabled();
+  const subagents = page.getByRole('checkbox', { name: 'Use Mjolnir sub-agents' });
+  await subagents.uncheck();
+  await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(state.actions).toHaveLength(0);
+  await refresh(page, state);
+  await expect(subagents).not.toBeChecked();
+  await expect(page.locator('#new-step')).toContainText('Checking project…');
+  expect(state.preflights).toHaveLength(1);
+  release();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  await expect(page.locator('#new-next')).toBeEnabled();
+  await expect(worktree).toBeChecked();
+  await expect(page.locator('#new-step')).toContainText('/resolved/project');
+  await page.locator('#new-next').click();
+  expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project', mjolnir_subagents: false });
+});
+
+test('failed Review retries without launching and Back abandons a pending check', async ({ page }) => {
+  const state = await mount(page);
+  await projectStep(page);
+  state.preflightError = 'Remote unavailable';
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  await expect(page.locator('#new-step')).toContainText('Remote unavailable');
+  await expect(page.locator('#new-next')).toHaveText('Retry');
+  state.preflightError = null;
+  let release;
+  state.holdPreflight = new Promise(resolve => { release = resolve; });
+  await page.locator('#new-next').click();
+  await expect.poll(() => state.preflights.length).toBe(2);
+  expect(state.actions).toHaveLength(0);
+  await page.locator('#new-back').click();
+  await expect(page.locator('#new-progress')).toContainText('Project');
+  state.holdPreflight = null;
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  await expect.poll(() => state.preflights.length).toBe(3);
+  release();
+  await expect.poll(() => state.preflightFailures).toBeGreaterThan(0);
+  await expect(page.locator('#new-progress')).toContainText('Review');
+  await expect(page.locator('#new-next')).toBeEnabled();
+  expect(state.actions).toHaveLength(0);
+});
+
+test('declining repair keeps Review unready and allows a fresh retry', async ({ page }) => {
+  const state = await mount(page);
+  state.remoteRepairs = [{ path: '/project', branch: 'main', missing_remote: 'old', replacement_remote: 'origin', fetch_url: 'https://example.com/project.git', push_urls: [] }];
+  page.on('dialog', dialog => dialog.dismiss());
+  await projectStep(page);
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-step')).toContainText('repair was declined');
+  await expect(page.locator('#new-next')).toHaveText('Retry');
+  expect(state.preflights).toHaveLength(1);
+  expect(state.actions).toHaveLength(0);
+  state.remoteRepairs = [];
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toHaveText('Start');
+  expect(state.preflights).toHaveLength(2);
+  expect(state.actions).toHaveLength(0);
+});
+
+test('a pending client does not prevent another client from completing preflight', async ({ page, context }) => {
+  const first = await mount(page);
+  await projectStep(page);
+  let release;
+  first.holdPreflight = new Promise(resolve => { release = resolve; });
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-next')).toBeDisabled();
+  const other = await context.newPage();
+  const second = await mount(other);
+  await projectStep(other);
+  await other.locator('#new-next').click();
+  await expect(other.locator('#new-next')).toHaveText('Start');
+  await expect(other.locator('#new-next')).toBeEnabled();
+  expect(second.preflights).toHaveLength(1);
+  await expect(page.locator('#new-next')).toBeDisabled();
+  release();
+  await expect(page.locator('#new-next')).toBeEnabled();
 });
 
 test('bundle save stays single-flight and a late result cannot alter a replacement wizard', async ({ page }) => {

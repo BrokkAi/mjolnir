@@ -187,9 +187,10 @@ test('project preflight prevents duplicate checks and ignores a cancelled wizard
   assert.equal(context.newDraft.dirty, undefined);
   assert.equal(context.pendingNewPreflight, null);
   context.request = async () => { throw new Error('invalid project'); };
-  await assert.rejects(vm.runInContext('preflightNew()', context), /invalid project/);
+  assert.equal(await vm.runInContext('preflightNew()', context), false);
+  assert.match(context.newDraft.preflightError, /invalid project/);
   assert.equal(context.pendingNewPreflight, null, 'failure releases the checking state');
-  assert.equal(context.newDraft.preflighted, undefined);
+  assert.equal(context.newDraft.preflighted, false);
 });
 
 test('an aborted preflight cannot clear a replacement check for the same draft', async () => {
@@ -209,11 +210,43 @@ test('an aborted preflight cannot clear a replacement check for the same draft',
   completions[0]({ remote_repositories: [{ id: 'old' }] });
   assert.equal(await old, false);
   assert.equal(context.pendingNewPreflight, draft);
-  assert.equal(draft.preflighted, undefined);
+  assert.equal(draft.preflighted, false);
   completions[1]({ remote_repositories: [{ id: 'current' }] });
   assert.equal(await current, true);
   assert.equal(draft.remoteRepositories[0].id, 'current');
   assert.equal(context.pendingNewPreflight, null);
+});
+
+test('commit refuses unready, pending, or failed preflight even when called directly', async () => {
+  for (const state of ['unready', 'pending', 'failed']) {
+    const draft = { preflighted: state !== 'unready', preflightError: state === 'failed' ? 'failed' : '' };
+    const context = vm.createContext({
+      newDraft: draft,
+      pendingNewPreflight: state === 'pending' ? draft : null,
+      request: () => assert.fail('unready draft cannot launch'),
+    });
+    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
+    await vm.runInContext('commitNew()', context);
+  }
+});
+
+test('entering Review does not wait for project preflight', async () => {
+  let complete;
+  const draft = { step: 0, bundleId: 'project' };
+  const context = vm.createContext({
+    newDraft: draft, pendingNewPreflight: null,
+    visibleSteps: () => [{ key: 'project' }, { key: 'review' }],
+    snapshot: { bundles: [{ id: 'project' }] }, targetIsBare: () => false,
+    newError: makeNode(), renderNewForm() {},
+    preflightNew: () => new Promise(resolve => { complete = resolve; }),
+  });
+  vm.runInContext(sourceBetween('async function advanceNew()', '\nasync function commitNew()'), context);
+  const pending = vm.runInContext('advanceNew()', context);
+  assert.equal(draft.step, 1, 'Review is entered before the response arrives');
+  assert.equal(draft.preflighted, false);
+  complete(false);
+  await pending;
+  assert.equal(draft.step, 1, 'failure stays on Review for retry');
 });
 
 test('the create payload carries a sub-agent choice only for Claude and Codex', async () => {
@@ -222,6 +255,7 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
     snapshot: { profiles: [{ id: profileId, harness_kind: harnessKind }] },
     newDraft: {
       workspaceId: 'test',
+      preflighted: true,
       profileId,
       bundleId: 'bundle',
       targetId: 'container',
@@ -231,6 +265,7 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
       createManagedWorktree: false,
       mjolnirSubagents,
     },
+    pendingNewPreflight: null,
     targetIsBare: () => false,
     renderNewForm: () => {},
     refresh: async () => {},

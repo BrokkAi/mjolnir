@@ -1189,6 +1189,7 @@ let renderedNewDraft = null;
 let renderedNewSignature = null;
 
 function abortPendingNewPreflight() {
+  if (newDraft) newDraft.preflighted = false;
   pendingNewPreflightController?.abort();
   pendingNewPreflightController = null;
   pendingNewPreflight = null;
@@ -1263,7 +1264,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
     project: step.key === 'project' ? [newDraft.targetId, snapshot.bundles, snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories, newDraft.showBundleSource] : null,
-    remote: step.key === 'review' ? [newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
+    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.mjolnirSubagents, subagentChoiceApplies()] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -1277,7 +1278,7 @@ function renderNewForm() {
   renderedNewSignature = signature;
   newProgress.textContent = `Step ${newDraft.step + 1} of ${steps.length} · ${step.title}`;
   newBackButton.disabled = newDraft.step === 0;
-  newNextButton.textContent = step.key === 'review' ? 'Start' : 'Next';
+  newNextButton.textContent = step.key === 'review' ? (newDraft.preflightError ? 'Retry' : 'Start') : 'Next';
 
   const body = document.createDocumentFragment();
   switch (step.key) {
@@ -1410,7 +1411,8 @@ function renderNewForm() {
           ]);
         }
       }
-      if (newDraft.preflightError) rows.push(['Repository preflight', newDraft.preflightError]);
+      if (pendingNewPreflight === newDraft) rows.push(['Project preflight', 'Checking project…']);
+      if (newDraft.preflightError) rows.push(['Project preflight', newDraft.preflightError]);
       for (const [term, value] of rows) {
         review.append(el('dt', '', term), el('dd', '', value));
       }
@@ -1455,9 +1457,9 @@ function renderNewForm() {
     newNextButton.textContent = 'Checking…';
   }
   const busy = newDraft.committing === true || newDraft.creatingBundle;
-  newNextButton.disabled = busy;
+  newNextButton.disabled = busy || checking || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
   newBackButton.disabled ||= busy;
-  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy || checking;
+  for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
   if (focused?.type === 'checkbox' && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
   if (caret && !busy) {
     const input = document.getElementById(caret.id);
@@ -1655,7 +1657,12 @@ function pathField(label, id, value, onInput, complete = null) {
 /// about, before the person commits to it.
 async function preflightNew() {
   const draft = newDraft;
-  if (pendingNewPreflight === draft) return false;
+  if (!draft || pendingNewPreflight === draft) return false;
+  draft.preflighted = false;
+  draft.preflightError = '';
+  draft.remoteRepositories = [];
+  draft.localChangesExcluded = false;
+  draft.worktreeOptions = null;
   const bare = targetIsBare(draft.targetId);
   const controller = new AbortController();
   pendingNewPreflight = draft;
@@ -1677,14 +1684,17 @@ async function preflightNew() {
           remote_repairs: remoteRepairs,
         }),
       });
-      if (controller.signal.aborted || newDraft !== draft) return false;
+      if (controller.signal.aborted || newDraft !== draft || pendingNewPreflightController !== controller) return false;
       remoteRepairs = answer.remote_repairs || [];
       if (!remoteRepairs.length) break;
       const details = remoteRepairs.map(repair =>
         `${repair.path}: branch ${repair.branch} tracks missing remote ${repair.missing_remote}.\nSet its tracking remote to ${repair.replacement_remote}.\nFetch: ${repair.fetch_url}\nPush: ${repair.push_urls.join(', ')}`
       ).join('\n\n');
-      if (!confirm(`Repair Git tracking and continue?\n\n${details}`)) return false;
-      if (controller.signal.aborted || newDraft !== draft) return false;
+      if (!confirm(`Repair Git tracking and continue?\n\n${details}`)) {
+        draft.preflightError = 'Git tracking repair was declined. Retry to review the repair, or go Back to choose another project.';
+        return false;
+      }
+      if (controller.signal.aborted || newDraft !== draft || pendingNewPreflightController !== controller) return false;
     }
     if (bare && answer.project_directory) {
       draft.projectDirectory = answer.project_directory;
@@ -1704,8 +1714,9 @@ async function preflightNew() {
     return true;
   } catch (error) {
     if (controller.signal.aborted || error?.name === 'AbortError') return false;
-    if (newDraft !== draft) return false;
-    throw error;
+    if (newDraft !== draft || pendingNewPreflightController !== controller) return false;
+    draft.preflightError = error.message || 'Could not check this project. Retry or go Back to change it.';
+    return false;
   } finally {
     if (pendingNewPreflightController === controller) {
       pendingNewPreflight = null;
@@ -1738,9 +1749,10 @@ async function advanceNew() {
       newError.textContent = 'Name the project directory to open.';
       return;
     }
-    if (!(await preflightNew())) return;
+    newDraft.preflighted = false;
     newDraft.step = Math.min(newDraft.step + 1, visibleSteps().length - 1);
     renderNewForm();
+    await preflightNew();
     return;
   }
   if (step.key !== 'review') {
@@ -1748,12 +1760,16 @@ async function advanceNew() {
     renderNewForm();
     return;
   }
+  if (!newDraft.preflighted) {
+    await preflightNew();
+    return;
+  }
   await commitNew();
 }
 
 async function commitNew() {
   const draft = newDraft;
-  if (draft.committing) return;
+  if (!draft || draft.committing || !draft.preflighted || pendingNewPreflight === draft || draft.preflightError) return;
   const bare = targetIsBare(newDraft.targetId);
   const body = {
     action: 'new',
@@ -5612,7 +5628,7 @@ for (const panel of [targetsPanel, quotaPanel]) {
 
 newBackButton.onclick = () => {
   if (!newDraft || newDraft.step === 0) return;
-  if (pendingNewPreflight === newDraft) abortPendingNewPreflight();
+  abortPendingNewPreflight();
   newDraft.step -= 1;
   newError.textContent = '';
   renderNewForm();
