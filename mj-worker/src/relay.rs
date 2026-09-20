@@ -22,6 +22,7 @@ mod journal;
 mod replay;
 mod requests;
 mod serving;
+mod verdict;
 use background::{KimiProvisionalTask, KimiTaskEntry, claude_turn_origin, is_agent_output};
 use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
@@ -136,7 +137,7 @@ pub struct DurableRelay {
     turn_context: mj_core::activity::verdict::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict_pending: bool,
-    expected_continuation: std::sync::Mutex<Option<i64>>,
+    replied_verdict: verdict::RepliedVerdictState,
     /// Codex tool calls explicitly introduced as execute cards, with the
     /// command needed if a later partial update says the process is detached.
     codex_execute_tools: BTreeMap<String, String>,
@@ -373,7 +374,7 @@ impl DurableRelay {
             turn_context: Default::default(),
             verdict_harness: None,
             replied_verdict_pending: false,
-            expected_continuation: std::sync::Mutex::new(None),
+            replied_verdict: Default::default(),
             codex_execute_tools: BTreeMap::new(),
             background_exec_cards: BTreeMap::new(),
             claude_background_tasks: BTreeMap::new(),
@@ -491,6 +492,7 @@ impl DurableRelay {
         // hand. Consumers read this instead of each deriving their own.
         let facts = self.activity_facts();
         state.expected_continuation = facts.expected_continuation;
+        state.inferred_idle_since_ms = facts.inferred_idle_since_ms;
         state.activity = Some(mj_core::activity::classify(&facts));
         state
     }
@@ -527,24 +529,18 @@ impl DurableRelay {
         let background_commands = self.background_commands().len() + self.native_agent_count();
         self.turn_context
             .set_counts(background_commands, self.snapshot.queued_prompts.len());
-        let expected_continuation = {
-            let mut expected = self
-                .expected_continuation
-                .lock()
-                .expect("continuation lock poisoned");
-            if background_commands > 0
-                || self.snapshot.active_prompt.is_some()
-                || self.snapshot.harness_turn.is_some()
-                || matches!(
-                    self.snapshot.execution,
-                    RelayExecutionState::Closing | RelayExecutionState::Closed
-                )
-            {
-                *expected = None;
-            }
-            *expected
-        };
-        mj_core::activity::ActivityFacts {
+        self.turn_context.set_background_inventory(
+            self.background_commands(),
+            self.snapshot
+                .native_agents
+                .iter()
+                .filter(|(_, agent)| {
+                    agent.state == mj_core::native_agent::NativeAgentState::Running
+                })
+                .map(|(id, _)| id.clone())
+                .collect(),
+        );
+        let mut facts = mj_core::activity::ActivityFacts {
             execution: self.snapshot.execution,
             prompt_started_at_ms: self
                 .snapshot
@@ -554,7 +550,8 @@ impl DurableRelay {
                 .or_else(|| self.clear_context_started_at_ms()),
             harness_turn_started_at_ms: self.snapshot.harness_turn.map(|turn| turn.started_at_ms),
             turn_started_at_ms: self.snapshot.activity_turn_started_at_ms,
-            expected_continuation,
+            expected_continuation: None,
+            inferred_idle_since_ms: None,
             queued_commands: self.snapshot.queued_prompts.len(),
             tools_in_flight: self.foreground_tools.snapshot(),
             background_started_at_ms: self
@@ -588,7 +585,11 @@ impl DurableRelay {
             last_acp_activity_at_ms: self.acp_activity.last_at_ms(),
             current_step_started_at_ms: self.step_clock.started_at_ms(),
             idle_since_ms: self.snapshot.idle_since_ms,
-        }
+        };
+        (facts.expected_continuation, facts.inferred_idle_since_ms) = self
+            .replied_verdict
+            .inference(self.turn_context.generation(), &facts);
+        facts
     }
 
     /// Whether the session's idle clock should be running.
@@ -637,66 +638,11 @@ impl DurableRelay {
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
         self.verdict_harness = Some(harness);
+        self.turn_context.set_session_id(&self.snapshot.session_id);
     }
 
     pub fn turn_context(&self) -> mj_core::activity::verdict::TurnContext {
         self.turn_context.clone()
-    }
-
-    pub fn pending_replied_verdict(
-        &mut self,
-    ) -> Option<(u64, mj_core::activity::verdict::TurnEvidence)> {
-        if !std::mem::take(&mut self.replied_verdict_pending) {
-            return None;
-        }
-        let harness = self.verdict_harness?;
-        let facts = self.activity_facts();
-        if facts.background_commands > 0
-            || facts.goal_running
-            || self.snapshot.active_prompt.is_some()
-            || self.snapshot.harness_turn.is_some()
-            || facts.queued_commands > 0
-            || matches!(
-                self.snapshot.execution,
-                RelayExecutionState::Closing | RelayExecutionState::Closed
-            )
-        {
-            return None;
-        }
-        let evidence = self.turn_context.evidence(
-            harness,
-            mj_core::activity::verdict::TurnPhase::Replied,
-            &facts,
-            epoch_millis(),
-        );
-        Some((self.turn_context.generation(), evidence))
-    }
-
-    pub fn expect_continuation(
-        &mut self,
-        since_ms: i64,
-        _note: String,
-        generation: u64,
-    ) -> Result<()> {
-        let facts = self.activity_facts();
-        if generation != self.turn_context.generation()
-            || facts.background_commands > 0
-            || facts.goal_running
-            || facts.queued_commands > 0
-            || self.snapshot.active_prompt.is_some()
-            || self.snapshot.harness_turn.is_some()
-            || matches!(
-                self.snapshot.execution,
-                RelayExecutionState::Closing | RelayExecutionState::Closed
-            )
-        {
-            return Ok(());
-        }
-        *self
-            .expected_continuation
-            .lock()
-            .expect("continuation lock poisoned") = Some(since_ms);
-        self.persist_activity_transition()
     }
 
     pub fn acp_activity_clock(&self) -> AcpActivityClock {

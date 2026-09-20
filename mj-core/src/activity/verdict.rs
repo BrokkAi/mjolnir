@@ -56,6 +56,9 @@ struct TurnContextState {
     recent_tools: VecDeque<String>,
     background_commands: usize,
     queued_commands: usize,
+    background_inventory: Vec<crate::relay::BackgroundCommand>,
+    native_agent_ids: Vec<String>,
+    session_id: String,
 }
 
 /// The relay and runtime share this small process-local evidence accumulator.
@@ -71,6 +74,9 @@ impl TurnContext {
             user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
+            background_inventory: std::mem::take(&mut state.background_inventory),
+            native_agent_ids: std::mem::take(&mut state.native_agent_ids),
+            session_id: std::mem::take(&mut state.session_id),
             ..Default::default()
         };
     }
@@ -104,9 +110,48 @@ impl TurnContext {
         }
     }
 
+    pub fn set_session_id(&self, session_id: &str) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .session_id = session_id.into();
+    }
+
+    pub fn session_id(&self) -> String {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .session_id
+            .clone()
+    }
+
+    /// Compare identities as well as counts; identical level reports are not activity.
+    pub fn set_background_inventory(
+        &self,
+        mut commands: Vec<crate::relay::BackgroundCommand>,
+        mut native_agent_ids: Vec<String>,
+    ) {
+        commands.sort_by(|a, b| a.id.cmp(&b.id));
+        native_agent_ids.sort();
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        if state.background_inventory != commands || state.native_agent_ids != native_agent_ids {
+            state.background_inventory = commands;
+            state.native_agent_ids = native_agent_ids;
+            state.generation = state.generation.wrapping_add(1);
+        }
+    }
+
     pub fn observe(&self, update: &SessionUpdate) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
-        state.generation = state.generation.wrapping_add(1);
+        if matches!(
+            update,
+            SessionUpdate::AgentMessageChunk(_)
+                | SessionUpdate::AgentThoughtChunk(_)
+                | SessionUpdate::ToolCall(_)
+                | SessionUpdate::ToolCallUpdate(_)
+        ) {
+            state.generation = state.generation.wrapping_add(1);
+        }
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let id = chunk.message_id.as_ref().map(ToString::to_string);
@@ -252,6 +297,7 @@ fn probability(value: &Value) -> Result<f32> {
 pub enum Decision {
     AwaitingInput,
     ExpectContinuation,
+    InferIdle,
     KeepCurrent,
 }
 
@@ -262,6 +308,7 @@ pub fn decide(phase: TurnPhase, verdict: &TurnVerdict) -> Decision {
     match (phase, verdict.waiting_on) {
         (TurnPhase::Running, WaitingOn::User) => Decision::AwaitingInput,
         (TurnPhase::Replied, WaitingOn::BackgroundWork) => Decision::ExpectContinuation,
+        (TurnPhase::Replied, WaitingOn::Finished | WaitingOn::User) => Decision::InferIdle,
         _ => Decision::KeepCurrent,
     }
 }
@@ -420,6 +467,11 @@ mod tests {
                             if (ACT_CONFIDENCE..=1.0).contains(&confidence) =>
                         {
                             Decision::ExpectContinuation
+                        }
+                        (TurnPhase::Replied, WaitingOn::Finished | WaitingOn::User)
+                            if (ACT_CONFIDENCE..=1.0).contains(&confidence) =>
+                        {
+                            Decision::InferIdle
                         }
                         _ => Decision::KeepCurrent,
                     };

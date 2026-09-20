@@ -1,4 +1,5 @@
 use super::*;
+use tracing::instrument::WithSubscriber;
 
 pub(crate) async fn run_relay_coordinator_with_shells(
     relay: Arc<Mutex<DurableRelay>>,
@@ -33,6 +34,9 @@ async fn run_relay_coordinator_with_verdict(
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
     let mut verdict_tasks = tokio::task::JoinSet::new();
+    let mut verdict_generation = None;
+    let mut verdict_poll = tokio::time::interval(std::time::Duration::from_secs(1));
+    verdict_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut in_flight = BTreeMap::new();
     let mut session_configured = false;
     let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
@@ -49,34 +53,45 @@ async fn run_relay_coordinator_with_verdict(
     // restarting the wait. Only the persisted wall deadline crosses restarts.
     let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
     loop {
+        let invalidated_generation = verdict_generation.filter(|generation| {
+            !relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .replied_verdict_is_current(*generation)
+        });
+        if let Some(generation) = invalidated_generation {
+            tracing::info!(target: "mj_jev", generation, phase = "replied",
+                session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
+                reason = "evidence_or_lifecycle_changed", outcome = "cancelled", "Jev request invalidated");
+            verdict_tasks.abort_all();
+            verdict_generation = None;
+        }
         let pending = relay
             .lock()
             .expect("relay state lock poisoned")
             .pending_replied_verdict();
-        if let Some((generation, evidence)) = pending
-            && let Some(client) = verdict.clone()
-        {
-            // Only the most recent completed turn can affect this session.
-            verdict_tasks.abort_all();
-            verdict_tasks.spawn(async move {
-                use mj_core::activity::verdict::{Decision, TurnPhase, decide};
-                match client.ask(&evidence).await {
-                    Ok(answer)
-                        if decide(TurnPhase::Replied, &answer) == Decision::ExpectContinuation =>
-                    {
-                        Some(RuntimeEvent::ContinuationExpected {
-                            since_ms: mj_core::clock::epoch_millis(),
-                            note: "expecting the agent to continue".into(),
-                            generation,
-                        })
+        if let Some((generation, evidence)) = pending {
+            if let Some(client) = verdict.clone() {
+                verdict_tasks.abort_all();
+                verdict_generation = Some(generation);
+                let session = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .turn_context()
+                    .session_id();
+                verdict_tasks.spawn(
+                    async move {
+                        let (attempt, answer) =
+                            client.ask_logged(&session, generation, &evidence).await;
+                        (generation, attempt, answer)
                     }
-                    Ok(_) => None,
-                    Err(error) => {
-                        tracing::warn!(%error, "could not classify the completed turn");
-                        None
-                    }
-                }
-            });
+                    .with_current_subscriber(),
+                );
+            } else {
+                tracing::info!(target: "mj_jev", generation, phase = "replied", outcome = "skipped",
+                    session = %relay.lock().expect("relay state lock poisoned").turn_context().session_id(),
+                    reason = "classifier_unavailable", "Jev classification skipped");
+            }
         }
         let capacity_deadline = relay
             .lock()
@@ -113,6 +128,7 @@ async fn run_relay_coordinator_with_verdict(
                         &mut kimi_tasks,
                         queued,
                     ).await? {
+                        verdict_tasks.shutdown().await;
                         return Ok(());
                     }
                     dispatch_pending(
@@ -131,6 +147,7 @@ async fn run_relay_coordinator_with_verdict(
                         &mut in_flight,
                         "ACP runtime stopped before the command completed",
                     )?;
+                    verdict_tasks.shutdown().await;
                     return Ok(());
                 };
                 if record_runtime_event_batch(
@@ -142,6 +159,7 @@ async fn run_relay_coordinator_with_verdict(
                     &mut user_shells,
                     &mut kimi_tasks,
                 ).await? {
+                    verdict_tasks.shutdown().await;
                     return Ok(());
                 }
                 dispatch_pending(
@@ -169,13 +187,45 @@ async fn run_relay_coordinator_with_verdict(
                     .refresh(&relay, false)
                     .await?;
             }
+            _ = verdict_poll.tick(), if verdict.is_some() => {}
             result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() => {
                 match result {
-                    Some(Ok(Some(event))) => {
-                        record_runtime_event(&relay, &mut in_flight, event)?;
+                    Some(Ok((generation, mut attempt, answer))) => {
+                        use mj_core::activity::verdict::{Decision, TurnPhase, decide};
+                        if verdict_generation == Some(generation) {
+                            verdict_generation = None;
+                        }
+                        let mut relay = relay.lock().expect("relay state lock poisoned");
+                        if !relay.replied_verdict_is_current(generation) {
+                            attempt.finish("discarded", "activity_or_generation_changed");
+                            continue;
+                        }
+                        match answer {
+                            Ok(answer) => {
+                                let decision = decide(TurnPhase::Replied, &answer);
+                                let reason = match relay.apply_replied_decision(generation, decision, mj_core::clock::epoch_millis()) {
+                                    Ok(reason) => reason,
+                                    Err(error) => {
+                                        attempt.finish("failed", "persist_activity_transition");
+                                        return Err(error);
+                                    }
+                                };
+                                attempt.finish(if reason == "applied" { "applied" } else { "unchanged" }, reason);
+                                if decision == Decision::KeepCurrent {
+                                    relay.retry_replied_verdict(generation);
+                                }
+                            }
+                            Err(_) => {
+                                attempt.finish("unchanged", "request_failed");
+                                relay.retry_replied_verdict(generation);
+                            }
+                        }
                     }
                     Some(Err(error)) if !error.is_cancelled() => {
-                        tracing::warn!(%error, "completed-turn classifier task failed");
+                        tracing::warn!(target: "mj_jev", %error, "completed-turn classifier task failed");
+                        if let Some(generation) = verdict_generation.take() {
+                            relay.lock().expect("relay state lock poisoned").retry_replied_verdict(generation);
+                        }
                     }
                     _ => {}
                 }

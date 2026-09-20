@@ -413,6 +413,9 @@ pub struct RelayOperationalState {
     /// Process-local inference; a restarted worker must forget it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_continuation: Option<i64>,
+    /// Process-local Jev inference, never recovered as proof of idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_idle_since_ms: Option<i64>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -592,6 +595,7 @@ impl RelayOperationalState {
                 .min(),
             background_commands: self.background_commands.len() + self.native_agent_count,
             expected_continuation: self.expected_continuation,
+            inferred_idle_since_ms: self.inferred_idle_since_ms,
             active_user_shells: self.active_user_shells.len(),
             active_agent_terminals: self.active_agent_terminals.len(),
             goal_active: self.goal.active(),
@@ -1064,6 +1068,7 @@ impl RelaySnapshot {
                 .filter(|agent| agent.state == crate::native_agent::NativeAgentState::Running)
                 .count(),
             expected_continuation: None,
+            inferred_idle_since_ms: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
             activity_turn_started_at_ms: self.activity_turn_started_at_ms,
