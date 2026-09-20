@@ -92,8 +92,6 @@ def stop_from_dashboard(client) -> None:
     client.send(b"\x1bOQ")
     client.wait_for("Click/Enter runs \u00b7 Tab moves \u00b7 Esc closes")
     client.send(b"stop\r")
-    client.wait_for("Suspend session?")
-    client.send(b"\r")
     # A stop needs the daemon's session manager to have adopted the session,
     # and adoption is asynchronous: a session the browser created moments ago
     # can still be unmanaged when the first stop reaches it. The surface offers

@@ -1398,23 +1398,30 @@ impl DashboardState {
             CommandId::CloseWorkspace => self.begin_workspace_command(true),
             CommandId::SuspendSession => {
                 if let Some(session) = self.selected_session() {
+                    let active_children = self
+                        .state
+                        .subagents
+                        .values()
+                        .filter(|r| r.parent_session_id == session.id)
+                        .filter(|r| {
+                            self.state
+                                .sessions
+                                .get(&r.child_session_id)
+                                .is_some_and(|s| s.state.is_active())
+                        })
+                        .count();
+                    let interrupting =
+                        self.attention_level(&session.id) == crate::AttentionLevel::Working;
+                    if !interrupting && active_children == 0 {
+                        return DashboardAction::Suspend {
+                            session_id: session.id.clone(),
+                        };
+                    }
                     self.mode =
                         crate::Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session.id.clone(),
-                            active_children: self
-                                .state
-                                .subagents
-                                .values()
-                                .filter(|r| r.parent_session_id == session.id)
-                                .filter(|r| {
-                                    self.state
-                                        .sessions
-                                        .get(&r.child_session_id)
-                                        .is_some_and(|s| s.state.is_active())
-                                })
-                                .count(),
-                            interrupting: self.attention_level(&session.id)
-                                == crate::AttentionLevel::Working,
+                            active_children,
+                            interrupting,
                         }));
                 }
                 DashboardAction::None

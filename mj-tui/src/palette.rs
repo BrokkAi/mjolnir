@@ -1033,18 +1033,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_suspend_opens_confirmation_before_dispatch() {
+    fn palette_suspends_an_idle_session_without_confirmation() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
         type_query(&mut dashboard, "suspend");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('s'))),
             DashboardAction::Suspend {
                 session_id: "session-1".into()
             }

@@ -4002,21 +4002,16 @@ fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
 }
 
 #[test]
-fn suspension_always_confirms_and_warns_when_interrupting_a_turn() {
+fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    // Idle suspension still confirms releasing the environment.
     assert_eq!(
         dashboard.dispatch_command(CommandId::SuspendSession),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('s'))),
         DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
     // Working suspension also explains that it interrupts the turn.
     dashboard
         .session_details
@@ -4702,8 +4697,58 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
 }
 
 #[test]
-fn suspend_session_always_confirms_and_cancel_is_safe() {
+fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
     let mut dashboard = dashboard_with_session(running_session());
+    let mut child = running_session();
+    child.id = "child".into();
+    dashboard.state.subagents.insert(
+        child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: "session-1".into(),
+            task_name: "child task".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "inspect".into(),
+            request_key: "request".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    dashboard.state.sessions.insert(child.id.clone(), child);
+    assert_eq!(dashboard.attention_level("session-1"), AttentionLevel::Idle);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::Confirm(dialog) if matches!(
+            dialog.confirmation,
+            crate::dialogs::Confirmation::SuspendSession {
+                active_children: 1,
+                interrupting: false,
+                ..
+            }
+        )
+    ));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn working_session_suspension_confirms_and_cancel_is_safe() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
     assert_eq!(
         chord(&mut dashboard, CommandId::SuspendSession),
         DashboardAction::None
@@ -4711,7 +4756,7 @@ fn suspend_session_always_confirms_and_cancel_is_safe() {
     assert!(
         matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::SuspendSession { .. }))
     );
-    // Enter initially activates Cancel, even when the session is idle.
+    // Enter initially activates Cancel.
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None

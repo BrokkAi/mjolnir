@@ -1232,7 +1232,7 @@ fn importing_session_renders_unknown_then_known_progress_and_ignores_navigation(
 }
 
 #[test]
-fn suspension_confirms_and_idle_restart_runs_from_the_palette() {
+fn idle_suspension_and_restart_run_from_the_palette() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
@@ -1248,11 +1248,6 @@ fn suspension_confirms_and_idle_restart_runs_from_the_palette() {
     );
     assert_eq!(
         dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('s'))),
         DashboardAction::Suspend {
             session_id: "session-1".into()
         }
