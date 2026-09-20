@@ -14,6 +14,7 @@ The keyboard reference should be easy to skim on ordinary terminals and searchab
 - [x] (2026-09-20 02:30Z) Connected supervised, cancellable background requests with a 400 ms debounce; focused background tests pass.
 - [x] (2026-09-20 02:40Z) Full dev-profile Cargo tests and clippy passed; final TUI suite passed after mouse/Escape refinements. Worker deployed and smoke-tested.
 - [x] (2026-09-20 02:40Z) Committed the shared contract and deployed proxy as `7372cef2`; reviewed the final UI changes and prepared the current-branch delivery to origin/master.
+- [x] (2026-09-20) Committed UI as `64ee22a7`. After a non-fast-forward push rejection, merged upstream `42b8bcf9` without conflicts in `7809498b`; combined CLI/TUI tests, formatting and clippy passed.
 
 ## Surprises & Discoveries
 
@@ -22,6 +23,8 @@ Substring filtering already exists in `mj-tui/src/help.rs`. Its unwrapped rows c
 ## Decision Log
 
 The user selected a grouped reference, substring improvements plus semantic search, and extending/deploying the public proxy. Literal matches stay first; at most eight additional semantic results with probability at least 0.70 follow in a Related shortcuts section. This preserves already-visible results. No commands execute from help. The user also explicitly requested pushing the finished work to origin/master. These decisions were recorded on 2026-09-19.
+
+On 2026-09-20, origin/master advanced with the independently validated shared-preflight change before the push. Preserve both histories by merging origin/master into the existing hel2 branch, without force, rebasing, or switching branches. The sole overlapping file was dashboard/io.rs, with independent changes that merged cleanly. Revalidate the combined CLI and TUI plus all-target clippy; reuse the already-passing full tests for unaffected modules.
 
 ## Outcomes & Retrospective
 
@@ -53,7 +56,7 @@ All registry commands and custom bindings remain reachable by scrolling or filte
 
 ## Idempotence and Recovery
 
-No database changes or new crates are needed. Test fixtures remain isolated. The proxy adds a route without changing the existing route contract; unsuccessful deployment leaves local fallback functional. Use the existing runbook's Worker rollback procedure if deployment verification regresses. Never force-push; report a non-fast-forward obstruction without altering branches.
+No database changes or new crates are needed. Test fixtures remain isolated. The proxy adds a route without changing the existing route contract; unsuccessful deployment leaves local fallback functional. Use the existing runbook's Worker rollback procedure if deployment verification regresses. Never force-push; inspect upstream advances and preserve them with a merge on the current branch when compatible, validating the combined result before retrying delivery.
 
 ## Artifacts and Notes
 
@@ -70,3 +73,5 @@ Initial plan recorded 2026-09-19 from the approved conversational plan; added th
 2026-09-20 update: recorded completed implementation, focused tests, deployed Worker version and synthetic verification. Full validation and commit/push remain.
 
 2026-09-20 completion update: recorded full validation, final TUI regression results, full-catalog semantic smoke results and the first implementation commit. This plan accompanies the final UI commit; the authorized remote delivery target is origin/master.
+
+2026-09-20 integration update: upstream advanced during validation. Merge `7809498b` preserves both features. Combined validation passed: 682 TUI tests (two existing ignores), 150 CLI unit tests, all enabled CLI integration tests including eight PTY tests, and all-target dev clippy with warnings denied. Logs are `merged-tests.log` and `merged-clippy.log` in the same validation directory. Formatting and diff checks passed. This update records why the original fast-forward delivery required a merge.
