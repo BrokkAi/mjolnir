@@ -13,13 +13,8 @@ pub(crate) fn render_full_frame(
     transcript_selected: bool,
 ) {
     let inner = frame.area();
-    let prompt_width = prompt_content_width(inner.width);
-    let visible_queued = chat.queued_prompts.len().min(3) as u16;
-    let input_rows = crate::chat::input::input_visual_rows(&chat.input, prompt_width) as u16;
-    let prompt_height = input_rows
-        .saturating_add(visible_queued)
-        .saturating_add(2)
-        .max(4)
+    let prompt_height = chat
+        .desired_prompt_height(inner.width)
         .min(inner.height.saturating_sub(6).max(3));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -662,6 +657,9 @@ pub(crate) fn render_composer_band(
             ))
         })
         .collect::<Vec<_>>();
+    if !prompt_lines.is_empty() {
+        prompt_lines.push(Line::default());
+    }
     let queue_rows = prompt_lines.len();
     prompt_lines.extend(if let Some(search) = chat.history_search.as_ref() {
         highlighted_input_lines(&chat.input, &search.query)

@@ -877,13 +877,17 @@ impl ChatState {
     }
 
     /// Rows the composer wants at `width`: the wrapped input, up to three
-    /// queued-prompt previews, and the block's own border rows.
+    /// queued-prompt previews with a separating row, and the block's borders.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
         let content_width = active::prompt_content_width(width);
         let input_rows =
             u16::try_from(input::input_visual_rows(&self.input, content_width)).unwrap_or(u16::MAX);
         let queued = u16::try_from(self.queued_prompts.len().min(3)).unwrap_or(3);
-        input_rows.saturating_add(queued).saturating_add(2).max(4)
+        input_rows
+            .saturating_add(queued)
+            .saturating_add(u16::from(queued > 0))
+            .saturating_add(2)
+            .max(4)
     }
 
     /// Draws only the composer band into `area`, for hosts that show the real
