@@ -357,7 +357,7 @@ impl ModalSurface for HelpOverlay {
     }
 
     fn text_input_focused(&self) -> bool {
-        false
+        self.search_focused
     }
 }
 

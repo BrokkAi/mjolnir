@@ -2,6 +2,7 @@ use super::*;
 
 impl DashboardContext {
     pub(crate) fn cancel_background_work(&mut self) {
+        self.help_search.cancel();
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
         if let Some(cancelled) = &self.review_discovery_cancel {

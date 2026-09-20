@@ -46,6 +46,10 @@ use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    HelpSearchFinished {
+        generation: u64,
+        result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
+    },
     RepositoryRemotesRepaired {
         generation: Option<u64>,
         retry: Box<DashboardAction>,
@@ -433,6 +437,9 @@ impl DashboardContext {
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
         match update {
+            DashboardIoUpdate::HelpSearchFinished { generation, result } => {
+                self.dashboard.apply_help_search_result(generation, result);
+            }
             DashboardIoUpdate::WorkspacePaneSizes { result } => match result {
                 Ok(layouts) => {
                     for (workspace_id, sizes) in layouts {
