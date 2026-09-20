@@ -177,7 +177,8 @@ impl ChatState {
     }
 
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
-        if self.prompt_in_flight
+        if self.targeted_turn_control_supported
+            && self.prompt_in_flight
             && self
                 .queued_prompts
                 .front()

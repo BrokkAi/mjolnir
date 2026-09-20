@@ -5565,12 +5565,13 @@ function turnControlState(session) {
   const pending = Boolean(session?.cancelling_prompt_id) || steering?.status === 'pending';
   const uncertain = steering?.status === 'unconfirmed';
   const failed = steering?.status === 'failed';
-  const queued = (session?.queued_prompts || [])[0];
+  const targeted = session?.targeted_turn_control_supported === true;
+  const queued = targeted && (session?.queued_prompts || [])[0];
   return {
     pending, uncertain, failed,
     label: session?.cancelling_prompt_id ? 'Interrupting turn…' : steering?.status === 'pending' ? 'Steering…'
       : uncertain ? 'Delivery unconfirmed' : queued ? 'Steer queued prompt' : 'Interrupt turn',
-    command: session?.active_prompt_id ? queued
+    command: targeted && session?.active_prompt_id ? queued
       ? { type: 'steer', data: { active_prompt_id: session.active_prompt_id, queued_prompt_id: queued.id || queued.command_id } }
       : { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null,
   };

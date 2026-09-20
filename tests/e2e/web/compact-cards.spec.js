@@ -852,6 +852,7 @@ test('composer steering survives reconnect and Escape never confirms cancellatio
   const parent = session('steering', 'project', 'Project', {
     queued: 1, capabilities: { prompt: true, interrupt_turn: true },
   });
+  parent.targeted_turn_control_supported = true;
   parent.active_prompt_id = 'turn-one'; parent.chat_phase = 'running';
   const state = await mount(page, [parent]);
   await card(page, 'steering').click();
@@ -957,3 +958,20 @@ test('destroying retained history offers explicit branch deletion', async ({ pag
   expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'retained', delete_branch: true });
   await expect(page.getByRole('button', { name: 'Destroy session…', exact: true })).toBeDisabled();
 });
+
+for (const queued of [0, 1]) {
+  test(`older worker remains interruptible with ${queued} queued prompts`, async ({ page }) => {
+    const parent = session('old-worker', 'project', 'Project', {
+      queued, capabilities: { prompt: true, interrupt_turn: true },
+    });
+    parent.targeted_turn_control_supported = false;
+    parent.active_prompt_id = 'old-turn';
+    parent.chat_phase = 'running';
+    const state = await mount(page, [parent]);
+    await card(page, 'old-worker').click();
+    await expect(page.locator('#cancel-turn')).toHaveText('Interrupt turn');
+    await page.locator('#prompt-text').press('Escape');
+    await expect.poll(() => state.actions.length).toBe(1);
+    expect(state.actions[0]).toEqual({ action: 'interrupt-turn', session_id: 'old-worker' });
+  });
+}

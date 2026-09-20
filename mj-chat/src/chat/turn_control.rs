@@ -30,6 +30,9 @@ pub(super) fn dialog() -> Dialog<Control> {
 
 impl ChatState {
     pub(super) fn escape_command(&self) -> Option<RelayCommand> {
+        if !self.targeted_turn_control_supported {
+            return Some(RelayCommand::CancelTurn);
+        }
         let Some(active_prompt_id) = self.active_prompt_id.clone() else {
             return Some(RelayCommand::CancelTurn);
         };
@@ -44,6 +47,7 @@ impl ChatState {
     }
 
     pub(super) fn sync_turn_control(&mut self, state: &RelayOperationalState) {
+        self.targeted_turn_control_supported = state.supports_targeted_turn_control();
         let changed = self.steering != state.steering;
         if self.turn_control_awaiting_state.as_ref().is_some_and(|id| {
             state.steering.as_ref().is_some_and(|s| s.command_id == *id)

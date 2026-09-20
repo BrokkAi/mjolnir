@@ -455,6 +455,9 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    /// Negotiated connection protocol, supplied by the controller after hello.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_protocol_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_agents: Vec<crate::native_agent::NativeAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -583,6 +586,18 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Targeted turn control was introduced with relay protocol 17.
+    #[must_use]
+    pub fn supports_targeted_turn_control(&self) -> bool {
+        self.relay_protocol_version.is_some_and(|version| {
+            version
+                >= RelayCommand::CancelTurnFor {
+                    active_prompt_id: String::new(),
+                }
+                .minimum_protocol()
+        })
+    }
+
     /// Whether this worker has a usable native ACP session.
     ///
     /// Workers predating `acp_ready` are treated as ready for compatibility;
@@ -1125,6 +1140,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            relay_protocol_version: None,
             native_agents: self.native_agents.values().cloned().collect(),
             steering: self.steering.clone(),
             cancelling_prompt_id: self.cancelling_prompt_id.clone(),

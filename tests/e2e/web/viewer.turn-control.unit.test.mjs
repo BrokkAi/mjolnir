@@ -11,10 +11,10 @@ vm.runInContext(source.slice(begin, end), context);
 const state = session => JSON.parse(JSON.stringify(context.turnControlState(session)));
 
 test('queued input produces an identity-bound steer instead of cancellation', () => {
-  const result = state({ active_prompt_id: 'turn-1', queued_prompts: [{ id: 'queued-1' }] });
+  const result = state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1', queued_prompts: [{ id: 'queued-1' }] });
   assert.deepEqual(result.command, { type: 'steer', data: { active_prompt_id: 'turn-1', queued_prompt_id: 'queued-1' } });
   assert.equal(result.label, 'Steer queued prompt');
-  assert.equal(state({ active_prompt_id: 'turn-1' }).command.type, 'cancel_turn_for');
+  assert.equal(state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1' }).command.type, 'cancel_turn_for');
 });
 
 test('reconnected pending and uncertain operations cannot silently become cancellation', () => {

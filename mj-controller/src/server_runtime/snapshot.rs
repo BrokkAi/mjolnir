@@ -547,6 +547,8 @@ pub(super) fn viewer_snapshot(
         }
         let live = operational.get(&session.id);
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
+        session.targeted_turn_control_supported =
+            live.is_some_and(|state| state.supports_targeted_turn_control());
         session.steering = live.and_then(|s| s.steering.clone());
         session.active_prompt_id =
             live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));

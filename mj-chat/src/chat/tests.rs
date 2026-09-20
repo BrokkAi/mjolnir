@@ -585,6 +585,7 @@ fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
     let task_area = chat.task_control_area.expect("task control hitbox");
     chat.mark_prompt_submitted("continue");
     chat.steering_supported = Some(true);
+    chat.targeted_turn_control_supported = true;
     chat.queued_prompts.push_back(queued("next", "follow up"));
     let rows = drawn_transcript(&mut chat, 100, 24);
     let shifted_task_area = chat.task_control_area.expect("shifted task control hitbox");

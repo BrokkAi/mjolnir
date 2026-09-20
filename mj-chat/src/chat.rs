@@ -663,6 +663,7 @@ pub struct ChatState {
     /// so cancellation and the composer's cancel hint key on this instead.
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
+    targeted_turn_control_supported: bool,
     active_prompt_id: Option<String>,
     steering: Option<mj_core::relay::SteeringOperation>,
     cancelling_prompt_id: Option<String>,
@@ -822,6 +823,7 @@ impl ChatState {
                 ..mj_client::usage_format::SessionActivity::default()
             },
             steering_supported: None,
+            targeted_turn_control_supported: false,
             active_prompt_id: None,
             steering: None,
             cancelling_prompt_id: None,
