@@ -232,7 +232,7 @@ fn render_dashboard_title(frame: &mut Frame, area: Rect, workspace_name: &str, v
 pub(crate) fn render(frame: &mut Frame, dashboard: &mut DashboardState) {
     let mut chats = std::collections::BTreeMap::new();
     let opening = std::collections::BTreeMap::new();
-    crate::combined::render_combined(frame, dashboard, &mut chats, &opening, false);
+    crate::combined::render_combined_for_test(frame, dashboard, &mut chats, &opening, false);
 }
 
 /// The width from which the Sessions sidebar sits beside the conversation.
