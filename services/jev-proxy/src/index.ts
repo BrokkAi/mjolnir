@@ -1,3 +1,4 @@
+import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
@@ -23,6 +24,8 @@ interface TurnEvidence {
   user_prompt_tail: string;
   assistant_text_tail: string;
 }
+
+type TurnEvidenceV2 = Omit<TurnEvidence, "recent_tools"> & { transcript_summary: string };
 
 class BodyTooLarge extends Error {}
 class UpstreamDeadline extends Error {}
@@ -59,6 +62,13 @@ function evidence(value: unknown): value is TurnEvidence {
     && Array.isArray(value.tools_in_flight) && value.tools_in_flight.length <= 16
     && value.tools_in_flight.every(tool => object(tool)
       && Object.keys(tool).length === 2 && text(tool.title, 128) && count(tool.running_s));
+}
+
+function evidenceV2(value: unknown): value is TurnEvidenceV2 {
+  if (!object(value) || !("transcript_summary" in value) || "recent_tools" in value
+    || !text(value.transcript_summary, 48 * 1024)) return false;
+  const { transcript_summary: _summary, ...rest } = value;
+  return evidence({ ...rest, recent_tools: [] });
 }
 
 function answers(value: unknown): Record<string, unknown> | undefined {
@@ -119,7 +129,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | HelpSearchRequest, key: string): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest, key: string): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -137,7 +147,7 @@ async function classify(state: TurnEvidence | HelpSearchRequest, key: string): P
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : questions }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "transcript_summary" in state ? questions : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
@@ -161,7 +171,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const search = url.pathname === "/v1/help-search";
-    if ((!search && url.pathname !== "/v1/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -184,6 +194,9 @@ export default {
     }
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
+    }
+    if (url.pathname === "/v2/turn-verdict") {
+      return evidenceV2(state) ? classify(state, key) : error("invalid_evidence", 400);
     }
     return evidence(state) ? classify(state, key) : error("invalid_evidence", 400);
   },

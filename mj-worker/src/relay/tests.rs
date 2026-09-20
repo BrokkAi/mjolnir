@@ -4225,3 +4225,56 @@ fn clear_refuses_pending_work_and_invalid_input_without_changing_identity() {
     );
     assert!(relay.snapshot.dispatches.contains_key("pending-work"));
 }
+
+#[test]
+fn transcript_summary_survives_reopen_without_promoting_updated_calls() {
+    use agent_client_protocol::schema::v1::{
+        ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    };
+    use mj_core::activity::{ActivityFacts, verdict::TurnPhase};
+    use mj_core::config::HarnessKind;
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    for n in 0..9 {
+        relay
+            .record_session_update(SessionUpdate::ToolCall(
+                ToolCall::new(format!("call-{n}"), "Execute")
+                    .kind(ToolKind::Execute)
+                    .status(ToolCallStatus::Completed)
+                    .raw_input(
+                        serde_json::json!({"command":format!("cargo test --marker=PRIVATE_{n}")}),
+                    ),
+            ))
+            .unwrap();
+    }
+    relay
+        .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "call-0",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+        )))
+        .unwrap();
+    let before = relay
+        .turn_context()
+        .evidence(
+            HarnessKind::Codex,
+            TurnPhase::Replied,
+            &ActivityFacts::default(),
+            0,
+        )
+        .transcript_summary;
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let after = relay
+        .turn_context()
+        .evidence(
+            HarnessKind::Codex,
+            TurnPhase::Replied,
+            &ActivityFacts::default(),
+            0,
+        )
+        .transcript_summary;
+    assert_eq!(before, after);
+    assert!(!after.contains("PRIVATE_0"));
+    assert!(after.contains("PRIVATE_8"));
+    assert!(after.contains("cargo test [failed]"));
+}

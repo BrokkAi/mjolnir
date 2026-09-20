@@ -1,8 +1,8 @@
 # Jev proxy operations
 
-The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes are `/v1/turn-verdict` and `/v1/help-search`. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
+The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict`, `/v2/turn-verdict`, and `/v1/help-search`. The v2 route is prepared in source; deploy the proxy before releasing a worker that uses it. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
 
-The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json`, calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
+The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json` (v2) or the frozen `verdict_questions_v1.json` (v1), calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
 
 ## Help search
 
@@ -38,9 +38,9 @@ Expect HTTP 200 with `answers.waiting_on` containing `type`, `choice`, and `conf
 
 The endpoints are public. Separate Cloudflare rate limiters (`TURN_RATE_LIMITER` and `HELP_RATE_LIMITER`) each allow approximately 120 requests per 60 seconds per client IP at each Cloudflare location. Help traffic does not consume turn-verdict capacity. Users behind the same NAT share these allowances. This is abuse mitigation, not a global spending ceiling; there is no daily budget counter. Adjust the binding limits in wrangler.jsonc and deploy when necessary.
 
-Request and upstream response bodies are bounded to 64 KiB. Evidence fields have the same byte/list caps as mj's Rust collector: prompt 1024 bytes, assistant 2048 bytes, tool titles 128 bytes, eight recent tools and sixteen active tools. Upstream requests have an eight-second deadline, including reading the response, and do not follow redirects. Rate limiting returns 429 with Retry-After; upstream errors return sanitized 502/504 responses. mj preserves its current activity state on failures.
+Request and upstream response bodies are bounded to 64 KiB. Both versions retain prompt 1024-byte, assistant 2048-byte, active-title 128-byte and sixteen-active-tool caps. V1 accepts eight recent 128-byte tool strings. V2 replaces `recent_tools` with `transcript_summary`, at most 48 KiB: the shared projection retains eight newest distinct calls in detail, summarizes older calls as names/outcomes, and marks bounded excerpts. The Rust collector also measures serialized JSON (including escaping) to keep the entire request under 64 KiB. Upstream requests have an eight-second deadline, including reading the response, and do not follow redirects. Rate limiting returns 429 with Retry-After; upstream errors return sanitized 502/504 responses. mj preserves its current activity state on failures.
 
-Evidence includes recent conversation text and tool titles; both Cloudflare and TypeSafe process it. The Worker has no application logging, persistence, or caching of evidence, credentials, IPs, or provider response bodies. Platform request metadata and vendor retention remain governed by those services. Do not enable payload logging or use real conversations for smoke tests.
+V2 evidence includes recent conversation text and the eight newest tool-call arguments/results; older calls include names and outcomes. V1 evidence includes recent conversation text and tool titles; both Cloudflare and TypeSafe process it. The Worker has no application logging, persistence, or caching of evidence, credentials, IPs, or provider response bodies. Platform request metadata and vendor retention remain governed by those services. Do not enable payload logging or use real conversations for smoke tests.
 
 Help-search requests contain only the entered search query and static help descriptions, not session contents, configured bindings or local availability details. The same no-payload-logging and no-persistence behavior applies.
 
@@ -53,3 +53,9 @@ Inspect versions with `npx wrangler deployments list`. Restore a known-good vers
 The first deployment on 2026-09-19 was verified with HTTP 200 and valid typed answers, including a request without a User-Agent (matching the Rust client). No real conversation was sent.
 
 Help search was deployed as version `c625e686-1591-420d-b6ae-2dc5902ffd63` on 2026-09-20 UTC (2026-09-19 America/Chicago). Synthetic requests returned HTTP 200: “leave agents running when I exit” scored Detach 0.96, and “show two conversations side by side” scored Open in split right 0.85. Turn-verdict still returned typed answers with `finished` confidence 0.98.
+
+## Shared transcript summary rollout
+
+Deploy the backward-compatible proxy before shipping mj workers using `/v2/turn-verdict`. V1 retains its exact field validator and question resource so old workers continue working. Test v2 with synthetic evidence replacing `recent_tools` in the example with `transcript_summary`; both routes must return typed answers. No deployment was performed by the shared-summary implementation task.
+
+Worker request logs report summary size and active tool count rather than serializing evidence. The separate, user-authorized bifrost2 replay is documented in `.agents/docs/jev-bifrost2-evidence-experiment-20260920.md`; it is not a production smoke-test procedure.

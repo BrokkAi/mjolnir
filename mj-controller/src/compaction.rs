@@ -7,40 +7,23 @@ use anyhow::{Context, Result, ensure};
 use futures::{TryStreamExt, stream};
 use serde_json::Value;
 
-use mj_checkpoint::archive::{CanonicalSessionSnapshot, CanonicalTranscriptBody};
+use mj_checkpoint::archive::CanonicalSessionSnapshot;
+#[cfg(test)]
+use mj_checkpoint::archive::CanonicalTranscriptBody;
+use mj_transcript::summary::{SummaryRole, TranscriptSummary};
 
 pub use mj_core::config::DEFAULT_CONTEXT_BYTES;
 
-/// Opening sentence of every handoff this module writes. Generation and
-/// detection share it so a later resume can always recognize its own prior
-/// handoff turns.
-pub const HANDOFF_PREAMBLE: &str =
-    "You are continuing a coding session previously run by another ACP harness.";
-/// Opening sentence of a hand-off written when an archived session is restored
-/// from the SessionWiki index. The restored session has no workspace from the
-/// old one, so it is marked apart from a cross-harness resume.
-pub const ARCHIVE_HANDOFF_PREAMBLE: &str = "Archived session restored from SessionWiki.";
-/// Opening sentence of the byte-truncating handoff this pipeline replaced.
-/// Sessions resumed by that build still carry it in their transcripts.
-pub const LEGACY_HANDOFF_PREAMBLE: &str =
-    "Continue this coding session from the portable transcript below.";
-/// What a prior handoff turn contributes to a new compaction. The transcript
-/// already carries the pre-resume lineage as ordinary turns, so repeating the
-/// handoff body would only spend budget on a summary of a summary.
-const HANDOFF_PLACEHOLDER: &str =
-    "[cross-harness resume handoff: continuing work from a prior harness]";
+#[cfg(test)]
+use mj_transcript::summary::HANDOFF_PLACEHOLDER;
+pub use mj_transcript::summary::{
+    ARCHIVE_HANDOFF_PREAMBLE, HANDOFF_PREAMBLE, LEGACY_HANDOFF_PREAMBLE,
+};
 pub const MIN_CONTEXT_BYTES: usize = 32 * 1024;
 /// How many summarizer requests run at once. Every page is independent, and
 /// each round of the reduction is independent within itself, so the only
 /// reason to serialize them is politeness to the provider.
 pub const COMPACTION_CONCURRENCY: usize = 8;
-const EXACT_TAIL_TURNS: usize = 2;
-// OpenCode v2 protects 40k estimated tokens of older tool output and only
-// prunes when doing so recovers more than 20k. Hel budgets imports in bytes,
-// so use the same estimator's four-bytes-per-token conversion explicitly.
-const TOOL_OUTPUT_PROTECT_BYTES: usize = 40_000 * 4;
-const TOOL_OUTPUT_PRUNE_MINIMUM_BYTES: usize = 20_000 * 4;
-const CLEARED_TOOL_RESULT: &str = "[Old tool result content cleared]";
 /// The smallest page worth halving. Below it a rejection is about the content
 /// or the backend, not the size.
 const MIN_SPLIT_PAGE_BYTES: usize = 4 * 1024;
@@ -197,7 +180,8 @@ pub async fn compact_snapshot(
         "cross-harness context byte budget must be at least {MIN_CONTEXT_BYTES}"
     );
     let turns = turns_from_snapshot(snapshot)?;
-    let compactable_turns = prune_old_tool_outputs(&turns);
+    let retained = retained_snapshot(snapshot, budget.handoff_bytes / 3);
+    let compactable_turns = &turns;
     let page_overhead = page_prompt("").len();
     let rendered_bytes = compactable_turns
         .iter()
@@ -208,10 +192,10 @@ pub async fn compact_snapshot(
 
     if rendered_bytes.saturating_add(page_overhead) <= budget.page_bytes {
         log_compaction_plan(rendered_bytes, 1, budget, true);
-        let transcript = render_turns(&compactable_turns, 0);
+        let transcript = render_turns(compactable_turns, 0);
         match requests.run(page_prompt(&transcript)).await? {
             RequestOutcome::Summary(summary) => {
-                return handoff(&summary, None, budget.handoff_bytes);
+                return handoff(&summary, Some(&retained), budget.handoff_bytes);
             }
             // The transcript fit Hel's byte budget but not the model's real
             // context, so fall through to the paged pipeline, whose prompts are
@@ -220,25 +204,13 @@ pub async fn compact_snapshot(
         }
     }
 
-    // Natural page boundaries come from the user-turn index. If even that
-    // compact first-pass view cannot fit, fail instead of pretending the
-    // target model can plan the import coherently.
-    let user_index = render_user_index(&turns);
-    ensure!(
-        user_index.len() <= budget.handoff_bytes,
-        "too large to import across harnesses: user messages alone exceed the target context byte budget"
-    );
-
-    let tail_start = exact_tail_start(&turns, budget.handoff_bytes);
-    let head = &compactable_turns[..tail_start];
-    let tail = &turns[tail_start..];
+    let head = compactable_turns;
     let page_payload_bytes = budget.page_bytes.saturating_sub(page_overhead).max(1);
     let pages = build_turn_pages(head, page_payload_bytes);
     log_compaction_plan(rendered_bytes, pages.len(), budget, false);
     let summaries = summarize_pages(pages, requests).await?;
     let summary = reduce_summaries(summaries, budget.page_bytes, requests).await?;
-    let exact_tail = (!tail.is_empty()).then(|| render_turns(tail, tail_start));
-    handoff(&summary, exact_tail.as_deref(), budget.handoff_bytes)
+    handoff(&summary, Some(&retained), budget.handoff_bytes)
 }
 
 /// State the plan before spending on it, so a slow compaction can be read out
@@ -259,49 +231,6 @@ fn log_compaction_plan(
         single_request,
         "compaction paging decided"
     );
-}
-
-fn prune_old_tool_outputs(turns: &[Turn]) -> Vec<Turn> {
-    let mut pruned = turns.to_vec();
-    let older_turns = turns.len().saturating_sub(EXACT_TAIL_TURNS);
-    let mut retained_bytes = 0usize;
-    let mut prune_bytes = 0usize;
-    let mut candidates = Vec::new();
-
-    for turn_index in (0..older_turns).rev() {
-        for event_index in (0..turns[turn_index].events.len()).rev() {
-            let TurnEvent::Tool(value) = &turns[turn_index].events[event_index] else {
-                continue;
-            };
-            let Some(size) = completed_tool_output_bytes(value) else {
-                continue;
-            };
-            retained_bytes = retained_bytes.saturating_add(size);
-            if retained_bytes > TOOL_OUTPUT_PROTECT_BYTES {
-                prune_bytes = prune_bytes.saturating_add(size);
-                candidates.push((turn_index, event_index));
-            }
-        }
-    }
-
-    if prune_bytes <= TOOL_OUTPUT_PRUNE_MINIMUM_BYTES {
-        return pruned;
-    }
-    for (turn_index, event_index) in candidates {
-        let TurnEvent::Tool(value) = &mut pruned[turn_index].events[event_index] else {
-            unreachable!();
-        };
-        value["content"] = Value::String(CLEARED_TOOL_RESULT.into());
-    }
-    pruned
-}
-
-fn completed_tool_output_bytes(value: &Value) -> Option<usize> {
-    (value.get("status").and_then(Value::as_str) == Some("completed")).then(|| {
-        value
-            .get("content")
-            .map_or(0, |content| content.to_string().len())
-    })
 }
 
 /// Split rendered turns into pages no larger than the summarizer's limit. This
@@ -458,42 +387,24 @@ fn split_at_utf8_midpoint(text: &str) -> (&str, &str) {
 /// than part of a user turn and are left out of the handoff.
 fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
     let mut turns = Vec::<Turn>::new();
-    let context_start = snapshot.current_context_start();
-    for item in snapshot
-        .transcript
-        .iter()
-        .filter(|item| item.position > context_start || context_start == 0)
-    {
-        match &item.body {
-            CanonicalTranscriptBody::User { content } => {
-                let text = mj_core::transcript::materialized_content_text(content);
-                turns.push(Turn {
-                    user: if is_synthetic_handoff(&text) {
-                        HANDOFF_PLACEHOLDER.to_owned()
-                    } else {
-                        text
-                    },
-                    events: Vec::new(),
-                });
+    for entry in TranscriptSummary::from_snapshot(snapshot).entries {
+        match entry.role {
+            SummaryRole::User => turns.push(Turn {
+                user: entry.text,
+                events: Vec::new(),
+            }),
+            SummaryRole::Assistant => {
+                push_turn_event(&mut turns, TurnEvent::Assistant(entry.text))?
             }
-            CanonicalTranscriptBody::Agent { chunks, .. } => push_turn_event(
-                &mut turns,
-                TurnEvent::Assistant(mj_core::transcript::materialized_chunks_text(chunks)),
-            )?,
-            CanonicalTranscriptBody::Tool { call, .. } => {
+            SummaryRole::Tool => {
                 if let Some(turn) = turns.last_mut() {
-                    append_turn_event(turn, TurnEvent::Tool(call.clone()));
+                    append_turn_event(turn, TurnEvent::Tool(entry.tool.expect("tool summary")));
                 }
             }
-            CanonicalTranscriptBody::Plan { plan } => {
-                push_turn_event(&mut turns, TurnEvent::Plan(plan.clone()))?;
-            }
-            // A captured plan proposal is a record of a decision point, not
-            // conversation input, so compaction never replays it to a model.
-            CanonicalTranscriptBody::Thought { .. }
-            | CanonicalTranscriptBody::PlanProposal { .. }
-            | CanonicalTranscriptBody::System { .. }
-            | CanonicalTranscriptBody::TerminalOutput { .. } => {}
+            SummaryRole::Plan => push_turn_event(
+                &mut turns,
+                TurnEvent::Plan(serde_json::from_str(&entry.text)?),
+            )?,
         }
     }
     ensure!(
@@ -503,21 +414,18 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
     Ok(turns)
 }
 
+fn retained_snapshot(snapshot: &CanonicalSessionSnapshot, budget: usize) -> String {
+    TranscriptSummary::from_snapshot(snapshot)
+        .retained()
+        .render(budget)
+}
+
 fn push_turn_event(turns: &mut [Turn], event: TurnEvent) -> Result<()> {
     let turn = turns.last_mut().context(
         "canonical transcript contains assistant/plan history before its first user turn",
     )?;
     append_turn_event(turn, event);
     Ok(())
-}
-
-/// Whether a user turn is a handoff this pipeline (or the one it replaced)
-/// wrote into an earlier resume.
-fn is_synthetic_handoff(user_text: &str) -> bool {
-    let text = user_text.trim_start();
-    text.starts_with(HANDOFF_PREAMBLE)
-        || text.starts_with(LEGACY_HANDOFF_PREAMBLE)
-        || text.starts_with(ARCHIVE_HANDOFF_PREAMBLE)
 }
 
 fn append_turn_event(turn: &mut Turn, item: TurnEvent) {
@@ -531,19 +439,6 @@ fn append_turn_event(turn: &mut Turn, item: TurnEvent) {
         }
         other => turn.events.push(other),
     }
-}
-
-fn render_user_index(turns: &[Turn]) -> String {
-    let mut output = String::new();
-    for (index, turn) in turns.iter().enumerate() {
-        output.push_str(&format!(
-            "TURN {} ({} bytes)\n{}\n\n",
-            index + 1,
-            rendered_turn_len(turn, index),
-            turn.user
-        ));
-    }
-    output
 }
 
 fn render_turns(turns: &[Turn], offset: usize) -> String {
@@ -584,22 +479,6 @@ fn rendered_turn_len(turn: &Turn, index: usize) -> usize {
     let mut rendered = String::new();
     render_turn(&mut rendered, turn, index);
     rendered.len()
-}
-
-fn exact_tail_start(turns: &[Turn], handoff_bytes: usize) -> usize {
-    let limit = handoff_bytes / 3;
-    let mut used = 0usize;
-    let mut start = turns.len();
-    for index in (0..turns.len()).rev().take(EXACT_TAIL_TURNS) {
-        let size = rendered_turn_len(&turns[index], index);
-        if used.saturating_add(size) > limit {
-            break;
-        }
-        used += size;
-        start = index;
-    }
-    // With no summarized head there is no reason to reserve an exact tail.
-    if start == 0 { turns.len() } else { start }
 }
 
 fn split_utf8(text: String, limit: usize) -> Vec<String> {
@@ -706,15 +585,15 @@ async fn reduce_summaries<B: CompactionBackend>(
     summaries.pop().context("compaction produced no summaries")
 }
 
-fn handoff(summary: &str, exact_tail: Option<&str>, handoff_bytes: usize) -> Result<String> {
+fn handoff(summary: &str, retained: Option<&str>, handoff_bytes: usize) -> Result<String> {
     let mut result = format!(
         "{HANDOFF_PREAMBLE} The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\n"
     );
     result.push_str(summary);
-    if let Some(tail) = exact_tail {
-        result.push_str("\n\n<exact_recent_conversation>\n");
+    if let Some(tail) = retained {
+        result.push_str("\n\n<retained_recent_context>\n");
         result.push_str(tail);
-        result.push_str("</exact_recent_conversation>");
+        result.push_str("</retained_recent_context>");
     }
     ensure!(
         result.len() <= handoff_bytes,
@@ -723,64 +602,24 @@ fn handoff(summary: &str, exact_tail: Option<&str>, handoff_bytes: usize) -> Res
     Ok(result)
 }
 
-/// Build a handoff without a summarizer, from the most recent turns alone.
+/// Build a handoff without a model using the same bounded transcript view.
 ///
 /// A resume or a worker restart that has lost the native session still has to
 /// hand the conversation over, and no utility model may be configured or
-/// reachable. Exact recent turns are a worse handoff than a summary, but they
-/// are far better than starting the target with no history at all.
+/// reachable. Keep available context with explicit omissions instead of starting empty.
 ///
-/// Turns are selected newest-first until the budget is spent and emitted
-/// oldest-first, so the text reads in order.
+/// Selection and byte fitting follow the shared transcript retention policy.
 pub fn render_recent_snapshot(snapshot: &CanonicalSessionSnapshot, handoff_bytes: usize) -> String {
-    const OPENING: &str = "<exact_recent_conversation>\n";
-    const CLOSING: &str = "</exact_recent_conversation>";
-
     let preamble = format!(
-        "{HANDOFF_PREAMBLE} The restored workspace is authoritative. No summarizer was available, so the most recent conversation is reproduced verbatim below and earlier turns are omitted. Use it for continuity, and do not repeat completed work unless verification requires it.\n\n"
+        "{HANDOFF_PREAMBLE} The restored workspace is authoritative. No summarizer was available; recent history follows using the shared transcript summary. Earlier tool calls contain names and outcomes; oversized bodies have explicit omission markers.\n\n"
     );
-    let turns = match turns_from_snapshot(snapshot) {
-        Ok(turns) => turns,
-        // The handoff is a courtesy to the target harness; an unreadable
-        // transcript must not take the preamble down with it.
-        Err(error) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not read the transcript for a verbatim handoff"
-            );
-            Vec::new()
-        }
-    };
-    let budget = handoff_bytes
-        .saturating_sub(preamble.len() + OPENING.len() + CLOSING.len())
-        .max(1);
-    let mut start = turns.len();
-    let mut used = 0usize;
-    for index in (0..turns.len()).rev() {
-        let size = rendered_turn_len(&turns[index], index);
-        if used.saturating_add(size) > budget {
-            break;
-        }
-        used += size;
-        start = index;
-    }
-    // Not even the newest turn fits: send its head rather than nothing.
-    let mut body = if start == turns.len() && !turns.is_empty() {
-        truncate_utf8(
-            render_turns(&turns[turns.len() - 1..], turns.len() - 1),
-            budget,
-        )
+    let summary = TranscriptSummary::from_snapshot(snapshot);
+    let body = if summary.entries.is_empty() {
+        "[no transcript was available to hand over]".into()
     } else {
-        render_turns(&turns[start..], start)
+        summary.render(handoff_bytes.saturating_sub(preamble.len()))
     };
-    if body.is_empty() {
-        body.push_str("[no transcript was available to hand over]\n");
-    }
-    let mut result = preamble;
-    result.push_str(OPENING);
-    result.push_str(&body);
-    result.push_str(CLOSING);
-    truncate_utf8(result, handoff_bytes)
+    truncate_utf8(preamble + &body, handoff_bytes)
 }
 
 /// Cut `text` to at most `limit` bytes on a character boundary.

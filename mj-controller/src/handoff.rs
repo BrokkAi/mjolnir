@@ -2,10 +2,10 @@
 //!
 //! Both the cross-harness resume and the native-continuity recovery need the
 //! same choice: resolve a utility model and summarize the transcript, or, when
-//! no model is available, hand the most recent transcript over verbatim. That
+//! no model is available, hand the shared recent transcript view over. That
 //! decision lives here once so the two callers cannot drift apart.
 //!
-//! This function makes only the resolve/summarize/verbatim decision. The
+//! This function makes only the resolve/summarize/recent-context decision. The
 //! executor and cancellation-poll wrapper that keeps a cancelled operation from
 //! waiting out several network requests belongs to each caller.
 
@@ -26,12 +26,12 @@ pub(crate) fn profile_handoff_bytes(profile: Option<&HarnessProfile>) -> usize {
 }
 
 /// Resolve a utility model and summarize the snapshot into a handoff, falling
-/// back to a verbatim recent-transcript handoff when no model is available.
+/// back to a bounded recent-transcript handoff when no model is available.
 ///
 /// A cancelled discovery is the caller's own doing and propagates as an `Err`.
 /// Any other resolve failure means no utility model is configured,
 /// credentialed, or in quota; the handoff still has to happen, so it is logged
-/// and answered with the verbatim handoff (an `Ok`).
+/// and answered with the bounded recent handoff (an `Ok`).
 pub(crate) async fn build_handoff_context(
     session_id: &str,
     config: &Config,
@@ -47,13 +47,13 @@ pub(crate) async fn build_handoff_context(
         // A cancelled discovery is the caller's own doing; report it.
         Err(error) if cancel.is_cancelled() => return Err(error),
         // No utility model is configured, credentialed, or in quota. The
-        // handoff still has to happen, so send the recent transcript verbatim
+        // handoff still has to happen, so send the shared recent transcript view
         // instead of failing.
         Err(error) => {
             tracing::warn!(
                 session_id,
                 error = format!("{error:#}"),
-                "no utility model is available for the handoff; handing over the most recent transcript verbatim"
+                "no utility model is available for the handoff; handing over the shared recent transcript view"
             );
             return Ok(crate::compaction::render_recent_snapshot(
                 snapshot,
@@ -63,7 +63,7 @@ pub(crate) async fn build_handoff_context(
     };
     let backend = crate::utility_llm::UtilityCompactionBackend::new(candidates, cancel.clone());
     let page_bytes = backend.page_bytes();
-    summarize_or_verbatim(
+    summarize_or_recent(
         session_id,
         snapshot,
         context_bytes,
@@ -75,15 +75,15 @@ pub(crate) async fn build_handoff_context(
 }
 
 /// Summarize the snapshot through an already-resolved backend, falling back to
-/// the verbatim recent transcript when the summarizer fails. This is the seam
+/// the bounded recent transcript when the summarizer fails. This is the seam
 /// the branch tests drive with a fake backend.
 ///
 /// A summarizer that resolved but then failed must not cost the whole handoff:
-/// the verbatim tail is the same floor used when no model was available, so a
+/// the bounded recent context is the same floor used when no model was available, so a
 /// caller never loses the transcript to a summarizer error. The native-continuity
-/// path in particular installed a verbatim tail before this code was shared, and
+/// path in particular installed bounded recent context before this code was shared, and
 /// must keep that floor. A cancellation is the caller's own doing and propagates.
-async fn summarize_or_verbatim(
+async fn summarize_or_recent(
     session_id: &str,
     snapshot: &CanonicalSessionSnapshot,
     context_bytes: usize,
@@ -106,7 +106,7 @@ async fn summarize_or_verbatim(
             tracing::warn!(
                 session_id,
                 error = format!("{error:#}"),
-                "utility summarizer failed; handing over the most recent transcript verbatim"
+                "utility summarizer failed; handing over the shared recent transcript view"
             );
             Ok(crate::compaction::render_recent_snapshot(
                 snapshot,
@@ -189,10 +189,10 @@ mod tests {
     }
 
     /// When a backend resolves, the handoff is the summarizer's snapshot under
-    /// the shared preamble, not a verbatim transcript.
+    /// the shared preamble, not a bounded transcript.
     #[tokio::test]
     async fn a_resolved_backend_produces_a_summarized_handoff() {
-        let handoff = summarize_or_verbatim(
+        let handoff = summarize_or_recent(
             "session-under-test",
             &one_exchange_snapshot(),
             64 * 1024,
@@ -210,15 +210,15 @@ mod tests {
         );
         assert!(
             !handoff.contains("No summarizer was available"),
-            "a summarized handoff must not carry the verbatim preamble: {handoff}"
+            "a summarized handoff must not carry the fallback preamble: {handoff}"
         );
     }
 
     /// A resolved summarizer that then fails does not cost the transcript: the
-    /// handoff falls back to the verbatim recent tail instead of erroring.
+    /// handoff falls back to the bounded recent context instead of erroring.
     #[tokio::test]
     async fn a_failing_summarizer_falls_back_to_verbatim() {
-        let handoff = summarize_or_verbatim(
+        let handoff = summarize_or_recent(
             "session-under-test",
             &one_exchange_snapshot(),
             64 * 1024,
@@ -234,7 +234,7 @@ mod tests {
     }
 
     /// With no utility model configured, discovery fails without a network call
-    /// and the real decision path falls back to the verbatim handoff.
+    /// and the real decision path falls back to the bounded recent handoff.
     #[tokio::test]
     async fn no_model_falls_back_to_a_verbatim_handoff() {
         let handoff = build_handoff_context(

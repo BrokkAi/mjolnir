@@ -134,7 +134,7 @@ pub struct DurableRelay {
     /// reads the same tool calls, and when it could not, a turn blocked in a
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
-    turn_context: mj_core::activity::verdict::TurnContext,
+    turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict_pending: bool,
     replied_verdict: verdict::RepliedVerdictState,
@@ -391,6 +391,52 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
+        // Startup already reads the active journal into the bounded hot window.
+        // Reuse it: old sealed history must not make worker startup slow or fail.
+        if !checkpoint_only {
+            let mut prompts = BTreeMap::<String, String>::new();
+            if relay
+                .hot_events
+                .front()
+                .is_none_or(|event| event.ordinal > 1)
+                && relay.snapshot.latest_ordinal > 0
+            {
+                relay.turn_context.mark_earlier_history_omitted();
+            }
+            for event in &relay.hot_events {
+                if let RelayObservation::CommandQueued {
+                    command_id,
+                    command: RelayCommand::Prompt { prompt },
+                    ..
+                } = &event.observation
+                {
+                    prompts.insert(
+                        command_id.clone(),
+                        prompt
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                let prompt = match &event.observation {
+                    RelayObservation::CommandStarted { command_id, .. } => {
+                        prompts.remove(command_id)
+                    }
+                    RelayObservation::CommandCompleted { command_id, .. } => {
+                        prompts.remove(command_id);
+                        None
+                    }
+                    _ => None,
+                };
+                relay
+                    .turn_context
+                    .observe_relay(&event.observation, prompt.as_deref());
+            }
+        }
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.
         let replayed = relay.snapshot.latest_ordinal > snapshot_ordinal;
@@ -641,7 +687,7 @@ impl DurableRelay {
         self.turn_context.set_session_id(&self.snapshot.session_id);
     }
 
-    pub fn turn_context(&self) -> mj_core::activity::verdict::TurnContext {
+    pub fn turn_context(&self) -> mj_transcript::turn_context::TurnContext {
         self.turn_context.clone()
     }
 
@@ -771,7 +817,6 @@ impl DurableRelay {
     }
 
     pub fn record_session_update(&mut self, mut update: SessionUpdate) -> Result<u64> {
-        self.turn_context.observe(&update);
         // An ACP file edit arrives as the whole file before and the whole file
         // after. Store the patch between them instead: nothing downstream
         // reconstructs a file from those copies, and the patch is proportional

@@ -1,21 +1,15 @@
 //! Bounded turn evidence and conservative decisions for the optional Jev classifier.
-use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::ActivityFacts;
 use crate::config::HarnessKind;
-use crate::transcript::truncate_string_start;
 
 pub const USER_PROMPT_BYTES: usize = 1024;
 pub const ASSISTANT_TEXT_BYTES: usize = 2048;
 pub const TOOL_TITLE_BYTES: usize = 128;
-pub const RECENT_TOOLS: usize = 8;
 pub const IN_FLIGHT_TOOLS: usize = 16;
 /// Jev recommends high confidence for automation; weaker answers preserve current behavior.
 pub const ACT_CONFIDENCE: f32 = 0.85;
@@ -39,205 +33,11 @@ pub struct TurnEvidence {
     pub phase: TurnPhase,
     pub silent_for_s: u64,
     pub tools_in_flight: Vec<ToolEvidence>,
-    pub recent_tools: Vec<String>,
+    pub transcript_summary: String,
     pub background_commands: usize,
     pub queued_commands: usize,
     pub user_prompt_tail: String,
     pub assistant_text_tail: String,
-}
-
-#[derive(Debug, Default)]
-struct TurnContextState {
-    generation: u64,
-    user_prompt_tail: String,
-    message_id: Option<String>,
-    assistant_text_tail: String,
-    last_completed_message: String,
-    recent_tools: VecDeque<String>,
-    background_commands: usize,
-    queued_commands: usize,
-    background_inventory: Vec<crate::relay::BackgroundCommand>,
-    native_agent_ids: Vec<String>,
-    session_id: String,
-}
-
-/// The relay and runtime share this small process-local evidence accumulator.
-#[derive(Debug, Default, Clone)]
-pub struct TurnContext(Arc<Mutex<TurnContextState>>);
-
-impl TurnContext {
-    pub fn reset(&self, prompt: &str) {
-        let mut state = self.0.lock().expect("turn context lock poisoned");
-        let generation = state.generation.wrapping_add(1);
-        *state = TurnContextState {
-            generation,
-            user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
-            background_commands: state.background_commands,
-            queued_commands: state.queued_commands,
-            background_inventory: std::mem::take(&mut state.background_inventory),
-            native_agent_ids: std::mem::take(&mut state.native_agent_ids),
-            session_id: std::mem::take(&mut state.session_id),
-            ..Default::default()
-        };
-    }
-
-    /// Invalidate a pending verdict at a lifecycle boundary without discarding evidence.
-    pub fn invalidate(&self) {
-        let mut state = self.0.lock().expect("turn context lock poisoned");
-        state.generation = state.generation.wrapping_add(1);
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .generation
-    }
-
-    pub fn counts(&self) -> (usize, usize) {
-        let state = self.0.lock().expect("turn context lock poisoned");
-        (state.background_commands, state.queued_commands)
-    }
-
-    pub fn set_counts(&self, background_commands: usize, queued_commands: usize) {
-        let mut state = self.0.lock().expect("turn context lock poisoned");
-        if (state.background_commands, state.queued_commands)
-            != (background_commands, queued_commands)
-        {
-            state.generation = state.generation.wrapping_add(1);
-            state.background_commands = background_commands;
-            state.queued_commands = queued_commands;
-        }
-    }
-
-    pub fn set_session_id(&self, session_id: &str) {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .session_id = session_id.into();
-    }
-
-    pub fn session_id(&self) -> String {
-        self.0
-            .lock()
-            .expect("turn context lock poisoned")
-            .session_id
-            .clone()
-    }
-
-    /// Compare identities as well as counts; identical level reports are not activity.
-    pub fn set_background_inventory(
-        &self,
-        mut commands: Vec<crate::relay::BackgroundCommand>,
-        mut native_agent_ids: Vec<String>,
-    ) {
-        commands.sort_by(|a, b| a.id.cmp(&b.id));
-        native_agent_ids.sort();
-        let mut state = self.0.lock().expect("turn context lock poisoned");
-        if state.background_inventory != commands || state.native_agent_ids != native_agent_ids {
-            state.background_inventory = commands;
-            state.native_agent_ids = native_agent_ids;
-            state.generation = state.generation.wrapping_add(1);
-        }
-    }
-
-    pub fn observe(&self, update: &SessionUpdate) {
-        let mut state = self.0.lock().expect("turn context lock poisoned");
-        if matches!(
-            update,
-            SessionUpdate::AgentMessageChunk(_)
-                | SessionUpdate::AgentThoughtChunk(_)
-                | SessionUpdate::ToolCall(_)
-                | SessionUpdate::ToolCallUpdate(_)
-        ) {
-            state.generation = state.generation.wrapping_add(1);
-        }
-        match update {
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                let id = chunk.message_id.as_ref().map(ToString::to_string);
-                if id != state.message_id {
-                    complete_message(&mut state);
-                    state.message_id = id;
-                }
-                if let ContentBlock::Text(content) = &chunk.content {
-                    // Trim each chunk before appending, so a huge chunk never grows retained state.
-                    state
-                        .assistant_text_tail
-                        .push_str(&tail(&content.text, ASSISTANT_TEXT_BYTES));
-                    truncate_string_start(&mut state.assistant_text_tail, ASSISTANT_TEXT_BYTES);
-                }
-            }
-            SessionUpdate::ToolCall(call) => {
-                complete_message(&mut state);
-                if state.recent_tools.len() == RECENT_TOOLS {
-                    state.recent_tools.pop_front();
-                }
-                state
-                    .recent_tools
-                    .push_back(tail(&call.title, TOOL_TITLE_BYTES));
-            }
-            SessionUpdate::ToolCallUpdate(_) | SessionUpdate::AgentThoughtChunk(_) => {
-                complete_message(&mut state)
-            }
-            _ => {}
-        }
-    }
-
-    pub fn evidence(
-        &self,
-        harness: HarnessKind,
-        phase: TurnPhase,
-        facts: &ActivityFacts,
-        now_ms: i64,
-    ) -> TurnEvidence {
-        let state = self.0.lock().expect("turn context lock poisoned");
-        TurnEvidence {
-            harness,
-            phase,
-            silent_for_s: facts
-                .last_acp_activity_at_ms
-                .map_or(0, |last| now_ms.saturating_sub(last).max(0) as u64 / 1000),
-            tools_in_flight: facts
-                .tools_in_flight
-                .iter()
-                .take(IN_FLIGHT_TOOLS)
-                .map(|tool| ToolEvidence {
-                    title: tail(
-                        tool.title.as_deref().unwrap_or("unknown tool"),
-                        TOOL_TITLE_BYTES,
-                    ),
-                    running_s: now_ms.saturating_sub(tool.started_at_ms).max(0) as u64 / 1000,
-                })
-                .collect(),
-            recent_tools: state.recent_tools.iter().cloned().collect(),
-            background_commands: facts.background_commands,
-            queued_commands: facts.queued_commands,
-            user_prompt_tail: state.user_prompt_tail.clone(),
-            assistant_text_tail: if state.assistant_text_tail.is_empty() {
-                state.last_completed_message.clone()
-            } else {
-                state.assistant_text_tail.clone()
-            },
-        }
-    }
-}
-
-fn complete_message(state: &mut TurnContextState) {
-    if !state.assistant_text_tail.is_empty() {
-        state.last_completed_message = std::mem::take(&mut state.assistant_text_tail);
-    }
-    state.message_id = None;
-}
-
-fn tail(text: &str, maximum_bytes: usize) -> String {
-    // Reuse the transcript's UTF-8-safe tail rule on an already bounded slice.
-    let mut start = text.len().saturating_sub(maximum_bytes);
-    while !text.is_char_boundary(start) {
-        start -= 1;
-    }
-    let mut value = text[start..].to_owned();
-    truncate_string_start(&mut value, maximum_bytes);
-    value
 }
 
 pub fn questions() -> Value {
@@ -336,110 +136,7 @@ fn resolve_key(environment: Option<&str>, home: Option<&Path>) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::InFlightToolCall;
     use serde_json::json;
-
-    fn message(id: &str, text: &str) -> SessionUpdate {
-        serde_json::from_value(json!({"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}})).unwrap()
-    }
-
-    fn tool(title: &str) -> SessionUpdate {
-        serde_json::from_value(json!({"sessionUpdate":"tool_call","toolCallId":title,"title":title,"status":"in_progress"})).unwrap()
-    }
-
-    #[test]
-    fn evidence_caps_utf8_text_tools_and_durations() {
-        let context = TurnContext::default();
-        context.reset(&"é".repeat(20_000));
-        context.observe(&message("first", &"🦀".repeat(20_000)));
-        let first = context.evidence(
-            HarnessKind::Claude,
-            TurnPhase::Running,
-            &ActivityFacts::default(),
-            0,
-        );
-        assert_eq!(first.user_prompt_tail.len(), USER_PROMPT_BYTES);
-        assert_eq!(first.assistant_text_tail.len(), ASSISTANT_TEXT_BYTES);
-        for n in 0..20 {
-            context.observe(&tool(&format!("{n}{}", "é".repeat(300))));
-        }
-        let facts = ActivityFacts {
-            last_acp_activity_at_ms: Some(1_000),
-            background_commands: 3,
-            queued_commands: 2,
-            tools_in_flight: (0..100)
-                .map(|n| InFlightToolCall {
-                    tool_call_id: n.to_string(),
-                    title: Some("🦀".repeat(200)),
-                    status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
-                    started_at_ms: 2_000,
-                })
-                .collect(),
-            ..Default::default()
-        };
-        let evidence = context.evidence(HarnessKind::Claude, TurnPhase::Running, &facts, 95_000);
-        assert_eq!(evidence.tools_in_flight.len(), IN_FLIGHT_TOOLS);
-        assert!(
-            evidence
-                .tools_in_flight
-                .iter()
-                .all(|tool| tool.title.len() <= TOOL_TITLE_BYTES && tool.running_s == 93)
-        );
-        assert_eq!(evidence.recent_tools.len(), RECENT_TOOLS);
-        assert!(
-            evidence
-                .recent_tools
-                .iter()
-                .all(|title| title.len() <= TOOL_TITLE_BYTES)
-        );
-        assert_eq!(evidence.assistant_text_tail, first.assistant_text_tail);
-        assert_eq!(evidence.silent_for_s, 94);
-        let json = serde_json::to_value(evidence).unwrap();
-        assert_eq!(json["phase"], "running");
-        assert_eq!(json["harness"], "claude");
-        assert_eq!(json["background_commands"], 3);
-        assert_eq!(json["queued_commands"], 2);
-        assert!(serde_json::to_vec(&json).unwrap().len() < 10_000);
-    }
-
-    #[test]
-    fn message_boundaries_and_prompt_reset_do_not_mix_answers() {
-        let context = TurnContext::default();
-        context.reset("First prompt");
-        context.observe(&message("one", "Old answer"));
-        context.observe(&message("two", "New "));
-        context.observe(&message("two", "answer?"));
-        let evidence = context.evidence(
-            HarnessKind::Claude,
-            TurnPhase::Replied,
-            &ActivityFacts::default(),
-            0,
-        );
-        assert_eq!(evidence.assistant_text_tail, "New answer?");
-        let generation = context.generation();
-        context.set_counts(1, 2);
-        assert_ne!(context.generation(), generation);
-        let generation = context.generation();
-        context.set_counts(1, 2);
-        assert_eq!(context.generation(), generation);
-        assert_eq!(context.counts(), (1, 2));
-        context.invalidate();
-        assert_ne!(context.generation(), generation);
-        assert_eq!(context.counts(), (1, 2));
-        let generation = context.generation();
-        context.reset("Second prompt");
-        assert_eq!(context.counts(), (1, 2));
-        assert_ne!(context.generation(), generation);
-        let evidence = context.evidence(
-            HarnessKind::Claude,
-            TurnPhase::Running,
-            &ActivityFacts::default(),
-            0,
-        );
-        assert_eq!(evidence.user_prompt_tail, "Second prompt");
-        assert!(evidence.assistant_text_tail.is_empty());
-        assert!(evidence.recent_tools.is_empty());
-    }
 
     #[test]
     fn decisions_require_the_right_phase_choice_and_confidence() {

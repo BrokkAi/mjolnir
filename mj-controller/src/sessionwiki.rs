@@ -188,28 +188,14 @@ impl MjolnirAdapter {
             .canonical_session()
             .with_context(|| format!("read the transcript of session {session_id}"))?;
         let mut evidence = provenance::Evidence::default();
-        let messages = snapshot
-            .transcript
-            .iter()
-            .filter_map(|item| {
-                let (role, text) = match &item.body {
-                    mj_core::archive::CanonicalTranscriptBody::User { content } => (
-                        Role::User,
-                        mj_core::transcript::materialized_content_text(content),
-                    ),
-                    mj_core::archive::CanonicalTranscriptBody::Agent { chunks, .. } => (
-                        Role::Assistant,
-                        mj_core::transcript::materialized_chunks_text(chunks),
-                    ),
-                    mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => {
-                        evidence.observe(call, item.created_at_ms);
-                        (Role::Tool, tool_call_title(call))
-                    }
-                    _ => return None,
-                };
-                message(role, text, item.created_at_ms)
-            })
-            .collect();
+        for item in &snapshot.transcript {
+            if let mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } = &item.body {
+                evidence.observe(call, item.created_at_ms);
+            }
+        }
+        let messages = summary_messages(mj_transcript::summary::TranscriptSummary::from_snapshot(
+            &snapshot,
+        ));
         Ok(IndexedTranscript {
             messages,
             title: snapshot.session.session_title.clone(),
@@ -321,36 +307,24 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
 
 /// A running session's conversation, as SessionWiki stores it.
 fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<Message> {
-    projection
-        .transcript
-        .iter()
-        .filter_map(|item| {
-            let (role, text) = match &item.body {
-                mj_core::state::TranscriptBody::User { content } => (
-                    Role::User,
-                    mj_core::transcript::materialized_content_text(content),
-                ),
-                mj_core::state::TranscriptBody::Agent { chunks, .. } => (
-                    Role::Assistant,
-                    mj_core::transcript::materialized_chunks_text(chunks),
-                ),
-                mj_core::state::TranscriptBody::Tool { call, .. } => {
-                    (Role::Tool, tool_call_title(call))
-                }
-                _ => return None,
-            };
-            message(role, text, item.created_at_ms)
-        })
-        .collect()
+    summary_messages(mj_transcript::summary::TranscriptSummary::from_materialized(projection))
 }
 
-/// The tool's own title, which is what the transcript showed the user.
-/// Arguments and output are not worth indexing.
-fn tool_call_title(call: &serde_json::Value) -> String {
-    call.get("title")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<Message> {
+    use mj_transcript::summary::SummaryRole;
+    summary
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            let role = match entry.role {
+                SummaryRole::User => Role::User,
+                SummaryRole::Assistant => Role::Assistant,
+                SummaryRole::Tool => Role::Tool,
+                SummaryRole::Plan => return None,
+            };
+            message(role, entry.body(), entry.created_at_ms)
+        })
+        .collect()
 }
 
 /// One indexed message, or nothing when the item carried no text.
@@ -426,7 +400,14 @@ impl Adapter for MjolnirAdapter {
         }
         let keys = tokens
             .into_iter()
-            .map(|(session_id, token)| (self.key_for(&session_id), token))
+            .map(|(session_id, token)| {
+                (
+                    self.key_for(&session_id),
+                    token
+                        .saturating_mul(1024)
+                        .saturating_add(i64::from(mj_transcript::summary::SUMMARY_VERSION)),
+                )
+            })
             .collect();
         Some(Store {
             keys,
@@ -1430,18 +1411,19 @@ fn snapshot_of(
                 })],
                 streaming: false,
             },
-            // The index keeps a tool call's title and nothing else, which is
-            // what the transcript showed the user.
-            Role::Tool => CanonicalTranscriptBody::Tool {
-                call: serde_json::json!({
-                    "toolCallId": format!("wiki-tool-{position}"),
-                    "title": text,
-                    "status": "completed"
-                }),
-                terminal_outputs: Vec::new(),
-                terminal_refs: Vec::new(),
-                presentation: None,
-            },
+            // New indexes retain the shared projection; legacy rows contain only a title.
+            Role::Tool => {
+                let (call, terminal_outputs) = mj_transcript::summary::indexed_tool_call(
+                    text,
+                    &format!("wiki-tool-{position}"),
+                );
+                CanonicalTranscriptBody::Tool {
+                    call,
+                    terminal_outputs,
+                    terminal_refs: Vec::new(),
+                    presentation: None,
+                }
+            }
         };
         let created_at_ms = message
             .ts
@@ -1891,17 +1873,14 @@ mod tests {
         assert_eq!(session.title, "the harness title");
         assert!(!session.subagent);
         assert_eq!(
-            session
-                .messages
-                .iter()
-                .map(|message| (message.role, message.text.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                (Role::User, "index this session"),
-                (Role::Tool, "Edit config.toml"),
-                (Role::Assistant, "done"),
-            ]
+            session.messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![Role::User, Role::Tool, Role::Assistant]
         );
+        assert_eq!(session.messages[0].text, "index this session");
+        let tool: serde_json::Value = serde_json::from_str(&session.messages[1].text).unwrap();
+        assert_eq!(tool["name"], "Edit");
+        assert_eq!(tool["call"]["title"], "Edit config.toml");
+        assert_eq!(session.messages[2].text, "done");
         assert_eq!(session.touched, vec!["/old/container/config.toml"]);
     }
 
@@ -1988,18 +1967,16 @@ mod tests {
     #[test]
     fn a_running_session_is_indexed_from_its_stored_transcript() {
         let session_id = "0123456789abcdef0123456789abcdef";
+        let messages = projected_messages(&projection(session_id));
         assert_eq!(
-            projected_messages(&projection(session_id))
-                .iter()
-                .map(|message| (message.role, message.text.clone()))
-                .collect::<Vec<_>>(),
-            vec![
-                (Role::User, "still talking".to_owned()),
-                (Role::Tool, "Read README.md".to_owned()),
-                (Role::Assistant, "reading".to_owned()),
-            ],
-            "a thought is skipped and every other item keeps its role"
+            messages.iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![Role::User, Role::Tool, Role::Assistant]
         );
+        assert_eq!(messages[0].text, "still talking");
+        assert_eq!(messages[2].text, "reading");
+        let tool: serde_json::Value = serde_json::from_str(&messages[1].text).unwrap();
+        assert_eq!(tool["name"], "Read");
+        assert_eq!(tool["call"]["title"], "Read README.md");
     }
 
     /// A running session is listed under the same key as a stopped one, with
@@ -2026,8 +2003,14 @@ mod tests {
         assert_eq!(
             store.keys,
             vec![
-                (key_of(running), 1_900_000_000),
-                (key_of(never_checkpointed), 1_900_000_001),
+                (
+                    key_of(running),
+                    1_900_000_000 * 1024 + i64::from(mj_transcript::summary::SUMMARY_VERSION)
+                ),
+                (
+                    key_of(never_checkpointed),
+                    1_900_000_001 * 1024 + i64::from(mj_transcript::summary::SUMMARY_VERSION)
+                ),
             ],
             "a live session's own token replaces the checkpoint's"
         );

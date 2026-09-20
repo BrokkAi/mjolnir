@@ -1863,7 +1863,7 @@ fn in_place_cross_harness_move_installs_the_handoff_without_provisioning() {
         .as_str()
         .expect("the destination relay holds the installed handoff");
     assert!(
-        context.contains("exact_recent_conversation"),
+        context.contains("shared transcript summary"),
         "unexpected handoff: {context}"
     );
     let moved = &controller.state.sessions[LATCH_RELAY_SESSION];

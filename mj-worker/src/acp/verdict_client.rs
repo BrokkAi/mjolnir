@@ -4,7 +4,7 @@ use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
 const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/turn-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v2/turn-verdict";
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -143,7 +143,8 @@ impl VerdictClient {
         };
         tracing::info!(target: "mj_jev", request_id = attempt.id, session, generation,
             phase = ?evidence.phase, harness = ?evidence.harness, source,
-            evidence = %serde_json::to_string(evidence).expect("serialize bounded Jev evidence"),
+            summary_bytes = evidence.transcript_summary.len(),
+            active_tools = evidence.tools_in_flight.len(),
             "Jev classification requested");
         let result = self.ask(evidence).await;
         match &result {
@@ -160,6 +161,14 @@ impl VerdictClient {
 
     pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+        let request_body = serde_json::to_vec(
+            &serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()}),
+        )
+        .context("encode turn evidence")?;
+        ensure!(
+            request_body.len() <= 64 * 1024,
+            "turn evidence exceeds request byte limit"
+        );
         let request = match &self.source {
             VerdictSource::Direct { key, endpoint } => self.client.post(endpoint)
                 .bearer_auth(key)
@@ -249,7 +258,8 @@ async fn await_input_verdict_with_cadence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::activity::verdict::{TurnContext, TurnPhase, WaitingOn};
+    use mj_core::activity::verdict::{TurnPhase, WaitingOn};
+    use mj_transcript::turn_context::TurnContext;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     async fn server(body: String) -> (VerdictClient, tokio::task::JoinHandle<serde_json::Value>) {
@@ -334,7 +344,7 @@ mod tests {
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v1/turn-verdict", listener.local_addr().unwrap());
+            let endpoint = format!("http://{}/v2/turn-verdict", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);

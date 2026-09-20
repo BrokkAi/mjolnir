@@ -281,7 +281,11 @@ async fn completed_turn_response(
         .unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();
     assert!(log.contains("Jev classification requested"), "{log}");
-    assert!(log.contains("Waiting for my agent to finish."), "{log}");
+    assert!(log.contains("summary_bytes="), "{log}");
+    assert!(
+        !log.contains("Waiting for my agent to finish."),
+        "payloads must not be logged: {log}"
+    );
     assert!(log.contains(SESSION_ID), "{log}");
     assert!(!log.contains("fake-key"));
     if matches!(action, WhileClassifying::Wait) {

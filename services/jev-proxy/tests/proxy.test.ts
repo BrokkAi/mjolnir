@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import proxy from "../src/index.ts";
-import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
+import questions from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 
 const base = {
   harness: "claude", phase: "running", silent_for_s: 60,
@@ -181,4 +181,24 @@ test("the deadline also covers a stalled response body", async t => {
   await started;
   t.mock.timers.tick(8000);
   await expectError(await response, 504, "upstream_timeout");
+});
+
+
+test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", async t => {
+  const { recent_tools: _old, ...rest } = base;
+  const state = { ...rest, transcript_summary: '<tool cargo test [completed]>full results</tool>' };
+  const calls = upstream(t, async (_url, options) => {
+    const forwarded = JSON.parse(options!.body as string);
+    assert.deepEqual(forwarded.state, state);
+    assert.match(forwarded.questions.waiting_on.instructions, /transcript_summary/);
+    return Response.json(answer);
+  });
+  function v2(body: unknown) {
+    return new Request("https://proxy.example/v2/turn-verdict", { method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body) });
+  }
+  assert.equal((await proxy.fetch(v2(state), environment())).status, 200);
+  for (const bad of [base, {...state,recent_tools:[]}, {...state,transcript_summary:"x".repeat(48 * 1024 + 1)}, {...state,extra:true}]) {
+    await expectError(await proxy.fetch(v2(bad), environment()),400,"invalid_evidence");
+  }
+  assert.equal(calls.callCount(),1);
 });
