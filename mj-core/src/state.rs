@@ -46,7 +46,7 @@ pub enum SessionTransitionKind {
     Starting,
     Resuming,
     Moving,
-    Stopping,
+    Suspending,
     Destroying,
 }
 
@@ -56,7 +56,7 @@ impl SessionTransitionKind {
             Self::Starting => "Starting",
             Self::Resuming => "Resuming",
             Self::Moving => "Moving",
-            Self::Stopping => "Stopping",
+            Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
         }
     }
@@ -86,7 +86,7 @@ mod transition_tests {
         assert_eq!(SessionState::Checkpointing.transition_kind(), None);
         assert_eq!(
             SessionState::Closing.transition_kind(),
-            Some(SessionTransitionKind::Stopping)
+            Some(SessionTransitionKind::Suspending)
         );
     }
 }
@@ -622,7 +622,7 @@ impl SessionState {
     pub const fn transition_kind(self) -> Option<SessionTransitionKind> {
         match self {
             Self::Provisioning => Some(SessionTransitionKind::Starting),
-            Self::Closing => Some(SessionTransitionKind::Stopping),
+            Self::Closing => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
             _ => None,
         }
@@ -1145,7 +1145,16 @@ fn default_session_workspace_id() -> String {
 /// controller composes a sentence for the person and tags it with this prefix,
 /// and the projection reads the tag to tell the two apart. Written in one
 /// place and read in one place, so the tag cannot drift.
-pub const CLOSE_FAILURE_PREFIX: &str = "the close did not finish";
+pub const DESTRUCTION_FAILURE_PREFIX: &str = "the destruction did not finish";
+
+pub const CLOSE_FAILURE_PREFIX: &str = "the suspension did not finish";
+
+/// Recognize safe lifecycle outcomes, including records saved before the rename.
+pub fn is_public_lifecycle_error(error: &str) -> bool {
+    error.starts_with(CLOSE_FAILURE_PREFIX)
+        || error.starts_with(DESTRUCTION_FAILURE_PREFIX)
+        || error.starts_with("the close did not finish")
+}
 
 /// How a target is named beside a session, wherever a surface shows one.
 ///
@@ -1181,7 +1190,7 @@ impl SessionRecord {
     pub fn public_error(&self) -> Option<&str> {
         self.last_error
             .as_deref()
-            .filter(|error| error.starts_with(CLOSE_FAILURE_PREFIX))
+            .filter(|error| is_public_lifecycle_error(error))
     }
 
     /// Configuration drift belongs to this session, not the entire controller.

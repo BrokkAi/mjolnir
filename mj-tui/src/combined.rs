@@ -1833,9 +1833,13 @@ mod tests {
     /// Retiring transitions keep the status panel: there is no conversation
     /// to type toward while the session is being stopped.
     #[test]
-    fn a_stopping_transition_keeps_the_status_panel() {
+    fn a_suspending_transition_keeps_the_status_panel() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Suspending,
+            None,
+        );
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
             .draw(|frame| {
@@ -1851,7 +1855,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("ctrl+b shift+c to cancel stopping")),
+                .any(|line| line.contains("ctrl+b shift+c to cancel suspending")),
             "cancel chord missing: {lines:?}"
         );
     }
@@ -1891,7 +1895,11 @@ mod tests {
         );
 
         dashboard.finish_session_operation("session-1");
-        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Suspending,
+            None,
+        );
         assert_eq!(dashboard.standby_prompt_session(), None);
     }
 

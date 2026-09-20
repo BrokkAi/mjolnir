@@ -1232,7 +1232,7 @@ fn importing_session_renders_unknown_then_known_progress_and_ignores_navigation(
 }
 
 #[test]
-fn stop_and_restart_run_from_the_palette_without_a_modal() {
+fn suspension_confirms_and_idle_restart_runs_from_the_palette() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
@@ -1247,8 +1247,13 @@ fn stop_and_restart_run_from_the_palette_without_a_modal() {
         DashboardAction::None
     );
     assert_eq!(
-        dashboard.dispatch_command(crate::actions::CommandId::StopSession),
-        DashboardAction::Close {
+        dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('s'))),
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
@@ -1266,22 +1271,22 @@ fn stop_and_restart_run_from_the_palette_without_a_modal() {
 fn deleting_a_session_keeps_its_branch_unless_asked() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
+    dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
     let Mode::Confirm(dialog) = &dashboard.mode else {
         panic!("delete confirmation");
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["No", "Yes", "Yes, delete branch"]
+        &["Cancel", "Destroy session", "Destroy and delete branch"]
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('n'))),
+        dashboard.handle_key(key(KeyCode::Char('c'))),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
-    dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
+    dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('y'))),
+        dashboard.handle_key(key(KeyCode::Char('d'))),
         DashboardAction::ForceDestroy {
             session_id: "session-1".into(),
             delete_branch: false,
@@ -1294,7 +1299,7 @@ fn deleting_a_session_keeps_its_branch_unless_asked() {
 fn deleting_a_session_takes_its_branch_from_the_last_button() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    dashboard.dispatch_command(crate::actions::CommandId::ForceDestroySession);
+    dashboard.dispatch_command(crate::actions::CommandId::DestroySession);
     dashboard.handle_key(key(KeyCode::Right));
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
@@ -1307,26 +1312,50 @@ fn deleting_a_session_takes_its_branch_from_the_last_button() {
 }
 
 #[test]
-fn failed_stop_offers_retry_and_direct_force_stop() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_close_failure("session-1".into(), "archive unavailable");
-    dashboard.handle_key(key(KeyCode::Right));
-    dashboard.handle_key(key(KeyCode::Right));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::Close {
-            session_id: "session-1".into()
-        }
-    );
+fn failed_suspension_requires_a_separate_checkpoint_discard_confirmation() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let checkpoint = session.checkpoint.clone().expect("recovery fixture");
+    let mut dashboard = dashboard_with_session(session);
     dashboard.show_close_failure("session-1".into(), "archive unavailable");
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ForceStop {
+        DashboardAction::None
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if selected == &checkpoint))
+    );
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::DiscardSinceCheckpoint {
+            session_id: "session-1".into(),
+            checkpoint
+        }
+    );
+}
+
+#[test]
+fn failed_suspension_without_a_checkpoint_offers_only_retry() {
+    let mut session = stopped_session();
+    session.checkpoint = None;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.show_close_failure("session-1".into(), "archive unavailable");
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("confirmation");
+    };
+    assert_eq!(
+        confirmation_buttons(&dialog.confirmation),
+        &["Cancel", "Retry suspension"]
+    );
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -1339,6 +1368,7 @@ fn button_confirmations_keep_their_button_row_visible() {
         Confirmation::CloseFailed {
             session_id: "session-1".into(),
             error: "archive unavailable".into(),
+            can_discard: true,
         },
         Confirmation::ForceDestroy {
             session_id: "session-1".into(),
@@ -1374,7 +1404,7 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     };
     assert_eq!(
         confirmation_buttons(&dialog.confirmation),
-        &["No", "Yes", "Yes, delete branch"]
+        &["Cancel", "Destroy session", "Destroy and delete branch"]
     );
     assert_eq!(
         dialog.form.borrow().focused(),

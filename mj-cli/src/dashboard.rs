@@ -1665,7 +1665,7 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
 ) {
     if matches!(
         kind,
-        SessionOperationKind::Stopping
+        SessionOperationKind::Suspending
             | SessionOperationKind::Destroying
             | SessionOperationKind::Moving
     ) {

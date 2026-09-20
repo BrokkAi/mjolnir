@@ -29,7 +29,7 @@ pub fn is_interrupted_close(session: &SessionRecord) -> bool {
     ) && session.target.is_some()
 }
 
-pub fn interrupted_close_session_ids(controller: &Controller) -> Vec<String> {
+pub fn interrupted_suspend_session_ids(controller: &Controller) -> Vec<String> {
     controller
         .state
         .sessions
@@ -103,62 +103,6 @@ pub fn unowned_interrupted_lifecycles(
             interrupted_lifecycle_cause(session).map(|cause| (session.id.clone(), cause))
         })
         .collect()
-}
-
-pub fn spawn_interrupted_close_recovery(
-    session_id: String,
-    session_manager: SessionManagerControl,
-    recovery_observer: crate::recovery_gate::RecoveryObserver,
-    cancelled: Arc<AtomicBool>,
-    updates: tokio::sync::mpsc::UnboundedSender<LifecycleUpdate>,
-    tracker: Option<mj_client::operations::CriticalOperationTracker>,
-) -> tokio::task::JoinHandle<()> {
-    let guard = tracker.map(|tracker| {
-        tracker.begin_cancellable(
-            format!(
-                "recovering session {}",
-                mj_core::state::short_id(&session_id)
-            ),
-            cancelled.clone(),
-        )
-    });
-    tokio::spawn(async move {
-        let operation_session_id = session_id.clone();
-        let joined = tokio::task::spawn_blocking(move || {
-            (|| -> Result<bool> {
-                let _recovery_reservation = reserve_recovery_or_cancel(
-                    &recovery_observer,
-                    &operation_session_id,
-                    &cancelled,
-                )?;
-                let mut controller = Controller::load()?;
-                let executor = CancellableProcessExecutor::new(cancelled);
-                mj_core::runtime::block_on(controller.recover_interrupted_close_managed(
-                    &operation_session_id,
-                    &executor,
-                    &session_manager,
-                ))?
-            })()
-            .map_err(|error| format!("{error:#}"))
-        })
-        .await;
-        let (result, deferred_cleanup) = match joined {
-            Ok(Ok(deferred_cleanup)) => (Ok(LifecycleSuccess::Closed), deferred_cleanup),
-            Ok(Err(error)) => (Err(error), false),
-            Err(error) => (
-                Err(format!("interrupted close recovery task failed: {error}")),
-                false,
-            ),
-        };
-        if let Err(error) = updates.send(LifecycleUpdate {
-            session_id: session_id.clone(),
-            result,
-            deferred_cleanup,
-        }) {
-            tracing::debug!(%session_id, %error, "interrupted close result dropped after dashboard shutdown");
-        }
-        drop(guard);
-    })
 }
 
 pub fn reserve_recovery_or_cancel(

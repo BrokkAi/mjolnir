@@ -372,7 +372,7 @@ async fn a_remote_stop_marks_the_open_chat_retiring_before_its_feed_closes() {
     mark_active_chat_retiring_for_remote_lifecycle(
         Some(&mut stopped),
         "session-open",
-        SessionOperationKind::Stopping,
+        SessionOperationKind::Suspending,
     );
     assert!(stopped.session_retiring());
 

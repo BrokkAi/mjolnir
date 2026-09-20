@@ -250,7 +250,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         SessionTransitionKind::Starting => glyphs.starting,
                         SessionTransitionKind::Resuming => glyphs.resuming,
                         SessionTransitionKind::Moving => glyphs.moving,
-                        SessionTransitionKind::Stopping => glyphs.stopping,
+                        SessionTransitionKind::Suspending => glyphs.stopping,
                         SessionTransitionKind::Destroying => glyphs.destroying,
                     })
                     .unwrap_or_else(|| facts.status_symbol(operation));

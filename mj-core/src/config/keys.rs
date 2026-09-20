@@ -402,10 +402,9 @@ key_actions! {
     FocusPaneRight / focus_pane_right = "prefix+l",
     Zoom / zoom = "prefix+z",
     LastPane / last_pane = "prefix+;",
-    StopSession / stop_session = "",
     RestartSession / restart_session = "",
     MoveSession / move_session = "",
-    DeleteSession / delete_session = "",
+    DestroySession / destroy_session = "",
     ContainerSettings / container_settings = "",
     ManageProfiles / manage_profiles = "",
     ManageTargets / manage_targets = "",
@@ -419,7 +418,7 @@ key_actions! {
     SwapPaneDown / swap_pane_down = "prefix+shift+j",
     SwapPaneUp / swap_pane_up = "prefix+shift+k",
     SwapPaneRight / swap_pane_right = "prefix+shift+l",
-    CloseSession / close_session = "prefix+shift+x",
+    SuspendSession / suspend_session = "prefix+shift+x",
     RenameWorkspace / rename_workspace = "prefix+shift+w",
     CloseWorkspace / close_workspace = "prefix+shift+d",
     ResizePaneLeft / resize_pane_left = "",
@@ -782,7 +781,10 @@ mod tests {
             keybinds.prefix_rhs_labels(KeyAction::NextPane),
             vec!["tab".to_owned()]
         );
-        assert!(keybinds.bindings(KeyAction::StopSession).is_empty());
+        assert_eq!(
+            keybinds.labels(KeyAction::SuspendSession),
+            vec!["ctrl+b shift+x".to_owned()]
+        );
 
         let create = parse_key_combo("c").expect("c parses");
         assert_eq!(

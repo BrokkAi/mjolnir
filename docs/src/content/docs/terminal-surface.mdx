@@ -8,7 +8,7 @@ import shotDashboard from '../../assets/screenshots/dashboard.svg';
 import shotCommandPalette from '../../assets/screenshots/command-palette.svg';
 import shotSetup from '../../assets/screenshots/setup.svg';
 
-The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, stop, or run work in the background.
+The Mjolnir TUI is a single control surface for conversations and the infrastructure behind them. It stays responsive while sessions launch, resume, suspend, or run work in the background.
 
 <figure class="shot">
   <a class="shot__zoom" href={shotDashboard.src} aria-label="Open the full-size screenshot: Mjolnir terminal dashboard">
@@ -24,7 +24,7 @@ the dashboard opens. Set that setting off to leave the workspace empty until
 you choose **Create**. Switching workspace tabs only filters the live session
 list and never creates a session; every workspace continues running
 independently.
-Stopped history is available from **Open**, including sessions that were
+Suspended history is available from **Open**, including sessions that were
 previously archived by a provider. Provider archive metadata is read-only.
 
 The Workspace pane has one tab row framed by two borders above Sessions. Click a
@@ -36,7 +36,7 @@ palette. The selected workspace also determines where **Create** attaches the
 new session.
 
 **Create** opens the full session creation wizard and **Open** opens the
-session dialog, which starts on the running sessions and keeps the stopped
+session dialog, which starts on the running sessions and keeps the suspended
 history on its other tabs. The command palette opens with `prefix+:`, from the
 clickable `: palette` hint in the footer, or from the **Commands** button on
 the first-run screen; it remains available while you type and while a notice
@@ -262,7 +262,7 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+shift+z` | Cycle the focused support pane's size |
 | `prefix+b` | Toggle the dashboard pane preset |
 | `prefix+shift+r` | Refresh all target capacity and profile quota data |
-| `prefix+shift+c` | Cancel the selected session's in-flight launch, resume, or stop operation |
+| `prefix+shift+c` | Cancel the selected session's in-flight launch, resume, or suspension operation |
 | `prefix+a` | Mark unread session activity as read |
 | `prefix+o` / `prefix+shift+o` | Open the next or previous session that needs you, in any workspace |
 | `prefix+u` | Show the web viewer address and access code |
@@ -273,12 +273,13 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+v` | Open the selected session in a pane beside this one |
 | `prefix+minus` | Open the selected session in a pane below this one |
 | `prefix+x` | Close the conversation pane you are in |
+| `prefix+shift+x` | Confirm suspension of the selected session |
 | `prefix+h` / `prefix+j` / `prefix+k` / `prefix+l` | Move the keyboard to the conversation pane left, below, above, or right |
 | `prefix+;` | Move the keyboard back to the conversation pane it was in before |
 | `prefix+z` | Zoom the conversation pane you are in, or put the others back |
 | `prefix+q` | Detach this terminal while the daemon and sessions continue |
 
-`Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `prefix+shift+c` is different: it cancels a lifecycle operation such as launch or resume. Stop, Restart, Move, Delete session, container settings, and managing profiles or targets have no default key; run them from the command palette so a mis-hit key cannot act on a live session.
+`Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `prefix+shift+c` is different: it cancels a lifecycle operation such as launch or resume. Use `prefix+shift+x` or **Suspend session** in the command palette to save a recovery copy and release the environment. Suspension always asks for confirmation. Restart, Move, Destroy session, container settings, and managing profiles or targets have no default key.
 
 Pressing the prefix twice sends the literal key through to whatever has focus instead of running a command. In the composer this is how you still reach `Ctrl-B`, backward-character: press `ctrl+b ctrl+b`.
 
@@ -333,7 +334,9 @@ Click **Commands** or press `prefix+:` to expose both shortcut-backed and palett
 
 Matching is fuzzy: `cre` finds **Create session** and `mvs` finds **Move session**, with a command whose label starts with the query first, then in-order matches on the label, then commands whose description contains the text. With an empty query the last five commands you ran appear under **Recent** before the groups. Create, Sessions, and Workspaces are listed like every other command, so a search finds them even though they also have buttons.
 
-Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Stop, Restart, and Delete. Stop, Restart, Move, and Delete have no keyboard shortcut: they are available from the palette and from a session row's **⋯** menu only, so a mis-hit key cannot stop a live session. **Move** opens a preparation and confirmation flow for a compatible profile or target; it keeps the logical session while rebuilding a fresh environment. Stop and Restart run at once on an idle session and ask first when the agent is mid-turn, since that is when a mis-click costs work; Stop also retries a stop that failed part-way without asking. Delete permanently removes the session, its target, and its recovery archive after a confirmation. Every confirmation lists a letter for each button under its text, for example `n No · y Yes · d Yes, delete branch`, so no confirmation needs Tab; `Esc` always takes the safe answer. The palette is also how you discover useful commands that have no dedicated key.
+Use `↑` / `↓` or `Ctrl+P` / `Ctrl+N` to select a command, `Enter` to run it, and `Esc` to close the palette. Selected-session actions include Rename session, Container settings for container-backed sessions, Move, Suspend session, Restart, and Destroy session. **Suspend session** saves a recovery copy and releases the environment for later Resume; it always confirms, including the interruption of a current turn and suspension of active sub-agents. Its shortcut is `prefix+shift+x`. **Close pane** (`prefix+x`) only dismisses the viewer and leaves the session running.
+
+**Move** opens preparation and confirmation for a compatible profile or target while keeping the logical session. Restart runs at once when idle and asks first mid-turn. **Destroy session** permanently removes the session, environment, and recovery archive after confirmation; deleting its managed branch is a separate choice. Keeping the branch does not save work held only in the environment. After a failed suspension, **Discard changes since checkpoint…** requires a second confirmation identifying the recovery copy and warning that newer work will be lost. Every confirmation lists a letter for each button, for example `c Cancel · d Destroy session · a Destroy and delete branch`; `Esc` takes the safe answer.
 
 ## New session and Setup
 
@@ -365,11 +368,11 @@ conversation header to show separate turn, step, and background clocks. The
 ordinary **Running** status covers the originating turn and its follow-on
 background work continuously, so it does not reset or go idle between phases.
 The configured spinner appears in the Prompt composer's upper-right corner only
-while the selected session is actually busy; an idle or stopped session does
+while the selected session is actually busy; an idle or suspended session does
 not animate.
 
-Stopped sessions are hidden from the Sessions pane by default and remain
-available through **Open**. Enable **Setup → Advanced → Show stopped sessions**
+Suspended sessions are hidden from the Sessions pane by default and remain
+available through **Open**. Enable **Setup → Advanced → Show suspended sessions**
 to include them in the Sessions pane for their workspace.
 
 <figure class="shot">

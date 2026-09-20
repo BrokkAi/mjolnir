@@ -136,7 +136,7 @@ The target has no Git connection back to the controller checkout.
 
 Local unpublished commits and staged, unstaged, or untracked files are not
 copied. Normal Git pushes go to the configured network push destination(s).
-Stopping saves a checkpoint without publishing a branch into the host
+Suspending saves a checkpoint without publishing a branch into the host
 repository. Only raw local sessions support repositories without network
 remotes. See [Workspaces and bundles](/workspaces-bundles/).
 

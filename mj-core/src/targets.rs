@@ -68,7 +68,7 @@ impl ProvisionStage {
             Self::Compacting => "Compact".into(),
             Self::RecoveryCopy => "Recovery copy".into(),
             Self::Verifying => "Verify".into(),
-            Self::Closing => "Close".into(),
+            Self::Closing => "Shut down agent".into(),
             Self::StoppingTarget => "Stop target".into(),
             Self::RemovingContainer => "Remove container".into(),
             Self::RemovingStorage => "Remove container storage".into(),

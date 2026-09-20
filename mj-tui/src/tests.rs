@@ -1088,7 +1088,7 @@ fn a_stopping_transition_offers_no_standby_composer() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
     dashboard.focus_prompt();
 
     assert_eq!(
@@ -4002,17 +4002,22 @@ fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
 }
 
 #[test]
-fn stop_and_restart_ask_only_while_the_agent_is_working() {
+fn suspension_always_confirms_and_warns_when_interrupting_a_turn() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    // Idle: both run at once.
+    // Idle suspension still confirms releasing the environment.
     assert_eq!(
-        dashboard.dispatch_command(CommandId::StopSession),
-        DashboardAction::Close {
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Char('s'))),
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
-    // Working: both ask, and the letter for the second button answers.
+    // Working suspension also explains that it interrupts the turn.
     dashboard
         .session_details
         .get_mut("session-1")
@@ -4023,7 +4028,7 @@ fn stop_and_restart_ask_only_while_the_agent_is_working() {
         AttentionLevel::Working
     );
     assert_eq!(
-        dashboard.dispatch_command(CommandId::StopSession),
+        dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Confirm(_)));
@@ -4031,18 +4036,18 @@ fn stop_and_restart_ask_only_while_the_agent_is_working() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Stop while working?")),
+            .any(|line| line.contains("The current turn will be interrupted.")),
         "{lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("c Cancel") && line.contains("s Stop now")),
+            .any(|line| line.contains("c Cancel") && line.contains("s Suspend session")),
         "{lines:#?}"
     );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('s'))),
-        DashboardAction::Close {
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
@@ -4075,23 +4080,23 @@ fn every_confirmation_button_answers_a_unique_letter() {
         ['d', 'o', 's']
     );
     assert_eq!(
-        confirmation_accelerators(&["Cancel", "Force stop", "Retry stop"]),
+        confirmation_accelerators(&["Cancel", "Force stop", "Retry suspension"]),
         ['c', 'f', 'r']
     );
 
     // The delete dialog's third button is reachable by its letter.
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    dashboard.dispatch_command(CommandId::ForceDestroySession);
+    dashboard.dispatch_command(CommandId::DestroySession);
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("d Yes, delete branch")),
+            .any(|line| line.contains("a Destroy and delete branch")),
         "{lines:#?}"
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('d'))),
+        dashboard.handle_key(key(KeyCode::Char('a'))),
         DashboardAction::ForceDestroy {
             session_id: "session-1".into(),
             delete_branch: true
@@ -4530,11 +4535,11 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     dashboard.set_state(state);
     assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
     assert!(matches!(
-        dashboard.dispatch_command(crate::actions::CommandId::StopSession),
+        dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
         DashboardAction::None
     ));
     assert_eq!(
-        chord(&mut dashboard, CommandId::CloseSession),
+        chord(&mut dashboard, CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(
@@ -4697,14 +4702,14 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
 }
 
 #[test]
-fn close_session_always_confirms_and_cancel_is_safe() {
+fn suspend_session_always_confirms_and_cancel_is_safe() {
     let mut dashboard = dashboard_with_session(running_session());
     assert_eq!(
-        chord(&mut dashboard, CommandId::CloseSession),
+        chord(&mut dashboard, CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::CloseSession { .. }))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::SuspendSession { .. }))
     );
     // Enter initially activates Cancel, even when the session is idle.
     assert_eq!(
@@ -4712,11 +4717,11 @@ fn close_session_always_confirms_and_cancel_is_safe() {
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
-    chord(&mut dashboard, CommandId::CloseSession);
+    chord(&mut dashboard, CommandId::SuspendSession);
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::Close {
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );

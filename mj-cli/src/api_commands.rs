@@ -329,22 +329,25 @@ pub(crate) struct SessionArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct CloseArgs {
+pub(crate) struct SuspendArgs {
     #[arg(long)]
     session: Option<String>,
-    /// Taken only so the command can explain itself. `mj close <id>` is a
+    /// Taken only so the command can explain itself. `mj suspend <id>` is a
     /// common mistake, and every session command in this CLI names its
     /// session with `--session`, so clap's "unexpected argument" would leave
     /// the person guessing which option it wanted.
     #[arg(value_name = "SESSION", hide = true)]
     misplaced_session: Option<String>,
-    /// Destroy the session without a checkpoint: the target is torn down, the
-    /// recovery archive removed, sub-agents destroyed first; irreversible.
     #[arg(long)]
-    force: bool,
-    /// With --force, also delete the session's managed branch. Without it the
-    /// branch stays in the repository.
-    #[arg(long, requires = "force")]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DestroyArgs {
+    #[arg(long)]
+    session: String,
+    /// Also delete the managed branch. Work held only in the environment is lost either way.
+    #[arg(long)]
     delete_branch: bool,
     #[arg(long)]
     json: bool,
@@ -357,7 +360,7 @@ pub(crate) struct CloseArgs {
         .args(["session", "wiki"])
 ))]
 pub(crate) struct ResumeArgs {
-    /// Stopped, lost, or failed session to resume. It keeps its identity,
+    /// Suspended, lost, or failed session to resume. It keeps its identity,
     /// transcript, and work.
     #[arg(long)]
     session: Option<String>,
@@ -375,7 +378,7 @@ pub(crate) struct ResumeArgs {
     /// Workspace to resume into. Defaults to the session's own.
     #[arg(long)]
     workspace_id: Option<String>,
-    /// What to do with prompts queued when the session stopped.
+    /// What to do with prompts queued when the session was suspended.
     #[arg(long, value_enum)]
     queue: Option<ResumeQueueArg>,
     #[arg(long)]
@@ -715,7 +718,7 @@ pub(crate) async fn sessions(
         println!("{}  {}  {}", session.id, session.state, session.title);
         // Silence is reported, never acted on. A turn waiting on a long build
         // is quiet and healthy, so this says what is true and leaves the
-        // decision — keep waiting, or `mj cancel-turn` — to the reader.
+        // decision — keep waiting, or `mj interrupt-turn` — to the reader.
         if let Some(note) = session.activity_state.as_ref().and_then(|state| {
             mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
         }) {
@@ -787,50 +790,55 @@ async fn wiki_session(client: &ApiClient, wiki_id: &str, json: bool) -> Result<(
     Ok(())
 }
 
-/// Close a session, with or without a checkpoint.
-///
-/// A non-force close is accepted asynchronously, because checkpointing and
-/// tearing down a target take minutes. Follow it with `mj wait --session <id>`,
-/// which blocks while the close runs and reports why it failed if it does.
-pub(crate) async fn close(args: CloseArgs) -> Result<()> {
-    let session = close_session_id(&args)?;
-    let client = ApiClient::connect().await?;
-    client
-        .close(session, args.force, args.delete_branch)
-        .await?;
-    match args.json {
-        true => print_json(&serde_json::json!({
-            "session_id": session,
-            "accepted": true,
-            "forced": args.force,
-        })),
-        false => {
-            match args.force {
-                true => println!("destroying {session}"),
-                false => {
-                    println!("closing {session}");
-                    println!("watch it with `mj wait --session {session}`");
-                }
-            }
-            Ok(())
-        }
+/// Save a recovery copy and release the environment. Acceptance is not completion.
+pub(crate) async fn suspend(args: SuspendArgs) -> Result<()> {
+    let session = suspend_session_id(&args)?;
+    ApiClient::connect().await?.suspend(session).await?;
+    if args.json {
+        print_json(
+            &serde_json::json!({"session_id": session, "accepted": true, "operation": "suspend"}),
+        )
+    } else {
+        println!("suspension accepted for {session}");
+        println!("watch it with `mj wait --session {session}`");
+        Ok(())
     }
 }
 
-/// Which session this close is for, or a message naming the option that says
+/// Permanently destroy the session, environment, and recovery archive.
+pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
+    ApiClient::connect()
+        .await?
+        .destroy(&args.session, args.delete_branch)
+        .await?;
+    if args.json {
+        print_json(
+            &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy"}),
+        )
+    } else {
+        println!("destruction accepted for {}", args.session);
+        println!(
+            "check removal with `mj sessions --session {}`",
+            args.session
+        );
+        Ok(())
+    }
+}
+
+/// Which session this suspension is for, or a message naming the option that says
 /// so.
-fn close_session_id(args: &CloseArgs) -> Result<&str> {
+fn suspend_session_id(args: &SuspendArgs) -> Result<&str> {
     match (args.session.as_deref(), args.misplaced_session.as_deref()) {
         (Some(session), None) => Ok(session),
         (None, Some(session)) => {
-            bail!("name the session as an option: `mj close --session {session}`")
+            bail!("name the session as an option: `mj suspend --session {session}`")
         }
         (Some(_), Some(_)) => bail!("name the session once, with --session"),
-        (None, None) => bail!("name the session to close with --session <id>"),
+        (None, None) => bail!("name the session to suspend with --session <id>"),
     }
 }
 
-/// Resume a stopped session from its checkpoint.
+/// Resume a suspended session from its checkpoint.
 ///
 /// The API answers as soon as the daemon admits the resume, because restoring
 /// an archive onto a fresh target takes minutes. Follow it with
@@ -1008,9 +1016,9 @@ fn report_wiki_continuation(
     Ok(())
 }
 
-pub(crate) async fn cancel_turn(args: SessionArgs) -> Result<()> {
+pub(crate) async fn interrupt_turn(args: SessionArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    client.cancel_turn(&args.session).await?;
+    client.interrupt_turn(&args.session).await?;
     match args.json {
         true => print_json(&serde_json::json!({ "session_id": args.session, "accepted": true })),
         false => {
@@ -1382,17 +1390,20 @@ mod tests {
         };
         assert_eq!(args.kind, ExportKindArg::Patch);
 
-        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1", "--force"]).unwrap();
-        let Some(Command::Close(args)) = cli.command else {
-            panic!("expected the close subcommand");
+        let cli =
+            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
+        let Some(Command::Destroy(args)) = cli.command else {
+            panic!("expected the suspend subcommand");
         };
-        assert!(args.force);
+        assert!(args.delete_branch);
 
-        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
-        let Some(Command::Close(args)) = cli.command else {
-            panic!("expected the close subcommand");
+        let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
+        let Some(Command::Suspend(args)) = cli.command else {
+            panic!("expected the suspend subcommand");
         };
-        assert!(!args.force);
+        assert_eq!(args.session.as_deref(), Some("s1"));
+        assert!(Cli::try_parse_from(["mj", "suspend", "--session", "s1", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["mj", "close", "--session", "s1"]).is_err());
 
         // Resume names the session and nothing else by default: the session's
         // own record supplies the profile and target.
@@ -1431,8 +1442,11 @@ mod tests {
             (vec!["mj", "diff", "--session", "s1"], "diff"),
             (vec!["mj", "resume", "--session", "s1"], "resume"),
             (vec!["mj", "sessions", "--json"], "sessions"),
-            (vec!["mj", "close", "--session", "s1"], "close"),
-            (vec!["mj", "cancel-turn", "--session", "s1"], "cancel-turn"),
+            (vec!["mj", "suspend", "--session", "s1"], "suspend"),
+            (
+                vec!["mj", "interrupt-turn", "--session", "s1"],
+                "interrupt-turn",
+            ),
             (vec!["mj", "api-info"], "api-info"),
         ] {
             let cli = Cli::try_parse_from(argv.clone()).unwrap_or_else(|error| {
@@ -1498,23 +1512,23 @@ mod tests {
     }
 
     #[test]
-    fn close_names_the_option_that_takes_a_session_id() {
-        let parsed = Cli::try_parse_from(["mj", "close", "s1"]).expect("the id is accepted");
-        let Command::Close(args) = parsed.command.expect("close is a command") else {
-            panic!("close parsed as another command");
+    fn suspend_names_the_option_that_takes_a_session_id() {
+        let parsed = Cli::try_parse_from(["mj", "suspend", "s1"]).expect("the id is accepted");
+        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
+            panic!("suspend parsed as another command");
         };
-        let error = close_session_id(&args).unwrap_err();
+        let error = suspend_session_id(&args).unwrap_err();
         assert!(
             format!("{error:#}").contains("--session s1"),
             "the error has to say which option to use: {error:#}"
         );
 
         let parsed =
-            Cli::try_parse_from(["mj", "close", "--session", "s1"]).expect("the option parses");
-        let Command::Close(args) = parsed.command.expect("close is a command") else {
-            panic!("close parsed as another command");
+            Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).expect("the option parses");
+        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
+            panic!("suspend parsed as another command");
         };
-        assert_eq!(close_session_id(&args).unwrap(), "s1");
+        assert_eq!(suspend_session_id(&args).unwrap(), "s1");
     }
 
     #[test]

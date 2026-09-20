@@ -71,7 +71,7 @@ Read state and browser drafts are client-specific, so opening a session on your
 phone does not consume another terminal's unread marker or steal its unsent
 text. The daemon remains the owner of the actual sessions.
 
-Stopped histories are global resume candidates. Resuming one moves it into the
+Suspended histories are global resume candidates. Resuming one moves it into the
 workspace from which you resume, even if its former workspace was deleted.
 This is why deleting an otherwise empty workspace does not erase stopped
 session history.
@@ -83,7 +83,7 @@ no recoverable detached drafts. Force deletion first destroys its active
 sessions and drops its drafts. This is destructive session lifecycle work, not
 just sidebar cleanup; review the confirmation carefully.
 
-Stopped and otherwise inactive histories remain available in the global resume
+Suspended and otherwise inactive histories remain available in the global resume
 picker after either form of workspace deletion. For session-level destruction
 and recovery guarantees, see [Durability and recovery](/durability/).
 

@@ -155,7 +155,7 @@ impl WaitDecision {
 pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Option<WaitDecision> {
     let stopping = matches!(
         observation.lifecycle,
-        Some(ViewerLifecycleCategory::Stopped | ViewerLifecycleCategory::Stopping)
+        Some(ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Suspending)
     ) || matches!(
         observation.execution,
         MaterializedExecutionState::Closing | MaterializedExecutionState::Closed

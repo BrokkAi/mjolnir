@@ -53,9 +53,9 @@ function session(id, projectKey, projectLabel, options = {}) {
       open: false,
       prompt: false,
       run_shell: false,
-      cancel_turn: false,
+      interrupt_turn: false,
       cancel_operation: false,
-      stop: false,
+      suspend: false,
       rename: false,
       resume: false,
       set_config: false,
@@ -77,7 +77,7 @@ function snapshot() {
       session('alpha-second', 'project-alpha', 'Alpha'),
       // A visible label is not an identity: this must remain its own group.
       session('other-alpha', 'project-other-alpha', 'Alpha'),
-      session('stopped-alpha', 'project-alpha', 'Alpha', { lifecycle: 'stopped' }),
+      session('stopped-alpha', 'project-alpha', 'Alpha', { lifecycle: 'suspended' }),
       session('other-workspace', 'project-other-workspace', 'Other', {
         workspaceId: 'workspace-2',
       }),

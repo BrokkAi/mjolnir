@@ -853,7 +853,7 @@ impl Controller {
                 } else {
                     // A recovered source stop always tears its target down: an
                     // interrupted in-place swap falls back to the fresh path.
-                    self.close_session_for_move(
+                    self.suspend_session_for_move(
                         &id,
                         executor,
                         manager,
@@ -922,7 +922,7 @@ impl Controller {
                 } else {
                     SourceTargetDisposition::Destroy
                 };
-                self.close_session_for_move(
+                self.suspend_session_for_move(
                     &id,
                     executor,
                     manager,

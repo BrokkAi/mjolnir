@@ -1505,14 +1505,14 @@ impl DashboardContext {
             }
             Ok(LifecycleSuccess::Closed) => {
                 self.dashboard
-                    .set_notice(format!("Stopped {}", short_id(&session_id)));
+                    .set_notice(format!("Suspended {}", short_id(&session_id)));
             }
             Ok(LifecycleSuccess::ForceStopped) => self.dashboard.set_notice(format!(
-                "Force-stopped {} at its latest recovery archive",
+                "Suspended {} using the confirmed recovery copy; newer changes discarded",
                 short_id(&session_id)
             )),
             Ok(LifecycleSuccess::DestroyedStopped) => self.dashboard.set_notice(format!(
-                "Permanently destroyed stopped session {}",
+                "Permanently destroyed suspended session {}",
                 short_id(&session_id)
             )),
             Ok(LifecycleSuccess::ForceDestroyed) => self.dashboard.set_notice(format!(
@@ -1522,7 +1522,7 @@ impl DashboardContext {
             Err(error) => {
                 if operation
                     .as_ref()
-                    .is_some_and(|operation| operation.kind == SessionOperationKind::Stopping)
+                    .is_some_and(|operation| operation.kind == SessionOperationKind::Suspending)
                 {
                     self.dashboard.show_close_failure(session_id.clone(), error);
                 } else if operation

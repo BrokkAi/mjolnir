@@ -57,8 +57,9 @@ Sessions and workspaces:
   that name.
 - `mj sessions` — the sessions the daemon holds; add `--session` for one.
 - `mj new` — create a session with a first prompt and print its id.
-- `mj close` — stop a session and checkpoint it; `--force` destroys it.
-- `mj resume` — continue a session that was closed. It keeps its id, its
+- `mj suspend` — save a recovery copy and release the environment for Resume.
+- `mj destroy` — permanently remove a session, its environment, and recovery archive; `--delete-branch` also removes its managed branch.
+- `mj resume` — continue a session that was suspended. It keeps its id, its
   transcript, and its work.
 
 Running a turn:
@@ -66,7 +67,7 @@ Running a turn:
 - `mj prompt` — send a prompt; `--wait` also waits for the turn to end.
 - `mj wait` — block until the turn ends and print the outcome, the turn number,
   the elapsed time, and the agent's final message.
-- `mj cancel-turn` — cancel the turn a session is running.
+- `mj interrupt-turn` — interrupt the current turn while keeping the environment.
 - `mj set-config` — apply a session configuration setting, such as the model.
 - `mj models` — the models and efforts a profile offers.
 
@@ -95,7 +96,7 @@ Diagnosis:
 id=$(mj new --profile work --target local --json "Port the parser to the new API" | jq -r .session_id)
 mj wait --session "$id" --timeout 900
 mj diff --session "$id"
-mj close --session "$id"
+mj suspend --session "$id"
 ```
 
 `mj new` prints the id, `mj wait` blocks until the turn ends, and
@@ -108,6 +109,7 @@ the argument is `-`.
 - Read the session's own output before reporting on it. `mj wait` gives you the
   agent's final message; `mj diff` gives you what actually changed.
 - One session, one job. Give a child a self-contained task and a way to report.
-- A session that has work in it is not disposable: `mj close --force` destroys
-  the workspace checkout. Prefer a plain `mj close`.
+- A session that has work in it is not disposable: `mj destroy` permanently removes
+  its environment and recovery archive. Prefer `mj suspend`. Keeping a managed
+  branch does not preserve work held only in the environment.
 - Report the session id in anything you tell the user, so they can open it.

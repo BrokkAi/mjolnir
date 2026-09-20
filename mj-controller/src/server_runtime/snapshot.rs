@@ -139,8 +139,8 @@ pub(super) fn viewer_operation(
             crate::daemon::RuntimeLifecycleKind::Move => ViewerOperationKind::Move,
             // Stop, destroy, and retained cleanup remain distinct so a phone
             // can describe which part of teardown owns the session.
-            crate::daemon::RuntimeLifecycleKind::Close
-            | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Stop,
+            crate::daemon::RuntimeLifecycleKind::Suspend
+            | crate::daemon::RuntimeLifecycleKind::ForceStop => ViewerOperationKind::Suspend,
             crate::daemon::RuntimeLifecycleKind::DestroyStopped
             | crate::daemon::RuntimeLifecycleKind::ForceDestroy => ViewerOperationKind::Destroy,
             crate::daemon::RuntimeLifecycleKind::Cleanup => ViewerOperationKind::Cleanup,
@@ -200,7 +200,7 @@ pub(super) fn session_capabilities(
             && session.lifecycle == ViewerLifecycleCategory::Live,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
-        cancel_turn: live
+        interrupt_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| {
                 state.active_prompt.is_some() || state.capacity_retry.is_some()
@@ -208,7 +208,14 @@ pub(super) fn session_capabilities(
         cancel_operation: operation.is_some_and(|operation| operation.cancellable),
         // Stopping a session that is already stopping asks for something that
         // is happening; resuming one that is running asks for a second copy.
-        stop: session.lifecycle.is_dashboard_visible() && !mutation_busy,
+        suspend: session.lifecycle.is_dashboard_visible() && !mutation_busy,
+        destroy: !operation.is_some_and(|op| {
+            matches!(
+                op.kind,
+                crate::server::ViewerOperationKind::Destroy
+                    | crate::server::ViewerOperationKind::Cleanup
+            )
+        }),
         rename: !session.transitioning,
         resume: !session.lifecycle.is_dashboard_visible() && !mutation_busy,
         move_session: live && !busy,

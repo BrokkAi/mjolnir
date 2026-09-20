@@ -98,7 +98,12 @@ impl ViewerSnapshot {
                     profile_id: session.last_profile.clone(),
                     bundle_id: session.bundle_id.clone(),
                     target_id: session.target_template_id.clone(),
-                    state: session.state.as_str().into(),
+                    state: match session.state {
+                        SessionState::Closing => "suspending",
+                        SessionState::Stopped => "suspended",
+                        _ => session.state.as_str(),
+                    }
+                    .into(),
                     created_at: session.created_at.clone(),
                     updated_at: session.updated_at.clone(),
                     has_error: session.last_error.is_some()
@@ -167,9 +172,10 @@ impl ViewerSnapshot {
                         open: false,
                         prompt: false,
                         run_shell: false,
-                        cancel_turn: false,
+                        interrupt_turn: false,
                         cancel_operation: false,
-                        stop: lifecycle.is_dashboard_visible(),
+                        suspend: lifecycle.is_dashboard_visible(),
+                        destroy: true,
                         rename: true,
                         resume: !lifecycle.is_dashboard_visible(),
                         move_session: false,
@@ -780,10 +786,11 @@ pub struct ViewerSessionCapabilities {
     pub prompt: bool,
     pub run_shell: bool,
     /// Cancel the turn the agent is working on now, leaving the session alive.
-    pub cancel_turn: bool,
+    pub interrupt_turn: bool,
     /// Cancel the provision, resume or stop currently running.
     pub cancel_operation: bool,
-    pub stop: bool,
+    pub suspend: bool,
+    pub destroy: bool,
     pub rename: bool,
     pub resume: bool,
     /// Prepare and confirm a daemon-owned move to a compatible profile or
@@ -804,8 +811,8 @@ pub struct ViewerSessionCapabilities {
 pub enum ViewerLifecycleCategory {
     Live,
     Starting,
-    Stopping,
-    Stopped,
+    Suspending,
+    Suspended,
     Failed,
 }
 
@@ -816,8 +823,8 @@ impl ViewerLifecycleCategory {
             SessionState::Running | SessionState::Disconnected | SessionState::Checkpointing => {
                 Self::Live
             }
-            SessionState::Closing | SessionState::Destroying => Self::Stopping,
-            SessionState::Stopped => Self::Stopped,
+            SessionState::Closing | SessionState::Destroying => Self::Suspending,
+            SessionState::Stopped => Self::Suspended,
             SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
                 Self::Failed
             }
@@ -828,7 +835,7 @@ impl ViewerLifecycleCategory {
     /// sessions belong to the resume flow instead, which is where a person can
     /// do something about them.
     pub const fn is_dashboard_visible(self) -> bool {
-        matches!(self, Self::Live | Self::Starting | Self::Stopping)
+        matches!(self, Self::Live | Self::Starting | Self::Suspending)
     }
 }
 
@@ -838,7 +845,7 @@ pub enum ViewerOperationKind {
     Create,
     Resume,
     Move,
-    Stop,
+    Suspend,
     Destroy,
     Cleanup,
     Checkpoint,
@@ -850,7 +857,7 @@ impl ViewerOperationKind {
             Self::Create => Some(SessionTransitionKind::Starting),
             Self::Resume => Some(SessionTransitionKind::Resuming),
             Self::Move => Some(SessionTransitionKind::Moving),
-            Self::Stop => Some(SessionTransitionKind::Stopping),
+            Self::Suspend => Some(SessionTransitionKind::Suspending),
             Self::Destroy | Self::Cleanup => Some(SessionTransitionKind::Destroying),
             // Checkpointing is an ordinary live-session operation. It must
             // not replace a readable conversation with a placeholder.

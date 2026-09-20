@@ -24,9 +24,77 @@ impl RuntimeState {
             .contains(session_id)
     }
 
-    pub async fn close_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+    /// Make the intent durable before an HTTP caller receives acceptance.
+    /// Waiting and store writes happen in the action task, never the UI loop.
+    pub async fn prepare_suspension(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        self.wait_before_close(session_id).await?;
+        if self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .is_some_and(|operation| {
+                operation.kind == LifecycleKind::Suspend && operation.result.borrow().is_none()
+            })
+        {
+            return Ok(());
+        }
+        blocking({
+            let session_id = session_id.to_owned();
+            let observer = self.recovery_observer.clone();
+            move || {
+                let cancelled = AtomicBool::new(false);
+                let _reservation = reserve_recovery_or_cancel(&observer, &session_id, &cancelled)?;
+                ensure!(
+                    !crate::controller::move_session::move_has_pending_queue(&session_id),
+                    "Move queue admission is incomplete; retry Move on the same destination before suspending"
+                );
+                let mut controller = Controller::load()?;
+                let record = controller
+                    .state
+                    .sessions
+                    .get_mut(&session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?;
+                if matches!(
+                    record.state,
+                    SessionState::Running
+                        | SessionState::Disconnected
+                        | SessionState::Checkpointing
+                ) {
+                    record.state = SessionState::Closing;
+                    record.last_error = None;
+                    record.updated_at = chrono::Utc::now().to_rfc3339();
+                    crate::database::save_lifecycle_session(record)?;
+                } else if record.public_error().is_some() {
+                    record.last_error = None;
+                    crate::database::save_lifecycle_session(record)?;
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        self.reload_controller().await?;
+        self.publish_revision();
+        Ok(())
+    }
+
+    pub async fn suspend_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+        self.request_close(&session_id);
+        let result = self.suspend_with_children(&session_id).await;
+        if let Err(error) = &result {
+            let reference = new_command_id("suspension").unwrap_or_else(|_| "suspension".into());
+            tracing::warn!(%session_id, %reference, error = format!("{error:#}"), "session suspension failed");
+            self.record_failed_close(&session_id, &reference, &LifecycleFailure::of(error))
+                .await;
+        }
+        self.clear_close_request(&session_id);
+        result
+    }
+
+    async fn suspend_with_children(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        self.prepare_suspension(session_id).await?;
         let children = blocking({
-            let session_id = session_id.clone();
+            let session_id = session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
                 Ok(active_child_session_ids(&controller.state, &session_id))
@@ -34,15 +102,15 @@ impl RuntimeState {
         })
         .await?;
         for child_id in children {
-            self.request_close(&child_id);
-            let result = self.close_requested_session(child_id.clone()).await;
-            self.clear_close_request(&child_id);
-            result.with_context(|| format!("stop sub-agent {child_id} before its parent"))?;
+            if let Err(error) = Box::pin(self.suspend_session(child_id.clone())).await {
+                tracing::warn!(%child_id, error = format!("{error:#}"), "child suspension failed");
+                return Err(mj_core::refusal::Refusal::precondition(format!(
+                    "sub-agent {child_id} could not be suspended; inspect that session and retry"
+                ))
+                .into());
+            }
         }
-        self.request_close(&session_id);
-        let result = self.close_requested_session(session_id.clone()).await;
-        self.clear_close_request(&session_id);
-        result
+        self.close_requested_session(session_id.to_owned()).await
     }
 
     pub(super) async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {
@@ -58,7 +126,7 @@ impl RuntimeState {
                 .filter(|operation| {
                     !matches!(
                         operation.kind,
-                        LifecycleKind::Close | LifecycleKind::Cleanup
+                        LifecycleKind::Suspend | LifecycleKind::Cleanup
                     )
                 })
                 .map(|operation| {
@@ -103,7 +171,7 @@ impl RuntimeState {
         let result = self
             .run_lifecycle(
                 operation_session_id,
-                LifecycleKind::Close,
+                LifecycleKind::Suspend,
                 move |state, session_id, cancelled| async move {
                     let _recovery_reservation = tokio::task::spawn_blocking({
                         let observer = state.recovery_observer.clone();
@@ -137,11 +205,11 @@ impl RuntimeState {
                         // create or resume finish, so a session that is still
                         // genuinely provisioning is not caught here.
                         CloseRoute::SettleWithoutCheckpoint => {
-                            controller.close_session_without_checkpoint(&session_id, &executor)?
+                            controller.suspend_session_without_checkpoint(&session_id, &executor)?
                         }
                         _ => {
                             controller
-                                .close_session_managed_controlled(
+                                .suspend_session_managed_controlled(
                                     &session_id,
                                     &executor,
                                     &state.session_manager,

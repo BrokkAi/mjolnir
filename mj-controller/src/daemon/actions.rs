@@ -502,8 +502,8 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::CloseSession { session_id } => {
-            state.close_session(session_id).await?;
+        DaemonAction::SuspendSession { session_id } => {
+            state.suspend_session(session_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::StartCreateSession(request) => Ok(DaemonReply::RegisteredSession(Box::new(
@@ -523,8 +523,13 @@ pub(super) async fn handle_action(
         DaemonAction::MoveSession(request) => {
             Ok(DaemonReply::MoveOutcome(state.move_session(request).await?))
         }
-        DaemonAction::ForceStopSession { session_id } => {
-            state.force_stop_session(session_id).await?;
+        DaemonAction::DiscardSinceCheckpoint {
+            session_id,
+            checkpoint,
+        } => {
+            state
+                .discard_since_checkpoint(session_id, checkpoint)
+                .await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::DestroyStoppedSession {

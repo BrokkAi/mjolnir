@@ -56,6 +56,7 @@ function cardHarness() {
   const source = sourceBetween('function sessionCard(session) {', '\nfunction action(');
   const context = vm.createContext({
     pendingActions: new Set(),
+    pendingLifecycleActions: new Map(),
     openSessionMenuId: null,
     snapshot: {},
     epochMs(value) { return typeof value === 'number' ? value : null; },
@@ -101,7 +102,7 @@ test('session cards are focusable, have no Open button, and retain nested action
     `render({
       id: 'session-1', title: 'Build', lifecycle: 'live', state: 'Ready',
       target_id: 'target', profile_id: 'profile', capabilities: {
-        open: true, rename: true, cancel_operation: true, stop: true, resume: true,
+        open: true, rename: true, cancel_operation: true, suspend: true, resume: true,
       },
     })`,
     cardHarness(),
@@ -113,12 +114,12 @@ test('session cards are focusable, have no Open button, and retain nested action
   assert.equal(card.attributes['aria-label'], 'Open session Build');
   assert.deepEqual(
     buttons.map(button => button.textContent),
-    ['⋯', 'Rename', 'Cancel operation', 'Stop session', 'Resume'],
+    ['⋯', 'Rename', 'Cancel operation', 'Suspend session…', 'Resume'],
   );
   assert.ok(!buttons.some(button => button.textContent === 'Open'));
 
   const closed = vm.runInContext(
-    `render({ id: 'closed', title: 'Closed', lifecycle: 'stopped', state: 'Stopped', target_id: 'target', profile_id: 'profile', capabilities: {} })`,
+    `render({ id: 'closed', title: 'Closed', lifecycle: 'suspended', state: 'Suspended', target_id: 'target', profile_id: 'profile', capabilities: {} })`,
     cardHarness(),
   );
   assert.equal(closed.attributes.role, undefined);
@@ -139,6 +140,7 @@ test('session clocks keep the TUI units and structured activity truth', () => {
 
   const activitySource = sourceBetween('function sessionActivityLabel(', '\nfunction updateSessionActivity');
   const activityContext = vm.createContext({
+    pendingLifecycleActions: new Map(),
     snapshot: {},
     epochMs(value) { return typeof value === 'number' ? value : null; },
     formatClock,
@@ -153,7 +155,7 @@ test('session clocks keep the TUI units and structured activity truth', () => {
   assert.equal(activity({ activity_details: { kind: 'step', step_started_at_ms: 40_000 } }, 100_000), 'Step 1m00s');
   assert.equal(activity({ activity_details: { kind: 'idle' } }, 100_000), 'Idle');
   assert.equal(activity({ activity_details: { kind: 'background' } }, 100_000), 'Background');
-  assert.equal(activity({ activity_details: { kind: 'lifecycle', label: 'Stopping' } }, 100_000), 'Stopping');
+  assert.equal(activity({ activity_details: { kind: 'lifecycle', label: 'Suspending' } }, 100_000), 'Suspending');
   assert.equal(activity({ lifecycle: 'starting', activity_details: { kind: 'turn', turn_started_at_ms: 40_000 } }, 100_000), 'starting');
 });
 
@@ -164,6 +166,7 @@ function cardEventHarness() {
   );
   const navigations = [];
   const context = vm.createContext({
+    pendingLifecycleActions: new Map(),
     suppressedSessionClickId: null,
     closeSessionMenu() {},
     openSessionMenu() {},
@@ -229,6 +232,7 @@ test('card navigation ignores nested controls and supports click, Enter, and Spa
 function queueHarness() {
   const source = sourceBetween('function renderQueue(session) {', '\n// Every snapshot revision');
   const context = vm.createContext({
+    pendingLifecycleActions: new Map(),
     queue: makeNode('div'),
     shells: makeNode('div'),
     queueHeading: makeNode('h3'),
@@ -238,6 +242,7 @@ function queueHarness() {
     conversationSide: makeNode('details'),
     conversationSummary: makeNode('summary'),
     pendingActions: new Set(),
+    pendingLifecycleActions: new Map(),
     backgroundTaskErrors: new Map(),
     epochMs: value => value,
     serverClockMs: () => 100_000,
@@ -339,9 +344,11 @@ test('background task stop requests are deduplicated and retain pending state un
     background_tasks: [{ id: 'task-1', can_stop: true }],
   };
   const context = vm.createContext({
+    pendingLifecycleActions: new Map(),
     currentSession: session.id,
     snapshot: { sessions: [session] },
     pendingActions: new Set(),
+    pendingLifecycleActions: new Map(),
     backgroundTaskErrors: new Map(),
     activeSession: () => session,
     renderQueue: () => {},

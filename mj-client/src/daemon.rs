@@ -302,7 +302,7 @@ pub struct RuntimeSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLifecycleKind {
     Create,
-    Close,
+    Suspend,
     Resume,
     Move,
     ForceStop,
@@ -585,7 +585,7 @@ pub enum DaemonAction {
         session_id: String,
         resolution: Resolution,
     },
-    CloseSession {
+    SuspendSession {
         session_id: String,
     },
     StartCreateSession(CreateSessionRequest),
@@ -595,8 +595,9 @@ pub enum DaemonAction {
     ResumeSession(ResumeSessionRequest),
     PrepareMoveSession(MoveSelection),
     MoveSession(MoveSessionRequest),
-    ForceStopSession {
+    DiscardSinceCheckpoint {
         session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
     },
     DestroyStoppedSession {
         session_id: String,
@@ -1594,9 +1595,9 @@ impl DaemonClient {
         }
     }
 
-    pub async fn close_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::CloseSession { session_id })
+            .request(DaemonAction::SuspendSession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1634,9 +1635,16 @@ impl DaemonClient {
         }
     }
 
-    pub async fn force_stop_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn discard_since_checkpoint(
+        &mut self,
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::ForceStopSession { session_id })
+            .request(DaemonAction::DiscardSinceCheckpoint {
+                session_id,
+                checkpoint,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1794,7 +1802,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

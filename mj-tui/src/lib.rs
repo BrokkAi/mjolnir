@@ -347,11 +347,12 @@ pub enum DashboardAction {
     CreateBundle {
         sources: Vec<String>,
     },
-    Close {
+    Suspend {
         session_id: String,
     },
-    ForceStop {
+    DiscardSinceCheckpoint {
         session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
     },
     DestroyStopped {
         session_id: String,
@@ -537,7 +538,7 @@ pub enum SessionOperationKind {
     Launching,
     Resuming,
     Moving,
-    Stopping,
+    Suspending,
     Destroying,
     Connecting,
     Importing,
@@ -549,7 +550,7 @@ impl SessionOperationKind {
             Self::Launching => "Launch",
             Self::Resuming => "Resuming",
             Self::Moving => "Moving",
-            Self::Stopping => "Stopping",
+            Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
             Self::Connecting => "Connecting",
             Self::Importing => "Importing",
@@ -564,7 +565,7 @@ impl SessionOperationKind {
             Self::Launching => Some(SessionTransitionKind::Starting),
             Self::Resuming => Some(SessionTransitionKind::Resuming),
             Self::Moving => Some(SessionTransitionKind::Moving),
-            Self::Stopping => Some(SessionTransitionKind::Stopping),
+            Self::Suspending => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
             Self::Connecting | Self::Importing => None,
         }

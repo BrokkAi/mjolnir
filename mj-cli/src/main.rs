@@ -124,12 +124,14 @@ enum Command {
     Export(api_commands::ExportArgs),
     /// List the sessions the daemon holds.
     Sessions(api_commands::SessionsArgs),
-    /// Close a session.
-    Close(api_commands::CloseArgs),
+    /// Save a recovery copy and release the environment for later Resume.
+    Suspend(api_commands::SuspendArgs),
+    /// Permanently destroy a session, its environment, and recovery archive.
+    Destroy(api_commands::DestroyArgs),
     /// Resume a stopped session from its checkpoint.
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
-    CancelTurn(api_commands::SessionArgs),
+    InterruptTurn(api_commands::SessionArgs),
     /// Print the API base URL and where its bearer token lives.
     ApiInfo(api_commands::ApiInfoArgs),
     /// Discover available models and efforts for a profile.
@@ -425,9 +427,10 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Diff(_)) => "diff",
         Some(Command::Export(_)) => "export",
         Some(Command::Sessions(_)) => "sessions",
-        Some(Command::Close(_)) => "close",
+        Some(Command::Suspend(_)) => "suspend",
+        Some(Command::Destroy(_)) => "destroy",
         Some(Command::Resume(_)) => "resume",
-        Some(Command::CancelTurn(_)) => "cancel-turn",
+        Some(Command::InterruptTurn(_)) => "interrupt-turn",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
@@ -543,13 +546,16 @@ async fn run_command(
         Some(Command::Sessions(args)) => api_commands::sessions(args, requested_workspace)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Close(args)) => api_commands::close(args)
+        Some(Command::Suspend(args)) => api_commands::suspend(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Destroy(args)) => api_commands::destroy(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Resume(args)) => api_commands::resume(args)
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::CancelTurn(args)) => api_commands::cancel_turn(args)
+        Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Models(args)) => api_commands::models(args)

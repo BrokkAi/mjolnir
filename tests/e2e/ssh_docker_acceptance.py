@@ -501,7 +501,7 @@ class AcceptanceLab:
         before = self.container_id(session_id)
         result = self.ipc({"action": "checkpoint_session", "arguments": {"session_id": session_id}}, 300)
         record_json(self.artifact / "checkpoint.json", result)
-        self.ipc({"action": "close_session", "arguments": {"session_id": session_id}}, 301)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 301)
         self.wait_state(session_id, "stopped", timeout=DEFAULT_TIMEOUT)
         resume = {
             "session_id": session_id,
@@ -629,12 +629,12 @@ class AcceptanceLab:
                 raise AcceptanceFailure("runtime recovery replaced a surviving container")
         self.lab.record_action("docker-daemon-interruption-recovered")
 
-        self.ipc({"action": "close_session", "arguments": {"session_id": first}}, 501)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": first}}, 501)
         self.wait_state(first, "stopped")
         self.verify_removed(first)
         if identities[second] != self.container_id(second):
             raise AcceptanceFailure("closing one session disturbed the other")
-        self.ipc({"action": "close_session", "arguments": {"session_id": second}}, 503)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": second}}, 503)
         self.wait_state(second, "stopped")
         self.verify_removed(second)
         self.run_orphan()
@@ -688,7 +688,7 @@ class AcceptanceLab:
         self.start_daemon()
         self.wait_state(session_id, "running")
         self.prompt_and_verify(session_id, 2)
-        self.ipc({"action": "close_session", "arguments": {"session_id": session_id}}, 502)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": session_id}}, 502)
         self.wait_state(session_id, "stopped")
         self.verify_removed(session_id)
         self.lab.record_action("fresh-controller-adoption-and-close", session_id=session_id)
@@ -779,8 +779,8 @@ class AcceptanceLab:
         self.prompt_and_verify(second, 2)
         self.checkpoint_close_resume(first)
         self.restart_and_recover()
-        self.ipc({"action": "close_session", "arguments": {"session_id": first}}, 400)
-        self.ipc({"action": "close_session", "arguments": {"session_id": second}}, 401)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": first}}, 400)
+        self.ipc({"action": "suspend_session", "arguments": {"session_id": second}}, 401)
         self.wait_state(first, "stopped", timeout=DEFAULT_TIMEOUT)
         self.wait_state(second, "stopped", timeout=DEFAULT_TIMEOUT)
         self.verify_removed(first)

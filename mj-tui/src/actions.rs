@@ -37,7 +37,7 @@ pub enum CommandId {
     SwapPaneDown,
     SwapPaneUp,
     SwapPaneRight,
-    CloseSession,
+    SuspendSession,
     RenameWorkspace,
     CloseWorkspace,
     ResizePaneLeft,
@@ -51,9 +51,8 @@ pub enum CommandId {
     RenameSession,
     ChangedFiles,
     ContainerSettings,
-    StopSession,
     MoveSession,
-    ForceDestroySession,
+    DestroySession,
     MarkAllRead,
     FilterSessions,
     NextAttention,
@@ -276,7 +275,7 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
     }
 }
 
-fn stop_session_available(dashboard: &DashboardState) -> Availability {
+fn suspend_session_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_session() else {
         return Availability::Hidden;
     };
@@ -290,7 +289,7 @@ fn stop_session_available(dashboard: &DashboardState) -> Availability {
     // that still applies here is move queue admission.
     if matches!(
         dashboard.transition_failure_kind(&session.id),
-        Some(SessionTransitionKind::Stopping | SessionTransitionKind::Destroying)
+        Some(SessionTransitionKind::Suspending | SessionTransitionKind::Destroying)
     ) {
         return if dashboard.move_queue_admission_incomplete(&session.id) {
             Availability::Blocked("Move queue admission is incomplete; retry Move first")
@@ -609,16 +608,16 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: conversation_pane_ready,
     },
     CommandSpec {
-        id: CommandId::CloseSession,
-        label: "Close session…",
-        description: "Confirm stopping the selected session and its children, preserving resumable history.",
+        id: CommandId::SuspendSession,
+        label: "Suspend session…",
+        description: "Save a recovery copy and release the environment. Resume this session later.",
         scope: Scope::Session,
         pane_keys: &[],
-        action: Some(KeyAction::CloseSession),
+        action: Some(KeyAction::SuspendSession),
         footer: no_footer,
         footer_group: FooterGroup::Chord,
         footer_rank: 0,
-        available: stop_session_available,
+        available: suspend_session_available,
     },
     CommandSpec {
         id: CommandId::RenameWorkspace,
@@ -844,19 +843,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: container_session,
     },
     CommandSpec {
-        id: CommandId::StopSession,
-        label: "Stop session",
-        description: "Stop the selected session without confirmation, or retry a stop that failed part-way.",
-        scope: Scope::Session,
-        // No pane key: a mis-hit must not stop a live session.
-        pane_keys: &[],
-        action: Some(KeyAction::StopSession),
-        footer: no_footer,
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: stop_session_available,
-    },
-    CommandSpec {
         id: CommandId::MoveSession,
         label: "Move session…",
         description: "Restore the selected session on another profile and/or target.",
@@ -869,13 +855,13 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: move_session_available,
     },
     CommandSpec {
-        id: CommandId::ForceDestroySession,
-        label: "Delete session",
+        id: CommandId::DestroySession,
+        label: "Destroy session…",
         description: "Permanently remove the selected session, its target, and its recovery archive.",
         scope: Scope::Session,
         // No pane key: a mis-hit must not begin deleting a session.
         pane_keys: &[],
-        action: Some(KeyAction::DeleteSession),
+        action: Some(KeyAction::DestroySession),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
@@ -1298,8 +1284,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
                         | CommandId::MoveSession
-                        | CommandId::StopSession
-                        | CommandId::ForceDestroySession
+                        | CommandId::DestroySession
                 ))
         })
         .filter(|spec| (spec.available)(dashboard) == Availability::Ready)
@@ -1363,9 +1348,8 @@ impl DashboardState {
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
                     | CommandId::MoveSession
-                    | CommandId::CloseSession
-                    | CommandId::StopSession
-                    | CommandId::ForceDestroySession
+                    | CommandId::SuspendSession
+                    | CommandId::DestroySession
             )
         {
             self.set_notice("Native agents are owned by their parent session");
@@ -1378,10 +1362,7 @@ impl DashboardState {
             self.recent_commands.push_front(id);
             self.recent_commands.truncate(RECENT_COMMANDS);
         }
-        if matches!(
-            id,
-            CommandId::StopSession | CommandId::CloseSession | CommandId::RestartSession
-        ) {
+        if matches!(id, CommandId::SuspendSession | CommandId::RestartSession) {
             match (spec(id).available)(self) {
                 Availability::Hidden => return DashboardAction::None,
                 Availability::Blocked(reason) => {
@@ -1415,11 +1396,25 @@ impl DashboardState {
             CommandId::SwapPaneRight => self.swap_pane_command(NavDirection::Right),
             CommandId::RenameWorkspace => self.begin_workspace_command(false),
             CommandId::CloseWorkspace => self.begin_workspace_command(true),
-            CommandId::CloseSession => {
+            CommandId::SuspendSession => {
                 if let Some(session) = self.selected_session() {
                     self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::CloseSession {
+                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session.id.clone(),
+                            active_children: self
+                                .state
+                                .subagents
+                                .values()
+                                .filter(|r| r.parent_session_id == session.id)
+                                .filter(|r| {
+                                    self.state
+                                        .sessions
+                                        .get(&r.child_session_id)
+                                        .is_some_and(|s| s.state.is_active())
+                                })
+                                .count(),
+                            interrupting: self.attention_level(&session.id)
+                                == crate::AttentionLevel::Working,
                         }));
                 }
                 DashboardAction::None
@@ -1470,47 +1465,7 @@ impl DashboardState {
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
             CommandId::MoveSession => self.begin_move(),
-            CommandId::StopSession => {
-                let Some(session_id) = self.selected_session().map(|session| session.id.clone())
-                else {
-                    return DashboardAction::None;
-                };
-                let active_children = self
-                    .state
-                    .subagents
-                    .values()
-                    .filter(|relation| relation.parent_session_id == session_id)
-                    .filter(|relation| {
-                        self.state
-                            .sessions
-                            .get(&relation.child_session_id)
-                            .is_some_and(|session| session.state.is_active())
-                    })
-                    .count();
-                if active_children > 0 {
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::StopWithSubagents {
-                            session_id,
-                            count: active_children,
-                        }));
-                    return DashboardAction::None;
-                }
-                // A retry of a failed stop and a stop of an idle session run
-                // at once; only stopping an agent mid-turn asks first, because
-                // that is the case where a mis-click costs work.
-                if self.transition_failure_kind(&session_id).is_none()
-                    && self.attention_level(&session_id) == crate::AttentionLevel::Working
-                {
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
-                            session_id,
-                            restart: false,
-                        }));
-                    return DashboardAction::None;
-                }
-                DashboardAction::Close { session_id }
-            }
-            CommandId::ForceDestroySession => {
+            CommandId::DestroySession => {
                 let Some(session_id) = self.selected_session().map(|session| session.id.clone())
                 else {
                     return DashboardAction::None;
@@ -1662,10 +1617,9 @@ mod tests {
     fn session_transition_commands_bind_no_key() {
         let defaults = Keybinds::default();
         for id in [
-            CommandId::StopSession,
             CommandId::RestartSession,
             CommandId::MoveSession,
-            CommandId::ForceDestroySession,
+            CommandId::DestroySession,
         ] {
             let spec = spec(id);
             assert!(spec.pane_keys.is_empty(), "{id:?} must not bind a pane key");
@@ -1688,7 +1642,7 @@ mod tests {
         let mut dashboard = dashboard_with_session(session);
         dashboard.focus_sessions();
         assert_eq!(
-            (spec(CommandId::StopSession).available)(&dashboard),
+            (spec(CommandId::SuspendSession).available)(&dashboard),
             Availability::Ready
         );
 
@@ -1701,7 +1655,7 @@ mod tests {
             operation(SessionOperationKind::Launching, None),
         );
         assert!(matches!(
-            (spec(CommandId::StopSession).available)(&dashboard),
+            (spec(CommandId::SuspendSession).available)(&dashboard),
             Availability::Blocked(_)
         ));
     }
@@ -1914,14 +1868,14 @@ mod tests {
     fn force_destroy_needs_a_selected_session_and_survives_in_flight_operations() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        assert!(available(&dashboard, None).contains(&CommandId::ForceDestroySession));
+        assert!(available(&dashboard, None).contains(&CommandId::DestroySession));
 
         dashboard.session_operations.insert(
             "session-1".into(),
             operation(SessionOperationKind::Launching, None),
         );
         assert!(
-            available(&dashboard, None).contains(&CommandId::ForceDestroySession),
+            available(&dashboard, None).contains(&CommandId::DestroySession),
             "force destruction exists to preempt a wedged operation"
         );
     }
