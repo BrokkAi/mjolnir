@@ -148,7 +148,9 @@ pub(crate) fn render_new_wizard(
                             },
                             directory.display()
                         ),
-                        if index == wizard.project_history_index {
+                        if form.is_focused(WizardControl::RecentProject(index)) {
+                            theme::selection(true)
+                        } else if index == wizard.project_history_index {
                             Style::default().fg(theme::palette().text)
                         } else {
                             Style::default().fg(theme::palette().muted)
