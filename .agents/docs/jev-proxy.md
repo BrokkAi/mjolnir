@@ -1,8 +1,24 @@
 # Jev proxy operations
 
-The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/turn-verdict`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
+The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes are `/v1/turn-verdict` and `/v1/help-search`. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
 
-The Worker accepts only POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json`, calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses this public endpoint without credentials. Changing the question resource affects both implementations and requires deploying the Worker as well as releasing mj.
+The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json`, calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
+
+## Help search
+
+`POST /v1/help-search` accepts `{query, entries}`. Each entry has an integer `id` (0–127, unique within the request), `category`, `label`, and `description`. The client supplies its own static help catalog so old and new client versions work with the same deployment. Maximums are 128 entries, 1024 UTF-8 bytes for the query, 128 bytes for a category, 256 for a label, and 1024 for a description. Query, category and label must be nonempty (query must not be whitespace). The whole request remains limited to 64 KiB. Unknown request fields are rejected.
+
+The Worker builds one relevance question per entry using `mj-core/src/help_search/question.json`; callers cannot supply questions, models or endpoints. Jev answers all questions in one request without an index. The response is `{scores: [{id, probability}]}` with exactly one finite probability in [0,1] for each submitted ID. Incomplete or malformed upstream answers return 502, not partial results.
+
+The TUI updates substring matches immediately, then waits 400 ms without query edits before asking for semantic matches. It shows at most eight additional results at probability ≥0.70. Requests are cancelled on edits, closing help and shutdown; generation checks reject late replies. Failures retain local filtering and display a fallback status, with no automatic retry. Local queries beyond the remote byte limit remain searchable locally. The client deadline is ten seconds; the Worker retains its eight-second deadline.
+
+Synthetic verification:
+
+    curl --fail-with-body https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/help-search \
+      -H 'Content-Type: application/json' \
+      --data '{"query":"leave agents running when I exit","entries":[{"id":0,"category":"Essentials","label":"Detach from this terminal","description":"Leave this terminal client; the daemon and its sessions keep running."},{"id":1,"category":"Sessions","label":"Stop session","description":"Stop the selected session."}]}'
+
+Expect HTTP 200 and a score for each ID. Detach should be relevant and Stop session should not; exact probabilities can vary. Also verify the turn-verdict route after deployment. Rolling back to a version without help search makes help fall back to substring search.
 
 ## Deployment and key rotation
 
@@ -20,11 +36,13 @@ Expect HTTP 200 with `answers.waiting_on` containing `type`, `choice`, and `conf
 
 ## Limits and data handling
 
-The endpoint is public. The Cloudflare rate limiter allows approximately 120 requests per 60 seconds per client IP at each Cloudflare location. Users behind the same NAT share this allowance. This is abuse mitigation, not a global spending ceiling; there is no daily budget counter. Adjust the binding limit in wrangler.jsonc and deploy when necessary.
+The endpoints are public. Separate Cloudflare rate limiters (`TURN_RATE_LIMITER` and `HELP_RATE_LIMITER`) each allow approximately 120 requests per 60 seconds per client IP at each Cloudflare location. Help traffic does not consume turn-verdict capacity. Users behind the same NAT share these allowances. This is abuse mitigation, not a global spending ceiling; there is no daily budget counter. Adjust the binding limits in wrangler.jsonc and deploy when necessary.
 
 Request and upstream response bodies are bounded to 64 KiB. Evidence fields have the same byte/list caps as mj's Rust collector: prompt 1024 bytes, assistant 2048 bytes, tool titles 128 bytes, eight recent tools and sixteen active tools. Upstream requests have an eight-second deadline, including reading the response, and do not follow redirects. Rate limiting returns 429 with Retry-After; upstream errors return sanitized 502/504 responses. mj preserves its current activity state on failures.
 
 Evidence includes recent conversation text and tool titles; both Cloudflare and TypeSafe process it. The Worker has no application logging, persistence, or caching of evidence, credentials, IPs, or provider response bodies. Platform request metadata and vendor retention remain governed by those services. Do not enable payload logging or use real conversations for smoke tests.
+
+Help-search requests contain only the entered search query and static help descriptions, not session contents, configured bindings or local availability details. The same no-payload-logging and no-persistence behavior applies.
 
 ## Monitoring and recovery
 
@@ -33,3 +51,5 @@ Use Cloudflare's Worker metrics to monitor requests, failures, latency, and rate
 Inspect versions with `npx wrangler deployments list`. Restore a known-good version with `npx wrangler rollback VERSION_ID --message 'Reason for rollback'`. Check secret changes before rolling back: a historical version may reference older secret configuration. Reapply the intended key with `secret put` and repeat the synthetic check when needed. Preserve the public hostname because released clients embed it. To suspend provider spending without changing the hostname, remove the secret with `npx wrangler secret delete TYPESAFE_API_KEY`; requests then fail closed with 503 until it is restored.
 
 The first deployment on 2026-09-19 was verified with HTTP 200 and valid typed answers, including a request without a User-Agent (matching the Rust client). No real conversation was sent.
+
+Help search was deployed as version `c625e686-1591-420d-b6ae-2dc5902ffd63` on 2026-09-20 UTC (2026-09-19 America/Chicago). Synthetic requests returned HTTP 200: “leave agents running when I exit” scored Detach 0.96, and “show two conversations side by side” scored Open in split right 0.85. Turn-verdict still returned typed answers with `finished` confidence 0.98.

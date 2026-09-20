@@ -13,6 +13,7 @@
 pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
+mod help_search;
 pub(crate) mod io;
 mod read_receipts;
 mod workspace_settings;
@@ -386,6 +387,7 @@ pub(crate) struct DashboardContext {
     /// reads it when it wakes and gives up when a later keystroke has since
     /// replaced it.
     pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
+    help_search: help_search::HelpSearch,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
@@ -789,6 +791,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.follow_selected_session();
             context.refresh_go_context();
             context.refresh_git_status();
+            context
+                .help_search
+                .sync(&context.dashboard, &context.dashboard_io_tx);
         }
         context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
@@ -1548,6 +1553,7 @@ impl DashboardContext {
             aws_options: Feed::new(aws_resource_options_rx),
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            help_search: help_search::HelpSearch::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
             import_task_tx,

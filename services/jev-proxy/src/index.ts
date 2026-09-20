@@ -1,8 +1,10 @@
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
+import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
 export interface Env {
   TYPESAFE_API_KEY: string;
   TURN_RATE_LIMITER: RateLimit;
+  HELP_RATE_LIMITER?: RateLimit;
 }
 
 const UPSTREAM = "https://api.typesafe.ai/v1/systemone";
@@ -117,7 +119,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence, key: string): Promise<Response> {
+async function classify(state: TurnEvidence | HelpSearchRequest, key: string): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -135,14 +137,15 @@ async function classify(state: TurnEvidence, key: string): Promise<Response> {
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : questions }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
-        const result = answers(await readBounded(upstream));
-        return result ? json({ answers: result }) : error("invalid_upstream_response", 502);
+        const body = await readBounded(upstream);
+        const result = "entries" in state ? helpAnswers(body, state) : answers(body);
+        return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
   } catch (cause) {
@@ -157,16 +160,18 @@ async function classify(state: TurnEvidence, key: string): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname !== "/v1/turn-verdict" || url.search) return error("not_found", 404);
+    const search = url.pathname === "/v1/help-search";
+    if ((!search && url.pathname !== "/v1/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
     const key = env.TYPESAFE_API_KEY?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    if (!key || !ip || !env.TURN_RATE_LIMITER) return error("service_unavailable", 503);
+    const limiter = search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
-      const { success } = await env.TURN_RATE_LIMITER.limit({ key: ip });
+      const { success } = await limiter.limit({ key: ip });
       if (!success) return error("rate_limited", 429, { "Retry-After": "60" });
     } catch {
       return error("service_unavailable", 503);
@@ -177,7 +182,9 @@ export default {
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
-    if (!evidence(state)) return error("invalid_evidence", 400);
-    return classify(state, key);
+    if (search) {
+      return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
+    }
+    return evidence(state) ? classify(state, key) : error("invalid_evidence", 400);
   },
 } satisfies ExportedHandler<Env>;

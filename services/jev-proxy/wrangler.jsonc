@@ -7,6 +7,11 @@
   "preview_urls": false,
   "ratelimits": [
     {
+      "name": "HELP_RATE_LIMITER",
+      "namespace_id": "1938471202",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
       "name": "TURN_RATE_LIMITER",
       "namespace_id": "1938471201",
       "simple": { "limit": 120, "period": 60 }

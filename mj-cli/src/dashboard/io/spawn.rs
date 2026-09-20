@@ -1279,30 +1279,24 @@ pub(crate) fn spawn_dashboard_create_session(
             let executor = CancellableProcessExecutor::new(cancelled.clone())
                 .with_deadline(Duration::from_secs(30));
             if project_directory.is_none() {
-                let bundle = controller
-                    .config
-                    .bundles
-                    .get(&bundle_id)
-                    .context("unknown bundle")?;
-                let repairs = mj_core::local_git::repository_remote_repairs(bundle, &executor)?;
-                if !repairs.is_empty() {
+                let result = controller.preflight_new_session(
+                    &bundle_id,
+                    &target_template_id,
+                    None,
+                    &executor,
+                )?;
+                if !result.remote_repairs.is_empty() {
                     updates
                         .send(DashboardIoUpdate::CreateSession(Box::new(
                             DashboardCreateSessionUpdate::RemoteRepair {
                                 bundle_id: bundle_id.clone(),
-                                repairs,
+                                repairs: result.remote_repairs,
                                 retry: Box::new(action.clone()),
                             },
                         )))
                         .context("dashboard closed during remote repair preparation")?;
                     return Ok(None);
                 }
-                resolve_remote_repositories(
-                    &controller.config,
-                    &bundle_id,
-                    &target_template_id,
-                    &executor,
-                )?;
             }
             if cancelled.load(Ordering::Acquire) {
                 bail!("operation cancelled");

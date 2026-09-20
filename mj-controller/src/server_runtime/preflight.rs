@@ -210,69 +210,27 @@ pub(super) fn run_new_preflight_with_executor(
     project_directory: Option<PathBuf>,
     executor: &impl CommandExecutor,
 ) -> Result<crate::server::PreflightNew> {
-    let target_is_bare = config
-        .targets
-        .get(&target_id)
-        .with_context(|| format!("unknown target template {target_id:?}"))
-        .map(is_bare_project_target)?;
-    if target_is_bare {
-        let directory =
-            project_directory.context("project directory is required for a bare target")?;
-        let controller = config_only_controller(config);
-        let directory = controller.resolve_project_directory(&target_id, &directory, executor)?;
-        let managed_worktree =
-            controller.managed_worktree_options(&target_id, &directory, executor)?;
-        return Ok(crate::server::PreflightNew {
-            managed_worktree,
-            project_directory: Some(directory),
-            remote_repairs: Vec::new(),
-            dirty_repositories: Vec::new(),
-            remote_repositories: Vec::new(),
-            local_changes_excluded: false,
-        });
-    }
-    if project_directory.is_some() {
-        bail!("project directory is unsupported for this target");
-    }
-
-    let bundle = config.bundles.get(&bundle_id).context("unknown bundle")?;
-    let repairs = mj_core::local_git::repository_remote_repairs(bundle, executor)?;
-    if !repairs.is_empty() {
-        return Ok(crate::server::PreflightNew {
-            managed_worktree: Default::default(),
-            project_directory: None,
-            remote_repairs: repairs,
-            dirty_repositories: Vec::new(),
-            remote_repositories: Vec::new(),
-            local_changes_excluded: true,
-        });
-    }
-    let remote_repositories = bundle
-        .repositories
-        .iter()
-        .map(|repository| {
-            let source = resolve_repository(repository, executor)
-                .with_context(|| format!("repository {:?}", repository.id))?;
-            let default_branch = default_branch(&source, executor)
-                .with_context(|| format!("repository {:?}", repository.id))?;
-            Ok(crate::server::PreflightRepository {
-                id: repository.id.clone(),
-                fetch_url: display_url(&source.fetch_url),
-                default_branch,
-                push_urls: source
-                    .push_urls
-                    .iter()
-                    .map(|url| display_url(url))
-                    .collect(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let result = config_only_controller(config).preflight_new_session(
+        &bundle_id,
+        &target_id,
+        project_directory.as_deref(),
+        executor,
+    )?;
     Ok(crate::server::PreflightNew {
-        managed_worktree: Default::default(),
-        project_directory: None,
-        remote_repairs: Vec::new(),
+        project_directory: result.project_directory,
+        managed_worktree: result.managed_worktree,
+        remote_repairs: result.remote_repairs,
         dirty_repositories: Vec::new(),
-        remote_repositories,
-        local_changes_excluded: true,
+        remote_repositories: result
+            .remote_repositories
+            .into_iter()
+            .map(|repository| crate::server::PreflightRepository {
+                id: repository.id,
+                fetch_url: repository.fetch_url,
+                default_branch: repository.default_branch,
+                push_urls: repository.push_urls,
+            })
+            .collect(),
+        local_changes_excluded: result.local_changes_excluded,
     })
 }

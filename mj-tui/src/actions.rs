@@ -106,7 +106,7 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
-    /// The heading the help overlay prints above this group.
+    /// The heading the command palette prints above this scope.
     pub(crate) const fn heading(self) -> &'static str {
         match self {
             Self::Global => "Anywhere",
@@ -120,19 +120,6 @@ impl Scope {
         }
     }
 }
-
-/// The order the help overlay prints the groups in, and the order
-/// [`available`] walks when it collects what applies at the current focus.
-pub(crate) const SCOPE_ORDER: [Scope; 8] = [
-    Scope::Sessions,
-    Scope::Session,
-    Scope::Targets,
-    Scope::Quota,
-    Scope::Setup,
-    Scope::Pane,
-    Scope::Settings,
-    Scope::Global,
-];
 
 /// Whether a command can be run, and if not, why the user cannot see it.
 ///
