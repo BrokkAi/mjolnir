@@ -23,6 +23,8 @@ use crate::{DashboardAction, DashboardState, Focus};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandId {
     OpenSession,
+    PinSession,
+    UnpinSession,
     OpenSessionSplitRight,
     OpenSessionSplitBelow,
     ClosePane,
@@ -247,7 +249,7 @@ fn conversation_pane_ready(dashboard: &DashboardState) -> Availability {
 }
 
 fn selected_session_ready(dashboard: &DashboardState) -> Availability {
-    if dashboard.selected_session().is_some() {
+    if dashboard.command_session().is_some() {
         Availability::Ready
     } else {
         Availability::Hidden
@@ -257,7 +259,7 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
 /// The gate the session commands share: there must be a selected session, and
 /// it must not be in the middle of a launch or a stop.
 fn session_idle(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_session() else {
+    let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
     if dashboard.move_queue_admission_incomplete(&session.id) {
@@ -276,7 +278,7 @@ fn session_idle(dashboard: &DashboardState) -> Availability {
 }
 
 fn suspend_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_session() else {
+    let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
     if !session.state.is_active() {
@@ -301,7 +303,7 @@ fn suspend_session_available(dashboard: &DashboardState) -> Availability {
 }
 
 fn restart_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_session() else {
+    let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
     if !session.state.is_active() && session.checkpoint.is_none() {
@@ -311,7 +313,7 @@ fn restart_session_available(dashboard: &DashboardState) -> Availability {
 }
 
 fn move_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_session() else {
+    let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
     if !session.state.is_active() {
@@ -323,7 +325,7 @@ fn move_session_available(dashboard: &DashboardState) -> Availability {
 /// A selected session whose target is running, which is what reading its
 /// checkout needs.
 fn live_session(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.selected_session() else {
+    let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
     if session.state.is_active() && session.target.is_some() {
@@ -379,7 +381,7 @@ fn support_pane_focused(dashboard: &DashboardState) -> Availability {
 }
 
 fn cancel_footer(dashboard: &DashboardState) -> Option<String> {
-    let session = dashboard.selected_session()?;
+    let session = dashboard.command_session()?;
     let operation = dashboard.session_operations.get(&session.id)?;
     if !operation.cancellable {
         return None;
@@ -440,28 +442,52 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: selected_session_ready,
     },
     CommandSpec {
-        id: CommandId::OpenSessionSplitRight,
-        label: "Open in split right",
-        description: "Show the selected session beside the conversation you are in.",
+        id: CommandId::PinSession,
+        label: "Pin session…",
+        description: "Keep a session visible while browsing others.",
         scope: Scope::Session,
         pane_keys: &[],
-        action: Some(KeyAction::SplitVertical),
+        action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: selected_session_ready,
     },
     CommandSpec {
-        id: CommandId::OpenSessionSplitBelow,
-        label: "Open in split below",
-        description: "Show the selected session under the conversation you are in.",
+        id: CommandId::UnpinSession,
+        label: "Unpin session",
+        description: "Leave this pane empty without stopping its session.",
         scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
+        id: CommandId::OpenSessionSplitRight,
+        label: "Split right",
+        description: "Split this pane right; keep the old Browse session pinned and browse in the new pane.",
+        scope: Scope::Pane,
+        pane_keys: &[],
+        action: Some(KeyAction::SplitVertical),
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: conversation_pane_ready,
+    },
+    CommandSpec {
+        id: CommandId::OpenSessionSplitBelow,
+        label: "Split down",
+        description: "Split this pane down; keep the old Browse session pinned and browse in the new pane.",
+        scope: Scope::Pane,
         pane_keys: &[],
         action: Some(KeyAction::SplitHorizontal),
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: selected_session_ready,
+        available: conversation_pane_ready,
     },
     CommandSpec {
         id: CommandId::ClosePane,
@@ -1275,7 +1301,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
         })
         .filter(|spec| {
             !(dashboard
-                .selected_session_id()
+                .command_session_id()
                 .is_some_and(|id| dashboard.is_native_agent(id))
                 && matches!(
                     spec.id,
@@ -1329,6 +1355,19 @@ impl DashboardState {
     /// key handler used to call directly, so the footer, the help overlay, and
     /// the keyboard cannot disagree about what a command does.
     pub fn dispatch_command(&mut self, id: CommandId) -> DashboardAction {
+        let saved = self.command_session_override.clone();
+        if spec(id).scope == Scope::Session && saved.is_none() && self.focus == Focus::Prompt {
+            let Some(session) = self.current_session_id().map(str::to_owned) else {
+                return DashboardAction::None;
+            };
+            self.command_session_override = Some(session);
+        }
+        let action = self.dispatch_command_inner(id);
+        self.command_session_override = saved;
+        action
+    }
+
+    fn dispatch_command_inner(&mut self, id: CommandId) -> DashboardAction {
         if !matches!(
             id,
             CommandId::ResizePaneLeft
@@ -1339,7 +1378,7 @@ impl DashboardState {
             self.resize_mode = false;
         }
         if self
-            .selected_session_id()
+            .command_session_id()
             .is_some_and(|selected| self.is_native_agent(selected))
             && matches!(
                 id,
@@ -1373,6 +1412,18 @@ impl DashboardState {
             }
         }
         match id {
+            CommandId::PinSession => {
+                if let Some(session) = self.command_session_id().map(str::to_owned) {
+                    self.begin_pin_menu(session);
+                }
+                DashboardAction::None
+            }
+            CommandId::UnpinSession => self
+                .command_session_id()
+                .map(str::to_owned)
+                .map_or(DashboardAction::None, |session_id| {
+                    DashboardAction::UnpinSession { session_id }
+                }),
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::OpenSessionSplitRight => {
                 self.split_command(ratatui::layout::Direction::Horizontal)

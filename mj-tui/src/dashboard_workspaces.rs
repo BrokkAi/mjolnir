@@ -187,6 +187,8 @@ impl DashboardState {
     /// Select the newly created session and use the ordinary composer.
     pub fn finish_new_session(&mut self, session_id: &str) {
         self.select_active_session(session_id);
+        self.focus_pane(self.browse_pane());
+        self.request_selected_browse();
         self.focus_prompt();
     }
 

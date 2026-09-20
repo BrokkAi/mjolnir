@@ -579,6 +579,13 @@ impl DashboardState {
             }
         }
         self.state = state;
+        let before = self.pane_sessions.len();
+        self.pane_sessions
+            .retain(|_, id| self.state.sessions.contains_key(id));
+        if before != self.pane_sessions.len() {
+            self.reconcile_pins();
+            self.mark_layout_modified();
+        }
         self.viewed_failures.retain(|id, seen| {
             self.state
                 .sessions

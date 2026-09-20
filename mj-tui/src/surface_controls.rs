@@ -19,6 +19,10 @@ pub(crate) enum SurfaceControl {
     Session(usize),
     /// The close chip on one conversation pane's title row.
     ClosePane(PaneId),
+    PaneMenu(PaneId),
+    PanePin(PaneId),
+    PinHere(PaneId),
+    SessionPin(usize),
     WorkspaceMenu,
 }
 
@@ -148,6 +152,29 @@ impl DashboardState {
                     DashboardAction::None
                 }
                 SurfaceControl::ClosePane(pane) => DashboardAction::ClosePane { pane },
+                SurfaceControl::PaneMenu(pane) => {
+                    self.begin_pane_menu(pane);
+                    DashboardAction::None
+                }
+                SurfaceControl::PanePin(pane) => {
+                    if let Some(id) = self.pane_session(pane).map(str::to_owned) {
+                        self.toggle_session_pin(id)
+                    } else {
+                        self.begin_pane_menu(pane);
+                        DashboardAction::None
+                    }
+                }
+                SurfaceControl::PinHere(pane) => self
+                    .selected_session_id()
+                    .map(str::to_owned)
+                    .map_or(DashboardAction::None, |session_id| {
+                        DashboardAction::PinSession { session_id, pane }
+                    }),
+                SurfaceControl::SessionPin(index) => self
+                    .session_menu_ids
+                    .get(index)
+                    .cloned()
+                    .map_or(DashboardAction::None, |id| self.toggle_session_pin(id)),
                 SurfaceControl::WorkspaceMenu => {
                     self.focus = Focus::Workspaces;
                     self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
@@ -222,6 +249,37 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
         if row.width < 5 || row.height == 0 {
             continue;
         }
+        if row.width >= 10 {
+            let pin_area = Rect::new(
+                row.right() - if row.width < 24 { 3 } else { 5 },
+                row.y,
+                if row.width < 24 { 3 } else { 2 },
+                1,
+            );
+            let control = SurfaceControl::SessionPin(index);
+            form.register(control, ControlKind::Button, pin_area, true);
+            let badge = dashboard
+                .session_menu_ids
+                .get(index)
+                .and_then(|session| dashboard.pin_id(session));
+            let (text, style) = badge.map_or_else(
+                || (theme::glyphs().pin.to_owned(), theme::muted()),
+                |id| {
+                    (
+                        if id < 26 {
+                            format!("{}{}", theme::glyphs().pinned, theme::pin_label(id))
+                        } else {
+                            theme::pin_label(id)
+                        },
+                        ratatui::style::Style::default().fg(theme::pin_color(id)),
+                    )
+                },
+            );
+            frame.render_widget(Paragraph::new(text).style(style), pin_area);
+        }
+        if row.width < 24 {
+            continue;
+        }
         let area = Rect::new(row.right().saturating_sub(3), row.y, 3.min(row.width), 1);
         let id = SurfaceControl::Session(index);
         form.register(id, ControlKind::Button, area, true);
@@ -247,7 +305,10 @@ pub(crate) fn render_pane_close_control(
     transcript: Rect,
     pane: PaneId,
 ) {
-    if transcript.width < PANE_CLOSE_CONTROL_RESERVE + 2 || transcript.height == 0 {
+    if pane == dashboard.browse_pane()
+        || transcript.width < PANE_CLOSE_CONTROL_RESERVE + 2
+        || transcript.height == 0
+    {
         return;
     }
     let area = Rect::new(
@@ -260,7 +321,12 @@ pub(crate) fn render_pane_close_control(
     );
     let control = SurfaceControl::ClosePane(pane);
     let mut form = dashboard.surface_form.borrow_mut();
-    form.register(control, ControlKind::Button, area, true);
+    form.register(
+        control,
+        ControlKind::Button,
+        area,
+        pane != dashboard.browse_pane(),
+    );
     let style = if form.is_armed(control) {
         theme::selection(true)
     } else {

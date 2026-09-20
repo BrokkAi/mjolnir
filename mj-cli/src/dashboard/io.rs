@@ -689,6 +689,7 @@ impl DashboardContext {
                     .attachments
                     .get(&pane)
                     .is_some_and(|attachment| attachment.accepts(generation, Some(&session_id)))
+                    || self.dashboard.pane_session(pane) != Some(session_id.as_str())
                     || self.opening_chat_sessions.get(&pane).map(String::as_str)
                         != Some(session_id.as_str())
                 {
@@ -705,8 +706,7 @@ impl DashboardContext {
                         .transition_failure_kind(&session_id)
                         .is_some()
                 {
-                    self.dashboard.set_pane_session(pane, None);
-                    self.defer_chat_open();
+                    self.defer_chat_open_in(pane);
                     return;
                 }
                 match *result {
@@ -730,6 +730,9 @@ impl DashboardContext {
                             chat
                         };
                         let mut chat = chat.open_replacing(self.chats.get(&session_id));
+                        if let Some(position) = self.transcript_positions.get(&session_id) {
+                            chat.restore_transcript_position(*position);
+                        }
                         self.restore_question_draft(&session_id, &mut chat);
                         self.chats.insert(session_id.clone(), chat);
                         // The context travelled with the attach, which is

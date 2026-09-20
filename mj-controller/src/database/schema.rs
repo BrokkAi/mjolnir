@@ -382,6 +382,18 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older layout writers discard Browse identity and pin badges.
+    if version < 42 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 42 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (42, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 42;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -460,8 +472,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 41 adds native context replacement.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 41;
+    /// `SCHEMA_VERSION`. Migration 42 preserves Browse and pin layout metadata.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 42;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -511,7 +523,7 @@ mod reader_tests {
             .unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 41);
+        assert_eq!(state.revision, 42);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let event = ApiEventData::InputRequired {
             request: None,
@@ -652,7 +664,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(41));
+        assert_eq!(state.minimum_compatible, Some(42));
     }
 
     #[test]

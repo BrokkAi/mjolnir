@@ -497,6 +497,8 @@ mod tests {
             |_, _| async { anyhow::bail!("database unavailable") },
         );
         let split = ConversationLayout {
+            browse: None,
+            pins: Default::default(),
             root: mj_core::workspace::LayoutNode::Split {
                 axis: mj_core::workspace::SplitAxis::Horizontal,
                 ratio: 0.5,

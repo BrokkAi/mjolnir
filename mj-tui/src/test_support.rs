@@ -362,7 +362,8 @@ pub(crate) fn open_resume_wizard(dashboard: &mut DashboardState) -> crate::Dashb
 
 pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardState {
     session.updated_at = "2026-08-09T01:00:00Z".into();
-    DashboardState::new(
+    let session_id = session.id.clone();
+    let mut dashboard = DashboardState::new(
         config(),
         State {
             subagents: Default::default(),
@@ -372,7 +373,12 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
             container_sizes: BTreeMap::new(),
         },
         BTreeMap::new(),
-    )
+    );
+    // This fixture represents a conversation already opened by the host.
+    dashboard
+        .pane_sessions
+        .insert(dashboard.focused_pane(), session_id);
+    dashboard
 }
 
 pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {

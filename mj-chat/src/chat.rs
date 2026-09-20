@@ -479,6 +479,10 @@ pub struct ChatSessionContext {
     pub reviewer_stager: mj_client::session::ReviewerStager,
 }
 
+/// A session-local transcript position, retained when its view is replaced.
+#[derive(Debug, Clone, Copy)]
+pub struct TranscriptPosition(TranscriptAnchor);
+
 pub struct ChatState {
     pub(crate) clear_context_supported: bool,
     session_id: String,
@@ -1699,3 +1703,12 @@ fn turn_started_at_epoch_seconds(execution: MaterializedExecutionState) -> Optio
 
 #[cfg(test)]
 mod tests;
+
+impl ChatState {
+    pub fn transcript_position(&self) -> TranscriptPosition {
+        TranscriptPosition(self.anchor)
+    }
+    pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {
+        self.anchor = position.0;
+    }
+}
