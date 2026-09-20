@@ -227,10 +227,12 @@ enum BuildCachePreviewResult {
 }
 
 fn storage_path(path: &[String]) -> Vec<String> {
-    if path.first().is_some_and(|key| key == "interface") {
-        path.iter().skip(1).cloned().collect()
-    } else {
-        path.to_vec()
+    match path {
+        [section, key] if section == "interface" && key == "prefix" => {
+            vec!["keys".to_owned(), "prefix".to_owned()]
+        }
+        [section, rest @ ..] if section == "interface" => rest.to_vec(),
+        _ => path.to_vec(),
     }
 }
 
@@ -331,7 +333,7 @@ fn root_group(key: &str) -> &'static str {
         .map_or("Other", |(heading, _)| *heading)
 }
 
-/// Root keys the page never lists: the file's version, the three settings the
+/// Root keys the page never lists: the file's version, the settings the
 /// synthetic Interface page gathers, the keybindings, and the deprecated
 /// stopped-session flag that Advanced now owns.
 fn hidden_root_key(key: &str) -> bool {
@@ -375,6 +377,7 @@ fn visible_keys(path: &[String], value: &Value) -> Vec<String> {
     }
     if path == ["interface"] {
         return vec![
+            "prefix".to_owned(),
             "sessions_side".to_owned(),
             "spinner".to_owned(),
             "theme".to_owned(),
@@ -629,8 +632,8 @@ fn preferred_size(draft: &Value) -> SetupSize {
             // the trailing column the row ends with.
             let line = format!("{}{name}    {summary} ", SETTING_GUTTER);
             *max_width = (*max_width).max(Line::raw(line).width());
-            // `interface` resolves to the draft root, which holds the three
-            // settings its page gathers; every other page is its own value.
+            // `interface` resolves to the draft root, which holds most of the
+            // settings its page gathers; the prefix has its own nested mapping.
             if (child.is_object() || child.is_array()) && path.as_slice() != ["review"] {
                 walk(path, draft, max_width, max_height);
             }
@@ -1423,7 +1426,9 @@ impl SetupDialog {
             }
         }
         let old = self.draft.pointer(&pointer(&editor.path)).unwrap();
-        let value = if clear {
+        let value = if clear && editor.path == ["interface", "prefix"] {
+            Value::String(mj_core::config::DEFAULT_PREFIX.to_owned())
+        } else if clear {
             Value::Null
         } else if !editor.choices.is_empty() {
             editor.choices[editor.selected].clone()
@@ -1476,7 +1481,17 @@ impl SetupDialog {
         } else {
             value
         };
-        if clear && !defaults.get(&key).is_some_and(Value::is_null) {
+        if editor.path == ["interface", "prefix"] {
+            let mut keys =
+                serde_json::from_value::<mj_core::config::KeysConfig>(self.draft["keys"].clone())
+                    .map_err(|error| error.to_string())?;
+            keys.prefix = value.as_str().unwrap_or_default().to_owned();
+            keys.resolve().map_err(|error| format!("{error:#}"))?;
+        }
+        if clear
+            && !defaults.get(&key).is_some_and(Value::is_null)
+            && editor.path != ["interface", "prefix"]
+        {
             return Err("This setting is required. Choose a value instead of clearing it.".into());
         }
         let changed = old != &value;

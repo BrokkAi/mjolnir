@@ -328,8 +328,44 @@ pub fn render_combined(
     // NO_COLOR wins over the configured theme; the symbol set follows the
     // configuration or, unset, the terminal.
     let theme = theme::effective_theme(dashboard.config.theme);
+    render_combined_with_theme(
+        frame,
+        dashboard,
+        chats,
+        opening_panes,
+        transcript_selected,
+        theme,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn render_combined_for_test(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+) -> Vec<String> {
+    render_combined_with_theme(
+        frame,
+        dashboard,
+        chats,
+        opening_panes,
+        transcript_selected,
+        dashboard.config.theme,
+    )
+}
+
+fn render_combined_with_theme(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+    selected_theme: theme::UiTheme,
+) -> Vec<String> {
     let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
-    theme::with_theme(theme, || {
+    theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected)
         })
