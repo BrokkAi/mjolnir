@@ -738,7 +738,8 @@ impl DurableRelay {
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
         let mut summary_prompt = None;
-        if let RelayObservation::CommandStarted { command_id, .. } = &event.observation
+        if let Some(command_id) =
+            mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
             && let Some(dispatch) = self.snapshot.dispatches.get(command_id)
             && let RelayCommand::Prompt { prompt } = &dispatch.command
         {

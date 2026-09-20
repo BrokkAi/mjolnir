@@ -597,6 +597,24 @@ impl TranscriptSummary {
         }
     }
 
+    /// Jev's current-request conversation, without historical tool-call records.
+    /// Keep the available suffix and its coverage marker if replay lacks the user boundary.
+    pub fn latest_user_messages(&self) -> Self {
+        let user = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.role == SummaryRole::User);
+        Self {
+            entries: self.entries[user.unwrap_or(0)..]
+                .iter()
+                .filter(|entry| entry.role != SummaryRole::Tool)
+                .cloned()
+                .collect(),
+            leading_omitted: self.leading_omitted && user.is_none(),
+            ..Default::default()
+        }
+    }
+
     /// Exact retained context alongside a model-produced summary, newest-first selection.
     pub fn retained(&self) -> Self {
         let last_assistant = self
@@ -622,13 +640,19 @@ impl TranscriptSummary {
     /// Preserve recent context first, then spend spare space on newest history.
     /// Only after optional history is removed do oversized retained bodies shrink.
     pub fn render(&self, limit: usize) -> String {
+        self.render_with_ids(limit).0
+    }
+
+    /// Return the retained entry identities as well as text, so offline evidence
+    /// selectors never ask about entries omitted by the rendering budget.
+    pub fn render_with_ids(&self, limit: usize) -> (String, Vec<String>) {
         let history_marker = if self.leading_omitted {
             "[Earlier transcript entries omitted]\n"
         } else {
             ""
         };
         if limit < history_marker.len() {
-            return excerpt(history_marker, limit);
+            return (excerpt(history_marker, limit), Vec::new());
         }
         let all = history_marker.to_owned()
             + &self
@@ -637,7 +661,10 @@ impl TranscriptSummary {
                 .map(|e| e.render(usize::MAX))
                 .collect::<String>();
         if all.len() <= limit {
-            return all;
+            return (
+                all,
+                self.entries.iter().map(|entry| entry.id.clone()).collect(),
+            );
         }
 
         let mut selected = std::collections::BTreeSet::new();
@@ -690,13 +717,17 @@ impl TranscriptSummary {
                     .map(|i| self.entries[*i].render(cap))
                     .collect::<String>()
         };
+        let ids = selected
+            .iter()
+            .map(|i| self.entries[*i].id.clone())
+            .collect();
         let full = render(usize::MAX);
         if full.len() <= limit {
-            return full;
+            return (full, ids);
         }
         let minimum = render(0);
         if minimum.len() > limit {
-            return excerpt(&minimum, limit);
+            return (excerpt(&minimum, limit), Vec::new());
         }
         // A common cap leaves short messages intact and shares remaining space among long bodies.
         let (mut low, mut high) = (0, limit);
@@ -708,7 +739,7 @@ impl TranscriptSummary {
                 high = middle - 1;
             }
         }
-        render(low)
+        (render(low), ids)
     }
 }
 

@@ -4227,7 +4227,7 @@ fn clear_refuses_pending_work_and_invalid_input_without_changing_identity() {
 }
 
 #[test]
-fn transcript_summary_survives_reopen_without_promoting_updated_calls() {
+fn jev_messages_survive_reopen_without_tool_details() {
     use agent_client_protocol::schema::v1::{
         ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
@@ -4235,6 +4235,11 @@ fn transcript_summary_survives_reopen_without_promoting_updated_calls() {
     use mj_core::config::HarnessKind;
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "prompt-summary", prompt("Summarize this work"));
+    relay.claim_pending_commands(true).unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Preserved answer"}
+    })).unwrap()).unwrap();
     for n in 0..9 {
         relay
             .record_session_update(SessionUpdate::ToolCall(
@@ -4275,6 +4280,53 @@ fn transcript_summary_survives_reopen_without_promoting_updated_calls() {
         .transcript_summary;
     assert_eq!(before, after);
     assert!(!after.contains("PRIVATE_0"));
-    assert!(after.contains("PRIVATE_8"));
-    assert!(after.contains("cargo test [failed]"));
+    assert!(!after.contains("PRIVATE_8"));
+    assert!(!after.contains("<tool"));
+    assert!(after.contains("Summarize this work"));
+    assert!(after.contains("Preserved answer"));
+}
+
+#[test]
+fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
+    use mj_core::activity::{ActivityFacts, verdict::TurnPhase};
+    use mj_core::config::HarnessKind;
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let evidence = |relay: &DurableRelay| {
+        relay.turn_context().evidence(
+            HarnessKind::Codex,
+            TurnPhase::Running,
+            &ActivityFacts::default(),
+            0,
+        )
+    };
+    submit_relay(&mut relay, "active-prompt", prompt("ORIGINAL REQUEST"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "queued-prompt", prompt("DELIVERED CORRECTION"));
+    assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
+    assert!(
+        !evidence(&relay)
+            .transcript_summary
+            .contains("DELIVERED CORRECTION")
+    );
+    submit_relay(&mut relay, "cancel-command", RelayCommand::Cancel);
+    relay.claim_pending_commands(true).unwrap();
+    assert_eq!(evidence(&relay).user_prompt_tail, "ORIGINAL REQUEST");
+    relay
+        .record_command_completed(
+            "cancel-command",
+            RelayCommandOutcome::Steered {
+                queued_command_id: "queued-prompt".into(),
+            },
+        )
+        .unwrap();
+    let before = evidence(&relay);
+    assert_eq!(before.user_prompt_tail, "DELIVERED CORRECTION");
+    assert!(before.transcript_summary.contains("DELIVERED CORRECTION"));
+    assert!(!before.transcript_summary.contains("ORIGINAL REQUEST"));
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let after = evidence(&relay);
+    assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
+    assert_eq!(after.transcript_summary, before.transcript_summary);
 }

@@ -422,15 +422,17 @@ impl DurableRelay {
                             .join("\n"),
                     );
                 }
-                let prompt = match &event.observation {
-                    RelayObservation::CommandStarted { command_id, .. } => {
-                        prompts.remove(command_id)
-                    }
-                    RelayObservation::CommandCompleted { command_id, .. } => {
+                let prompt = if let Some(command_id) =
+                    mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
+                {
+                    prompts.remove(command_id)
+                } else {
+                    if let RelayObservation::CommandCompleted { command_id, .. } =
+                        &event.observation
+                    {
                         prompts.remove(command_id);
-                        None
                     }
-                    _ => None,
+                    None
                 };
                 relay
                     .turn_context

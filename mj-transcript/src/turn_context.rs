@@ -20,6 +20,20 @@ struct TurnContextState {
     session_id: String,
 }
 
+/// The prompt that became visible to the harness at this durable observation.
+/// A queued or unconfirmed steering prompt has not been delivered yet.
+pub fn delivered_prompt_command_id(observation: &mj_core::relay::RelayObservation) -> Option<&str> {
+    use mj_core::relay::{RelayCommandOutcome, RelayObservation};
+    match observation {
+        RelayObservation::CommandStarted { command_id, .. } => Some(command_id),
+        RelayObservation::CommandCompleted {
+            outcome: RelayCommandOutcome::Steered { queued_command_id },
+            ..
+        } => Some(queued_command_id),
+        _ => None,
+    }
+}
+
 /// The relay and runtime share this small process-local evidence accumulator.
 #[derive(Debug, Default, Clone)]
 pub struct TurnContext(Arc<Mutex<TurnContextState>>);
@@ -49,7 +63,11 @@ impl TurnContext {
     ) {
         use mj_core::relay::{RelayCommandOutcome, RelayObservation};
         match observation {
-            RelayObservation::CommandStarted { .. } => {
+            RelayObservation::CommandStarted { .. }
+            | RelayObservation::CommandCompleted {
+                outcome: RelayCommandOutcome::Steered { .. },
+                ..
+            } => {
                 if let Some(prompt) = prompt {
                     self.reset(prompt);
                     self.0
@@ -213,6 +231,7 @@ impl TurnContext {
         now_ms: i64,
     ) -> TurnEvidence {
         let state = self.0.lock().expect("turn context lock poisoned");
+        let summary = state.summary.latest_user_messages();
         let mut evidence = TurnEvidence {
             harness,
             phase,
@@ -237,7 +256,7 @@ impl TurnContext {
                     running_s: now_ms.saturating_sub(tool.started_at_ms).max(0) as u64 / 1000,
                 })
                 .collect(),
-            transcript_summary: state.summary.render(48 * 1024),
+            transcript_summary: summary.render(48 * 1024),
             background_commands: facts.background_commands,
             queued_commands: facts.queued_commands,
             user_prompt_tail: state.user_prompt_tail.clone(),
@@ -254,7 +273,7 @@ impl TurnContext {
             > 60 * 1024
         {
             limit /= 2;
-            evidence.transcript_summary = state.summary.render(limit);
+            evidence.transcript_summary = summary.render(limit);
         }
         evidence
     }
@@ -285,6 +304,61 @@ mod tests {
 
     fn tool(title: &str) -> SessionUpdate {
         serde_json::from_value(json!({"sessionUpdate":"tool_call","toolCallId":title,"title":title,"status":"in_progress"})).unwrap()
+    }
+
+    #[test]
+    fn verdict_uses_latest_delivered_user_without_tool_history_but_keeps_live_facts() {
+        use mj_core::relay::RelayObservation;
+        let context = TurnContext::default();
+        let start = |id: &str| RelayObservation::CommandStarted {
+            command_id: id.into(),
+            started_at_ms: 0,
+        };
+        context.observe_relay(&start("old"), Some("OLD REQUEST"));
+        context.observe(&message("old", "OLD ANSWER"));
+        context.observe(&tool("active-build"));
+        context.observe_relay(&start("new"), Some("CURRENT REQUEST"));
+        let noisy: SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate":"tool_call", "toolCallId":"noisy", "title":"noisy", "status":"completed",
+            "rawInput":{"command":"TOOL_BODY".repeat(20_000)}
+        })).unwrap();
+        context.observe(&noisy);
+        context.observe(&message("new", "CURRENT ANSWER"));
+        let facts = ActivityFacts {
+            background_commands: 2,
+            queued_commands: 3,
+            tools_in_flight: vec![InFlightToolCall {
+                tool_call_id: "active-build".into(),
+                title: Some("active-build".into()),
+                status: agent_client_protocol::schema::v1::ToolCallStatus::InProgress,
+                started_at_ms: 1_000,
+            }],
+            ..Default::default()
+        };
+        let evidence = context.evidence(HarnessKind::Codex, TurnPhase::Running, &facts, 5_000);
+        assert!(evidence.transcript_summary.contains("CURRENT REQUEST"));
+        assert!(evidence.transcript_summary.contains("CURRENT ANSWER"));
+        for excluded in [
+            "OLD REQUEST",
+            "OLD ANSWER",
+            "TOOL_BODY",
+            "<tool",
+            "bytes omitted",
+        ] {
+            assert!(
+                !evidence.transcript_summary.contains(excluded),
+                "{excluded}"
+            );
+        }
+        assert_eq!(evidence.user_prompt_tail, "CURRENT REQUEST");
+        assert_eq!(evidence.assistant_text_tail, "CURRENT ANSWER");
+        assert_eq!(evidence.background_commands, 2);
+        assert_eq!(evidence.queued_commands, 3);
+        assert_eq!(evidence.tools_in_flight.len(), 1);
+        assert!(evidence.tools_in_flight[0].title.contains("active-build"));
+        assert_eq!(evidence.tools_in_flight[0].running_s, 4);
+        let full = context.0.lock().unwrap().summary.render(256 * 1024);
+        assert!(full.contains("OLD REQUEST") && full.contains("TOOL_BODY"));
     }
 
     #[test]
