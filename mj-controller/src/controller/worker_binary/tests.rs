@@ -1357,9 +1357,9 @@ fn default_bridges_pin_command_capable_adapter_versions() {
     );
     assert_eq!(codex_command, "sh");
     assert_eq!(codex_arguments[0], "-c");
-    assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.4"));
+    assert!(codex_arguments[1].contains("@brokkai/codex-acp@1.11.5"));
     assert!(codex_arguments[1].contains("codex-acp --version"));
-    assert!(codex_arguments[1].contains("npx -y @brokkai/codex-acp@1.11.4"));
+    assert!(codex_arguments[1].contains("npx -y @brokkai/codex-acp@1.11.5"));
 
     let (claude_command, claude_arguments) = bridge_launch(
         mj_core::config::HarnessKind::Claude,
