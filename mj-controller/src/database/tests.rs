@@ -4643,3 +4643,87 @@ fn projection_reads_keep_one_snapshot_when_a_writer_commits_after_the_frontier_r
         );
     }
 }
+
+#[test]
+fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontier() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("continuation.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut materialized = materialized_session("session-1");
+    materialized.transcript = vec![
+        Arc::new(TranscriptItem {
+            stable_id: "user:request".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::User {
+                content: vec![
+                    serde_json::json!({"type":"text","text":"Implement the parser and run tests"}),
+                ],
+            },
+        }),
+        Arc::new(TranscriptItem {
+            stable_id: "system:notice".into(),
+            position: 2,
+            latest_content_event_ordinal: None,
+            created_at_ms: 2,
+            last_changed_at_ms: 2,
+            body: TranscriptBody::System {
+                text: "not authorization".into(),
+            },
+        }),
+        Arc::new(TranscriptItem {
+            stable_id: "agent:reply".into(),
+            position: 3,
+            latest_content_event_ordinal: Some(3),
+            created_at_ms: 3,
+            last_changed_at_ms: 3,
+            body: TranscriptBody::Agent {
+                chunks: vec![
+                    serde_json::json!({"content":{"type":"text","text":"Implemented. Shall I test?"}}),
+                ],
+                streaming: false,
+            },
+        }),
+    ];
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let (window, metadata) = load_materialized_projection_tail_from(&database, "session-1", 1)
+        .unwrap()
+        .unwrap();
+    assert!(metadata.omitted_items > 0);
+    assert!(crate::continuation::evidence(&window).is_err());
+    let collected = load_continuation_evidence_from(
+        &database,
+        "session-1",
+        materialized.applied_event_ordinal,
+        &materialized.applied_event_digest,
+    )
+    .unwrap();
+    assert_eq!(
+        collected,
+        crate::continuation::evidence(&materialized).unwrap()
+    );
+    assert_eq!(
+        collected.messages[0].text,
+        "Implement the parser and run tests"
+    );
+    assert!(
+        load_continuation_evidence_from(
+            &database,
+            "session-1",
+            materialized.applied_event_ordinal + 1,
+            &materialized.applied_event_digest
+        )
+        .is_err()
+    );
+    assert!(
+        load_continuation_evidence_from(
+            &database,
+            "session-1",
+            materialized.applied_event_ordinal,
+            "wrong-digest"
+        )
+        .is_err()
+    );
+}

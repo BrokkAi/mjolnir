@@ -741,7 +741,7 @@ impl DurableRelay {
         if let Some(command_id) =
             mj_transcript::turn_context::delivered_prompt_command_id(&event.observation)
             && let Some(dispatch) = self.snapshot.dispatches.get(command_id)
-            && let RelayCommand::Prompt { prompt } = &dispatch.command
+            && let Some(prompt) = dispatch.command.prompt_blocks()
         {
             let prompt_text = prompt
                 .iter()

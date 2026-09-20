@@ -1,6 +1,6 @@
 # Jev proxy operations
 
-The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict`, `/v2/turn-verdict`, and `/v1/help-search`. The v2 route is prepared in source; deploy the proxy before releasing a worker that uses it. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
+The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict`, `/v2/turn-verdict`, `/v1/help-search`, and `/v1/continuation-verdict`. All four routes are deployed. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
 
 The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json` (v2) or the frozen `verdict_questions_v1.json` (v1), calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
 
@@ -61,3 +61,11 @@ Deploy the backward-compatible proxy before shipping mj workers using `/v2/turn-
 Worker request logs report summary size and active tool count rather than serializing evidence. The separate, user-authorized bifrost2 replay is documented in `.agents/docs/jev-bifrost2-evidence-experiment-20260920.md`; it is not a production smoke-test procedure.
 
 The 0+1 policy selection and authorized fifty-request strict pilot plus one-hundred-request exploratory comparison are documented in `.agents/docs/jev-turn-evidence-comparison-20260920.md`. Confirmed steering establishes a new delivered-user boundary; merely queued or unconfirmed steering does not.
+
+## Authorized continuation
+
+`POST /v1/continuation-verdict` accepts `{assistant_history_omitted, messages}` with whole `{id, role, text}` user/assistant messages. It uses fixed questions in `mj-core/src/continuation/questions.json` and returns typed Noul `unfinished` and `no_input_needed` answers. The client requires both scores ≥0.90. User text is limited to 32 KiB, assistant text to 16 KiB, and the serialized request to 64 KiB. Omitted assistant context is explicit; incomplete user authorization causes local abstention. Tool bodies are excluded. This evidence intentionally spans multiple user exchanges, unlike the activity classifier's current-request scope.
+
+`CONTINUATION_RATE_LIMITER` has its own 120/minute per-IP budget. Missing bindings fail closed. The endpoint shares existing transport deadlines, sanitized errors, and no-payload-logging behavior. Deploy the route before releasing clients that use it; smoke-test only synthetic scenarios. Rollback leaves clients abstaining without automatic continuation.
+
+Continuation and v2 support were deployed on 2026-09-20 UTC as version `abf42692-4729-42f5-98d1-26041fbe95c6`. Synthetic smoke checks returned HTTP 200 for all four routes. The continuation example scored unfinished=0.96 and no_input_needed=0.94. Requests without User-Agent, matching mj's Rust client, succeeded; the edge rejected the generic Python urllib User-Agent with 403. No private session content was used for deployment smoke tests.

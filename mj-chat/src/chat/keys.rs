@@ -198,6 +198,10 @@ impl ChatState {
             // started on its own also reads as Running, and the relay refuses
             // to cancel it, so Esc must not claim to.
             return if self.prompt_in_flight
+                || matches!(
+                    self.session_activity.state().last_known(),
+                    mj_core::activity::ActivityState::CheckingContinuation
+                )
                 || self.session_activity.capacity_retry.is_some()
                 || !self.active_user_shells.is_empty()
             {

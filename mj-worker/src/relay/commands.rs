@@ -441,6 +441,45 @@ impl DurableRelay {
                 None,
             )));
         }
+        if let RelayCommand::ContinueAuthorizedWork {
+            expected,
+            user_command_id,
+            completed_command_id,
+            attempt,
+        } = &command
+        {
+            let state = &self.snapshot.continuation;
+            let facts = self.activity_facts();
+            let planning = self.verdict_harness.is_some_and(|harness| {
+                mj_core::acp::AcpSessionFacts::from_operational(
+                    harness,
+                    &self.snapshot.config,
+                    &self.snapshot.config_options,
+                    self.snapshot.modes.as_ref(),
+                )
+                .plan_mode_active()
+            });
+            if planning
+                || !state.eligible()
+                || state.user_command_id.as_ref() != Some(user_command_id)
+                || state.completed_command_id.as_ref() != Some(completed_command_id)
+                || *attempt != state.attempts + 1
+                || self.snapshot.latest_ordinal != expected.ordinal
+                || self.snapshot.latest_digest != expected.digest
+                || !mj_core::activity::is_quiet(&facts)
+                || facts.background_commands != 0
+                || !self.snapshot.queued_prompts.is_empty()
+                || self.snapshot.goal.active()
+                || self.pending_close_barrier_id().is_some()
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "continuation evidence is stale or the allowance is exhausted",
+                    false,
+                    None,
+                )));
+            }
+        }
         let created_at_ms = epoch_millis();
         let accepted_ordinal = self.append_relay_event(
             Some(command_id),
@@ -730,32 +769,34 @@ impl DurableRelay {
                 .get_mut(&command_id)
                 .expect("claimable command disappeared");
             dispatch.state = RelayDispatchState::InFlight;
-            let hidden_prompt_context = matches!(&dispatch.command, RelayCommand::Prompt { prompt }
-                if !mj_core::acp::prompt_requests_compaction(prompt))
-            .then(|| {
-                let mut contexts = Vec::new();
-                if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
-                    if context.attached_command_id.is_none() {
-                        context.attached_command_id = Some(command_id.clone());
+            let hidden_prompt_context = dispatch
+                .command
+                .prompt_blocks()
+                .is_some_and(|prompt| !mj_core::acp::prompt_requests_compaction(&prompt))
+                .then(|| {
+                    let mut contexts = Vec::new();
+                    if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
+                        if context.attached_command_id.is_none() {
+                            context.attached_command_id = Some(command_id.clone());
+                        }
+                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                            contexts.push(context.text.clone());
+                        }
                     }
-                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                        contexts.push(context.text.clone());
+                    for context in &mut next_snapshot.pending_user_shell_contexts {
+                        if context.accepted_ordinal >= accepted_ordinal {
+                            continue;
+                        }
+                        if context.attached_command_id.is_none() {
+                            context.attached_command_id = Some(command_id.clone());
+                        }
+                        if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
+                            contexts.push(context.text.clone());
+                        }
                     }
-                }
-                for context in &mut next_snapshot.pending_user_shell_contexts {
-                    if context.accepted_ordinal >= accepted_ordinal {
-                        continue;
-                    }
-                    if context.attached_command_id.is_none() {
-                        context.attached_command_id = Some(command_id.clone());
-                    }
-                    if context.attached_command_id.as_deref() == Some(command_id.as_str()) {
-                        contexts.push(context.text.clone());
-                    }
-                }
-                (!contexts.is_empty()).then(|| contexts.join("\n\n"))
-            })
-            .flatten();
+                    (!contexts.is_empty()).then(|| contexts.join("\n\n"))
+                })
+                .flatten();
             claimed.push(ClaimedRelayCommand {
                 command_id,
                 accepted_ordinal,
@@ -770,7 +811,7 @@ impl DurableRelay {
             self.commit_snapshot(next_snapshot)?;
             if claimed
                 .iter()
-                .any(|claim| matches!(claim.command, RelayCommand::Prompt { .. }))
+                .any(|claim| claim.command.prompt_blocks().is_some())
             {
                 self.capacity_response = CapacityResponse::default();
             }

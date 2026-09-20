@@ -2860,3 +2860,22 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
         assert!(actions.try_recv().is_err());
     }
 }
+
+#[test]
+fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary() {
+    let observation = WaitObservation {
+        checking_continuation: true,
+        execution: MaterializedExecutionState::Idle,
+        last_turn_outcome: Some(completed(7, "end_turn")),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_none());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_wait(&observation, &request).unwrap().outcome,
+        WaitOutcome::Finished
+    );
+}

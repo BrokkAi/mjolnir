@@ -856,8 +856,11 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
     let request_id = claimed.command_id.clone();
     match &claimed.command {
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
-        RelayCommand::Prompt { prompt } => {
-            let mut prompt = prompt.clone();
+        command @ (RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. }) => {
+            let mut prompt = command
+                .prompt_blocks()
+                .expect("prompt command")
+                .into_owned();
             if let Some(context) = &claimed.hidden_prompt_context {
                 prompt.insert(
                     0,

@@ -406,9 +406,10 @@ impl DurableRelay {
             for event in &relay.hot_events {
                 if let RelayObservation::CommandQueued {
                     command_id,
-                    command: RelayCommand::Prompt { prompt },
+                    command,
                     ..
                 } = &event.observation
+                    && let Some(prompt) = command.prompt_blocks()
                 {
                     prompts.insert(
                         command_id.clone(),
@@ -480,9 +481,15 @@ impl DurableRelay {
                 continue;
             };
             let payload = match &dispatch.command {
-                RelayCommand::Prompt { prompt } => StoredQueuedRelayPayload::Prompt {
-                    prompt: prompt.clone(),
-                },
+                command @ (RelayCommand::Prompt { .. }
+                | RelayCommand::ContinueAuthorizedWork { .. }) => {
+                    StoredQueuedRelayPayload::Prompt {
+                        prompt: command
+                            .prompt_blocks()
+                            .expect("prompt command")
+                            .into_owned(),
+                    }
+                }
                 RelayCommand::SetConfig { key, value } => StoredQueuedRelayPayload::SetConfig {
                     key: key.clone(),
                     value: value.clone(),
@@ -766,7 +773,7 @@ impl DurableRelay {
         // A prompt that only waits in the durable queue never reached the
         // agent. Anything past admission may have.
         self.snapshot.dispatches.values().any(|dispatch| {
-            matches!(dispatch.command, RelayCommand::Prompt { .. })
+            dispatch.command.prompt_blocks().is_some()
                 && !matches!(
                     dispatch.state,
                     RelayDispatchState::Queued | RelayDispatchState::Pending
@@ -1092,3 +1099,6 @@ mod tests;
 
 #[cfg(test)]
 mod attachment_tests;
+
+#[cfg(test)]
+mod continuation_tests;

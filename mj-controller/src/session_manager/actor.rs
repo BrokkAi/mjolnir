@@ -455,7 +455,9 @@ pub(super) async fn run_session_actor(
                         }
                         if matches!(
                             &command,
-                            RelayCommand::Prompt { .. } | RelayCommand::ClearContext
+                            RelayCommand::Prompt { .. }
+                                | RelayCommand::ContinueAuthorizedWork { .. }
+                                | RelayCommand::ClearContext
                         ) && !admitted
                             && let Some(refusal) =
                                 crate::review_host::prompt_refusal(&target.session_id)
@@ -475,6 +477,14 @@ pub(super) async fn run_session_actor(
                             let _ = reply.send(Err(
                                 "/clear requires an idle session; a lifecycle operation is running"
                                     .into(),
+                            ));
+                            continue;
+                        }
+                        if lifecycle.is_leased()
+                            && matches!(command, RelayCommand::ContinueAuthorizedWork { .. })
+                        {
+                            let _ = reply.send(Err(
+                                "automatic continuation cancelled by lifecycle operation".into(),
                             ));
                             continue;
                         }
@@ -897,6 +907,15 @@ pub(super) async fn deliver_submit(
     {
         let _ = reply.send(Err("review delivery admission is no longer valid".into()));
         return;
+    }
+    if matches!(command, RelayCommand::ContinueAuthorizedWork { .. }) {
+        if reply.is_closed() {
+            return;
+        }
+        if let Some(refusal) = crate::review_host::prompt_refusal(&target.session_id) {
+            let _ = reply.send(Err(refusal.into()));
+            return;
+        }
     }
     let started = Instant::now();
     tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,

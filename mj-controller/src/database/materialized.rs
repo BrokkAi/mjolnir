@@ -1546,3 +1546,70 @@ fn decode_transcript_body(body_json: &str, session_id: &str) -> Result<Transcrip
     }
     Ok(body)
 }
+
+/// Read complete authorization and recent replies in one consistent snapshot.
+/// Runs on the continuation service's blocking pool, never a render/event loop.
+pub(crate) fn load_continuation_evidence(
+    session_id: &str,
+    ordinal: u64,
+    digest: &str,
+) -> Result<mj_core::continuation::ContinuationEvidence> {
+    load_continuation_evidence_from(&database_path(), session_id, ordinal, digest)
+}
+
+pub(super) fn load_continuation_evidence_from(
+    path: &Path,
+    session_id: &str,
+    ordinal: u64,
+    digest: &str,
+) -> Result<mj_core::continuation::ContinuationEvidence> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let fields = read_materialized_session_fields(&connection, session_id)?
+        .context("continuation projection is missing")?;
+    anyhow::ensure!(
+        fields.applied_event_ordinal == ordinal && fields.applied_event_digest == digest,
+        "continuation projection changed"
+    );
+    let mut statement = connection.prepare(
+        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
+                last_changed_at_ms, body_json
+         FROM materialized_transcript_items WHERE session_id = ?1
+         AND (json_extract(body_json, '$.kind') IN ('user', 'agent')
+              OR stable_id LIKE 'context-cleared:%')
+         ORDER BY position DESC, stable_id DESC",
+    )?;
+    let rows = statement.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, Option<u64>>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    crate::continuation::evidence_from_items(rows.map(|row| {
+        let (
+            stable_id,
+            position,
+            latest_content_event_ordinal,
+            created_at_ms,
+            last_changed_at_ms,
+            body_json,
+        ) = row?;
+        // Refuse exceptionally large source messages rather than clip consent.
+        anyhow::ensure!(
+            body_json.len() <= 1024 * 1024,
+            "continuation source message exceeds budget"
+        );
+        Ok(Arc::new(TranscriptItem {
+            stable_id,
+            position,
+            latest_content_event_ordinal,
+            created_at_ms,
+            last_changed_at_ms,
+            body: decode_transcript_body(&body_json, session_id)?,
+        }))
+    }))
+}

@@ -133,6 +133,10 @@ pub(super) fn build_observation(
     start_status: Option<StartStatus>,
 ) -> WaitObservation {
     let mut observation = WaitObservation {
+        checking_continuation: matches!(
+            session.activity_state,
+            Some(mj_core::activity::ActivityState::CheckingContinuation)
+        ),
         pending_elicitations: session.pending_elicitations.clone(),
         lifecycle: Some(session.lifecycle),
         resuming: session

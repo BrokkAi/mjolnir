@@ -196,7 +196,7 @@ impl Drop for SessionManagerShutdown {
 }
 
 #[derive(Clone)]
-pub(super) struct CoalescedUpdateSender {
+pub(crate) struct CoalescedUpdateSender {
     pub(super) pending: Arc<Mutex<BTreeMap<String, SessionManagerUpdate>>>,
     pub(super) wake: mpsc::Sender<()>,
 }
@@ -209,7 +209,7 @@ pub struct SessionManagerUpdates {
 }
 
 impl CoalescedUpdateSender {
-    pub(super) fn send(&self, update: SessionManagerUpdate) {
+    pub(crate) fn send(&self, update: SessionManagerUpdate) {
         if self.wake.is_closed() {
             return;
         }
@@ -250,7 +250,7 @@ impl SessionManagerUpdates {
     }
 }
 
-pub(super) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
+pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
     let pending = Arc::new(Mutex::new(BTreeMap::new()));
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (

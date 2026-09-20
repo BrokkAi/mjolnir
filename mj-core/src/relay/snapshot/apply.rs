@@ -84,6 +84,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             native_continuity_lost,
             resumed,
         } => {
+            snapshot.continuation.suppressed = true;
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
             // A normal open clears the flag; only the fallback sets it.
@@ -124,6 +125,43 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
                 _ => {}
             }
+            match command {
+                RelayCommand::Prompt { prompt }
+                    if !crate::continuation::is_generated_prompt(command_id)
+                        && !crate::continuation::is_generated_prompt_text(
+                            &prompt
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ContentBlock::Text(t) = b {
+                                        Some(t.text.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ) =>
+                {
+                    snapshot.continuation = crate::continuation::ContinuationState {
+                        user_command_id: Some(command_id.clone()),
+                        suppressed: crate::acp::context_command(prompt).is_some(),
+                        ..Default::default()
+                    };
+                }
+                RelayCommand::ContinueAuthorizedWork { attempt, .. } => {
+                    snapshot.continuation.attempts = *attempt;
+                    snapshot.continuation.completed_command_id = None;
+                }
+                RelayCommand::Cancel
+                | RelayCommand::CancelTurn
+                | RelayCommand::CancelTurnFor { .. }
+                | RelayCommand::ClearContext
+                | RelayCommand::GoalControl { .. }
+                | RelayCommand::SetSessionMode { .. } => {
+                    snapshot.continuation.suppressed = true;
+                }
+                _ => {}
+            }
             if cancels_capacity_retry(command) {
                 if let Some(retry) = snapshot.capacity_retry.as_mut()
                     && retry.command_id == *command_id
@@ -152,9 +190,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             // Prompts and configuration changes share one FIFO queue so they
             // reach the agent in the order the user submitted them.
             let payload = match command {
-                RelayCommand::Prompt { prompt } => Some(StoredQueuedRelayPayload::Prompt {
-                    prompt: prompt.clone(),
-                }),
+                command if command.prompt_blocks().is_some() => {
+                    Some(StoredQueuedRelayPayload::Prompt {
+                        prompt: command
+                            .prompt_blocks()
+                            .expect("prompt command")
+                            .into_owned(),
+                    })
+                }
                 RelayCommand::SetConfig { key, value } => {
                     Some(StoredQueuedRelayPayload::SetConfig {
                         key: key.clone(),
@@ -199,7 +242,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("started unknown relay command {command_id}"))?;
             dispatch.state = RelayDispatchState::Pending;
             match &dispatch.command {
-                RelayCommand::Prompt { .. } => {
+                RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. } => {
                     let index = snapshot
                         .queued_prompts
                         .iter()
@@ -270,6 +313,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("completed command {command_id} is not in the ledger"))?
                 .terminal_ordinal = Some(event.ordinal);
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
+                snapshot.continuation.completed_command_id =
+                    (snapshot.continuation.user_command_id.as_ref() == Some(command_id)
+                        || matches!(command, RelayCommand::ContinueAuthorizedWork { .. }))
+                    .then(|| command_id.clone());
+                if crate::state::classify_prompt_completion(stop_reason)
+                    != crate::state::PromptCompletion::Finished
+                {
+                    snapshot.continuation.suppressed = true;
+                }
                 let accepted = snapshot.handled_commands[command_id].accepted_ordinal;
                 let superseded = snapshot.handled_commands.values().any(|handled| {
                     handled.accepted_ordinal > accepted && cancels_capacity_retry(&handled.command)
@@ -290,7 +342,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 };
             }
             match (command, outcome) {
-                (RelayCommand::Prompt { .. }, RelayCommandOutcome::Prompt { .. }) => {
+                (
+                    RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. },
+                    RelayCommandOutcome::Prompt { .. },
+                ) => {
                     if snapshot
                         .active_prompt
                         .as_ref()
@@ -424,7 +479,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .get_mut(queued_command_id)
                         .ok_or_else(|| anyhow!("steered unknown queued prompt"))?;
                     if target.state != RelayDispatchState::Queued
-                        || !matches!(target.command, RelayCommand::Prompt { .. })
+                        || target.command.prompt_blocks().is_none()
                     {
                         bail!("steered target is not a queued prompt");
                     }
@@ -517,6 +572,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         memory,
                     },
                 ) => {
+                    snapshot.continuation.suppressed = true;
                     snapshot.native_session_id = Some(native_session_id.clone());
                     snapshot.native_session_opened_ordinal = Some(event.ordinal);
                     snapshot.native_session_used = false;

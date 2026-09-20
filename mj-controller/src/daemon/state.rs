@@ -209,7 +209,7 @@ impl RuntimeState {
         Ok(Some(registered))
     }
 
-    fn live_session_ids(&self) -> BTreeSet<String> {
+    pub(super) fn live_session_ids(&self) -> BTreeSet<String> {
         self.controller
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

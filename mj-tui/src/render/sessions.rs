@@ -573,6 +573,13 @@ pub(crate) fn session_activity_line(
         )
     } else if facts.unreachable {
         "Unreachable".to_owned()
+    } else if detail.is_some_and(|d| {
+        matches!(
+            d.activity.state().last_known(),
+            mj_core::activity::ActivityState::CheckingContinuation
+        )
+    }) {
+        "Checking continuation".to_owned()
     } else if facts.needs_input() {
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {

@@ -49,6 +49,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),

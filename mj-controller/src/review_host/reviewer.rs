@@ -283,7 +283,13 @@ pub(super) fn seed_from_session(
                 if text.is_empty() {
                     continue;
                 }
-                if mj_core::second_opinion::is_control_origin_prompt(text) {
+                if mj_core::second_opinion::is_control_origin_prompt(text)
+                    || mj_core::continuation::is_generated_prompt(
+                        item.stable_id
+                            .strip_prefix("user:")
+                            .unwrap_or(&item.stable_id),
+                    )
+                {
                     continue;
                 }
                 task = text.to_owned();
@@ -311,7 +317,10 @@ pub(super) fn seed_from_session(
     summary.entries.retain(|entry| {
         entry.position > reviewed_through
             && !(entry.role == mj_transcript::summary::SummaryRole::User
-                && mj_core::second_opinion::is_control_origin_prompt(&entry.text))
+                && (mj_core::second_opinion::is_control_origin_prompt(&entry.text)
+                    || mj_core::continuation::is_generated_prompt(
+                        entry.id.strip_prefix("user:").unwrap_or(&entry.id),
+                    )))
     });
     let trajectory = summary.render(mj_review::lanes::LANE_TRAJECTORY_LIMIT);
     TurnReviewSeed {

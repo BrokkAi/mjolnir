@@ -79,7 +79,16 @@ pub(super) fn project_observation(
                 });
                 push_system(mutation, event, "Clearing context…");
             }
-            RelayCommand::Prompt { prompt } => {
+            command @ (RelayCommand::Prompt { .. }
+            | RelayCommand::ContinueAuthorizedWork { .. }) => {
+                let prompt = command.prompt_blocks().expect("prompt command");
+                if let RelayCommand::ContinueAuthorizedWork { attempt, .. } = command {
+                    push_system(
+                        mutation,
+                        event,
+                        format!("Continuing requested work automatically · {attempt} of 3"),
+                    );
+                }
                 let content = prompt
                     .iter()
                     .map(serde_json::to_value)

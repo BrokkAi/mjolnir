@@ -50,6 +50,13 @@ pub enum RelayCommand {
     Prompt {
         prompt: Vec<ContentBlock>,
     },
+    /// A fixed prompt admitted only against the exact classified state.
+    ContinueAuthorizedWork {
+        expected: RelayCursor,
+        user_command_id: String,
+        completed_command_id: String,
+        attempt: u8,
+    },
     RunUserShell {
         command: String,
     },
@@ -122,8 +129,19 @@ pub enum RelayCommand {
 }
 
 impl RelayCommand {
+    pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
+        match self {
+            Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
+            Self::ContinueAuthorizedWork { .. } => {
+                Some(std::borrow::Cow::Owned(crate::continuation::prompt_blocks()))
+            }
+            _ => None,
+        }
+    }
+
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::ContinueAuthorizedWork { .. } => 18,
             Self::Steer { .. } | Self::CancelTurnFor { .. } | Self::ResolveSteering { .. } => 17,
             Self::ClearContext => 15,
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
@@ -144,7 +162,10 @@ impl RelayCommand {
 
     /// Whether this command waits its turn in the durable command queue.
     pub fn is_queue_entry(&self) -> bool {
-        matches!(self, Self::Prompt { .. } | Self::SetConfig { .. })
+        matches!(
+            self,
+            Self::Prompt { .. } | Self::ContinueAuthorizedWork { .. } | Self::SetConfig { .. }
+        )
     }
 
     pub fn is_relay_local(&self) -> bool {
@@ -165,6 +186,7 @@ impl RelayCommand {
             self,
             Self::ClearContext
                 | Self::Prompt { .. }
+                | Self::ContinueAuthorizedWork { .. }
                 | Self::SetConfig { .. }
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
@@ -186,7 +208,7 @@ impl RelayCommand {
     pub const fn kind(&self) -> RelayCommandKind {
         match self {
             Self::ClearContext => RelayCommandKind::ClearContext,
-            Self::Prompt { .. } => RelayCommandKind::Prompt,
+            Self::Prompt { .. } | Self::ContinueAuthorizedWork { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
             Self::CancelUserShell { .. } => RelayCommandKind::CancelUserShell,
             Self::RemoveQueuedPrompt { .. } => RelayCommandKind::RemoveQueuedPrompt,
@@ -455,6 +477,8 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default)]
+    pub continuation: crate::continuation::ContinuationState,
     /// Negotiated connection protocol, supplied by the controller after hello.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_protocol_version: Option<u32>,
@@ -1011,6 +1035,8 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default)]
+    pub continuation: crate::continuation::ContinuationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering: Option<SteeringOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1094,6 +1120,7 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            continuation: Default::default(),
             steering: None,
             cancelling_prompt_id: None,
             native_agents: BTreeMap::new(),
@@ -1140,6 +1167,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            continuation: self.continuation.clone(),
             relay_protocol_version: None,
             native_agents: self.native_agents.values().cloned().collect(),
             steering: self.steering.clone(),

@@ -22,6 +22,7 @@ pub fn map_stop_reason(stop_reason: &str) -> (WaitOutcome, Option<String>) {
 /// Everything one pass of the wait loop knows about a session.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaitObservation {
+    pub checking_continuation: bool,
     pub background_work: Option<ApiBackgroundWork>,
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
     pub lifecycle: Option<ViewerLifecycleCategory>,
@@ -269,7 +270,8 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             Some(WaitDecision::from_outcome(outcome))
         }
         None => {
-            if observation.execution != MaterializedExecutionState::Idle
+            if observation.checking_continuation
+                || observation.execution != MaterializedExecutionState::Idle
                 || observation.active_turn.is_some()
                 || observation.queued > 0
             {

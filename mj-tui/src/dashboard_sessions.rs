@@ -102,6 +102,12 @@ pub(crate) fn attention_level(
     let Some(detail) = detail else {
         return AttentionLevel::Idle;
     };
+    if matches!(
+        detail.activity.state().last_known(),
+        mj_core::activity::ActivityState::CheckingContinuation
+    ) {
+        return AttentionLevel::Working;
+    }
     if detail.awaiting_input && detail.current_turn_started_at.is_none() {
         AttentionLevel::Waiting
     } else if matches!(

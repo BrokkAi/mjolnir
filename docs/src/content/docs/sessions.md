@@ -458,3 +458,20 @@ Only older current-v1 workers without ownership markers need `--profile` and `--
 After a Mjolnir upgrade, live workers are replaced at their next quiet point, when no prompt, shell command, or queued work is active. A continuously busy session keeps its original worker until it becomes quiet or is suspended.
 
 Continue with [durability and recovery](/durability/) for the archive guarantees, or [troubleshooting](/troubleshooting/) when a launch, checkpoint, or resume fails.
+
+## Automatic continuation
+
+Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
+
+This is enabled by default. Uncheck **Enabled** under **Settings → Automatically continue unfinished requests** to disable it, or set:
+
+```toml
+[continuation]
+enabled = false
+```
+
+The session shows **Checking continuation** while Jev checks the conversation. A continuation appears in the transcript with its attempt number. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
+
+Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, active goals, failed turns, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
+
+The check uses user messages since the last context reset and recent assistant replies, including earlier exchanges that establish what “go ahead” refers to. It excludes tool history and generated prompts. Evidence has size limits; required user history is never clipped to fit. TypeSafe processes this text, through the public Jev proxy when no local TypeSafe key is configured. The proxy does not log or store message bodies.

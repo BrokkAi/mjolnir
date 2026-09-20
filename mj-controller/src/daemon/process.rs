@@ -83,7 +83,7 @@ pub(super) async fn run_daemon_runtime(
     let manager = spawn_session_manager()?;
     let manager_targets = manager.targets;
     manager_targets.send_replace(dashboard_worker_targets(&controller));
-    let mut manager_updates = manager.updates;
+    let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
     let mut recovery = crate::recovery::RecoveryCoordinator::spawn(manager_control.clone());
@@ -115,6 +115,9 @@ pub(super) async fn run_daemon_runtime(
     let move_owned = state.recover_moves(move_operations)?;
     state.resume_retained_cleanups();
     let cancellation = crate::termination::Coordinator::install().token();
+    let (mut manager_updates, continuation_task) =
+        continuation::spawn(state.clone(), manager_updates, cancellation.clone());
+
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -401,7 +404,7 @@ pub(super) async fn run_daemon_runtime(
                     // Every session's view passes here whether or not anything is
                     // attached, which is exactly what an automatic review needs to
                     // see: the turn that just finished.
-                    state.review_host().observe(&update.session_id, &update.view);
+                    // The continuation completion gate has already notified review.
                     state.publish_session(update.session_id, update.view).await?;
                 }
             }
@@ -415,6 +418,11 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
+    match continuation_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),
+        Err(error) => tracing::error!(%error, "continuation service task failed"),
+    }
     drop(interrupted_close_tx);
     record_daemon_cleanup(
         &mut outcome,
