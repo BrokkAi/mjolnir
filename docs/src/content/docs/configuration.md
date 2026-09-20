@@ -82,9 +82,10 @@ The only accepted top-level keys are:
 | `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
 | `build_cache` | table | no | default `[build_cache]` values | Global switch for the shared mbx build cache. |
 
-The terminal Setup screen groups `sessions_side`, `spinner`, and `theme` under
-**Interface**. This is only a presentation grouping; the fields remain at the
-top level in `config.toml`.
+The terminal Setup screen groups the prefix key, `sessions_side`, `spinner`,
+and `theme` under **Interface**. This is a presentation grouping: the prefix
+remains at `keys.prefix`, while the other three fields remain at the top level
+in `config.toml`.
 
 A missing or empty file is treated as an empty version 12 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
@@ -130,9 +131,9 @@ across the originating turn and its background work.
 The optional `[keys]` table rebinds the prefix key and every command it
 drives. Mjolnir follows tmux's model, described in [Terminal
 surface](/terminal-surface/#prefix-key): press the prefix, release it, then
-press a second key. An edit here takes effect the next time the daemon
-reloads the file, within about a second; the terminal Setup screen does not
-show this section, so it is edited by hand.
+press a second key. An edit here takes effect the next time the daemon reloads
+the file, within about a second. The terminal Setup screen exposes the prefix
+under **Interface**; edit the command bindings by hand.
 
 ```toml
 [keys]

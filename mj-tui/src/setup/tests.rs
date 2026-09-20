@@ -238,7 +238,11 @@ fn interface_choice_commits_to_the_existing_root_storage_path() {
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings");
     };
-    assert_eq!(dialog.keys(), ["sessions_side", "spinner", "theme"]);
+    assert_eq!(
+        dialog.keys(),
+        ["prefix", "sessions_side", "spinner", "theme"]
+    );
+    assert_eq!(dialog.draft["keys"]["prefix"], "ctrl+b");
     assert_eq!(dialog.draft["theme"], "midnight");
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -270,6 +274,68 @@ fn interface_choice_commits_to_the_existing_root_storage_path() {
         .unwrap();
     let free_text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(!free_text.contains('▾'), "{free_text}");
+}
+
+#[test]
+fn interface_prefix_key_validates_and_persists_with_the_other_keybindings() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "interface");
+    choose(&mut dashboard, "prefix");
+    setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .editor
+        .as_mut()
+        .unwrap()
+        .input
+        .set_value("a");
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(dialog.editor.is_some(), "an invalid prefix stays open");
+    assert!(
+        dialog
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("prefix must use ctrl, alt or super")),
+        "unexpected validation notice: {:?}",
+        dialog.notice
+    );
+
+    dialog.editor.as_mut().unwrap().input.set_value("ctrl+a");
+    dialog.notice = None;
+    dashboard.handle_key(key(KeyCode::Enter));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(dialog.editor.is_none(), "a valid prefix applies");
+    assert_eq!(dialog.draft["keys"]["prefix"], "ctrl+a");
+
+    let DashboardAction::SaveSetup { updated, .. } =
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+    else {
+        panic!("settings must save");
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    assert_eq!(saved.keys.prefix, "ctrl+a");
+}
+
+#[test]
+fn interface_prefix_key_can_be_restored_to_its_default() {
+    let mut configured = config();
+    configured.keys.prefix = "ctrl+a".to_owned();
+    let mut dialog = SetupDialog::new(&configured);
+    dialog.path = vec!["interface".to_owned()];
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "prefix")
+        .unwrap();
+    dialog.open_selected();
+
+    dialog.apply_editor(true).unwrap();
+
+    assert_eq!(
+        dialog.draft["keys"]["prefix"],
+        mj_core::config::DEFAULT_PREFIX
+    );
 }
 
 #[test]

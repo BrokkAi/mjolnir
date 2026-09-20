@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "sessionwiki":{}, "subagents":{}, "build_cache":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -137,6 +137,7 @@ pub(super) fn is_local_runtime(draft: &Value, target: &str) -> bool {
 pub(super) fn label(key: &str) -> String {
     match key {
         "interface" => "Interface",
+        "prefix" => "Prefix key",
         "sessions_side" => "Session sidebar position",
         "spinner" => "Activity animation",
         "advanced" => "Advanced",
@@ -493,6 +494,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
 
 pub(super) fn help(path: &[String]) -> &'static str {
     match path.last().map(String::as_str).unwrap_or("") {
+        "prefix" if path.first().is_some_and(|key| key == "interface") => {
+            "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
+        }
         "theme" => {
             "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
         }
