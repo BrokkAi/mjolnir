@@ -1027,7 +1027,7 @@ kind = "bare"
         self.record_action("clients-converged", session_id=session_id, clients=3)
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}")
@@ -1109,7 +1109,7 @@ kind = "bare"
 
         started = time.monotonic()
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"active close action returned {status}")
@@ -1175,7 +1175,7 @@ kind = "bare"
         )
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"cleanup close returned {status}")
@@ -1262,7 +1262,7 @@ kind = "bare"
         self.record_action("unanswered-turn", session_id=session_id, report=report)
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}")

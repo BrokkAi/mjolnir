@@ -126,6 +126,10 @@ impl DashboardState {
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
+        if matches!(self.mode, Mode::Help(_)) {
+            self.paste_help(pasted);
+            return;
+        }
         if self.component_modal_open() {
             self.handle_component_event(crossterm::event::Event::Paste(pasted.to_owned()));
             return;

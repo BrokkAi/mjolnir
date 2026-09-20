@@ -22,8 +22,8 @@ Each terminal session row starts with a fixed status symbol. Symbols stay visibl
 | `↻` | Resuming |
 | `⇄` | Moving |
 | `▣` | Checkpointing |
-| `↓` | Stopping |
-| `■` | Stopped |
+| `↓` | Suspending |
+| `■` | Suspended |
 | `⊗` | Destroying |
 
 A failure takes precedence over an unreachable worker, which takes precedence over a request for input, which takes precedence over unread activity. Reading a completed session changes its check mark to the idle circle.
@@ -31,7 +31,7 @@ A failure takes precedence over an unreachable worker, which takes precedence ov
 With the ASCII symbol set (**Setup → Advanced → Symbols**, or automatically on
 a terminal without UTF-8) the same states read `*` working, `!` waiting, `+`
 unread, `-` idle, `.` unknown, `?` unreachable, `x` failed, `^` starting, `~`
-resuming, `<>` moving, `#` checkpointing, `v` stopping, `=` stopped, and `X`
+resuming, `<>` moving, `#` checkpointing, `v` suspending, `=` suspended, and `X`
 destroying.
 
 ## Needs attention
@@ -43,7 +43,7 @@ A session needs attention when it is waiting for you rather than working. There 
 3. `!` **Needs input**: the agent asked a question, or a review produced findings to answer.
 4. `✓` **Unread**: the turn finished and nobody has read what it said.
 
-A session that is working, starting, stopping, or already read needs no attention.
+A session that is working, starting, suspending, or already read needs no attention.
 
 Each workspace tab carries the most urgent symbol among its own sessions and how many of them are flagged, as in `Default !2`. A tab with nothing flagged carries no badge. A folded project heading and a minimized Sessions pane carry the same badge.
 
@@ -87,11 +87,13 @@ Press `Esc` to cancel the active agent turn or shell command. This does not stop
 
 A turn normally ends when the harness answers. If the harness bridge process exits, its connection closes, or the worker restarts, Mjolnir reports a failed turn within seconds, with the reason in `mj wait` and in the transcript. Optional stall bounds and key-enabled turn classification can also end Mjolnir’s tracked turn, as described below.
 
-Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Unless the turn classifier confidently identifies a request for your input, Mjolnir reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minute(s)`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj cancel-turn` or `Esc`.
+Silence is different. A turn can send nothing at all for a long time and be perfectly healthy, because a twenty-minute build produces no protocol traffic. Unless the turn classifier confidently identifies a request for your input, Mjolnir reports the silence and leaves the decision to you. Once a running turn has been quiet for a minute, `mj sessions --session <id>` prints `running, no harness activity for about N minute(s)`, `mj wait` says the same in its timeout message, and the session row in the terminal and web surfaces shows a `Quiet` clock beside the turn and step clocks. If you decide the turn is not coming back, end it with `mj interrupt-turn` or `Esc`.
 
 There is one case Mjolnir cannot recover from: an adapter that finished the work — wrote its final message, made its commit — and then failed to send the reply. That work exists in the workspace and in the harness's own session files, but never reaches Mjolnir's transcript, so the turn stays running until you end it. If you would rather have Mjolnir end such turns automatically, set `MJ_TURN_STALL_TIMEOUT_MS` to a number of milliseconds of silence to allow; the turn then fails with the reason `harness_inactive`. It is off by default because the same setting will also end healthy turns that are merely slow.
 
-Mjolnir automatically uses TypeSafe's Jev classifier to distinguish a question from ongoing work. By default, it sends bounded recent prompt and assistant text, tool titles, and activity counts through Mjolnir's public Cloudflare proxy to TypeSafe after a minute of silence and after a completed reply. No API key is required. With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, requests go directly to TypeSafe using your key; the daemon forwards that key to container and SSH workers. A confident user-input verdict marks the turn as waiting for you (`mj wait` returns `input_required`); the harness may still be running. A confident background-work verdict shows “expecting the agent to continue” until activity resumes. Low confidence, rate limits, and API failures keep the existing behavior. The proxy does not log request content and limits requests per client IP; users sharing an IP share that allowance.
+Mjolnir automatically uses TypeSafe's Jev classifier to distinguish a question from ongoing work. By default, it sends bounded recent prompt and assistant text, tool titles, and activity counts through Mjolnir's public Cloudflare proxy to TypeSafe after a minute of silence and after a completed reply. No API key is required. With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, requests go directly to TypeSafe using your key; the daemon forwards that key to container and SSH workers. During a running turn, a confident user-input verdict marks the turn as waiting for you (`mj wait` returns `input_required`); the harness may still be running. After a completed reply, Jev also considers sessions whose harness still lists background tasks. A confident finished or user-input verdict shows the agent as idle, while preserving the task list, stop controls, and protections against replacing a worker that owns background work. A confident background-work verdict retains the background activity status when tasks are recorded, or shows “expecting the agent to continue” otherwise. New foreground activity or changed task inventory invalidates the inference. Low confidence, rate limits, and API failures preserve the existing activity and retry after one minute, backing off to five minutes; conclusive decisions remain until the evidence changes. The proxy does not log request content and limits requests per client IP; users sharing an IP share that allowance.
+
+Each session’s local `worker.log` records Jev’s bounded input evidence, verdict, confidence, and whether the decision was applied, discarded, or cancelled. Requests and outcomes share a request ID, session, and evidence generation. This includes the recent prompt and assistant text sent to the classifier, but no authentication credentials. These events are enabled by default under the `mj_jev` logging target; an explicit `RUST_LOG` overrides the default (`warn,mj_jev=info`). Existing worker processes gain this behavior only when updated worker code runs.
 
 ## Detach and reattach
 
@@ -101,7 +103,7 @@ Run `mj` again to reattach. Mjolnir selects the workspace and opens the session 
 
 While the terminal says **Opening session**, `Esc` cancels that attachment,
 selecting another session switches immediately, and `prefix+q` still quits.
-Opening times out after 15 seconds. A failed or cancelled open stays stopped;
+Opening times out after 15 seconds. A failed or cancelled open stays suspended;
 press `Enter` on the session in Sessions to retry. Cancelling attachment leaves
 the agent running.
 
@@ -138,9 +140,9 @@ mj checkpoint --session <session-id>
 
 Mjolnir verifies the archive byte-for-byte against the target's SHA-256 and verifies its internal manifest and payload hashes before using it. Credentials and live GitHub tokens are not written into checkpoints.
 
-## Stop safely
+## Suspend safely
 
-Select a live session, press `prefix+:`, and choose **Stop session**. A normal stop:
+Select a live session, press `prefix+:`, and choose **Suspend session**. Suspending a session:
 
 1. Freezes dispatch at a safe boundary.
 2. Captures and verifies a current recovery archive.
@@ -148,11 +150,20 @@ Select a live session, press `prefix+:`, and choose **Stop session**. A normal s
 4. Retires the session's managed worktree, container, or instance only after the worker has stopped.
 5. Leaves the session record and verified archive available to resume.
 
-If checkpoint creation or verification fails, normal Stop refuses teardown. The failure dialog lets you retry. **Force stop** is offered only when an existing recovery archive is present and passes verification again; it then removes the current target without making a new checkpoint. Work newer than that archive may be lost, while the verified older archive remains resumable. If the existing archive cannot be verified, force stop changes nothing.
+If checkpoint creation or verification fails, suspension refuses teardown and
+reports the failure. Retry suspension after resolving it. When a recovery copy
+exists, the terminal also offers **Discard changes since checkpoint…**. A second
+confirmation shows the copy's timestamp and explains that newer work may be lost.
+The daemon verifies the selected recovery copy again before releasing the environment.
 
-**Force destroy session** is a different, irreversible action. It removes the target, managed worktree checkout, recovery archive, and session record. Mjolnir requires the session's short ID as confirmation because nothing can be read or resumed afterward.
+**Destroy session…** is a separate irreversible action in both terminal and web
+interfaces. It removes the environment, managed checkout, recovery archive, and
+session record. The confirmation keeps the managed branch by default and offers
+an explicit choice to delete it too. Keeping the managed branch does not preserve
+work held only inside the destroyed environment.
 
-Destroying a session leaves the managed worktree's git branch in the source repository, so any commits you made there survive. Choose **Yes, delete branch** in the confirmation if you want Mjolnir to delete the branch as well.
+**Interrupt turn** leaves the environment available for further prompts.
+**Close pane** only dismisses a viewer; it does not interrupt or suspend a session.
 
 ## Resume on a fresh target
 
@@ -181,12 +192,12 @@ mj wait --session <id>
 `mj resume` runs the same operation as the wizard, without one. The session's
 own record supplies the profile and target when the command names none, so
 closing a session after capture and continuing it later is scriptable:
-`mj close --session <id>`, then `mj resume --session <id>` when you want it
+`mj suspend --session <id>`, then `mj resume --session <id>` when you want it
 back. The command answers as soon as the daemon has taken the session; `mj wait`
 blocks while the resume runs and reports the reason if it fails. Afterwards
 `mj set-config` and `mj prompt` work as they do for any live session. The same
 operation is `POST /api/v1/sessions/{id}/resume` in the
-[HTTP API](/api-reference/#resume-a-stopped-session).
+[HTTP API](/api-reference/#resume-a-suspended-session).
 
 ### Resume a local session into a container
 
@@ -239,7 +250,7 @@ or files outside the declared workspace. Either way the old harness process
 stops, so running process memory is lost.
 
 If an in-place swap fails, or the daemon restarts while it runs, Mjolnir does
-not retry in place. It releases the environment and leaves the session stopped
+not retry in place. It releases the environment and leaves the session suspended
 with its verified checkpoint, and the UI offers retry or resume with the
 previous settings.
 
@@ -266,7 +277,7 @@ directories fixed. It offers one explicit confirmation to clear inherited
 resource sizing and use destination defaults; use the terminal Move wizard
 when you need to change attached resources.
 
-If destination launch fails, the session remains stopped with its verified
+If destination launch fails, the session remains suspended with its verified
 checkpoint and the UI offers retry or resume with the previous settings. If
 queue admission fails after the destination is ready, the live destination is
 kept so accepted commands are not replayed on another target. Closing the
@@ -277,7 +288,7 @@ For Codex, the archive includes the primary thread and child-agent results surfa
 
 ## Import a native harness session
 
-The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a stopped, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
+The `prefix+g` picker also has an Import view for sessions created outside Mjolnir. Native sessions from all five supported harnesses can be adopted into a suspended, verified Mjolnir archive and then resumed on a configured target. Muse imports retain their native session IDs and support workspace relocation. Muse accepts one workspace root.
 
 For scripting, select a specific native UUID or the latest session:
 
@@ -301,7 +312,7 @@ If imported Git roots are dirty, Mjolnir warns that it will archive their comple
 Mjolnir writes every session into
 [SessionWiki](https://github.com/jbellis/sessionwiki), a separate tool that
 keeps one full-text index of AI coding sessions across Claude Code, Codex, and
-other harnesses. This is always on. The one setting is how long a stopped
+other harnesses. This is always on. The one setting is how long a suspended
 session is kept before Mjolnir's own copy is removed:
 
 ```toml
@@ -312,14 +323,14 @@ archive_after_days = 30
 The Setup screen's SessionWiki page shows how much disk your sessions use and,
 while you type a value for **Archive after (days)**, an estimate of what that
 value would reclaim. The estimate covers checkpoints and image attachments, and
-it counts every aged stopped session whether or not the index has caught up
+it counts every aged suspended session whether or not the index has caught up
 with it yet, so it describes the policy rather than the next hourly pass.
 
 ### What gets indexed, and when
 
-A running session is indexed from the transcript the daemon holds, and a stopped
+A running session is indexed from the transcript the daemon holds, and a suspended
 one from its checkpoint, so a session is searchable before it has ever been
-closed. The daemon indexes when it starts, when a session reaches the stopped
+closed. The daemon indexes when it starts, when a session reaches the suspended
 state, once an hour, and before a Resume search that has not synced in the last
 minute. The first build walks every tool's store and can take many minutes on a
 large corpus. Until it finishes, the Resume search box cannot be typed into and
@@ -399,7 +410,7 @@ restored.
 ### What archiving deletes and keeps
 
 With `archive_after_days = N`, the hourly job removes Mjolnir's own copy of a
-stopped session older than N days, but only after confirming SessionWiki holds
+suspended session older than N days, but only after confirming SessionWiki holds
 its conversation. It deletes the session record, the checkpoint archive, and the
 session's image attachments. It deletes the `mj/<session id>` branch only when
 every commit on it is already on another branch, local or remote-tracking, that
@@ -444,6 +455,6 @@ mj recover adopt --session <session-id> --target <target-id>
 
 Only older current-v1 workers without ownership markers need `--profile` and `--bundle`. To delete an orphan instead, `mj recover destroy` requires the exact session ID twice—once as `--session` and once as `--confirm`. That path destroys the managed resource and should be used only after verifying it is not recoverable.
 
-After a Mjolnir upgrade, live workers are replaced at their next quiet point, when no prompt, shell command, or queued work is active. A continuously busy session keeps its original worker until it becomes quiet or is stopped.
+After a Mjolnir upgrade, live workers are replaced at their next quiet point, when no prompt, shell command, or queued work is active. A continuously busy session keeps its original worker until it becomes quiet or is suspended.
 
 Continue with [durability and recovery](/durability/) for the archive guarantees, or [troubleshooting](/troubleshooting/) when a launch, checkpoint, or resume fails.

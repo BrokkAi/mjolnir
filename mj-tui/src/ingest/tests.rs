@@ -153,7 +153,7 @@ fn a_completed_remote_launch_restores_the_ready_row_without_another_record_chang
 #[test]
 fn stopped_cleanup_removes_history_after_its_owner_finishes() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
     assert_eq!(dashboard.ordered_sessions().len(), 1);
     assert_eq!(
         dashboard.state.sessions["session-1"].state,
@@ -998,7 +998,7 @@ fn failed_closing_record_is_recovery_status_not_an_active_transition() {
     assert_eq!(dashboard.transition_kind("session-1"), None);
     assert_eq!(
         dashboard.transition_failure_kind("session-1"),
-        Some(mj_core::state::SessionTransitionKind::Stopping)
+        Some(mj_core::state::SessionTransitionKind::Suspending)
     );
 }
 

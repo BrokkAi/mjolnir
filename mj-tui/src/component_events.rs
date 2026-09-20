@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn help_over_a_dialog_reports_no_confirmation_and_no_text_focus() {
+    fn help_over_a_dialog_reports_no_confirmation_and_filter_text_focus() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_container_edit();
         // The container editor counts as text-focused on its first field.
@@ -213,7 +213,7 @@ mod tests {
         dashboard.begin_help();
         draw(&mut dashboard);
         assert!(!dashboard.dialog_confirmation_open());
-        assert!(!dashboard.text_input_focused());
+        assert!(dashboard.text_input_focused());
 
         let Mode::Help(overlay) = &dashboard.mode else {
             panic!("help overlay");

@@ -159,7 +159,7 @@ def stop_and_resume(lab, tmux, evidence, session_id, dialogs_only=False):
     tmux.wait_for("Commands")
     tmux.send_text("stop session")
     tmux.wait_for(" 1 commands ")
-    tmux.wait_for("Stop session")
+    tmux.wait_for("Suspend session")
     tmux.send_key("Escape")
     absent(tmux, " Commands ")
     if not any(row["id"] == session_id and row["state"] == "running" for row in lab.snapshot()["sessions"]):
@@ -168,7 +168,7 @@ def stop_and_resume(lab, tmux, evidence, session_id, dialogs_only=False):
     tmux.wait_for("Commands")
     tmux.send_text("stop session")
     tmux.wait_for(" 1 commands ")
-    tmux.wait_for("Stop session")
+    tmux.wait_for("Suspend session")
     click(tmux, "  Run  ")
     absent(tmux, " Commands ")
     lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "stopped" for row in value["sessions"]), "session stopped with recovery copy")

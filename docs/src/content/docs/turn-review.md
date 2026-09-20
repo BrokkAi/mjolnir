@@ -103,7 +103,7 @@ Cancel is also available while review work is still running. It releases the pro
 
 New eligible primary sessions capture a review baseline even when automatic review is off. A session started without a baseline must be resumed or restarted after configuring an eligible reviewer. Child sessions do not capture independent review baselines.
 
-Stopping a session while a reviewer conversation is open preserves its result for reference, but that reviewer's native conversation cannot continue after the target is destroyed. A later review starts a new reviewer conversation.
+Suspending a session while a reviewer conversation is open preserves its result for reference, but that reviewer's native conversation cannot continue after the target is destroyed. A later review starts a new reviewer conversation.
 
 If Mjolnir restarts during a review, it clears the interrupted in-flight marker, releases the prompt hold, and leaves the reviewed boundary unchanged. The next review therefore covers the same changes instead of silently skipping them.
 

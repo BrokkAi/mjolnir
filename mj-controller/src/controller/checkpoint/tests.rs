@@ -270,6 +270,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             clear_context_started_at_ms: None,
             native_agent_count: 0,
             expected_continuation: None,
+            inferred_idle_since_ms: None,
             goal: serde_json::from_value(
                 serde_json::json!({"known":true,"execution":{"version":1,"status":"idle"}}),
             )
@@ -2507,7 +2508,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         .unwrap();
     let executor = RecordingExecutor::default();
     let deferred = controller
-        .close_session_for_move(
+        .suspend_session_for_move(
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,

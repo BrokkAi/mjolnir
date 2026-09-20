@@ -439,6 +439,9 @@ impl StandaloneSession {
                 self.latest_credential_sync_signal = Some(signal);
             }
         }
+        tracing::debug!(target: "mj_controller::latency", session_id = %self.materialized.session_id,
+            through_ordinal, event_count, transaction_count, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "projection page committed");
         if transaction_count > 1 {
             tracing::debug!(
                 session_id = self.materialized.session_id,

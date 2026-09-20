@@ -814,6 +814,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 clear_context_started_at_ms: None,
                 native_agent_count: 0,
                 expected_continuation: None,
+                inferred_idle_since_ms: None,
                 goal: Default::default(),
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,
@@ -1946,6 +1947,7 @@ async fn submit_a_deferred_prompt(
     actor
         .commands
         .send(ActorCommand::Submit {
+            queued_at: Instant::now(),
             command_id: new_command_id("prompt").unwrap(),
             command: RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new("hello"))],

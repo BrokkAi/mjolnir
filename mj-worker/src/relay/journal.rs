@@ -757,6 +757,8 @@ impl DurableRelay {
         if matches!(
             event.observation,
             RelayObservation::HarnessTurnStarted { .. }
+                | RelayObservation::SessionRestarted
+                | RelayObservation::AgentInitialized { .. }
         ) || matches!(
             self.snapshot.execution,
             mj_core::relay::RelayExecutionState::Closing

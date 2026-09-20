@@ -80,6 +80,34 @@ pub struct NativeAgentView {
     pub projection: crate::state::MaterializedSession,
 }
 
+/// Transcript-free identity published by the controller runtime feed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeAgentSummary {
+    pub generation_ordinal: u64,
+    pub agent: NativeAgent,
+    pub projection_ordinal: u64,
+    pub projection_digest: String,
+}
+
+impl NativeAgentSummary {
+    pub fn of(view: &NativeAgentView) -> Self {
+        Self {
+            generation_ordinal: view.generation_ordinal,
+            agent: view.agent.clone(),
+            projection_ordinal: view.projection.applied_event_ordinal,
+            projection_digest: view.projection.applied_event_digest.clone(),
+        }
+    }
+
+    pub fn is_satisfied_by(&self, view: &NativeAgentView) -> bool {
+        self.generation_ordinal == view.generation_ordinal
+            && (view.projection.applied_event_ordinal > self.projection_ordinal
+                || (view.projection.applied_event_ordinal == self.projection_ordinal
+                    && view.projection.applied_event_digest == self.projection_digest
+                    && view.agent == self.agent))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeAgentHistoryPage {
     pub generation_ordinal: u64,

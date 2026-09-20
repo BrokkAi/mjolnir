@@ -129,6 +129,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         clear_context_started_at_ms: None,
         native_agent_count: 0,
         expected_continuation: None,
+        inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
         store_id: None,

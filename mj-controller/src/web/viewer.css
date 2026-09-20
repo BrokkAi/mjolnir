@@ -1808,3 +1808,7 @@ body[data-connection='reconnecting'] .connection::before {
   font-size: 14px;
   overflow-wrap: anywhere;
 }
+
+.session-destroy-dialog { max-width: min(32rem, 90vw); color: var(--text); background: var(--surface); border-radius: .5rem; padding: 1.5rem; }
+.session-destroy-dialog::backdrop { background: #0008; }
+.session-destroy-dialog input[type="checkbox"] { width: auto; margin-right: .5rem; }

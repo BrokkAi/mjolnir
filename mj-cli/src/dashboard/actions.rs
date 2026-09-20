@@ -8,14 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use mj_core::config::is_bare_project_target;
-use mj_core::remote_git::{default_branch, display_url, resolve_repository};
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
 use mj_controller::controller::{Controller, ResumeRepositorySourceReceipt};
 use mj_controller::review_settings::ReviewDiscoveryRequest;
-use mj_controller::targets::{CancellableProcessExecutor, CommandExecutor};
+use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
-use mj_tui::{DashboardAction, RemoteRepositoryPreview, SessionOperationKind};
+use mj_tui::{DashboardAction, SessionOperationKind};
 
 use crate::daemon;
 use crate::dashboard::io::{
@@ -131,12 +130,11 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
-                let result = async {
-                    let mut client = daemon::connect_existing().await?;
-                    client
-                        .native_agent_history(owner.clone(), child.clone(), before)
-                        .await
-                }
+                let result = mj_controller::pollers::load_native_agent_history(
+                    owner.clone(),
+                    child.clone(),
+                    before,
+                )
                 .await
                 .map_err(|error: anyhow::Error| format!("{error:#}"));
                 if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentHistory {
@@ -822,17 +820,18 @@ pub(crate) async fn apply_dashboard_action(
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(30));
                     let controller = config_only_controller(config);
-                    let directory = controller.resolve_project_directory(
+                    let result = controller.preflight_new_session(
+                        "",
                         &target_template_id,
-                        std::path::Path::new(&requested),
+                        Some(std::path::Path::new(&requested)),
                         &executor,
                     )?;
-                    let options = controller.managed_worktree_options(
-                        &target_template_id,
-                        &directory,
-                        &executor,
-                    )?;
-                    Ok((directory, options))
+                    Ok((
+                        result
+                            .project_directory
+                            .context("bare preflight returned no directory")?,
+                        result.managed_worktree,
+                    ))
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
                     context: input_context,
@@ -893,7 +892,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         if session.state.is_active() {
-                            daemon.close_session(session_id.clone()).await?;
+                            daemon.suspend_session(session_id.clone()).await?;
                         }
                         anyhow::ensure!(
                             !cancelled.load(Ordering::Acquire),
@@ -1096,12 +1095,12 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::Close { session_id } => {
+        DashboardAction::Suspend { session_id } => {
             context
                 .dashboard
-                .set_notice(format!("Stopping {}…", short_id(&session_id)));
+                .set_notice(format!("Suspending {}…", short_id(&session_id)));
             let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
@@ -1110,7 +1109,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .close_session(session_id)
+                            .suspend_session(session_id)
                             .await
                     })??;
                     Ok(LifecycleSuccess::Closed)
@@ -1128,9 +1127,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::ForceStop { session_id } => {
+        DashboardAction::DiscardSinceCheckpoint {
+            session_id,
+            checkpoint,
+        } => {
             let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
@@ -1139,7 +1141,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .force_stop_session(session_id)
+                            .discard_since_checkpoint(session_id, checkpoint)
                             .await
                     })??;
                     Ok(LifecycleSuccess::ForceStopped)
@@ -1346,6 +1348,7 @@ pub(crate) fn start_create_session_preflight(
     }
     let config = context.controller.config.clone();
     let bundle_id = bundle_id.clone();
+    let target_id = target_template_id.clone();
     let generation = context.dashboard.session_preflight_generation();
     context.cancel_session_preflight();
     context.dashboard.begin_remote_session_preflight(generation);
@@ -1356,38 +1359,9 @@ pub(crate) fn start_create_session_preflight(
         move |cancelled| {
             let executor = CancellableProcessExecutor::new(cancelled)
                 .with_deadline(std::time::Duration::from_secs(30));
-            let bundle = config
-                .bundles
-                .get(&bundle_id)
-                .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
-            let repairs = mj_core::local_git::repository_remote_repairs(bundle, &executor)?;
-            if !repairs.is_empty() {
-                return Ok(super::io::RemotePreflightOutcome::Repair(repairs));
-            }
-            bundle
-                .repositories
-                .iter()
-                .map(|repository| {
-                    if executor.cancellation_requested() {
-                        bail!("repository preflight cancelled");
-                    }
-                    let source = resolve_repository(repository, &executor)
-                        .with_context(|| format!("repository {:?}", repository.id))?;
-                    let default_branch = default_branch(&source, &executor)
-                        .with_context(|| format!("repository {:?}", repository.id))?;
-                    Ok(RemoteRepositoryPreview {
-                        repository_id: repository.id.clone(),
-                        fetch_url: display_url(&source.fetch_url),
-                        default_branch,
-                        push_urls: source
-                            .push_urls
-                            .iter()
-                            .map(|url| display_url(url))
-                            .collect(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(super::io::RemotePreflightOutcome::Ready)
+            config_only_controller(config)
+                .preflight_new_session(&bundle_id, &target_id, None, &executor)
+                .map(super::io::RemotePreflightOutcome::from)
         },
         move |result| DashboardIoUpdate::RemotePreflight {
             generation,

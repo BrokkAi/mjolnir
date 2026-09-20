@@ -544,6 +544,7 @@ pub struct ChatState {
     /// rebuilds `entries` from the projection, which never saw these.
     unsent_prompts: Vec<UnsentPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
+    submission_renders: Vec<(String, std::time::Instant)>,
     /// The command id of the last turn recorded as unanswered, so the same
     /// projection arriving again does not record it twice (#970).
     unanswered_turn: Option<String>,
@@ -730,6 +731,7 @@ impl ChatState {
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
             pending_submissions: Vec::new(),
+            submission_renders: Vec::new(),
             unanswered_turn: None,
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
@@ -970,6 +972,7 @@ impl ChatState {
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
     ) {
+        let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
         let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
@@ -1069,6 +1072,7 @@ impl ChatState {
                 self.set_notice(format!("Could not read goal state: {error:#}"));
             }
         }
+        tracing::debug!(target: "mj_chat::latency", ordinal = session.applied_event_ordinal, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection applied");
         self.keep_unanswered_prompt(session);
         self.set_config_options(config_options);
         self.acp_surface
@@ -1471,6 +1475,7 @@ pub struct NoticeRecord {
 #[derive(Debug, Default)]
 struct NoticeSlot {
     notice: Option<Notice>,
+    persistent_failure: Option<String>,
     /// Bumped when the displayed text changes, so a dirty-gated renderer can
     /// tell that the bar moved without keeping a copy of its text.
     generation: u64,
@@ -1612,6 +1617,9 @@ impl Notices {
     /// afterwards, so a caller can tell a survivor from a dismissal.
     pub fn dismiss(&self, now: std::time::Instant) -> bool {
         let mut slot = self.lock();
+        if slot.persistent_failure.is_some() {
+            return false;
+        }
         match slot.notice.as_ref() {
             None => true,
             Some(notice) => {
@@ -1626,10 +1634,32 @@ impl Notices {
 
     /// The current notice, if any.
     pub fn current(&self) -> Option<String> {
-        self.lock()
-            .notice
-            .as_ref()
-            .map(|notice| notice.text.clone())
+        let slot = self.lock();
+        slot.persistent_failure
+            .clone()
+            .or_else(|| slot.notice.as_ref().map(|notice| notice.text.clone()))
+    }
+
+    /// A continuing feed failure stays visible until its owner reports recovery.
+    /// Transient notices remain available after recovery and in the notice log.
+    pub fn set_persistent_failure(&self, error: Option<String>) {
+        let error = error.map(|text| sanitize_terminal_text(&text));
+        let mut slot = self.lock();
+        if slot.persistent_failure == error {
+            return;
+        }
+        if let Some(text) = &error {
+            slot.history.push_back(NoticeRecord {
+                text: text.clone(),
+                at: std::time::Instant::now(),
+                failure: true,
+            });
+            while slot.history.len() > NOTICE_HISTORY {
+                slot.history.pop_front();
+            }
+        }
+        slot.persistent_failure = error;
+        slot.generation = slot.generation.wrapping_add(1);
     }
 
     /// Counts displayed-text changes to the shared slot. A renderer that

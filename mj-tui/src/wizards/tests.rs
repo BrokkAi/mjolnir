@@ -111,6 +111,41 @@ fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
 }
 
 #[test]
+fn pending_creation_preflight_keeps_back_and_cancel_live_and_ignores_late_results() {
+    for control in [WizardControl::Back, WizardControl::Cancel] {
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+        ready_open_new_wizard(&mut dashboard);
+        for _ in 0..3 {
+            ready_key(&mut dashboard, key(KeyCode::Enter));
+        }
+        assert!(matches!(
+            dashboard.take_prerequisite_check(),
+            Some(DashboardAction::PreflightCreateSession { .. })
+        ));
+        let generation = dashboard.session_preflight_generation();
+        dashboard.begin_remote_session_preflight(generation);
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new wizard")
+        };
+        wizard.form.get_mut().focus(control);
+        ready_key(&mut dashboard, key(KeyCode::Enter));
+        dashboard.apply_remote_session_preflight(generation, Err("late failure".into()));
+        match control {
+            WizardControl::Back => {
+                let Mode::New(wizard) = &dashboard.mode else {
+                    panic!("new wizard")
+                };
+                assert_eq!(wizard.step, WizardStep::Bundle);
+                assert!(!wizard.remote_preflight_in_flight);
+                assert!(wizard.remote_preflight_error.is_none());
+            }
+            WizardControl::Cancel => assert!(matches!(dashboard.mode, Mode::Dashboard)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn isolated_creation_runs_one_check_at_a_time_and_retries_after_failure() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);

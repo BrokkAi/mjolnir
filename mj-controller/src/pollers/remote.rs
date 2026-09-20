@@ -16,15 +16,25 @@ pub fn spawn_remote_dashboard_worker_poller(
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (config_tx, config_rx) = tokio::sync::watch::channel(mj_core::config::Config::default());
+    let (health_tx, health_rx) = tokio::sync::watch::channel(RuntimeFeedHealth::default());
     tokio::spawn(async move {
         let mut feed = spawn_runtime_feed_with(
             workspace_id,
             |workspace, revision| poll_daemon_runtime(workspace, revision, true),
             load_runtime_projection,
         );
+        let mut native = super::native_agents::NativeAgentLoader::default();
         let mut request_order = crate::session_manager::SessionRequestOrder::new();
         loop {
             tokio::select! {
+                _ = state_tx.closed() => return,
+                () = native.next(), if native.has_work() => {
+                    state_tx.send_modify(|state| state.native_agents = native.views());
+                    health_tx.send_if_modified(|health| {
+                        let error = native.error();
+                        if health.native_error == error { false } else { health.native_error = error; true }
+                    });
+                },
                 request = requests.recv() => {
                     let Some(request) = request else { return; };
                     request_order.dispatch(request, forward_remote_session_request);
@@ -36,8 +46,16 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 if *config == snapshot.config { false }
                                 else { *config = snapshot.config.clone(); true }
                             });
+                            native.update(snapshot.native_agents);
+                            health_tx.send_if_modified(|health| {
+                                let recovered = health.refresh_error.take().is_some();
+                                let native_error = native.error();
+                                let changed = health.native_error != native_error;
+                                health.native_error = native_error;
+                                recovered || changed
+                            });
                             state_tx.send_replace(RuntimeStateUpdate {
-                                native_agents: snapshot.native_agents,
+                                native_agents: native.views(),
                                 workspace_names: snapshot.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,
@@ -52,9 +70,17 @@ pub fn spawn_remote_dashboard_worker_poller(
                             if publisher.publish(session_id, *view).await.is_err() { return; }
                         }
                         Some(RuntimeFeedUpdate::Error(error)) => {
-                            tracing::warn!(%error, "could not refresh sessions from controller daemon");
+                            health_tx.send_if_modified(|health| {
+                                if health.refresh_error.as_ref() == Some(&error) { return false; }
+                                tracing::warn!(%error, "could not refresh sessions from controller daemon");
+                                health.refresh_error = Some(error);
+                                true
+                            });
                         }
-                        None => return,
+                        None => {
+                            health_tx.send_modify(|health| health.refresh_error = Some("Session updates stopped; reconnect to the controller.".into()));
+                            return;
+                        },
                     }
                 }
             }
@@ -69,6 +95,7 @@ pub fn spawn_remote_dashboard_worker_poller(
         reviews: reviews_rx,
         notices: notices_rx,
         config: config_rx,
+        health: health_rx,
     })
 }
 

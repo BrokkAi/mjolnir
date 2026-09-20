@@ -202,12 +202,18 @@ fn install_stderr_logging() -> Result<()> {
     let (filter, filter_error) = match std::env::var("RUST_LOG") {
         Ok(value) => match EnvFilter::try_new(value) {
             Ok(filter) => (filter, None),
-            Err(error) => (EnvFilter::new("warn"), Some(error.to_string())),
+            Err(error) => (
+                EnvFilter::new(mj_worker::DEFAULT_WORKER_LOG_FILTER),
+                Some(error.to_string()),
+            ),
         },
-        Err(std::env::VarError::NotPresent) => (EnvFilter::new("warn"), None),
-        Err(error @ std::env::VarError::NotUnicode(_)) => {
-            (EnvFilter::new("warn"), Some(error.to_string()))
+        Err(std::env::VarError::NotPresent) => {
+            (EnvFilter::new(mj_worker::DEFAULT_WORKER_LOG_FILTER), None)
         }
+        Err(error @ std::env::VarError::NotUnicode(_)) => (
+            EnvFilter::new(mj_worker::DEFAULT_WORKER_LOG_FILTER),
+            Some(error.to_string()),
+        ),
     };
     tracing_subscriber::fmt()
         .with_ansi(false)

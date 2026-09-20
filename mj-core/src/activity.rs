@@ -57,6 +57,9 @@ pub struct ActivityFacts {
     pub background_commands: usize,
     #[serde(default)]
     pub expected_continuation: Option<i64>,
+    /// A generation-checked Jev inference; does not discharge owned work.
+    #[serde(default)]
+    pub inferred_idle_since_ms: Option<i64>,
     pub active_user_shells: usize,
     pub active_agent_terminals: usize,
     pub goal_active: bool,
@@ -101,6 +104,7 @@ impl Default for ActivityFacts {
             background_started_at_ms: None,
             background_commands: 0,
             expected_continuation: None,
+            inferred_idle_since_ms: None,
             active_user_shells: 0,
             active_agent_terminals: 0,
             goal_active: false,
@@ -195,7 +199,8 @@ impl Default for ActivityState {
 }
 
 impl ActivityState {
-    /// Nothing is running: no turn, no tool, no background work, no goal.
+    /// The agent is idle, either observed or inferred after a completed reply.
+    /// Recorded background tasks may remain; lifecycle callers must use the facts.
     ///
     /// An unknown or unrecognized state is never idle. Missing knowledge must
     /// not be presented as confirmed idleness.
@@ -395,6 +400,17 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
             last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
+    if let Some(since_ms) = facts.inferred_idle_since_ms
+        && facts.active_user_shells == 0
+        && facts.queued_commands == 0
+        && !facts.goal_active
+        && !facts.goal_running
+        && !facts.capacity_retry_armed
+    {
+        return ActivityState::Idle {
+            since_ms: Some(since_ms),
+        };
+    }
     if facts.background_commands > 0 || facts.active_user_shells > 0 {
         return ActivityState::Background {
             started_at_ms: facts.background_started_at_ms,
@@ -434,6 +450,8 @@ pub fn has_work_in_flight(facts: &ActivityFacts) -> bool {
         // killing the worker would destroy something.
         || facts.execution != RelayExecutionState::Idle
         || facts.queued_commands > 0
+        || facts.background_commands > 0
+        || facts.active_user_shells > 0
         || facts.active_agent_terminals > 0
         || facts.goal_pending_resume
         || facts.goal_decision

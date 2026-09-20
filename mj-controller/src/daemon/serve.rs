@@ -234,9 +234,9 @@ pub(super) async fn serve_client(
         };
         // Echo the caller's protocol version: replies must stay readable in the
         // client's own dialect, and the shapes it can receive here are frozen.
-        write_frame(
+        write_response(
             &mut stream,
-            &ResponseEnvelope {
+            ResponseEnvelope {
                 protocol_version: request.protocol_version,
                 request_id,
                 result,
@@ -244,6 +244,38 @@ pub(super) async fn serve_client(
         )
         .await?;
     }
+}
+
+/// Encoding failure is a reply, not an unexplained connection close.
+pub(super) async fn write_response(
+    stream: &mut TcpStream,
+    mut response: ResponseEnvelope,
+) -> Result<()> {
+    let body = serde_json::to_vec(&response)?;
+    if body.len() <= MAX_FRAME_BYTES {
+        return write_encoded_frame(stream, &body).await;
+    }
+    // Inspect only the reply tag; serde skips the potentially huge value.
+    #[derive(serde::Deserialize)]
+    struct ReplyKind {
+        reply: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseKind {
+        result: std::result::Result<ReplyKind, serde::de::IgnoredAny>,
+    }
+    let operation = serde_json::from_slice::<ResponseKind>(&body)?
+        .result
+        .map(|reply| reply.reply)
+        .unwrap_or_else(|_| "error".into());
+    let message = format!(
+        "Daemon {operation} response for request {} is too large: {} bytes exceeds the {MAX_FRAME_BYTES}-byte limit",
+        response.request_id,
+        body.len()
+    );
+    tracing::warn!(request_id = response.request_id, %operation, encoded_bytes = body.len(), limit = MAX_FRAME_BYTES, "daemon response exceeded frame limit");
+    response.result = Err(message);
+    write_frame(stream, &response).await
 }
 
 pub(super) async fn blocking<T: Send + 'static>(

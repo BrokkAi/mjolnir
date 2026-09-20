@@ -47,9 +47,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_close_session_ids,
-    reserve_recovery_or_cancel, spawn_image_refresher, spawn_interrupted_close_recovery,
-    unowned_interrupted_lifecycles,
+    dashboard_worker_targets, dashboard_worker_targets_excluding, interrupted_suspend_session_ids,
+    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -204,7 +203,7 @@ impl RuntimeRevisions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleKind {
     Create,
-    Close,
+    Suspend,
     Resume,
     Move,
     ForceStop,
@@ -223,7 +222,7 @@ impl LifecycleKind {
     fn label(self) -> &'static str {
         match self {
             LifecycleKind::Create => "create",
-            LifecycleKind::Close => "close",
+            LifecycleKind::Suspend => "suspend",
             LifecycleKind::Resume => "resume",
             LifecycleKind::Move => "move",
             LifecycleKind::ForceStop => "force stop",
@@ -241,7 +240,7 @@ impl LifecycleKind {
 /// `Destroying`, that lease has been released and target teardown is exclusive.
 fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     match kind {
-        LifecycleKind::Close => state == Some(SessionState::Destroying),
+        LifecycleKind::Suspend => state == Some(SessionState::Destroying),
         LifecycleKind::Move => !matches!(
             state,
             Some(
@@ -261,7 +260,7 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// target, so stopping the teardown only strands the target. Every other
 /// lifecycle stays cancellable while it runs.
 fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    !(kind == LifecycleKind::Close && state == Some(SessionState::Destroying))
+    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying))
 }
 
 /// How a stop request has to be carried out, given the durable record.
@@ -395,8 +394,8 @@ enum DaemonLifecycleResult {
 /// failure rebuilt from a string alone would arrive as an internal fault.
 #[derive(Debug, Clone)]
 pub(crate) struct LifecycleFailure {
-    detail: String,
-    refusal: Option<Refusal>,
+    pub(crate) detail: String,
+    pub(crate) refusal: Option<Refusal>,
 }
 
 /// One lifecycle operation's outcome, and the channel every waiter reads it
@@ -440,7 +439,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
     fn from(kind: LifecycleKind) -> Self {
         match kind {
             LifecycleKind::Create => Self::Create,
-            LifecycleKind::Close => Self::Close,
+            LifecycleKind::Suspend => Self::Suspend,
             LifecycleKind::Resume => Self::Resume,
             LifecycleKind::Move => Self::Move,
             LifecycleKind::ForceStop => Self::ForceStop,

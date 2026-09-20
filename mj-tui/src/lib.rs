@@ -347,11 +347,12 @@ pub enum DashboardAction {
     CreateBundle {
         sources: Vec<String>,
     },
-    Close {
+    Suspend {
         session_id: String,
     },
-    ForceStop {
+    DiscardSinceCheckpoint {
         session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
     },
     DestroyStopped {
         session_id: String,
@@ -537,7 +538,7 @@ pub enum SessionOperationKind {
     Launching,
     Resuming,
     Moving,
-    Stopping,
+    Suspending,
     Destroying,
     Connecting,
     Importing,
@@ -549,7 +550,7 @@ impl SessionOperationKind {
             Self::Launching => "Launch",
             Self::Resuming => "Resuming",
             Self::Moving => "Moving",
-            Self::Stopping => "Stopping",
+            Self::Suspending => "Suspending",
             Self::Destroying => "Destroying",
             Self::Connecting => "Connecting",
             Self::Importing => "Importing",
@@ -564,7 +565,7 @@ impl SessionOperationKind {
             Self::Launching => Some(SessionTransitionKind::Starting),
             Self::Resuming => Some(SessionTransitionKind::Resuming),
             Self::Moving => Some(SessionTransitionKind::Moving),
-            Self::Stopping => Some(SessionTransitionKind::Stopping),
+            Self::Suspending => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
             Self::Connecting | Self::Importing => None,
         }
@@ -854,6 +855,7 @@ pub struct DashboardState {
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
+    pub(crate) help_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
     pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
@@ -1027,6 +1029,7 @@ impl DashboardState {
             drawn_failures: BTreeMap::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
+            help_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,
             review_settings_generation: 0,

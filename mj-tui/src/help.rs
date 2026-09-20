@@ -1,55 +1,111 @@
-//! The help overlay: every key the terminal surface answers, in one scrollable
-//! list built from the action registry in [`crate::actions`] and the bindings
-//! in force.
-//!
-//! The overlay is a mode like any other dialog, but it is unusual in one way:
-//! it can open over another mode. Opening help inside the new-session wizard
-//! must not throw the wizard away, so [`DashboardState::begin_help`] moves the
-//! mode it opened over into the overlay and puts it straight back when the
-//! overlay closes. That is why closing help does not go through
-//! `cancel_modal`, which resets the surface to the dashboard.
+//! A grouped keyboard reference with immediate text filtering and optional semantic matches.
+//! The previous mode is retained so closing help restores unfinished dialogs.
 
 use std::cell::{Cell, RefCell};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use mj_chat::components::{Form, Interaction};
-use mj_chat::theme;
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use mj_chat::chat::wrap_styled_line;
+use mj_chat::components::{ControlKind, FieldEdit, Form, Interaction, TextField};
+use mj_chat::text_input::TextInput;
+use mj_chat::{selection::FrameSurfaces, theme};
+use mj_core::help_search::{HelpSearchEntry, HelpSearchRequest, HelpSearchResponse};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
 
-use mj_chat::selection::FrameSurfaces;
-
-use crate::actions::{Availability, COMMANDS, SCOPE_ORDER};
+use crate::actions::{Availability, COMMANDS};
 use crate::widgets::{centered_modal, dismissible_modal_title};
-use crate::{DashboardAction, DashboardState, Mode};
+use crate::{CommandId, DashboardAction, DashboardState, Mode};
 
-/// How many lines PageUp and PageDown move the list.
 const PAGE: usize = 10;
+const GROUPS: [&str; 6] = [
+    "Essentials",
+    "Workspaces",
+    "Sessions",
+    "Panes",
+    "Composer",
+    "Settings & Diagnostics",
+];
 
-/// The open help overlay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HelpOverlay {
-    /// First listed line drawn, so a long list can be read on a short terminal.
-    pub(crate) scroll: usize,
-    /// The filter text. Empty means every row is listed.
-    pub(crate) query: String,
-    /// Whether typing edits the filter rather than scrolling the list.
-    pub(crate) search_focused: bool,
-    /// The mode help opened over, restored when it closes.
-    pub(crate) return_to: Box<Mode>,
-    pub(crate) form: RefCell<Form<()>>,
-    pub(crate) area: Cell<Rect>,
-    /// Rows the last frame gave the list, so scrolling can stop once the final
-    /// line is on screen. Zero until the overlay has been drawn once.
-    pub(crate) body_rows: Cell<u16>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelpControl {
+    Query,
+    Body,
 }
 
-/// The composer's own keys, which the chat handles rather than the dashboard,
-/// so the registry does not know about them. Kept here as plain text because
-/// the one help screen has to cover the whole surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HelpOverlay {
+    pub(crate) scroll: usize,
+    pub(crate) query: TextInput,
+    pub(crate) search_focused: bool,
+    pub(crate) return_to: Box<Mode>,
+    pub(crate) form: RefCell<Form<HelpControl>>,
+    pub(crate) area: Cell<Rect>,
+    pub(crate) body_rows: Cell<u16>,
+    body_width: Cell<u16>,
+    /// Effective offset from the previous frame, after resize clamping.
+    drawn_scroll: Cell<usize>,
+    request_id: u64,
+    pending: bool,
+    unavailable: bool,
+    related: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct HelpEntry {
+    text: HelpSearchEntry,
+    keys: String,
+    availability: Availability,
+}
+
+fn group(id: CommandId) -> &'static str {
+    use CommandId::*;
+    match id {
+        Help | Palette | NewSessionWizard | ResumeDialog | QuitDetach => GROUPS[0],
+        Workspaces
+        | FocusWorkspaces
+        | SelectWorkspacePrevious
+        | SelectWorkspaceNext
+        | SwitchWorkspace
+        | RenameWorkspace
+        | CloseWorkspace => GROUPS[1],
+        OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
+        | ContainerSettings | MoveSession | DestroySession | MarkAllRead | FilterSessions
+        | NextAttention | PreviousAttention | CancelOperation | ToggleProject => GROUPS[2],
+        OpenSessionSplitRight
+        | OpenSessionSplitBelow
+        | ClosePane
+        | FocusPaneLeft
+        | FocusPaneDown
+        | FocusPaneUp
+        | FocusPaneRight
+        | FocusLastPane
+        | ZoomPane
+        | ResizeMode
+        | SwapPaneLeft
+        | SwapPaneDown
+        | SwapPaneUp
+        | SwapPaneRight
+        | ResizePaneLeft
+        | ResizePaneDown
+        | ResizePaneUp
+        | ResizePaneRight
+        | CycleFocus
+        | CycleFocusReverse
+        | CycleFocusedPaneSize
+        | TogglePanePreset => GROUPS[3],
+        ToggleTranscriptRendering | ToggleDictation => GROUPS[4],
+        ChangeGoSetup | TargetActions | EditProfile | Refresh | OpenConfig | ManageProfiles
+        | ManageMachines | ManageTargets | WebViewer | RestartDaemon | NoticeLog | CycleSpinner => {
+            GROUPS[5]
+        }
+    }
+}
+
 const COMPOSER_KEYS: &[(&str, &str)] = &[
     (
         "Enter",
@@ -81,33 +137,172 @@ const COMPOSER_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
+fn entries(dashboard: &DashboardState) -> Vec<HelpEntry> {
+    let mut entries: Vec<_> = COMMANDS
+        .iter()
+        .enumerate()
+        .map(|(id, spec)| HelpEntry {
+            text: HelpSearchEntry {
+                id,
+                category: group(spec.id).into(),
+                label: spec.label.into(),
+                description: spec.description.into(),
+            },
+            keys: dashboard.key_labels(spec.id).join(" / "),
+            availability: (spec.available)(dashboard),
+        })
+        .collect();
+    for (index, (keys, description)) in COMPOSER_KEYS.iter().enumerate() {
+        // Doubling the active prefix sends that literal key, even after rebinding.
+        let (keys, description) = if index == COMPOSER_KEYS.len() - 1 {
+            let prefix = dashboard.keybinds().prefix_label();
+            (
+                format!("{prefix} {prefix}"),
+                format!("send a literal {prefix} to the composer"),
+            )
+        } else {
+            ((*keys).into(), (*description).into())
+        };
+        entries.push(HelpEntry {
+            text: HelpSearchEntry {
+                id: entries.len(),
+                category: GROUPS[4].into(),
+                label: description,
+                description: String::new(),
+            },
+            keys,
+            availability: Availability::Ready,
+        });
+    }
+    entries
+}
+
+fn literal(entry: &HelpEntry, needle: &str) -> bool {
+    [
+        &entry.keys,
+        &entry.text.label,
+        &entry.text.description,
+        &entry.text.category,
+    ]
+    .iter()
+    .any(|field| field.to_lowercase().contains(needle))
+}
+
 impl DashboardState {
-    /// Opens the help overlay over whatever is on screen. Opening it twice is
-    /// a no-op, so a repeated help key cannot bury a wizard behind two
-    /// overlays.
     pub(crate) fn begin_help(&mut self) {
         if matches!(self.mode, Mode::Help(_)) {
             return;
         }
         self.cancel_component_pointer();
+        self.help_request_generation = self.help_request_generation.wrapping_add(1);
         let previous = std::mem::replace(&mut self.mode, Mode::Dashboard);
         self.mode = Mode::Help(HelpOverlay {
             scroll: 0,
-            query: String::new(),
-            search_focused: false,
+            query: TextInput::new(),
+            search_focused: true,
             return_to: Box::new(previous),
             form: RefCell::new(Form::default()),
             area: Cell::new(Rect::default()),
             body_rows: Cell::new(0),
+            body_width: Cell::new(80),
+            drawn_scroll: Cell::new(0),
+            request_id: self.help_request_generation,
+            pending: false,
+            unavailable: false,
+            related: Vec::new(),
         });
     }
 
-    /// Puts back the mode help opened over. Deliberately not `cancel_modal`,
-    /// which would drop a half-filled wizard.
     pub(crate) fn close_help(&mut self) {
         if let Mode::Help(overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) {
             self.mode = *overlay.return_to;
         }
+    }
+
+    fn help_query_changed(&mut self) {
+        self.help_request_generation = self.help_request_generation.wrapping_add(1);
+        if let Mode::Help(overlay) = &mut self.mode {
+            overlay.request_id = self.help_request_generation;
+            overlay.scroll = 0;
+            overlay.drawn_scroll.set(0);
+            overlay.related.clear();
+            overlay.pending = !overlay.query.trim().is_empty();
+            overlay.unavailable = false;
+        }
+    }
+
+    /// A generation survives completion, so the coordinator never repeats a search.
+    pub fn help_search_generation(&self) -> Option<u64> {
+        match &self.mode {
+            Mode::Help(overlay) if !overlay.query.trim().is_empty() => Some(overlay.request_id),
+            _ => None,
+        }
+    }
+
+    pub fn help_search_request(&self) -> Option<HelpSearchRequest> {
+        let Mode::Help(overlay) = &self.mode else {
+            return None;
+        };
+        self.help_search_generation()?;
+        Some(HelpSearchRequest {
+            query: overlay.query.trim().into(),
+            entries: entries(self).into_iter().map(|entry| entry.text).collect(),
+        })
+    }
+
+    /// A result can never change a later query or a reopened help overlay.
+    pub fn apply_help_search_result(
+        &mut self,
+        request_id: u64,
+        result: Result<HelpSearchResponse, String>,
+    ) {
+        if self.help_search_generation() != Some(request_id) {
+            return;
+        }
+        let request = self.help_search_request().expect("active help request");
+        let result = result.and_then(|response| {
+            response
+                .validate(&request)
+                .map_err(|error| error.to_string())?;
+            Ok(response)
+        });
+        let catalog = entries(self);
+        let Mode::Help(overlay) = &mut self.mode else {
+            return;
+        };
+        overlay.pending = false;
+        match result {
+            Ok(mut response) => {
+                response.scores.sort_by(|a, b| {
+                    b.probability
+                        .total_cmp(&a.probability)
+                        .then(a.id.cmp(&b.id))
+                });
+                let needle = overlay.query.trim().to_lowercase();
+                overlay.related = response
+                    .scores
+                    .into_iter()
+                    .filter(|score| {
+                        score.probability >= 0.70 && !literal(&catalog[score.id], &needle)
+                    })
+                    .take(8)
+                    .map(|score| score.id)
+                    .collect();
+            }
+            Err(_) => {
+                overlay.unavailable = true;
+                overlay.related.clear();
+            }
+        }
+    }
+
+    fn help_max_scroll(&self) -> usize {
+        let Mode::Help(overlay) = &self.mode else {
+            return 0;
+        };
+        help_lines(self, overlay, usize::from(overlay.body_width.get()))
+            .len()
+            .saturating_sub(usize::from(overlay.body_rows.get()).max(1))
     }
 
     pub(crate) fn handle_help_mouse(&mut self, mouse: MouseEvent) -> DashboardAction {
@@ -115,121 +310,119 @@ impl DashboardState {
         let Mode::Help(overlay) = &mut self.mode else {
             return DashboardAction::None;
         };
+        let before = overlay.query.to_string();
         let result = overlay.form.get_mut().handle(&Event::Mouse(mouse));
-        self.last_event_consumed.set(result.consumed);
+        self.last_event_consumed.set(true);
         if matches!(result.action, Some(Interaction::Cancel)) {
             self.close_help();
-        } else if overlay
+            return DashboardAction::None;
+        }
+        if let Some(Interaction::Edit(HelpControl::Query, edit)) = result.action {
+            overlay.search_focused = true;
+            TextField::apply(&mut overlay.query, edit);
+        }
+        if overlay
             .area
             .get()
             .contains((mouse.column, mouse.row).into())
         {
+            overlay.scroll = overlay.drawn_scroll.get().min(last);
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
-                    overlay.scroll = overlay.scroll.saturating_add(3).min(last);
+                    overlay.scroll = overlay.scroll.saturating_add(3).min(last)
                 }
-                MouseEventKind::ScrollUp => {
-                    overlay.scroll = overlay.scroll.saturating_sub(3);
+                MouseEventKind::ScrollUp => overlay.scroll = overlay.scroll.saturating_sub(3),
+                MouseEventKind::Down(_) | MouseEventKind::Up(_) => {
+                    overlay.search_focused =
+                        overlay.form.borrow().focused() == Some(HelpControl::Query);
                 }
                 _ => {}
             }
+            overlay.drawn_scroll.set(overlay.scroll);
+        }
+        if before != overlay.query.value() {
+            self.help_query_changed();
         }
         DashboardAction::None
     }
 
-    /// The furthest the overlay can scroll under the filter in force: the
-    /// offset that puts the last line on the last drawn row. A list that
-    /// already fits cannot scroll at all, so the scrolling keys never push the
-    /// prefix line or a group heading off the top to show blank rows.
-    ///
-    /// Before the first frame there is no viewport to consult, so the whole
-    /// list is treated as one row and the next frame clamps it properly.
-    fn help_max_scroll(&self) -> usize {
-        let (query, rows) = match &self.mode {
-            Mode::Help(overlay) => (
-                overlay.query.clone(),
-                usize::from(overlay.body_rows.get()).max(1),
-            ),
-            _ => (String::new(), 1),
+    pub(crate) fn paste_help(&mut self, text: &str) {
+        self.last_event_consumed.set(true);
+        let Mode::Help(overlay) = &mut self.mode else {
+            return;
         };
-        help_lines(self, &query).len().saturating_sub(rows)
+        if overlay.search_focused
+            && TextField::apply(&mut overlay.query, FieldEdit::Paste(text.into())).changed()
+        {
+            self.help_query_changed();
+        }
     }
 
     pub(crate) fn handle_help_key(&mut self, key: KeyEvent) -> DashboardAction {
         let last = self.help_max_scroll();
-        let Mode::Help(mut overlay) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
-            unreachable!("help input requires the help overlay");
+        let Mode::Help(overlay) = &mut self.mode else {
+            unreachable!("help mode");
         };
-        // While the filter has focus every printable key is filter text, so
-        // `j`, `k` and `?` type rather than scroll or close. Only the keys
-        // that cannot be text — the arrows and the Page keys — still move the
-        // list. Esc answers the innermost thing there is: the query and the box
-        // it was typed in, and only once the list has the keyboard back does it
-        // close the overlay.
+        self.last_event_consumed.set(true);
+        let before = overlay.query.to_string();
+        overlay.scroll = overlay.drawn_scroll.get().min(last);
         if overlay.search_focused {
             match key.code {
                 KeyCode::Enter => {
-                    self.mode = *overlay.return_to;
+                    self.close_help();
                     return DashboardAction::None;
                 }
-                // Esc leaves the box whether or not anything is left in it: a
-                // filter emptied with Ctrl-U still holds the keyboard, and
-                // closing the dialog around a focused input would surprise.
+                KeyCode::Esc if overlay.query.is_empty() => {
+                    self.close_help();
+                    return DashboardAction::None;
+                }
                 KeyCode::Esc => {
                     overlay.query.clear();
-                    overlay.search_focused = false;
                     overlay.scroll = 0;
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.query.clear()
+                }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_sub(1)
+                }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.scroll = overlay.scroll.saturating_add(1).min(last)
+                }
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End => scroll_help(overlay, key.code, last),
+                _ => {
+                    TextField::apply(&mut overlay.query, FieldEdit::Key(key));
+                }
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc if !overlay.query.is_empty() => {
                     overlay.query.clear();
                     overlay.scroll = 0;
                 }
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    overlay.scroll = overlay.scroll.saturating_sub(1);
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+                    self.close_help();
+                    return DashboardAction::None;
                 }
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    overlay.scroll = overlay.scroll.saturating_add(1).min(last);
-                }
-                KeyCode::Backspace => {
-                    overlay.query.pop();
-                    overlay.scroll = 0;
-                }
-                KeyCode::Char(character)
-                    if !key.modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                    ) =>
-                {
-                    overlay.query.push(character);
-                    overlay.scroll = 0;
-                }
-                code => scroll_help(&mut overlay, code, last),
+                KeyCode::Char('/') => overlay.search_focused = true,
+                KeyCode::Char('k') => overlay.scroll = overlay.scroll.saturating_sub(1),
+                KeyCode::Char('j') => overlay.scroll = overlay.scroll.saturating_add(1).min(last),
+                code => scroll_help(overlay, code, last),
             }
-            self.mode = Mode::Help(overlay);
-            return DashboardAction::None;
         }
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
-                self.mode = *overlay.return_to;
-                return DashboardAction::None;
-            }
-            KeyCode::Char('/') => {
-                overlay.search_focused = true;
-            }
-            KeyCode::Char('k') => {
-                overlay.scroll = overlay.scroll.saturating_sub(1);
-            }
-            KeyCode::Char('j') => {
-                overlay.scroll = overlay.scroll.saturating_add(1).min(last);
-            }
-            code => scroll_help(&mut overlay, code, last),
+        overlay.drawn_scroll.set(overlay.scroll);
+        if before != overlay.query.value() {
+            self.help_query_changed();
         }
-        self.mode = Mode::Help(overlay);
         DashboardAction::None
     }
 }
 
-/// The scrolling keys that mean the same thing whether or not the filter has
-/// focus, because none of them can be filter text.
 fn scroll_help(overlay: &mut HelpOverlay, code: KeyCode, last: usize) {
     match code {
         KeyCode::Up => overlay.scroll = overlay.scroll.saturating_sub(1),
@@ -242,110 +435,119 @@ fn scroll_help(overlay: &mut HelpOverlay, code: KeyCode, last: usize) {
     }
 }
 
-/// Every key the surface answers, grouped the way the registry groups them.
-///
-/// Commands that cannot run right now still appear, greyed, with the reason
-/// where there is one: a help screen that hid what is unavailable would leave
-/// the reader wondering whether the key exists at all.
-pub(crate) fn help_lines(dashboard: &DashboardState, query: &str) -> Vec<Line<'static>> {
-    let needle = query.trim().to_lowercase();
-    let keeps = |fields: [&str; 3]| {
-        needle.is_empty()
-            || fields
-                .iter()
-                .any(|field| field.to_lowercase().contains(&needle))
+fn heading(text: impl Into<String>) -> Line<'static> {
+    Line::styled(
+        text.into(),
+        Style::default()
+            .fg(theme::palette().accent)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn entry_lines(entry: &HelpEntry, width: usize, related: bool) -> Vec<Line<'static>> {
+    let ready = entry.availability == Availability::Ready;
+    let keys = if entry.keys.is_empty() {
+        theme::glyphs().none
+    } else {
+        &entry.keys
     };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            format!("prefix: {}", dashboard.keybinds().prefix_label()),
-            Style::default()
-                .fg(theme::palette().secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   (edit [keys] in config.toml)".to_owned(), theme::muted()),
-    ])];
-    for scope in SCOPE_ORDER {
-        let group = COMMANDS
-            .iter()
-            .filter(|spec| spec.scope == scope)
-            .collect::<Vec<_>>();
-        if group.is_empty() {
-            continue;
-        }
-        // The heading is written only once a row under it survives the
-        // filter, so a narrowed list is headings and matches, not a column of
-        // empty groups.
-        let mut group_lines = Vec::new();
-        for spec in group {
-            let keys = dashboard.key_labels(spec.id).join(" / ");
-            if !keeps([&keys, spec.label, spec.description]) {
-                continue;
-            }
-            let availability = (spec.available)(dashboard);
-            let suffix = match availability {
-                Availability::Ready => String::new(),
-                Availability::Hidden => "  (not available here)".to_owned(),
-                Availability::Blocked(reason) => format!("  ({reason})"),
-            };
-            let ready = availability == Availability::Ready;
-            let style = if ready {
-                Style::default()
-                    .fg(theme::palette().text)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                theme::muted()
-            };
-            let keys = if keys.is_empty() {
-                theme::glyphs().none.to_owned()
-            } else {
-                keys
-            };
-            group_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {keys:<22}  "),
-                    Style::default().fg(if ready {
-                        theme::palette().secondary
-                    } else {
-                        theme::palette().muted
-                    }),
-                ),
-                Span::styled(spec.label, style),
-                Span::styled(format!("  {}{suffix}", spec.description), theme::muted()),
-            ]));
-        }
-        if group_lines.is_empty() {
-            continue;
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            scope.heading().to_owned(),
-            Style::default()
-                .fg(theme::palette().accent)
-                .add_modifier(Modifier::BOLD),
+    let key_style = Style::default().fg(if ready {
+        theme::palette().secondary
+    } else {
+        theme::palette().muted
+    });
+    let label_style = Style::default()
+        .fg(theme::palette().text)
+        .add_modifier(Modifier::BOLD);
+    let label = if related {
+        format!("{} · {}", entry.text.label, entry.text.category)
+    } else {
+        entry.text.label.clone()
+    };
+    let mut lines = if width >= 60 {
+        wrap_styled_line(
+            Line::from(vec![
+                Span::styled(format!("  {keys:<24} "), key_style),
+                Span::styled(label, label_style),
+            ]),
+            width,
+            4,
+        )
+    } else {
+        let mut lines = wrap_styled_line(Line::styled(format!("  {label}"), label_style), width, 2);
+        lines.extend(wrap_styled_line(
+            Line::styled(format!("    {keys}"), key_style),
+            width,
+            4,
         ));
-        lines.extend(group_lines);
+        lines
+    };
+    let reason = match entry.availability {
+        Availability::Ready => "",
+        Availability::Hidden => "Not available here.",
+        Availability::Blocked(reason) => reason,
+    };
+    let description = [&*entry.text.description, reason]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !description.is_empty() {
+        lines.extend(wrap_styled_line(
+            Line::styled(format!("    {description}"), theme::muted()),
+            width,
+            4,
+        ));
     }
-    let composer = COMPOSER_KEYS
-        .iter()
-        .filter(|(keys, description)| keeps([keys, description, ""]))
-        .collect::<Vec<_>>();
-    if !composer.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Composer".to_owned(),
-            Style::default()
-                .fg(theme::palette().accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-        for (keys, description) in composer {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {keys:<24}  "),
-                    Style::default().fg(theme::palette().secondary),
-                ),
-                Span::styled(*description, Style::default().fg(theme::palette().text)),
-            ]));
+    lines
+}
+
+fn help_lines(
+    dashboard: &DashboardState,
+    overlay: &HelpOverlay,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let catalog = entries(dashboard);
+    let needle = overlay.query.trim().to_lowercase();
+    let mut lines = Vec::new();
+    for group in GROUPS {
+        let matches: Vec<_> = catalog
+            .iter()
+            .filter(|entry| entry.text.category == group && literal(entry, &needle))
+            .collect();
+        if matches.is_empty() {
+            continue;
         }
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(wrap_styled_line(heading(group), width, 0));
+        for entry in matches {
+            lines.extend(entry_lines(entry, width, false));
+        }
+    }
+    if !overlay.related.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(wrap_styled_line(heading("Related shortcuts"), width, 0));
+        for id in &overlay.related {
+            lines.extend(entry_lines(&catalog[*id], width, true));
+        }
+    }
+    if lines.is_empty() {
+        lines.extend(wrap_styled_line(
+            Line::styled(
+                if overlay.pending {
+                    "No text matches. Searching related shortcuts…"
+                } else {
+                    "No matching shortcuts."
+                },
+                theme::muted(),
+            ),
+            width,
+            0,
+        ));
     }
     lines
 }
@@ -357,15 +559,7 @@ pub(crate) fn render_help(
     overlay: &HelpOverlay,
     surfaces: &mut FrameSurfaces,
 ) {
-    let lines = help_lines(dashboard, &overlay.query);
-    // The filter line is shown once it is being used, so an untouched overlay
-    // reads exactly as it did before, and `/` is advertised in the footer of
-    // the frame either way.
-    let filtering = overlay.search_focused || !overlay.query.is_empty();
-    let height = (lines.len() as u16)
-        .saturating_add(if filtering { 3 } else { 2 })
-        .min(area.height);
-    let popup = centered_modal(frame, surfaces, 90, height, area);
+    let popup = centered_modal(frame, surfaces, 90, area.height, area);
     let mut form = overlay.form.borrow_mut();
     form.begin_frame();
     let title = dismissible_modal_title(
@@ -375,43 +569,113 @@ pub(crate) fn render_help(
         theme::title(true),
         true,
     );
-    let block = theme::modal().title(title).title_bottom(Line::styled(
-        " ↑↓ scroll · / filter · Esc closes ",
-        theme::muted(),
-    ));
+    let footer = if overlay.search_focused && overlay.query.is_empty() {
+        " ↑↓ scroll · Type to filter · Esc / Enter closes "
+    } else if overlay.search_focused {
+        " ↑↓ scroll · Esc clears search · Enter closes "
+    } else {
+        " ↑↓ scroll · / filter · Esc closes "
+    };
+    let block = theme::modal()
+        .title(title)
+        .title_bottom(Line::styled(footer, theme::muted()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let body = if filtering && inner.height > 1 {
-        let filter = Rect { height: 1, ..inner };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("filter: ".to_owned(), theme::muted()),
-                Span::styled(
-                    format!(
-                        "{}{}",
-                        overlay.query,
-                        if overlay.search_focused { "▏" } else { "" }
-                    ),
-                    Style::default().fg(theme::palette().text),
-                ),
-            ])),
-            filter,
-        );
-        Rect {
-            y: inner.y.saturating_add(1),
-            height: inner.height.saturating_sub(1),
-            ..inner
-        }
-    } else {
-        inner
-    };
+    let prefix = format!(
+        "prefix: {}   (edit [keys] in config.toml)",
+        dashboard.keybinds().prefix_label()
+    );
+    let header = wrap_styled_line(
+        Line::styled(prefix, theme::muted()),
+        usize::from(inner.width),
+        0,
+    );
+    let header_rows = (header.len() as u16).min(inner.height.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(lines).scroll((overlay.scroll as u16, 0)),
+        Paragraph::new(header),
+        Rect {
+            height: header_rows,
+            ..inner
+        },
+    );
+    let search = Rect {
+        y: inner.y.saturating_add(header_rows),
+        height: u16::from(inner.height > header_rows),
+        ..inner
+    };
+    let label_width = 8.min(search.width);
+    frame.render_widget(
+        Paragraph::new("filter: "),
+        Rect {
+            width: label_width,
+            ..search
+        },
+    );
+    let field = Rect {
+        x: search.x.saturating_add(label_width),
+        width: search.width.saturating_sub(label_width),
+        ..search
+    };
+    let status = Rect {
+        y: search.y.saturating_add(search.height),
+        height: u16::from(inner.height > header_rows + search.height),
+        ..inner
+    };
+    let body = Rect {
+        y: status.y.saturating_add(status.height),
+        height: inner
+            .height
+            .saturating_sub(header_rows + search.height + status.height),
+        ..inner
+    };
+    form.register(HelpControl::Body, ControlKind::Button, body, true);
+    form.register(HelpControl::Query, ControlKind::TextField, field, true);
+    form.focus(if overlay.search_focused {
+        HelpControl::Query
+    } else {
+        HelpControl::Body
+    });
+    TextField::render_inline(
+        frame,
+        field,
+        &overlay.query,
+        false,
+        overlay.search_focused,
+        &mut form,
+        HelpControl::Query,
+    );
+    let catalog = entries(dashboard);
+    let needle = overlay.query.trim().to_lowercase();
+    let count = catalog
+        .iter()
+        .filter(|entry| literal(entry, &needle))
+        .count();
+    let status_text = if overlay.unavailable {
+        format!("Semantic search unavailable; showing {count} text matches")
+    } else if overlay.pending {
+        format!("{count} text matches · Searching related shortcuts…")
+    } else if needle.is_empty() {
+        format!(
+            "{} shortcuts · / search by key, name, or intent",
+            catalog.len()
+        )
+    } else {
+        format!("{count} text matches · {} related", overlay.related.len())
+    };
+    frame.render_widget(Paragraph::new(status_text).style(theme::muted()), status);
+    let lines = help_lines(dashboard, overlay, usize::from(body.width));
+    let scroll = overlay
+        .scroll
+        .min(lines.len().saturating_sub(usize::from(body.height)));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
         body,
     );
+    overlay.drawn_scroll.set(scroll);
     overlay.area.set(popup);
     overlay.body_rows.set(body.height);
-    form.end_frame(());
+    overlay.body_width.set(body.width);
+    form.end_frame(HelpControl::Body);
 }
 
 #[cfg(test)]
@@ -425,6 +689,22 @@ mod tests {
         running_session,
     };
 
+    fn draw_all(dashboard: &mut DashboardState) -> String {
+        let mut rendered = drawn(dashboard, 200, 50).join("\n");
+        loop {
+            let before = match &dashboard.mode {
+                Mode::Help(overlay) => overlay.scroll,
+                _ => unreachable!(),
+            };
+            dashboard.handle_key(key(KeyCode::PageDown));
+            rendered.push_str(&drawn(dashboard, 200, 50).join("\n"));
+            if matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll == before) {
+                break;
+            }
+        }
+        rendered
+    }
+
     /// The overlay is the reference for the whole surface, so nothing in the
     /// registry may be missing from it — including commands that cannot run
     /// where the user happens to be standing.
@@ -434,9 +714,7 @@ mod tests {
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
 
-        let mut rendered = drawn(&mut dashboard, 200, 100).join("\n");
-        dashboard.handle_key(key(KeyCode::End));
-        rendered.push_str(&drawn(&mut dashboard, 200, 100).join("\n"));
+        let rendered = draw_all(&mut dashboard);
         for spec in COMMANDS {
             assert!(rendered.contains(spec.label), "missing {}", spec.label);
             if let Some(label) = dashboard.key_labels(spec.id).first() {
@@ -477,8 +755,10 @@ mod tests {
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
 
-        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
+        let rendered = draw_all(&mut dashboard);
         assert!(rendered.contains("prefix: ctrl+a"), "{rendered}");
+        assert!(rendered.contains("ctrl+a ctrl+a"), "{rendered}");
+        assert!(!rendered.contains("ctrl+b ctrl+b"), "{rendered}");
         assert!(rendered.contains("ctrl+a shift+r / f5"), "{rendered}");
         assert_eq!(
             dashboard.key_labels(crate::CommandId::WebViewer),
@@ -522,10 +802,9 @@ mod tests {
         assert!(
             drawn(&mut dashboard, 200, 100)
                 .join("\n")
-                .contains("/ filter")
+                .contains("Type to filter")
         );
 
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -556,14 +835,14 @@ mod tests {
         assert_eq!(overlay.query, "");
         assert!(overlay.search_focused);
 
-        // Esc unfocuses and clears rather than closing.
+        // Esc clears the query and keeps typing available.
         dashboard.handle_key(key(KeyCode::Char('x')));
         dashboard.handle_key(key(KeyCode::Esc));
         let Mode::Help(overlay) = &dashboard.mode else {
             panic!("Esc must clear the filter before it closes anything");
         };
         assert_eq!(overlay.query, "");
-        assert!(!overlay.search_focused);
+        assert!(overlay.search_focused);
         let rendered = drawn(&mut dashboard, 200, 100).join("\n");
         assert!(rendered.contains("Command palette"), "{rendered}");
         assert!(rendered.contains("Create session"), "{rendered}");
@@ -580,7 +859,6 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
 
         dashboard.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         let Mode::Help(overlay) = &dashboard.mode else {
@@ -614,13 +892,12 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
         let rendered = drawn(&mut dashboard, 200, 60).join("\n");
         assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
-        assert!(rendered.contains("Anywhere"), "{rendered}");
+        assert!(rendered.contains("Essentials"), "{rendered}");
 
         for code in [
             KeyCode::Down,
@@ -639,15 +916,18 @@ mod tests {
         }
         let rendered = drawn(&mut dashboard, 200, 60).join("\n");
         assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
-        assert!(rendered.contains("Anywhere"), "{rendered}");
+        assert!(rendered.contains("Essentials"), "{rendered}");
 
         // A list that does not fit still scrolls, to the offset that puts its
         // last line on the last row and no further.
         for _ in 0.."palette".len() {
             dashboard.handle_key(key(KeyCode::Backspace));
         }
-        let lines = help_lines(&dashboard, "").len();
         let rows = drawn(&mut dashboard, 200, 30);
+        let Mode::Help(overlay) = &dashboard.mode else {
+            unreachable!()
+        };
+        let lines = help_lines(&dashboard, overlay, usize::from(overlay.body_width.get())).len();
         dashboard.handle_key(key(KeyCode::End));
         let Mode::Help(overlay) = &dashboard.mode else {
             panic!("the help overlay stays open");
@@ -660,16 +940,12 @@ mod tests {
         assert_eq!(overlay.scroll, lines - body);
     }
 
-    /// Esc answers the innermost thing there is: the query, then the box it was
-    /// typed in, and only then the overlay. Emptying the box with Ctrl-U leaves
-    /// it focused, so the next Esc has to leave the box rather than close the
-    /// dialog around a focused input.
+    /// An empty focused filter must not add an extra Escape before closing.
     #[test]
-    fn esc_leaves_the_focused_help_filter_before_it_closes_help() {
+    fn esc_closes_help_when_the_focused_filter_is_empty() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -681,18 +957,13 @@ mod tests {
         assert!(overlay.search_focused, "Ctrl-U keeps the box focused");
 
         dashboard.handle_key(key(KeyCode::Esc));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("Esc must leave the filter box before it closes help");
-        };
-        assert!(!overlay.search_focused);
-        dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     /// While the filter has focus every printable key is filter text, so the
     /// keys that close or scroll the overlay must not steal them back.
     #[test]
-    fn help_closes_on_enter_and_question_mark_but_not_while_filtering() {
+    fn help_closes_on_enter_and_treats_printable_keys_as_filter_text() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
 
@@ -701,11 +972,6 @@ mod tests {
         assert_eq!(dashboard.mode, Mode::Dashboard);
 
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('?')));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-
-        chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in ['?', 'j', 'k'] {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -745,9 +1011,179 @@ mod tests {
                 matches!(dashboard.mode, Mode::Help(_)),
                 "{focus:?} did not open help"
             );
-            // The same key closes it again.
+            // Another question mark searches for that shortcut.
             dashboard.handle_key(key(KeyCode::Char('?')));
-            assert_eq!(dashboard.mode, Mode::Dashboard);
+            assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query == "?"));
         }
+    }
+
+    fn filter(dashboard: &mut DashboardState, query: &str) {
+        dashboard.begin_help();
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        dashboard.handle_paste(query);
+    }
+
+    #[test]
+    fn help_search_matches_categories_descriptions_and_unicode_edits() {
+        let mut dashboard = dashboard_with_session(running_session());
+        filter(&mut dashboard, "WORKSPACES");
+        let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(rendered.contains("Rename workspace"), "{rendered}");
+        assert!(!rendered.contains("Command palette"), "{rendered}");
+        filter(&mut dashboard, "animations");
+        let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(rendered.contains("Next spinner style"), "{rendered}");
+        assert!(rendered.contains("1 text matches"), "{rendered}");
+        filter(&mut dashboard, "palette😀");
+        dashboard.handle_key(key(KeyCode::Backspace));
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        dashboard.handle_key(key(KeyCode::Char('X')));
+        dashboard.handle_key(key(KeyCode::Backspace));
+        assert_eq!(dashboard.help_search_request().unwrap().query, "palette");
+        filter(&mut dashboard, "no-such-shortcut-xyz");
+        let id = dashboard.help_search_generation().unwrap();
+        dashboard.apply_help_search_result(id, Err("offline".into()));
+        let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(
+            rendered.contains("Semantic search unavailable"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("No matching shortcuts"), "{rendered}");
+    }
+
+    #[test]
+    fn help_semantic_results_preserve_literal_matches_and_ignore_stale_generations() {
+        use mj_core::help_search::HelpSearchScore;
+        let mut dashboard = dashboard_with_session(running_session());
+        filter(&mut dashboard, "palette");
+        let generation = dashboard.help_search_generation().unwrap();
+        let request = dashboard.help_search_request().unwrap();
+        let response = HelpSearchResponse {
+            scores: request
+                .entries
+                .iter()
+                .map(|entry| HelpSearchScore {
+                    id: entry.id,
+                    probability: if entry.label == "Detach from this terminal" {
+                        0.99
+                    } else {
+                        0.8
+                    },
+                })
+                .collect(),
+        };
+        dashboard.apply_help_search_result(generation, Ok(response.clone()));
+        let Mode::Help(overlay) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert_eq!(overlay.related.len(), 8);
+        assert_eq!(
+            request.entries[overlay.related[0]].label,
+            "Detach from this terminal"
+        );
+        let rendered = drawn(&mut dashboard, 160, 60).join("\n");
+        assert_eq!(rendered.matches("Command palette").count(), 1, "{rendered}");
+        assert!(
+            rendered.find("Command palette").unwrap() < rendered.find("Related shortcuts").unwrap()
+        );
+        filter(&mut dashboard, "unrelated");
+        dashboard.apply_help_search_result(generation, Ok(response.clone()));
+        assert!(
+            matches!(&dashboard.mode, Mode::Help(overlay) if overlay.pending && overlay.related.is_empty())
+        );
+        dashboard.close_help();
+        filter(&mut dashboard, "palette");
+        dashboard.apply_help_search_result(generation, Ok(response));
+        assert!(
+            matches!(&dashboard.mode, Mode::Help(overlay) if overlay.pending && overlay.related.is_empty())
+        );
+    }
+
+    #[test]
+    fn help_wraps_complete_descriptions_and_clamps_scrolling_after_resize() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_help();
+        drawn(&mut dashboard, 60, 20);
+        dashboard.handle_key(key(KeyCode::End));
+        for (width, height) in [(40, 20), (160, 60), (20, 10), (1, 1)] {
+            drawn(&mut dashboard, width, height);
+            let Mode::Help(overlay) = &dashboard.mode else {
+                unreachable!()
+            };
+            let lines = help_lines(&dashboard, overlay, usize::from(overlay.body_width.get()));
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line.width() <= usize::from(overlay.body_width.get()).max(1))
+            );
+            assert_eq!(
+                overlay.drawn_scroll.get(),
+                overlay.scroll.min(
+                    lines
+                        .len()
+                        .saturating_sub(usize::from(overlay.body_rows.get()))
+                )
+            );
+        }
+        filter(&mut dashboard, "Detach");
+        drawn(&mut dashboard, 60, 30);
+        let Mode::Help(overlay) = &dashboard.mode else {
+            unreachable!()
+        };
+        let text = help_lines(&dashboard, overlay, usize::from(overlay.body_width.get()))
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains("Leave this terminal client; the daemon and its sessions keep running."),
+            "{words}"
+        );
+        assert_eq!(overlay.drawn_scroll.get(), 0);
+    }
+
+    #[test]
+    fn help_search_field_accepts_mouse_focus_and_does_not_paste_into_underlying_prompt() {
+        use crate::test_support::point;
+        use crossterm::event::MouseButton;
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.begin_help();
+        dashboard.handle_paste("initial");
+        assert_eq!(dashboard.help_search_request().unwrap().query, "initial");
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let rows = drawn(&mut dashboard, 120, 35);
+        let (x, y) = point(&rows, "filter:");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(MouseEvent {
+                kind,
+                column: x + 9,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        dashboard.handle_paste("palette");
+        assert_eq!(dashboard.help_search_request().unwrap().query, "palette");
+        let rows = drawn(&mut dashboard, 120, 35);
+        let (column, row) = point(&rows, "Command palette");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert!(matches!(&dashboard.mode, Mode::Help(overlay) if !overlay.search_focused));
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()));
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 }

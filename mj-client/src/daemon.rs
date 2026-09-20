@@ -275,7 +275,7 @@ pub struct RuntimeNotice {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSnapshot {
     #[serde(default)]
-    pub native_agents: Vec<mj_core::native_agent::NativeAgentView>,
+    pub native_agents: Vec<mj_core::native_agent::NativeAgentSummary>,
     #[serde(default)]
     pub workspace_names: BTreeMap<String, String>,
     #[serde(default)]
@@ -302,7 +302,7 @@ pub struct RuntimeSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLifecycleKind {
     Create,
-    Close,
+    Suspend,
     Resume,
     Move,
     ForceStop,
@@ -585,7 +585,7 @@ pub enum DaemonAction {
         session_id: String,
         resolution: Resolution,
     },
-    CloseSession {
+    SuspendSession {
         session_id: String,
     },
     StartCreateSession(CreateSessionRequest),
@@ -595,8 +595,9 @@ pub enum DaemonAction {
     ResumeSession(ResumeSessionRequest),
     PrepareMoveSession(MoveSelection),
     MoveSession(MoveSessionRequest),
-    ForceStopSession {
+    DiscardSinceCheckpoint {
         session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
     },
     DestroyStoppedSession {
         session_id: String,
@@ -879,9 +880,17 @@ pub fn read_metadata_any() -> Result<DaemonMetadata> {
 
 pub async fn write_frame<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
     let body = serde_json::to_vec(value)?;
-    ensure!(body.len() <= MAX_FRAME_BYTES, "daemon frame is too large");
+    write_encoded_frame(stream, &body).await
+}
+
+pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
+    ensure!(
+        body.len() <= MAX_FRAME_BYTES,
+        "daemon frame is too large: {} bytes exceeds {MAX_FRAME_BYTES}",
+        body.len()
+    );
     stream.write_u32(body.len() as u32).await?;
-    stream.write_all(&body).await?;
+    stream.write_all(body).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -1586,9 +1595,9 @@ impl DaemonClient {
         }
     }
 
-    pub async fn close_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
         match self
-            .request(DaemonAction::CloseSession { session_id })
+            .request(DaemonAction::SuspendSession { session_id })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1626,9 +1635,16 @@ impl DaemonClient {
         }
     }
 
-    pub async fn force_stop_session(&mut self, session_id: String) -> Result<()> {
+    pub async fn discard_since_checkpoint(
+        &mut self,
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::ForceStopSession { session_id })
+            .request(DaemonAction::DiscardSinceCheckpoint {
+                session_id,
+                checkpoint,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),
@@ -1786,7 +1802,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 29;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

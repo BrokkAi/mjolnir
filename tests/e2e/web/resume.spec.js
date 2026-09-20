@@ -7,8 +7,8 @@ function session(id, overrides = {}) {
   return {
     id,
     title: id,
-    state: 'stopped',
-    lifecycle: 'stopped',
+    state: 'suspended',
+    lifecycle: 'suspended',
     workspace_id: 'test',
     profile_id: 'alpha',
     target_id: 'local',
@@ -20,7 +20,7 @@ function session(id, overrides = {}) {
 }
 
 async function mount(page, {
-  sessions = [session('stopped', { title: 'Stopped test' })],
+  sessions = [session('suspended', { title: 'Suspended test' })],
   profiles = [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }],
   targets = [
     { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: [] },
@@ -445,7 +445,7 @@ test('a queue-pinned move recovery exposes retry Move and does not offer unsafe 
 
 test('a removed choice can be explicitly replaced when only one alternative remains', async ({ page }) => {
   const state = await mount(page);
-  await openSession(page, 'stopped');
+  await openSession(page, 'suspended');
   const detail = page.locator('#resume-detail');
   await choose(picker(detail, 'resume-profile'), 'beta');
   await picker(detail, 'resume-profile').locator('select').focus();
@@ -527,14 +527,14 @@ test('keyboard selection and browser Back restore a scrolled list', async ({ pag
 test('a late success does not redirect a new visit to the same card', async ({ page }) => {
   let release;
   const state = await mount(page, { holdAction: new Promise(resolve => { release = resolve; }) });
-  await openSession(page, 'stopped');
+  await openSession(page, 'suspended');
   await page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
   await page.locator('#resume-detail-back').click();
-  await openSession(page, 'stopped');
+  await openSession(page, 'suspended');
   release();
   await expect(page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true })).toBeEnabled();
-  await expect(page).toHaveURL(/\/resume\/stopped$/);
+  await expect(page).toHaveURL(/\/resume\/suspended$/);
 });
 
 test('the Archived section lists what the index kept and marks a hit on a live row', async ({ page }) => {
@@ -547,9 +547,9 @@ test('the Archived section lists what the index kept and marks a hit on a live r
           archived: true, native_id: null, snippet: null, hel_session_id: null,
         },
         {
-          id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Stopped test',
+          id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Suspended test',
           started: '2026-09-17T01:00:00Z', msgs: 5, preview: 'still here',
-          archived: false, native_id: null, snippet: 'a pomegranate sentinel', hel_session_id: 'stopped',
+          archived: false, native_id: null, snippet: 'a pomegranate sentinel', hel_session_id: 'suspended',
         },
       ],
       brief: '# Previous session\n\nThe single word is hello.',
@@ -560,7 +560,7 @@ test('the Archived section lists what the index kept and marks a hit on a live r
   await expect(page.locator('#resume-archived [data-wiki-id]')).toHaveCount(1);
   await expect(page.locator('#resume-archived')).toContainText('Archived pomegranate work');
   await expect(page.locator('#resume-archived')).toContainText('3 messages');
-  await expect(page.locator('#resumable [data-session-id="stopped"]')).toContainText('a pomegranate sentinel');
+  await expect(page.locator('#resumable [data-session-id="suspended"]')).toContainText('a pomegranate sentinel');
   await expect(page.locator('#resume-wiki-note')).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
@@ -618,7 +618,7 @@ test('the search box stays closed while the first index build runs and opens whe
   await expect(page.locator('#resume-search')).toBeDisabled();
   await expect(page.locator('#resume-search')).toHaveAttribute('placeholder', 'Indexing…');
   // Rows keep working while it builds.
-  await expect(page.locator('#resumable [data-session-id="stopped"]')).toBeVisible();
+  await expect(page.locator('#resumable [data-session-id="suspended"]')).toBeVisible();
 
   // The page asks again on its own; when the build ends the box opens without
   // the person reopening the page.

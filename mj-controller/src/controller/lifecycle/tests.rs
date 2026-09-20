@@ -662,7 +662,7 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     };
 
     let deferred = controller
-        .close_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+        .suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
         .unwrap();
 
     assert!(!deferred, "a bare target needs no storage cleanup pass");
@@ -700,7 +700,7 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     };
 
     let error = controller
-        .close_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
+        .suspend_session_without_checkpoint_with(session_id, &FailingExecutor, |_| Ok(()))
         .unwrap_err();
 
     assert!(
@@ -1281,5 +1281,50 @@ fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
     assert_ne!(
         failed.updated_at, "2026-09-18T15:28:35Z",
         "the failure is a state change of its own"
+    );
+}
+
+#[test]
+fn failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data() {
+    const CHILD: &str = "MJ_TEST_SUSPENSION_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            "failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let checkpoint = write_checkpoint_gate_archive(root.path(), id, 7);
+    let mut controller = stopped_podman_cleanup_controller(id);
+    let record = controller.state.sessions.get_mut(id).unwrap();
+    record.state = SessionState::Running;
+    record.last_error = Some("old transport error with secret details".into());
+    record.checkpoint = Some(checkpoint.clone());
+    crate::database::save_session(record).unwrap();
+    let target = record.target.clone();
+    let reason = format!(
+        "{}; see reference suspension-test",
+        mj_core::state::CLOSE_FAILURE_PREFIX
+    );
+    assert!(controller.record_failed_close(id, &reason).unwrap());
+    let restored = crate::database::load_state().unwrap();
+    let record = &restored.sessions[id];
+    assert_eq!(record.public_error(), Some(reason.as_str()));
+    assert_eq!(record.state, SessionState::Running);
+    assert_eq!(record.target, target);
+    assert_eq!(record.checkpoint.as_ref(), Some(&checkpoint));
+    assert!(checkpoint.archive_path.exists());
+    let snapshot =
+        crate::server::ViewerSnapshot::from_config_state(&controller.config, &restored, 1);
+    assert_eq!(
+        snapshot.sessions[0].launch_error.as_deref(),
+        Some(reason.as_str())
     );
 }

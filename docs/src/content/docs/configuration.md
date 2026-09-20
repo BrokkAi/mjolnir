@@ -118,7 +118,7 @@ session_order = "project"
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
-| `show_stopped_sessions` | boolean | `false` | When enabled, stopped sessions appear in the terminal Sessions pane for their workspace. |
+| `show_stopped_sessions` | boolean | `false` | When enabled, suspended sessions appear in the terminal Sessions pane for their workspace. |
 | `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
 | `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
 
@@ -199,10 +199,10 @@ The default bindings:
 | `focus_pane_right` | `prefix+l` | Move the keyboard to the pane on the right |
 | `zoom` | `prefix+z` | Fill the conversation area with the pane you are in, or put the others back |
 | `last_pane` | `prefix+;` | Move the keyboard back to the pane it was in before |
-| `stop_session` | unbound | Stop the selected session |
+| `suspend_session` | unbound | Stop the selected session |
 | `restart_session` | unbound | Restart the selected session |
 | `move_session` | unbound | Move the selected session to another target |
-| `delete_session` | unbound | Delete the selected session |
+| `destroy_session` | unbound | Delete the selected session |
 | `container_settings` | unbound | Edit container settings for the selected session |
 | `manage_profiles` | unbound | Open profile management |
 | `manage_targets` | unbound | Open target management |
@@ -346,7 +346,7 @@ archive_after_days = 30
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `archive_after_days` | integer | no | unset (keep every session) | Stopped sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. `0` is rejected. |
+| `archive_after_days` | integer | no | unset (keep every session) | Suspended sessions older than this many days are removed from Mjolnir once SessionWiki has indexed them. `0` is rejected. |
 
 An `enabled` key written by an earlier build is still read and then ignored;
 indexing is no longer optional.

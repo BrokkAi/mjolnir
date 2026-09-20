@@ -11,6 +11,7 @@ pub struct RemoteDashboardWorkerPoller {
     /// Background events the daemon wants reported once, oldest first.
     pub notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
     pub config: tokio::sync::watch::Receiver<mj_core::config::Config>,
+    pub health: tokio::sync::watch::Receiver<RuntimeFeedHealth>,
 }
 
 /// Records and lifecycle ownership must reach the surface in the same frame.
@@ -123,19 +124,22 @@ impl Drop for RuntimeFeed {
 
 pub(super) type StoredProjection = Option<(MaterializedSession, mj_core::state::ProjectionWindow)>;
 
+pub(super) static PROJECTION_READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+
 pub(super) async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {
-    static READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
-        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
-    let permit = Arc::clone(&READERS)
+    let permit = Arc::clone(&PROJECTION_READERS)
         .acquire_owned()
         .await
         .context("projection readers stopped")?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let started = Instant::now();
         let result = crate::database::load_materialized_projection_tail(
             &session_id,
             crate::database::PROJECTION_TAIL_ITEMS,
         );
+        tracing::debug!(target: "mj_controller::latency", %session_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection loaded");
         // A blocking SQLite read can outlive cancellation of its subscriber.
         if let Err(error) = &result {
             tracing::warn!(%session_id, %error, "could not load runtime projection");

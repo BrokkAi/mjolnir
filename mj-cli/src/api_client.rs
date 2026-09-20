@@ -475,25 +475,26 @@ impl ApiClient {
         Ok(ExportResult::Bytes(bytes))
     }
 
-    pub(crate) async fn close(
-        &self,
-        session_id: &str,
-        force: bool,
-        delete_branch: bool,
-    ) -> Result<()> {
-        let request = self
-            .http
-            .post(self.url(&format!("/sessions/{session_id}/close")))
-            .timeout(REQUEST_TIMEOUT);
-        // A plain close stays a bodiless POST; only a forced close carries a
-        // body, so older controllers see exactly the request they saw before.
-        let request = match force {
-            true => {
-                request.json(&serde_json::json!({ "force": true, "delete_branch": delete_branch }))
-            }
-            false => request,
-        };
-        self.send(request).await.map(|_| ())
+    pub(crate) async fn suspend(&self, session_id: &str) -> Result<()> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/sessions/{session_id}/suspend")))
+                .json(&serde_json::json!({"acknowledge_active_subagents": true}))
+                .timeout(REQUEST_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub(crate) async fn destroy(&self, session_id: &str, delete_branch: bool) -> Result<()> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/sessions/{session_id}/destroy")))
+                .json(&serde_json::json!({"delete_branch": delete_branch}))
+                .timeout(REQUEST_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Ask the daemon to resume a stopped session. It answers as soon as the
@@ -511,10 +512,10 @@ impl ApiClient {
         .await
     }
 
-    pub(crate) async fn cancel_turn(&self, session_id: &str) -> Result<()> {
+    pub(crate) async fn interrupt_turn(&self, session_id: &str) -> Result<()> {
         self.send(
             self.http
-                .post(self.url(&format!("/sessions/{session_id}/cancel-turn")))
+                .post(self.url(&format!("/sessions/{session_id}/interrupt-turn")))
                 .timeout(REQUEST_TIMEOUT),
         )
         .await

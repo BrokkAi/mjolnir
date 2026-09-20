@@ -90,7 +90,7 @@ mj import <harness> (--session <uuid> | --latest) [options]
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
 
-Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a stopped session record, and makes that record available through `prefix+g`.
+Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
 
 Examples:
 
@@ -170,11 +170,12 @@ mj diff --session <id> [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
-mj close --session <id> [--force] [--delete-branch]
+mj suspend --session <id> [--json]
+mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>]
           [--queue start|discard] [--json]
-mj cancel-turn --session <id>
+mj interrupt-turn --session <id>
 mj api-info [--json]
 ```
 
@@ -194,13 +195,13 @@ and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
 
-`mj resume` continues a session that `mj close` stopped. The session keeps its
+`mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores
 the verified checkpoint. Every selector is optional: the session's own record
 supplies the profile, the target, and the workspace, so `mj resume --session
 <id>` is the whole command for continuing where you left off. `--profile` and
 `--target` resume somewhere else, and `--queue` decides whether prompts queued
-when the session stopped are started or discarded (`start` by default).
+when the session was suspended are started or discarded (`start` by default).
 
 `mj resume --wiki <sessionwiki-id>` continues a session found in the
 SessionWiki index, whoever ran it, so an agent that searched for earlier work
@@ -225,13 +226,19 @@ The command answers as soon as the daemon has taken the session, because
 restoring an archive takes minutes. Follow it with `mj wait --session <id>`,
 which blocks while the resume runs and reports the reason if it fails, and then
 `mj set-config` and `mj prompt` as for any live session. A session that is
-already running is refused: close it first. `mj move` is the command for a live
+already running is refused: suspend it first. `mj move` is the command for a live
 session that should continue elsewhere.
 
-`mj close --force` destroys the session instead of checkpointing it. It removes
-the managed worktree's checkout but leaves its git branch in the source
-repository, so the commits survive. Add `--delete-branch` to delete the branch
-as well.
+`mj suspend` saves a verified recovery copy and releases the environment. It
+reports acceptance; follow it with `mj wait --session <id>` to observe completion
+or a reported failure. `mj interrupt-turn` interrupts only the current turn and
+keeps the session available for another prompt.
+
+`mj destroy` permanently removes the session, environment, and recovery archive.
+It keeps the managed branch in the source repository unless `--delete-branch` is
+specified. Keeping that branch does not preserve work held only in the destroyed
+environment. These commands replace `mj close` and its destructive `--force`
+flag; the old command is no longer accepted.
 
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;

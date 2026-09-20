@@ -106,6 +106,7 @@ impl RelayClient {
         }
         frame.push(b'\n');
         let session_id = self.session_id.clone();
+        let started = Instant::now();
         let exchanged = tokio::time::timeout(timeout, async {
             self.input
                 .as_mut()
@@ -146,6 +147,9 @@ impl RelayClient {
                 })
         })
         .await;
+        tracing::debug!(target: "mj_controller::latency", %session_id, %operation,
+            request_id = %envelope.request_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "relay exchange completed");
         match exchanged {
             Ok(line) => line,
             Err(_elapsed) => {

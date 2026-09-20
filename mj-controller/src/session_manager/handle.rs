@@ -187,6 +187,7 @@ impl ManagedSessionHandle {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ActorCommand::Submit {
+                queued_at: Instant::now(),
                 command_id,
                 command,
                 admission,

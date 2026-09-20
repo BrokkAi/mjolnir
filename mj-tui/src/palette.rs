@@ -857,7 +857,7 @@ mod tests {
         // and the list now runs past 44 rows.
         let lines = drawn(&mut dashboard, 120, 90);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
-        let stop = row_of(&lines, "Stop session").expect("Stop session");
+        let stop = row_of(&lines, "Suspend session").expect("Suspend session");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         assert!(heading < stop, "{lines:#?}");
         assert!(stop < anywhere, "{lines:#?}");
@@ -892,20 +892,19 @@ mod tests {
     #[test]
     fn palette_ranks_prefix_matches_before_substring_matches() {
         let dashboard = dashboard_with_session(running_session());
-        // "Cancel operation" carries "stop" in its description, so it is a
-        // substring match; "Stop session" is a prefix match on the label.
+        // The suspension label ranks ahead of unrelated description matches.
         let all = palette_entries(&dashboard, "");
         assert!(
             all.iter()
                 .any(|entry| entry.id == CommandId::CancelOperation
-                    || entry.id == CommandId::StopSession)
+                    || entry.id == CommandId::SuspendSession)
         );
 
-        let matched = palette_entries(&dashboard, "stop");
+        let matched = palette_entries(&dashboard, "suspend");
         assert!(
             matched
                 .iter()
-                .any(|entry| entry.id == CommandId::StopSession),
+                .any(|entry| entry.id == CommandId::SuspendSession),
             "{matched:?}"
         );
         assert!(
@@ -1034,14 +1033,19 @@ mod tests {
     }
 
     #[test]
-    fn palette_stops_without_opening_another_modal() {
+    fn palette_suspend_opens_confirmation_before_dispatch() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
-        type_query(&mut dashboard, "stop");
+        type_query(&mut dashboard, "suspend");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Close {
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+        assert_eq!(
+            dashboard.handle_key(key(KeyCode::Char('s'))),
+            DashboardAction::Suspend {
                 session_id: "session-1".into()
             }
         );

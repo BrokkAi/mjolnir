@@ -13,6 +13,7 @@
 pub(crate) mod actions;
 mod attachment;
 mod composer_drafts;
+mod help_search;
 pub(crate) mod io;
 mod read_receipts;
 mod workspace_settings;
@@ -319,6 +320,7 @@ pub(crate) struct DashboardContext {
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
+    runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
     runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::review_host::RuntimeReviewView>>>,
@@ -386,6 +388,7 @@ pub(crate) struct DashboardContext {
     /// reads it when it wakes and gives up when a later keystroke has since
     /// replaced it.
     pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
+    help_search: help_search::HelpSearch,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
@@ -688,6 +691,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             update = context.runtime_config.wait(), if context.runtime_config.is_open() => {
                 context.runtime_config.accept(update);
             }
+            update = context.runtime_health.wait(), if context.runtime_health.is_open() => {
+                context.runtime_health.accept(update);
+            }
             update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
                 context.runtime_state.accept(update);
             }
@@ -789,6 +795,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.follow_selected_session();
             context.refresh_go_context();
             context.refresh_git_status();
+            context
+                .help_search
+                .sync(&context.dashboard, &context.dashboard_io_tx);
         }
         context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
@@ -1519,6 +1528,7 @@ impl DashboardContext {
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
+            runtime_health: Feed::new(remote_worker.health),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
             reported_notice_id,
@@ -1548,6 +1558,7 @@ impl DashboardContext {
             aws_options: Feed::new(aws_resource_options_rx),
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            help_search: help_search::HelpSearch::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
             import_task_tx,
@@ -1654,7 +1665,7 @@ fn mark_active_chat_retiring_for_remote_lifecycle(
 ) {
     if matches!(
         kind,
-        SessionOperationKind::Stopping
+        SessionOperationKind::Suspending
             | SessionOperationKind::Destroying
             | SessionOperationKind::Moving
     ) {

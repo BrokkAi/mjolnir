@@ -134,7 +134,7 @@ pub(super) fn admit_phone_action(
 ) -> std::result::Result<Option<String>, ActionOutcome> {
     let closing = matches!(
         action,
-        ControllerAction::Close { .. } | ControllerAction::ForceClose { .. }
+        ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
     );
     if !closing && !phone_action_capacity_available(running_actions) {
         return Err(ActionOutcome::Busy);

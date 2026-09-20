@@ -17,6 +17,7 @@ pub mod elicitation;
 pub mod go;
 pub mod goal;
 pub mod harness_runtime;
+pub mod help_search;
 pub mod hex;
 pub mod history;
 pub mod local_git;

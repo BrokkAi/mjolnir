@@ -51,13 +51,44 @@ pub(crate) struct VerdictClient {
     client: reqwest::Client,
 }
 
+/// Kept alive through application so cancellation has a terminal log event too.
+pub(crate) struct VerdictAttempt {
+    id: u64,
+    session: String,
+    generation: u64,
+    phase: mj_core::activity::verdict::TurnPhase,
+    started: std::time::Instant,
+    finished: bool,
+    dispatch: tracing::Dispatch,
+}
+
+impl VerdictAttempt {
+    pub(crate) fn finish(&mut self, outcome: &str, reason: &str) {
+        tracing::dispatcher::with_default(&self.dispatch, || {
+            tracing::info!(target: "mj_jev", request_id = self.id, session = %self.session,
+                generation = self.generation, phase = ?self.phase,
+                elapsed_ms = self.started.elapsed().as_millis() as u64, outcome, reason,
+                "Jev decision outcome");
+        });
+        self.finished = true;
+    }
+}
+
+impl Drop for VerdictAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish("cancelled", "request_or_owner_dropped");
+        }
+    }
+}
+
 impl VerdictClient {
     pub(crate) async fn resolve(source: Option<&VerdictSource>) -> Option<Self> {
         let source = source.cloned();
         match tokio::task::spawn_blocking(move || Self::resolve_blocking(source)).await {
             Ok(client) => client,
             Err(error) => {
-                tracing::warn!(%error, "turn classifier initialization task failed");
+                tracing::warn!(target: "mj_jev", %error, "turn classifier initialization task failed");
                 None
             }
         }
@@ -66,12 +97,13 @@ impl VerdictClient {
     fn resolve_blocking(source: Option<VerdictSource>) -> Option<Self> {
         let source = source.unwrap_or_else(|| VerdictSource::for_key(api_key()));
         if matches!(&source, VerdictSource::Direct { key, .. } if key.trim().is_empty()) {
+            tracing::info!(target: "mj_jev", outcome = "disabled", reason = "explicit_blank_key", "Jev classifier disabled");
             return None;
         }
         match Self::new(source) {
             Ok(client) => Some(client),
             Err(error) => {
-                tracing::warn!(%error, "turn classifier unavailable");
+                tracing::warn!(target: "mj_jev", %error, "turn classifier unavailable");
                 None
             }
         }
@@ -86,6 +118,44 @@ impl VerdictClient {
             .build()
             .context("create turn classifier HTTP client")?;
         Ok(Self { source, client })
+    }
+
+    pub(crate) async fn ask_logged(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+    ) -> (VerdictAttempt, Result<TurnVerdict>) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let attempt = VerdictAttempt {
+            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
+            session: session.into(),
+            generation,
+            phase: evidence.phase,
+            started: std::time::Instant::now(),
+            finished: false,
+            dispatch: tracing::dispatcher::get_default(Clone::clone),
+        };
+        let source = match self.source {
+            VerdictSource::Direct { .. } => "direct",
+            VerdictSource::Hosted { .. } => "hosted",
+        };
+        tracing::info!(target: "mj_jev", request_id = attempt.id, session, generation,
+            phase = ?evidence.phase, harness = ?evidence.harness, source,
+            evidence = %serde_json::to_string(evidence).expect("serialize bounded Jev evidence"),
+            "Jev classification requested");
+        let result = self.ask(evidence).await;
+        match &result {
+            Ok(answer) => tracing::info!(target: "mj_jev", request_id = attempt.id, session,
+                generation, phase = ?evidence.phase, verdict = ?answer.waiting_on,
+                confidence = %answer.confidence, asked_question = %answer.asked_question,
+                decision = ?mj_core::activity::verdict::decide(evidence.phase, answer),
+                elapsed_ms = attempt.started.elapsed().as_millis() as u64, "Jev classification received"),
+            Err(error) => tracing::warn!(target: "mj_jev", request_id = attempt.id, session,
+                generation, phase = ?evidence.phase, error = %format!("{error:#}"), "Jev classification failed"),
+        }
+        (attempt, result)
     }
 
     pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
@@ -136,7 +206,6 @@ async fn await_input_verdict_with_cadence(
     let mut observed = spec.acp_activity.last_at_ms();
     let mut gap = first;
     let mut next_silence = first;
-    let mut warned = false;
     loop {
         let facts = super::turn_stall_facts(spec);
         if observed != facts.last_acp_activity_at_ms {
@@ -155,23 +224,22 @@ async fn await_input_verdict_with_cadence(
         let evidence = spec
             .turn_context
             .evidence(spec.harness, TurnPhase::Running, &facts, now);
-        let answer = client.ask(&evidence).await;
+        let (mut attempt, answer) = client
+            .ask_logged(&spec.turn_context.session_id(), generation, &evidence)
+            .await;
         if observed != spec.acp_activity.last_at_ms()
             || generation != spec.turn_context.generation()
         {
+            attempt.finish("discarded", "activity_or_generation_changed");
             continue;
         }
         match answer {
             Ok(verdict) if decide(TurnPhase::Running, &verdict) == Decision::AwaitingInput => {
+                attempt.finish("applied", "awaiting_input");
                 return;
             }
-            Ok(_) => {}
-            Err(error) => {
-                if !warned {
-                    tracing::warn!(%error, "turn classification failed; retaining current activity");
-                    warned = true;
-                }
-            }
+            Ok(_) => attempt.finish("unchanged", "keep_current"),
+            Err(_) => attempt.finish("unchanged", "request_failed"),
         }
         gap = (gap * 2).min(Duration::from_secs(300));
         next_silence = silent + gap;

@@ -45,7 +45,7 @@ pub enum ControllerAction {
     },
     /// Stop the turn the agent is working on, leaving the session alive. This
     /// is not `Cancel`, which stops a provision, resume or stop.
-    CancelTurn {
+    InterruptTurn {
         session_id: String,
     },
     /// Change one setting the harness advertised, such as `model` or `effort`.
@@ -109,7 +109,7 @@ pub enum ControllerAction {
         session_id: String,
         shell_command_id: String,
     },
-    Close {
+    Suspend {
         session_id: String,
     },
     /// Destroy a session without checkpointing it: the live target is torn
@@ -120,7 +120,7 @@ pub enum ControllerAction {
     /// `/actions`, so a wire request must never be able to name this variant;
     /// it is reachable only from the HTTP API, which builds it in process.
     #[serde(skip)]
-    ForceClose {
+    Destroy {
         session_id: String,
         /// Whether the managed worktree's branch goes with the session.
         /// Destruction keeps it unless the request asks for the deletion.

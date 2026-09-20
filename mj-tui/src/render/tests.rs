@@ -843,7 +843,7 @@ fn session_transitions_preserve_the_blank_row_before_the_next_session() {
         Some(SessionOperationKind::Launching),
         Some(SessionOperationKind::Resuming),
         Some(SessionOperationKind::Moving),
-        Some(SessionOperationKind::Stopping),
+        Some(SessionOperationKind::Suspending),
         Some(SessionOperationKind::Destroying),
         None,
     ] {
@@ -3489,12 +3489,12 @@ fn launch_clock_falls_back_to_the_kind_label_without_a_stage() {
 fn a_stage_does_not_rename_a_non_launch_operation() {
     let session = stopped_session();
     let operation = operation(
-        SessionOperationKind::Stopping,
+        SessionOperationKind::Suspending,
         Some(ProvisionStage::Syncing),
     );
 
     let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
-    assert!(text.contains("Stopping 12s"), "{text}");
+    assert!(text.contains("Suspending 12s"), "{text}");
 }
 
 #[test]

@@ -169,12 +169,27 @@ pub fn materialized_chat_entries_reusing(
     skip: usize,
     previous: Vec<ChatEntry>,
 ) -> Vec<ChatEntry> {
-    let mut previous = previous.into_iter();
+    let mut previous = previous.into_iter().peekable();
     let mut entries = session
         .transcript
         .iter()
         .skip(skip)
         .map(|item| {
+            // A bounded canonical tail slides forward as messages arrive.
+            // Align by durable position so appending one message does not
+            // reparse every unchanged tool body in the window.
+            while previous
+                .peek()
+                .is_some_and(|entry| entry.start_seq < item.position)
+            {
+                previous.next();
+            }
+            if previous
+                .peek()
+                .is_none_or(|entry| entry.start_seq != item.position)
+            {
+                return materialized_chat_entry(item, session.applied_event_ordinal);
+            }
             let Some(mut entry) = previous.next() else {
                 return materialized_chat_entry(item, session.applied_event_ordinal);
             };
@@ -232,7 +247,12 @@ pub fn suppress_duplicate_standalone_terminal_output(entries: &mut [ChatEntry]) 
 }
 
 pub fn entry_matches_transcript_item(entry: &ChatEntry, item: &TranscriptItem) -> bool {
-    entry.start_seq == item.position
+    entry
+        .source
+        .0
+        .as_ref()
+        .is_none_or(|source| source.as_ref() == item)
+        && entry.start_seq == item.position
         && entry.recorded_at_ms == Some(item.created_at_ms)
         && entry.revision == u64::try_from(item.last_changed_at_ms).unwrap_or_default()
         && entry.role == entry_role(item)
@@ -562,9 +582,8 @@ pub fn browser_projection_entries(
                 let members = entries[index..end]
                     .iter()
                     .filter(|entry| entry.start_seq > last_compaction_seq && !entry.raw_only)
-                    .cloned()
                     .collect::<Vec<_>>();
-                projected.extend(collapsed_streak_entries(&members));
+                projected.extend(collapsed_streak_entry_refs(&members));
                 index = end;
             }
         }
@@ -879,6 +898,10 @@ pub fn entry_collapse_states(
 /// The single cell that stands in for a streak of completed tools: each
 /// member's compact summary in order. Non-tool entries contribute none.
 pub fn collapsed_tool_entry(members: &[ChatEntry]) -> ChatEntry {
+    collapsed_tool_entry_refs(&members.iter().collect::<Vec<_>>())
+}
+
+fn collapsed_tool_entry_refs(members: &[&ChatEntry]) -> ChatEntry {
     let tools = members
         .iter()
         .filter(|member| is_completed_tool(member))
@@ -915,22 +938,26 @@ pub fn collapsed_tool_entry(members: &[ChatEntry]) -> ChatEntry {
 /// browser projections so an interleaved thought cannot disappear on one
 /// surface or move behind the tool summary on the other.
 pub fn collapsed_streak_entries(members: &[ChatEntry]) -> Vec<ChatEntry> {
+    collapsed_streak_entry_refs(&members.iter().collect::<Vec<_>>())
+}
+
+fn collapsed_streak_entry_refs(members: &[&ChatEntry]) -> Vec<ChatEntry> {
     let mut projected = Vec::new();
     if let Some(thought) = members
         .iter()
         .rev()
         .find(|member| member.role == ChatRole::Thought)
     {
-        projected.push(thought.clone());
+        projected.push((**thought).clone());
     }
     let tools = members
         .iter()
         .filter(|member| is_completed_tool(member))
         .collect::<Vec<_>>();
     if tools.len() >= 2 {
-        projected.push(collapsed_tool_entry(members));
+        projected.push(collapsed_tool_entry_refs(members));
     } else {
-        projected.extend(tools.into_iter().cloned());
+        projected.extend(tools.into_iter().map(|tool| (**tool).clone()));
     }
     projected
 }
@@ -963,4 +990,125 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
         0,
         None,
     )
+}
+
+/// Reuse unchanged typed entries while recomputing collapse topology and cursors.
+/// Owned by one session's supervised background projection task.
+#[derive(Default)]
+pub struct BrowserTranscriptProjector {
+    entries: Vec<ChatEntry>,
+}
+
+impl BrowserTranscriptProjector {
+    pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
+        self.entries =
+            materialized_chat_entries_reusing(session, 0, std::mem::take(&mut self.entries));
+        browser_transcript(&self.entries, session.applied_event_ordinal, 0, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(position: u64, body: TranscriptBody) -> Arc<TranscriptItem> {
+        Arc::new(TranscriptItem {
+            stable_id: format!("item-{position}"),
+            position,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body,
+        })
+    }
+
+    fn assert_projection(
+        projector: &mut BrowserTranscriptProjector,
+        session: &MaterializedSession,
+    ) -> BrowserTranscript {
+        let cached = projector.project(session);
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap(),
+            serde_json::to_value(materialized_browser_transcript(session)).unwrap()
+        );
+        cached
+    }
+
+    #[test]
+    fn advancing_transcript_window_preserves_computed_tool_diffstats() {
+        let mut session = MaterializedSession::empty("sliding-tail");
+        for position in 1..=3 {
+            session.transcript.push(item(position, TranscriptBody::Tool {
+                call: json!({"toolCallId": format!("tool-{position}"), "title": "Edit file", "status": "completed", "kind": "edit"}),
+                terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
+            }));
+        }
+        session.applied_event_ordinal = 3;
+        let diffstats = BTreeMap::from([("item-2".to_owned(), vec!["file.rs  +7 −2".to_owned()])]);
+        let previous = materialized_chat_entries_with_diffstats(&session, &diffstats);
+        session.transcript.remove(0);
+        session.transcript.push(item(
+            4,
+            TranscriptBody::User {
+                content: vec![json!({"type": "text", "text": "continue"})],
+            },
+        ));
+        session.applied_event_ordinal = 4;
+        let reused = materialized_chat_entries_reusing(&session, 0, previous);
+        assert_eq!(reused[0].tool_diffstats, diffstats["item-2"]);
+        assert_eq!(reused.len(), 3);
+        assert_eq!(reused[2].start_seq, 4);
+    }
+
+    #[test]
+    fn incremental_browser_projection_preserves_updates_collapse_and_history_replacement() {
+        let mut session = MaterializedSession::empty("cache-test");
+        let mut projector = BrowserTranscriptProjector::default();
+        session.transcript.push(item(
+            1,
+            TranscriptBody::User {
+                content: vec![json!({"type":"text", "text":"first"})],
+            },
+        ));
+        for position in 2..=3 {
+            session.transcript.push(item(position, TranscriptBody::Tool {
+                call: json!({"toolCallId":format!("tool-{position}"), "title":"Read file", "status":"in_progress", "kind":"read", "content":[{"type":"content", "content":{"type":"text", "text":"x".repeat(80_000)}}]}),
+                terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
+            }));
+        }
+        session.applied_event_ordinal = 3;
+        assert_projection(&mut projector, &session);
+        // Same-millisecond updates still change content and collapse topology.
+        for entry in &mut session.transcript[1..] {
+            let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(entry).body else {
+                unreachable!()
+            };
+            call["status"] = json!("completed");
+        }
+        session.applied_event_ordinal = 4;
+        assert_projection(&mut projector, &session);
+        session.transcript.push(item(
+            5,
+            TranscriptBody::User {
+                content: vec![json!({"type":"text", "text":"next"})],
+            },
+        ));
+        session.applied_event_ordinal = 5;
+        let projected = assert_projection(&mut projector, &session);
+        assert!(
+            projected
+                .entries
+                .iter()
+                .any(|entry| entry.lines.iter().any(|line| line == "next"))
+        );
+        // Integrity repair can replace content without changing timestamps or IDs.
+        Arc::make_mut(&mut session.transcript[0]).body = TranscriptBody::User {
+            content: vec![json!({"type":"text", "text":"repaired"})],
+        };
+        assert_projection(&mut projector, &session);
+        session.transcript.truncate(1);
+        session.applied_event_ordinal = 1;
+        assert_projection(&mut projector, &session);
+    }
 }

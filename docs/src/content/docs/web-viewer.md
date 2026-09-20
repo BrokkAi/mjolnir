@@ -34,9 +34,10 @@ The viewer can:
   reviewing the resolved launch;
 - open a live conversation, send prompts, and run the slash commands the
   session actually supports;
-- queue prompts while an agent is busy and cancel agent or shell work;
-- stop a session, resume it from its checkpoint, and browse all stopped resume
+- queue prompts while an agent is busy, **Interrupt turn** without releasing the environment, and cancel shell work;
+- suspend a session, resume it from its checkpoint, and browse all suspended resume
   candidates, including records previously archived by a provider;
+- **Destroy session…** from a live session menu or retained-session detail, with a separate confirmation and an unchecked option to delete its managed branch;
 - search the SessionWiki index, list archived sessions, read one's briefing, and
   restore it into a new session, matching the terminal's Archived tab (see
   [Search and restore archived sessions](/sessions/#search-and-restore-archived-sessions));
@@ -59,7 +60,7 @@ Move is a two-step, authenticated flow. The viewer first asks the daemon for a
 read-only preparation that resolves the profile, target, compatibility, active
 state, and queued commands. Only the confirmation submits the fingerprinted
 preparation and interruption acknowledgement. The browser cannot implement a
-move by composing Stop and Resume, and a stale destination is rejected before
+move by composing Suspend and Resume, and a stale destination is rejected before
 the source is interrupted.
 
 The confirmation explains what will be rebuilt. A move that keeps the same
@@ -187,3 +188,5 @@ See [Security boundaries](/security/) for the full trust model,
 [Configuration reference](/configuration/#web-viewer-phone) for every field,
 and [Troubleshooting](/troubleshooting/) when the viewer remains loopback-only
 or the desktop shell cannot open.
+
+**Suspend session…** confirms saving a recovery copy and releasing the environment, warning about the current turn and active sub-agents. Accepted work remains visible until it completes or reports a failure. **Destroy session…** permanently removes the session, environment, and recovery archive; keeping its branch does not preserve environment-only work. Closing a browser pane or tab leaves sessions running.

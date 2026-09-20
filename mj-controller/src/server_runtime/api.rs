@@ -162,7 +162,7 @@ impl ExportRuntime for RuntimeState {
     }
 
     fn close_subagent(self: Arc<Self>, session_id: String) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move { self.close_session(session_id).await })
+        Box::pin(async move { self.suspend_session(session_id).await })
     }
 
     fn republish_workspaces(&self, workspaces: Vec<mj_core::workspace::WorkspaceRecord>) {

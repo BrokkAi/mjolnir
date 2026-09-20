@@ -766,8 +766,8 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
             WorkerPhase::Running if chat.pursuing_goal() => parts.push("Pursuing goal".into()),
             // The spinner already indicates an ordinary running turn.
             WorkerPhase::Running => {}
-            WorkerPhase::Closing => parts.push("Closing".into()),
-            WorkerPhase::Closed => parts.push("Closed".into()),
+            WorkerPhase::Closing => parts.push("Agent shutdown".into()),
+            WorkerPhase::Closed => parts.push("Agent ended".into()),
         }
     }
     // Auto-review changes what happens when this turn ends, so the composer
@@ -930,7 +930,7 @@ pub(crate) fn render_background_task_dialog(frame: &mut Frame, area: Rect, chat:
             let prefix = format!("{elapsed:>8}  ");
             let prefix_width = display_width(&prefix);
             let label = if chat.background_stop_pending(&command.id) {
-                "Stopping…"
+                "Interrupting…"
             } else {
                 "[Stop]"
             };

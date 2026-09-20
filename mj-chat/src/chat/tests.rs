@@ -748,7 +748,7 @@ fn stoppable_background_task_keyboard_activation_is_deduplicated() {
     assert!(
         drawn_transcript(&mut chat, 80, 16)
             .iter()
-            .any(|line| line.contains("Stopping…"))
+            .any(|line| line.contains("Interrupting…"))
     );
 
     // The disabled pending control cannot submit a second request.
@@ -2500,4 +2500,39 @@ fn clear_requires_capability_and_idle_state_before_submission() {
         chat.handle_key(key(KeyCode::Enter)),
         ChatAction::Prompt("/clear".into())
     );
+}
+
+#[test]
+fn continuing_feed_failure_survives_dismissal_and_clears_only_on_recovery() {
+    let notices = Notices::default();
+    notices.set("Unrelated task finished");
+    notices.set_persistent_failure(Some("Could not refresh sessions: connection closed".into()));
+    let generation = notices.generation();
+    notices.set_persistent_failure(Some("Could not refresh sessions: connection closed".into()));
+    assert_eq!(notices.generation(), generation);
+    assert_eq!(notices.history().len(), 2);
+    assert!(!notices.dismiss(std::time::Instant::now() + NOTICE_MINIMUM_DISPLAY));
+    assert!(
+        notices
+            .current()
+            .unwrap()
+            .contains("Could not refresh sessions")
+    );
+    notices.set_persistent_failure(None);
+    assert_eq!(
+        notices.current().as_deref(),
+        Some("Unrelated task finished")
+    );
+    assert!(notices.generation() > generation);
+
+    notices.set_persistent_failure(Some("Could not refresh sessions".into()));
+    notices.clear();
+    assert!(
+        notices
+            .current()
+            .unwrap()
+            .contains("Could not refresh sessions")
+    );
+    notices.set_persistent_failure(None);
+    assert!(notices.current().is_none());
 }

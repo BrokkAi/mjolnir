@@ -89,7 +89,7 @@ pub(super) async fn wait(
                     // and the one fact that bears on it is whether the harness
                     // is still saying anything. Mjolnir will not end the turn
                     // for silence on its own, so it reports the silence here
-                    // and leaves `mj cancel-turn` to the caller.
+                    // and leaves `mj interrupt-turn` to the caller.
                     message: Some(match session
                         .activity_state
                         .as_ref()
@@ -142,15 +142,15 @@ pub(super) fn build_observation(
         // The projection forces a close-requested session to `Closing` from
         // the moment the controller takes the request, so this covers the gap
         // before the lifecycle operation itself is registered.
-        closing: session.lifecycle == ViewerLifecycleCategory::Stopping,
+        closing: session.lifecycle == ViewerLifecycleCategory::Suspending,
         // A live session publishes no raw error text, so a reason on one can
         // only be the sentence a failed close recorded.
-        close_failure: matches!(
-            session.lifecycle,
-            ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting
-        )
-        .then(|| session.launch_error.clone())
-        .flatten(),
+        close_failure: session
+            .launch_error
+            .as_ref()
+            .filter(|error| mj_core::state::is_public_lifecycle_error(error))
+            .filter(|_| session.operation.is_none())
+            .cloned(),
         launch_failed: snapshot
             .launch_failures
             .iter()

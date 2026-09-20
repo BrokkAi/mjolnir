@@ -295,6 +295,7 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
         clear_context_started_at_ms: None,
         native_agent_count: 0,
         expected_continuation: None,
+        inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -450,6 +451,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         clear_context_started_at_ms: None,
         native_agent_count: 0,
         expected_continuation: None,
+        inferred_idle_since_ms: None,
         goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -1037,7 +1039,7 @@ async fn a_new_action_that_never_publishes_still_answers_its_phone() {
 #[test]
 fn force_close_is_admitted_like_close() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
-    let force_close = ControllerAction::ForceClose {
+    let force_close = ControllerAction::Destroy {
         session_id: "session-1".into(),
         delete_branch: false,
     };
@@ -1056,7 +1058,7 @@ fn force_close_is_admitted_like_close() {
 #[test]
 fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
     let mut active = std::collections::BTreeSet::from(["session-1".to_owned()]);
-    let close = ControllerAction::Close {
+    let close = ControllerAction::Suspend {
         session_id: "session-1".into(),
     };
     assert_eq!(

@@ -160,22 +160,32 @@ pub(super) async fn run_daemon_runtime(
     let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
     readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut interrupted_close_cancellations = Vec::new();
     let mut interrupted_close_tasks = Vec::new();
-    for session_id in interrupted_close_session_ids(&controller) {
+    for session_id in interrupted_suspend_session_ids(&controller) {
         if move_owned.contains(&session_id) {
             continue;
         }
-        let interrupted_cancellation = Arc::new(AtomicBool::new(false));
-        let interrupted_close_task = spawn_interrupted_close_recovery(
-            session_id,
-            manager_control.clone(),
-            recovery_observer.clone(),
-            interrupted_cancellation.clone(),
-            interrupted_close_tx.clone(),
-            None,
-        );
-        interrupted_close_cancellations.push(interrupted_cancellation);
+        let recovery_state = state.clone();
+        let recovery_shutdown = cancellation.clone();
+        let updates = interrupted_close_tx.clone();
+        let interrupted_close_task = tokio::spawn(async move {
+            let result = tokio::select! {
+                result = recovery_state.suspend_session(session_id.clone()) => result,
+                () = recovery_shutdown.cancelled() => return,
+            }
+            .map(|()| crate::pollers::LifecycleSuccess::Closed)
+            .map_err(|error| format!("{error:#}"));
+            if updates
+                .send(crate::pollers::LifecycleUpdate {
+                    session_id,
+                    result,
+                    deferred_cleanup: false,
+                })
+                .is_err()
+            {
+                tracing::debug!("suspension recovery receiver stopped");
+            }
+        });
         interrupted_close_tasks.push(interrupted_close_task);
     }
     // Whatever is still in an in-flight lifecycle state now has no owner: the
@@ -405,9 +415,6 @@ pub(super) async fn run_daemon_runtime(
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
-    for interrupted_cancellation in interrupted_close_cancellations {
-        interrupted_cancellation.store(true, Ordering::Release);
-    }
     drop(interrupted_close_tx);
     record_daemon_cleanup(
         &mut outcome,

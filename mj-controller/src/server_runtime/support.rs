@@ -27,15 +27,15 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         ControllerAction::Prompt { session_id, .. }
         | ControllerAction::RunShell { session_id, .. }
         | ControllerAction::CancelShell { session_id, .. }
-        | ControllerAction::Close { session_id }
-        | ControllerAction::ForceClose { session_id, .. }
+        | ControllerAction::Suspend { session_id }
+        | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Resume { session_id, .. }
         | ControllerAction::Open { session_id }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::RemoveQueuedPrompt { session_id, .. }
         | ControllerAction::RespondElicitation { session_id, .. }
         | ControllerAction::Rename { session_id, .. }
-        | ControllerAction::CancelTurn { session_id }
+        | ControllerAction::InterruptTurn { session_id }
         | ControllerAction::SetConfig { session_id, .. }
         | ControllerAction::SetPlanMode { session_id, .. }
         | ControllerAction::StartReview { session_id }

@@ -4558,3 +4558,82 @@ fn workspace_close_refuses_new_active_sessions_without_discarding_drafts() {
         "creation cannot resurrect a removed workspace"
     );
 }
+
+thread_local! {
+    static AFTER_MATERIALIZED_FRONTIER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
+
+pub(super) fn after_materialized_frontier_read() {
+    let hook = AFTER_MATERIALIZED_FRONTIER_READ.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[test]
+fn projection_reads_keep_one_snapshot_when_a_writer_commits_after_the_frontier_read() {
+    for mode in ["whole", "tail", "summary"] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("hel.sqlite3");
+        save_session_to(&database, &session("session-1", "project-1")).unwrap();
+        let mut before = materialized_session("session-1");
+        before.transcript.truncate(2);
+        save_materialized_session_to(&database, &before).unwrap();
+        let before_summary =
+            load_materialized_session_summary_from(&database, "session-1").unwrap();
+        let mut after = before.clone();
+        after.applied_event_ordinal = 8;
+        after.applied_event_digest = event_digest(8);
+        let message = Arc::make_mut(&mut after.transcript[1]);
+        message.latest_content_event_ordinal = Some(8);
+        if let TranscriptBody::Agent { chunks, .. } = &mut message.body {
+            chunks
+                .push(serde_json::json!({"content":{"type":"text","text":"New streamed content"}}));
+        }
+        after.transcript.push(Arc::new(TranscriptItem {
+            stable_id: "system:8".into(),
+            position: 8,
+            latest_content_event_ordinal: None,
+            created_at_ms: 2_000,
+            last_changed_at_ms: 2_000,
+            body: TranscriptBody::System {
+                text: "New publication".into(),
+            },
+        }));
+        let writer_path = database.clone();
+        AFTER_MATERIALIZED_FRONTIER_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // A separate WAL connection commits between the reader's queries.
+                // This must succeed without waiting for the reader to finish.
+                save_materialized_session_to(&writer_path, &after).unwrap();
+            }));
+        });
+        match mode {
+            "whole" => assert_eq!(
+                load_materialized_session_from(&database, "session-1").unwrap(),
+                Some(before)
+            ),
+            "tail" => {
+                let (actual, window) =
+                    load_materialized_projection_tail_from(&database, "session-1", 1)
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(window.omitted_items, 1);
+                before.transcript.remove(0);
+                assert_eq!(actual, before);
+            }
+            _ => assert_eq!(
+                load_materialized_session_summary_from(&database, "session-1").unwrap(),
+                before_summary
+            ),
+        }
+        assert!(AFTER_MATERIALIZED_FRONTIER_READ.with(|hook| hook.borrow().is_none()));
+        assert_eq!(
+            load_materialized_session_from(&database, "session-1")
+                .unwrap()
+                .unwrap()
+                .applied_event_ordinal,
+            8
+        );
+    }
+}

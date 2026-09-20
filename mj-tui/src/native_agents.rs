@@ -228,7 +228,7 @@ impl DashboardState {
             frame.render_widget(Paragraph::new(lines), inner);
         }
         let controls = if pane.stopping {
-            "Stopping…"
+            "Suspending…"
         } else if pane.agent.capabilities.cancel && pane.agent.state == NativeAgentState::Running {
             "s: stop · PgUp/PgDn: scroll · Enter: children · p: parent"
         } else {

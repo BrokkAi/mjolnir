@@ -9,6 +9,7 @@ pub(super) enum ManagerCommand {
 
 pub(super) enum ActorCommand {
     Submit {
+        queued_at: Instant,
         command_id: String,
         command: RelayCommand,
         admission: Option<ReviewDeliveryAdmission>,
@@ -138,6 +139,7 @@ pub(super) struct ReturnedConnection {
 /// A submission that arrived while a lifecycle operation held the connection.
 /// The actor replays these in arrival order once the lease comes back.
 pub(super) struct DeferredSubmit {
+    pub(super) queued_at: Instant,
     pub(super) command_id: String,
     pub(super) command: RelayCommand,
     pub(super) admission: Option<ReviewDeliveryAdmission>,

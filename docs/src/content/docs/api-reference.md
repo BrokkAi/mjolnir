@@ -170,7 +170,7 @@ GET /api/v1/sessions
 }
 ```
 
-`lifecycle` is one of `live`, `starting`, `stopping`, `stopped`, `failed`.
+`lifecycle` is one of `live`, `starting`, `suspending`, `suspended`, `failed`.
 `chat_phase` is one of `idle`, `running`, `closing`, `closed`.
 
 Session detail and the session embedded in wait responses also include optional
@@ -324,10 +324,10 @@ response = json.loads(result.stdout)
 | --- | --- |
 | `finished` | The turn completed normally. |
 | `error` | The turn failed or was rejected, the session could not be launched or started, or the harness gave a stop reason Mjolnir does not recognize. `stop_reason` and `message` say which. |
-| `cancelled` | The turn was cancelled or interrupted, which is what `cancel-turn` produces. |
+| `cancelled` | The turn was cancelled or interrupted, which is what `interrupt-turn` produces. |
 | `quota_limit` | Reported usage quota is exhausted, or the model was at capacity and no retry is armed. |
 | `timeout` | The deadline passed with the turn still running. Wait again with the same `turn_id`. |
-| `stopped` | The session is stopped, stopping, or failed, so no turn can finish on it. `message` carries the session's own recorded reason when it has one, such as a resume that failed. |
+| `stopped` | The session is suspended or failed, so no turn can finish on it. `message` carries the session's own recorded reason when it has one, such as a resume that failed. |
 
 - `turn_number` is the one-based position of this turn in the conversation, and
   `elapsed_ms` is how long it took from its first item to its last change. Both
@@ -396,29 +396,36 @@ stable**: read it when you need structure the text cannot carry, and expect its
 shape to change between Mjolnir versions.
 
 The transcript is read from the durable projection, so it answers the same way
-while the session runs and long after it stopped.
+while the session runs and long after it was suspended.
 
-### Close a session, cancel a turn
+### Suspend, destroy, or interrupt a turn
 
 ```text
-POST /api/v1/sessions/{session_id}/close
-POST /api/v1/sessions/{session_id}/cancel-turn
+POST /api/v1/sessions/{session_id}/suspend
+POST /api/v1/sessions/{session_id}/destroy
+POST /api/v1/sessions/{session_id}/interrupt-turn
 ```
 
-Both take no body and answer `202` with no content: the action was accepted, and
-the session's own state is where you see it take effect.
+These endpoints answer `202` with no content when accepted. Acceptance is not
+completion: inspect the session's lifecycle and error, or use `mj wait` for
+suspension. An idle conversation alone says nothing about lifecycle completion.
 
-`close` also takes an optional body, `{"force": true}`. A forced close destroys
-the session instead of checkpointing it: there is no checkpoint, the live target
-is torn down, the recovery archive is removed, and sub-agent children are
-destroyed first. The managed worktree's git branch stays in the source
-repository unless the body also sets `{"delete_branch": true}`. This cannot be
-undone. Afterwards `GET /sessions/{id}` and
-`mj sessions --session <id>` answer `404`, because the session row is deleted. A
-forced close also takes over a graceful close that is stuck, so it is the way
-out when a close failed and left the session in `error`.
+Suspend saves a verified recovery copy before releasing the environment. With
+active sub-agents, supply `{"acknowledge_active_subagents": true}` to suspend them
+first. A failed suspension reports its error and preserves recoverable resources;
+it never silently switches to destruction.
 
-### Resume a stopped session
+Destroy permanently removes the environment, recovery archive, and session
+record, including sub-agents. The optional `{"delete_branch": true}` body also
+deletes the managed branch in the source repository. Keeping that branch does
+not preserve work held only in the environment. Once destruction completes,
+`GET /sessions/{id}` returns `404`.
+
+Interrupt turn keeps the environment and session available for further prompts.
+There is no `/close` endpoint or `force` parameter. Destruction is available only
+through its dedicated authenticated endpoint, not the generic viewer actions.
+
+### Resume a suspended session
 
 ```text
 POST /api/v1/sessions/{session_id}/resume
@@ -437,7 +444,7 @@ The body is optional and so is every field in it: the session's own record
 supplies the profile, target, and workspace it last ran with, so a bodiless POST
 means "continue this session where it left off". `queue` is `start` or
 `discard`, and decides what happens to prompts that were queued when the session
-stopped; it defaults to `start`.
+suspended; it defaults to `start`.
 
 ```json
 {
@@ -502,10 +509,10 @@ Preconditions, all answering `409` with the reason:
 
 | Export | Needs |
 | --- | --- |
-| `diff`, `files`, `branch` | A live target. A stopped session has none; use the bundle. |
+| `diff`, `files`, `branch` | A live target. A suspended session has none; use the bundle. |
 | `branch` | An idle session — a push mid-turn would publish a tree the agent is still changing — a valid branch name, and a configured push remote. |
 | `diff` | A recorded base commit, or a session branch whose reflog still names where it started. |
-| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a stopped one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
+| `bundle` | Commits beyond the session base. For a session on a bare target, the base is the commit the session's worktree branch was created from. A live session is checkpointed first; a suspended one is read from its last checkpoint, so this is the one export that still works after the target is gone. |
 
 ## CLI equivalents
 
@@ -524,9 +531,10 @@ Preconditions, all answering `409` with the reason:
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |
 | `mj export --session <id> --kind patch\|branch\|bundle` | `POST /sessions/{id}/export` |
 | `mj export --session <id> --kind file --path <path>` | `GET /sessions/{id}/files?path=` |
-| `mj close --session <id> [--force]` | `POST /sessions/{id}/close` |
+| `mj suspend --session <id>` | `POST /sessions/{id}/suspend` |
 | `mj resume --session <id>` | `POST /sessions/{id}/resume` |
-| `mj cancel-turn --session <id>` | `POST /sessions/{id}/cancel-turn` |
+| `mj destroy --session <id> [--delete-branch]` | `POST /sessions/{id}/destroy` |
+| `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 
 Every one of them takes `--json` and then prints the route's response unchanged,
 which is the quickest way to see a shape before you write a client for it.
@@ -540,7 +548,7 @@ mj wait --session <id>
 mj prompt --session <id> --wait "now add a test"
 mj diff --session <id>
 mj export --session <id> --kind bundle --out work.bundle
-mj close --session <id>
+mj suspend --session <id>
 ```
 
 `mj transcript --session <id>` still answers after the close: the projection
@@ -612,10 +620,10 @@ are the routes for choosing deliberately.
 `close` is accepted while provisioning or another lifecycle operation is in
 flight. It cancels cancellable work, prevents the initial prompt, waits for the
 old operation to release ownership, and then cleans up. Repeated closes join the
-same operation. A stopping session's `wait` returns `stopped`, including when an
+same operation. A suspending session's `wait` returns `stopped`, including when an
 earlier initialization failed. Cleanup errors remain visible in session state. A
 close whose worker restart fails leaves the session in `error` with the failure
-recorded in its state, and `mj close --session <id> --force` is the way out.
+recorded in its state. Retry suspension after resolving the error. Use `mj destroy` only when you intend to discard the environment and recovery copy.
 
 The CLI and `mj api-info` probe API support before reading the token file. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;
@@ -629,7 +637,7 @@ incompatible API versions, and missing tokens have separate diagnostics.
 `turns`, `next_after_seq`, `latest_seq`, `totals`, and `coverage`. Resume with
 `next_after_seq`. Each turn includes command identity, completion sequence,
 outcome, and optional `usage`. Wait responses also include that turn's usage
-when reported. Records persist after stopping and daemon restart. History starts
+when reported. Records persist after suspension and daemon restart. History starts
 with events projected by this version; older usage is not backfilled.
 
 Usage scope is `turn`, `last_request`, or `unspecified`. The managed Claude
@@ -730,7 +738,7 @@ to get the silence age. Mjolnir publishes this and does not act on it: a turn
 waiting on a long build is silent and healthy, and ending a turn on a guess
 destroys real work. `mj wait` includes the silence age in its `timeout`
 message, and `mj sessions --session` prints it, so an orchestrator can decide
-whether to keep waiting or call `mj cancel-turn`. The field is absent for an
+whether to keep waiting or call `mj interrupt-turn`. The field is absent for an
 idle session, for a session the daemon currently cannot see, and from workers
 too old to report the ACP clock.
 
