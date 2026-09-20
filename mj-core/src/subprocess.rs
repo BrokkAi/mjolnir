@@ -24,6 +24,78 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
+/// Capture a process with byte/time bounds, draining both pipes concurrently.
+/// Kill its process group before returning on overflow, timeout, or cancellation.
+pub async fn run_bounded(
+    command: &mut tokio::process::Command,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Output> {
+    use tokio::io::AsyncReadExt;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().context("start bounded subprocess")?;
+    struct Group(Option<u32>);
+    impl Drop for Group {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            if let Some(pid) = self.0 {
+                terminate_process_group(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+    let mut group = Group(child.id());
+    async fn read(mut pipe: impl tokio::io::AsyncRead + Unpin, max: usize) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        (&mut pipe)
+            .take(max as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        anyhow::ensure!(bytes.len() <= max, "subprocess output exceeds {max} bytes");
+        Ok(bytes)
+    }
+    let stdout = child.stdout.take().context("missing subprocess stdout")?;
+    let stderr = child.stderr.take().context("missing subprocess stderr")?;
+    let result = tokio::time::timeout(timeout, async {
+        let (stdout, stderr, status) =
+            tokio::try_join!(read(stdout, max_bytes), read(stderr, max_bytes), async {
+                Ok::<_, anyhow::Error>(child.wait().await?)
+            })?;
+        Ok::<_, anyhow::Error>(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => {
+            group.0 = None;
+            Ok(output)
+        }
+        outcome => {
+            drop(group);
+            if let Err(error) = child.start_kill() {
+                tracing::debug!(%error, "bounded subprocess already exited during termination");
+            }
+            let reaped =
+                tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+            if !matches!(reaped, Ok(Ok(_))) {
+                tracing::warn!("could not reap bounded subprocess after termination");
+            }
+            match outcome {
+                Ok(Err(error)) => Err(error),
+                _ => anyhow::bail!("subprocess timed out"),
+            }
+        }
+    }
+}
+
 /// Launch a long-lived background process with no inherited terminal streams.
 ///
 /// The process is genuinely detached: on Unix it is a grandchild reparented to
@@ -286,6 +358,33 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_capture_drains_large_pipes_and_stops_on_overflow_or_timeout() {
+        use std::time::Duration;
+        let mut command = tokio::process::Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
+        ]);
+        let output = super::run_bounded(&mut command, 200_000, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr.len(), 131072);
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "head -c 200000 /dev/zero; sleep 30"]);
+        let error = super::run_bounded(&mut command, 100_000, Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let error = super::run_bounded(&mut command, 100_000, Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+    }
     use super::*;
 
     #[cfg(unix)]

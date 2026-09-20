@@ -41,6 +41,145 @@ pub(crate) const ACP_EVENT_CHANNEL_CAPACITY: usize = 256;
 pub(super) struct ProjectMemoryEndpoint {
     config: Option<super::ProjectMemoryLaunchConfig>,
     io: Arc<tokio::sync::Semaphore>,
+    history: super::history::HistoryEndpoint,
+    cwd: PathBuf,
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use mj_core::history::{HistoryQuery, HistoryResult};
+    use mj_core::relay::RELAY_PROTOCOL_VERSION;
+
+    #[tokio::test]
+    async fn history_round_trips_large_replies_without_delegation_or_durable_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(Mutex::new(
+            DurableRelay::open(temp.path(), "history-test", "1.0.0").unwrap(),
+        ));
+        let memory = ProjectMemoryEndpoint::new(Some(super::super::ProjectMemoryLaunchConfig {
+            project_key: "key".into(),
+            root: temp.path().join("memory"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: Default::default(),
+            mcp_delivery: mj_core::worker_launch::ProjectMemoryMcpDelivery::Acp,
+            history_socket: Some(temp.path().join("control.sock")),
+        }));
+        let (wake, _received) = mpsc::channel(1);
+        let (fatal, _errors) = mpsc::channel(1);
+        let mut tasks = Vec::new();
+        let mut connections = Vec::new();
+        for _ in 0..2 {
+            let (server, client) = UnixStream::pair().unwrap();
+            tasks.push(tokio::spawn(serve_client_with_memory(
+                server,
+                relay.clone(),
+                wake.clone(),
+                Err("no credentials".into()),
+                ConnectionRuntime {
+                    project_memory: memory.clone(),
+                    ..Default::default()
+                },
+                fatal.clone(),
+            )));
+            connections.push(BufReader::new(client));
+        }
+        async fn send(connection: &mut BufReader<UnixStream>, request: RelayRequest) {
+            let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
+                request_id: "request".into(),
+                protocol_version: RELAY_PROTOCOL_VERSION,
+                request,
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            connection.get_mut().write_all(&bytes).await.unwrap();
+        }
+        async fn receive(connection: &mut BufReader<UnixStream>) -> RelayResponsePayload {
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                connection.read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+            match response.body {
+                RelayResponseBody::Ok { payload } => payload,
+                other => panic!("{other:?}"),
+            }
+        }
+        send(
+            &mut connections[0],
+            RelayRequest::HistoryQuery {
+                query: HistoryQuery::SearchSessions {
+                    query: "needle".into(),
+                    limit: 20,
+                },
+            },
+        )
+        .await;
+        let requests = loop {
+            send(&mut connections[1], RelayRequest::HistoryRequests).await;
+            let RelayResponsePayload::HistoryRequests { requests } =
+                receive(&mut connections[1]).await
+            else {
+                panic!("history requests");
+            };
+            if !requests.is_empty() {
+                break requests;
+            }
+            tokio::task::yield_now().await;
+        };
+        let value = serde_json::json!({"text":"é🙂".repeat(30_000)});
+        send(
+            &mut connections[1],
+            RelayRequest::CompleteHistoryRequest {
+                result: HistoryResult {
+                    request_id: requests[0].request_id.clone(),
+                    value: value.clone(),
+                    is_error: false,
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut connections[1]).await,
+            RelayResponsePayload::HistoryRequestCompleted
+        ));
+        let RelayResponsePayload::HistoryResult { result } = receive(&mut connections[0]).await
+        else {
+            panic!("history result");
+        };
+        assert_eq!(result.value, value);
+        // Disconnect while another request is waiting for the controller.
+        send(
+            &mut connections[0],
+            RelayRequest::HistoryQuery {
+                query: HistoryQuery::TraceFile {
+                    path: "a.rs".into(),
+                    limit: 20,
+                },
+            },
+        )
+        .await;
+        while memory.history.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        drop(connections);
+        for task in tasks {
+            tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        assert!(memory.history.requests().is_empty());
+        assert_eq!(
+            relay.lock().unwrap().operational_state().session_id,
+            "history-test"
+        );
+    }
 }
 
 impl ProjectMemoryEndpoint {
@@ -48,6 +187,8 @@ impl ProjectMemoryEndpoint {
         Self {
             config,
             io: Arc::new(tokio::sync::Semaphore::new(1)),
+            history: Default::default(),
+            cwd: PathBuf::new(),
         }
     }
 }
@@ -196,7 +337,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     record_imported_native_identity(&config, &mut durable_relay)?;
     let resume_session = select_resume_session(&config, &durable_relay);
     let native_session_may_have_history = durable_relay.native_session_may_have_history();
-    let project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
+    let mut project_memory = ProjectMemoryEndpoint::new(config.project_memory.clone());
+    project_memory.cwd = config.cwd.clone();
     if !checkpoint_only && resume_session.is_none()
         // Recreating an unused native thread keeps this relay's original
         // startup context, which may already belong to a pending prompt.
@@ -399,6 +541,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             })),
         }));
         let acp_spec = LaunchSpec {
+            clear_context_request: None,
+        context_restore: None,
             goal_recovery,
             command: worker_executable,
             args: vec![
@@ -844,6 +988,38 @@ pub(super) async fn serve_client_with_memory(
                 let operation = envelope.request.method_name();
                 let response = project_memory_response(envelope, &project_memory).await;
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
+                continue;
+            }
+            if matches!(&envelope.request, RelayRequest::HistoryQuery { .. } | RelayRequest::HistoryRequests | RelayRequest::CompleteHistoryRequest { .. }) {
+                let operation = envelope.request.method_name();
+                let result: Result<RelayResponsePayload> = match envelope.request {
+                    RelayRequest::HistoryRequests => Ok(RelayResponsePayload::HistoryRequests { requests: project_memory.history.requests() }),
+                    RelayRequest::CompleteHistoryRequest { result } => {
+                        project_memory.history.complete(result);
+                        Ok(RelayResponsePayload::HistoryRequestCompleted)
+                    }
+                    RelayRequest::HistoryQuery { query } => {
+                        if project_memory.config.as_ref().is_none_or(|config| config.history_socket.is_none()) {
+                            Err(anyhow::anyhow!("history tools are unavailable in this worker; resume with a current controller"))
+                        } else {
+                            tokio::select! {
+                                result = project_memory.history.query(query, &project_memory.cwd) => result.map(|result| RelayResponsePayload::HistoryResult { result }),
+                                disconnected = reader.fill_buf() => {
+                                    match disconnected {
+                                        Ok(_) => return Ok(()),
+                                        Err(error) => return Err(error.into()),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                let body = match result {
+                    Ok(payload) => RelayResponseBody::Ok { payload },
+                    Err(error) => compaction_error(RelayErrorCode::Internal, &format!("{error:#}")),
+                };
+                write_logged_response(&mut writer, &RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body }, &session_id, operation).await?;
                 continue;
             }
             if let RelayRequest::Reviewer { .. } = &envelope.request {

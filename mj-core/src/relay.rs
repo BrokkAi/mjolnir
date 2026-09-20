@@ -49,7 +49,7 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// session and replace the worker with the current build once it is quiet.
 /// Until then, a request the older worker cannot decode is refused on the
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
-pub const RELAY_PROTOCOL_VERSION: u32 = 14;
+pub const RELAY_PROTOCOL_VERSION: u32 = 16;
 pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
@@ -64,7 +64,7 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// A v1 snapshot is upgraded in place to the current schema on open (its stored
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
-pub const RELAY_STATE_VERSION: u32 = 7;
+pub const RELAY_STATE_VERSION: u32 = 8;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

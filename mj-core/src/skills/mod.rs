@@ -475,7 +475,7 @@ mod tests {
     fn managed_skills_are_installable_archive_entries() {
         for kind in HarnessKind::ALL {
             let entries = managed_skills(kind);
-            assert_eq!(entries.len(), 3, "{kind:?}");
+            assert_eq!(entries.len(), 1, "{kind:?}");
             let prefix = kind.synced_skill_dirs()[0];
             for entry in &entries {
                 validate_archive_path(&entry.path).expect(&entry.path);
@@ -510,6 +510,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn user_recall_and_provenance_skills_remain_user_owned() {
+        let home = tempfile::tempdir().unwrap();
+        write(home.path(), "skills/recall/SKILL.md", b"user recall");
+        write(
+            home.path(),
+            "skills/provenance/SKILL.md",
+            b"user provenance",
+        );
+        let archive = session_skills(HarnessKind::Codex, home.path()).unwrap();
+        for name in ["recall", "provenance"] {
+            let entry = archive
+                .entries()
+                .iter()
+                .find(|entry| entry.path == format!("skills/{name}/SKILL.md"))
+                .unwrap();
+            assert_eq!(entry.bytes, format!("user {name}").as_bytes());
+        }
     }
 
     #[test]

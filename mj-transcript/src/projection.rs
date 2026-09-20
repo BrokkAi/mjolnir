@@ -373,6 +373,9 @@ fn apply_committed_projection_event_inner(
     if let Some(active_turn) = mutation.active_turn {
         current.active_turn = active_turn;
     }
+    if mutation.clear_turn_outcome {
+        current.last_turn_outcome = None;
+    }
     if let Some(last_turn_outcome) = mutation.last_turn_outcome {
         current.last_turn_outcome = Some(last_turn_outcome);
     }

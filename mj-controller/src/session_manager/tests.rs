@@ -810,6 +810,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                clear_context: false,
+                clear_context_started_at_ms: None,
                 native_agent_count: 0,
                 expected_continuation: None,
                 goal: Default::default(),
@@ -1250,16 +1252,61 @@ fn leased_relay_child_serves_stdio() {
         "1.0.0",
     )
     .expect("open the test relay journal");
-    if let Some(marker) = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER") {
+    {
+        let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
         let mut input = std::io::stdin().lock();
         let mut output = std::io::stdout().lock();
         while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
+            use mj_core::relay::{
+                RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
+            };
+            let history = match &request.request {
+                RelayRequest::HistoryRequests => {
+                    let path = PathBuf::from(&root).join("history-request.json");
+                    let requests = if path.exists() {
+                        vec![
+                            serde_json::from_slice::<mj_core::history::HistoryRequest>(
+                                &std::fs::read(path).unwrap(),
+                            )
+                            .unwrap(),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    Some(RelayResponsePayload::HistoryRequests { requests })
+                }
+                RelayRequest::CompleteHistoryRequest { result } => {
+                    std::fs::write(
+                        PathBuf::from(&root).join("history-result.json"),
+                        serde_json::to_vec(result).unwrap(),
+                    )
+                    .unwrap();
+                    std::fs::remove_file(PathBuf::from(&root).join("history-request.json"))
+                        .unwrap();
+                    Some(RelayResponsePayload::HistoryRequestCompleted)
+                }
+                _ => None,
+            };
+            if let Some(payload) = history {
+                mj_core::relay::write_relay_frame(
+                    &mut output,
+                    &RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok { payload },
+                    },
+                )
+                .unwrap();
+                continue;
+            }
             let response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
-                    if role.as_deref() == Some("slow") {
-                        std::fs::write(&marker, b"started").unwrap();
+                    if let Some(marker) = &marker
+                        && role.as_deref() == Some("slow")
+                    {
+                        std::fs::write(marker, b"started").unwrap();
                         std::io::copy(&mut input, &mut std::io::sink()).unwrap();
-                        std::fs::write(&marker, b"disconnected").unwrap();
+                        std::fs::write(marker, b"disconnected").unwrap();
                         return;
                     }
                     mj_core::relay::RelayResponseEnvelope {
@@ -1274,14 +1321,70 @@ fn leased_relay_child_serves_stdio() {
                 };
             mj_core::relay::write_relay_frame(&mut output, &response).unwrap();
         }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_history_poll_executes_real_index_queries_without_delegation() {
+    const CHILD: &str = "MJ_TEST_HISTORY_POLL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "worker_history_poll_executes_real_index_queries_without_delegation",
+        );
         return;
     }
-    mj_worker::relay::serve_relay_json_lines(
-        &mut std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
-        &mut relay,
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let (_directory, connection) = {
+        let _held = crate::sessionwiki::tags::testing::lock();
+        crate::sessionwiki::tags::testing::isolated_index()
+    };
+    crate::sessionwiki::tags::testing::index_row(&connection, "history-session", "mjolnir");
+    let text = "é🙂".repeat(30_000);
+    connection
+        .execute(
+            "INSERT INTO messages(session_id, role, text) VALUES ('history-session', 'user', ?1)",
+            [&text],
+        )
+        .unwrap();
+    let relay_root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        relay_root.path().join("history-request.json"),
+        serde_json::to_vec(&mj_core::history::HistoryRequest {
+            request_id: "read-history".into(),
+            blame: None,
+            query: mj_core::history::HistoryQuery::ReadSession {
+                session_id: "history-session".into(),
+                start: 0,
+                offset: 0,
+                role: None,
+                limit: 20,
+                max_chars: 64000,
+            },
+        })
+        .unwrap(),
     )
-    .expect("serve relay frames until the controller disconnects");
+    .unwrap();
+    let mut worker = StandaloneSession::connect(&leased_relay_target(relay_root.path()))
+        .await
+        .unwrap();
+    let result_path = relay_root.path().join("history-result.json");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !result_path.exists() {
+            worker.sync().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let result: mj_core::history::HistoryResult =
+        serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+    assert!(!result.is_error, "{:?}", result.value);
+    assert_eq!(result.value["data"]["messages"][0]["text"], text);
+    assert!(worker.subagent_requests.is_empty());
+    worker.detach().await.unwrap();
 }
 
 #[cfg(unix)]

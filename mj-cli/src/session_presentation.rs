@@ -183,6 +183,8 @@ mod tests {
         current_step_started_at_ms: Option<i64>,
     ) -> RelayOperationalState {
         RelayOperationalState {
+            clear_context: false,
+            clear_context_started_at_ms: None,
             native_agent_count: 0,
             expected_continuation: None,
             goal: Default::default(),

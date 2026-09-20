@@ -472,6 +472,21 @@ impl ChatState {
                     self.clear_input();
                     ChatAction::GoalControl { action }
                 }
+                LocalCommand::Clear => {
+                    if !self.clear_context_supported {
+                        self.set_notice("This worker does not support /clear; update the worker or start a new session");
+                        return ChatAction::None;
+                    }
+                    if !args.is_empty() {
+                        self.set_notice("usage: /clear");
+                        return ChatAction::None;
+                    }
+                    if self.phase != WorkerPhase::Idle || !self.queued_prompts.is_empty() {
+                        self.set_notice("/clear requires an idle session with no queued work");
+                        return ChatAction::None;
+                    }
+                    self.submit_prompt(prompt)
+                }
                 LocalCommand::Help => {
                     self.clear_input();
                     self.show_help();

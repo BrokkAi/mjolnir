@@ -14,8 +14,8 @@ mod session_config;
 pub(crate) mod verdict_client;
 use claude_tasks::*;
 use drive::*;
-pub use launch::LaunchSpec;
 use launch::*;
+pub use launch::{ContextReset, LaunchSpec};
 use permissions::*;
 use session::*;
 use session_config::*;
@@ -123,6 +123,9 @@ fn session_update_is_relay_visible(
 
 #[derive(Debug)]
 pub enum CommandRequest {
+    ClearContext {
+        request_id: String,
+    },
     PromptAttachments {
         request_id: String,
         prompt: Vec<ContentBlock>,
@@ -230,7 +233,17 @@ struct OpenedSession {
     native_session_used: Arc<AtomicBool>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SessionRestart {
+    Resume(String),
+    Clear {
+        reset: ContextReset,
+        previous: String,
+    },
+}
+
 struct BridgeRestart {
+    clear_context: Option<(ContextReset, String)>,
     resume_session: Option<String>,
     /// Carried into the next bridge's spec: what the dead bridge saw is the
     /// evidence for whether its thread may be replaced.
@@ -249,12 +262,13 @@ async fn run_inner(
     spec.environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     let mut rapid_deaths = 0_u32;
     let mut replacing_previous_bridge = false;
+    let mut rollback = None;
     loop {
         if shutdown.is_cancelled() {
             return Ok(());
         }
         let opened = Arc::new(Mutex::new(None));
-        match run_bridge(
+        let result = run_bridge(
             &spec,
             &mut requests,
             &events,
@@ -262,38 +276,77 @@ async fn run_inner(
             replacing_previous_bridge,
             &shutdown,
         )
-        .await?
-        {
-            None => return Ok(()),
-            Some(restart) => {
-                if restart.unexpected {
-                    if restart.session_age < RAPID_BRIDGE_WINDOW {
-                        rapid_deaths += 1;
-                        ensure!(
-                            rapid_deaths < RAPID_BRIDGE_RESTART_LIMIT,
-                            "ACP bridge exited repeatedly during startup; giving up"
-                        );
-                    } else {
-                        rapid_deaths = 0;
-                    }
-                }
-                emit_runtime_event(
-                    &events,
-                    RuntimeEvent::HarnessRestarting {
-                        message: restart.message.to_owned(),
-                    },
-                )
-                .await?;
-                spec.goal_recovery
-                    .lock()
-                    .expect("goal lock poisoned")
-                    .state
-                    .restart();
-                spec.resume_session = restart.resume_session;
-                spec.native_session_may_have_history |= restart.native_session_used;
+        .await;
+        let did_open = opened
+            .lock()
+            .expect("opened session lock poisoned")
+            .is_some();
+        if did_open {
+            spec.context_restore = None;
+        }
+        if did_open && spec.clear_context_request.is_some() {
+            spec.clear_context_request = None;
+            rollback = None;
+        }
+        let restart = match result {
+            Err(error) if spec.clear_context_request.is_some() => {
+                let reset = spec.clear_context_request.take().expect("pending clear");
+                let request_id = reset.request_id.clone();
+                spec.context_restore = Some(reset);
+                emit_runtime_event(&events, RuntimeEvent::CommandRejected {
+                    request_id, message: format!("Could not clear context; restoring the previous conversation: {error:#}"),
+                }).await?;
+                let (previous, used, goal) = rollback.take().expect("clear rollback identity");
+                spec.resume_session = Some(previous);
+                spec.native_session_may_have_history = used;
+                spec.goal_recovery = goal;
                 replacing_previous_bridge = true;
+                continue;
+            }
+            result => match result? {
+                None => return Ok(()),
+                Some(restart) => restart,
+            },
+        };
+        if let Some((request_id, previous)) = restart.clear_context {
+            rollback = Some((
+                previous,
+                spec.native_session_may_have_history || restart.native_session_used,
+                spec.goal_recovery.clone(),
+            ));
+            spec.goal_recovery = Arc::new(Mutex::new(Default::default()));
+            spec.clear_context_request = Some(request_id);
+            spec.resume_session = None;
+            spec.native_session_may_have_history = false;
+            replacing_previous_bridge = true;
+            continue;
+        }
+        if restart.unexpected {
+            if restart.session_age < RAPID_BRIDGE_WINDOW {
+                rapid_deaths += 1;
+                ensure!(
+                    rapid_deaths < RAPID_BRIDGE_RESTART_LIMIT,
+                    "ACP bridge exited repeatedly during startup; giving up"
+                );
+            } else {
+                rapid_deaths = 0;
             }
         }
+        emit_runtime_event(
+            &events,
+            RuntimeEvent::HarnessRestarting {
+                message: restart.message.to_owned(),
+            },
+        )
+        .await?;
+        spec.goal_recovery
+            .lock()
+            .expect("goal lock poisoned")
+            .state
+            .restart();
+        spec.resume_session = restart.resume_session;
+        spec.native_session_may_have_history |= restart.native_session_used;
+        replacing_previous_bridge = true;
     }
 }
 
@@ -382,19 +435,29 @@ async fn run_bridge(
     // to kill the child, so a non-zero exit is the expected outcome.
     if !child_reaped {
         if restarting {
-            if let Err(error) = child.kill().await {
-                tracing::warn!(
-                    operation = "acp_bridge_restart",
-                    %error,
-                    "could not kill ACP bridge during planned restart"
-                );
-            }
-            if let Err(error) = child.wait().await {
-                tracing::warn!(
-                    operation = "acp_bridge_restart",
-                    %error,
-                    "could not reap ACP bridge during planned restart"
-                );
+            let exited = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(_)) => true,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "wait for retiring ACP supervisor");
+                    false
+                }
+                Err(_) => false,
+            };
+            if !exited {
+                if let Err(error) = child.kill().await {
+                    tracing::warn!(
+                        operation = "acp_bridge_restart",
+                        %error,
+                        "could not kill ACP bridge during planned restart"
+                    );
+                }
+                if let Err(error) = child.wait().await {
+                    tracing::warn!(
+                        operation = "acp_bridge_restart",
+                        %error,
+                        "could not reap ACP bridge during planned restart"
+                    );
+                }
             }
         } else {
             let cleanup =
@@ -445,7 +508,18 @@ async fn run_bridge(
     }
     match result {
         Ok(None) => Ok(None),
-        Ok(Some(native_session_id)) => Ok(Some(BridgeRestart {
+        Ok(Some(SessionRestart::Clear { reset, previous })) => Ok(Some(BridgeRestart {
+            clear_context: Some((reset, previous)),
+            resume_session: None,
+            native_session_used: opened_now
+                .as_ref()
+                .is_some_and(|opened| opened.native_session_used.load(Ordering::Acquire)),
+            unexpected: false,
+            session_age: Duration::ZERO,
+            message: "Clearing context",
+        })),
+        Ok(Some(SessionRestart::Resume(native_session_id))) => Ok(Some(BridgeRestart {
+            clear_context: None,
             resume_session: Some(native_session_id),
             native_session_used: opened_now
                 .as_ref()
@@ -459,6 +533,7 @@ async fn run_bridge(
         Err(error) => match opened_now {
             None => Err(error),
             Some(opened) => Ok(Some(BridgeRestart {
+                clear_context: None,
                 resume_session: opened
                     .resume_required
                     .load(Ordering::Acquire)
@@ -575,7 +650,7 @@ fn relay_event_channel_error() -> agent_client_protocol::Error {
     ))
 }
 
-fn merge_drive_error(result: &mut Result<Option<String>>, additional: anyhow::Error) {
+fn merge_drive_error(result: &mut Result<Option<SessionRestart>>, additional: anyhow::Error) {
     let previous = std::mem::replace(result, Ok(None));
     *result = match previous {
         Ok(_) => Err(additional),

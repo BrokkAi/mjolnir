@@ -8,6 +8,8 @@ pub struct StandaloneSession {
     pub(super) project_memory: Option<ProjectMemorySyncTarget>,
     pub(super) subagent_requests: Vec<mj_core::subagent::SubagentToolRequest>,
     pub(super) subagent_results: Vec<mj_core::subagent::SubagentToolResult>,
+    history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
+    history_active: std::collections::BTreeSet<String>,
 }
 
 impl StandaloneSession {
@@ -30,6 +32,8 @@ impl StandaloneSession {
             project_memory: target.project_memory.clone(),
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
+            history_jobs: tokio::task::JoinSet::new(),
+            history_active: Default::default(),
         };
         connection.sync_in_place().await?;
         Ok(connection)
@@ -62,6 +66,7 @@ impl StandaloneSession {
     }
 
     pub(super) async fn sync_in_place(&mut self) -> Result<bool> {
+        self.sync_history().await?;
         let original_ordinal = self.materialized.applied_event_ordinal;
         let original_digest = self.materialized.applied_event_digest.clone();
         let original_operational = self.operational.clone();
@@ -119,6 +124,41 @@ impl StandaloneSession {
             || self.subagent_requests != previous_requests
             || self.subagent_results != previous_results;
         Ok(changed)
+    }
+
+    /// Poll only bounded messages here. Disk searches run independently of this
+    /// actor, and the owned JoinSet cancels them when the connection is retired.
+    async fn sync_history(&mut self) -> Result<()> {
+        while let Some(completed) = self.history_jobs.try_join_next() {
+            match completed {
+                Ok(result) => {
+                    self.history_active.remove(&result.request_id);
+                    self.client.complete_history_request(result).await?;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "history task failed; pending requests will retry");
+                    self.history_jobs.abort_all();
+                    while let Some(result) = self.history_jobs.join_next().await {
+                        if let Err(error) = result
+                            && !error.is_cancelled()
+                        {
+                            tracing::error!(%error, "history task failed during cleanup");
+                        }
+                    }
+                    self.history_active.clear();
+                }
+            }
+        }
+        for request in self.client.history_requests().await? {
+            if self.history_active.len() >= mj_core::history::MAX_PENDING {
+                break;
+            }
+            if self.history_active.insert(request.request_id.clone()) {
+                self.history_jobs
+                    .spawn(crate::sessionwiki::history::execute(request));
+            }
+        }
+        Ok(())
     }
 
     /// Apply relay pages through the exact frontier captured by the first

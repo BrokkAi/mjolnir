@@ -97,6 +97,9 @@ fn is_served_relay_method(method: &str) -> bool {
             | "install_credentials"
             | "skills_state"
             | "install_skills"
+            | "history_query"
+            | "history_requests"
+            | "complete_history_request"
             | "compact"
             | "respond_elicitation"
     )

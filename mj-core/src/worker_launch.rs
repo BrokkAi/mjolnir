@@ -186,6 +186,9 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectMemoryLaunchConfig {
+    /// Private worker control socket for controller-backed history tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_socket: Option<PathBuf>,
     /// Stable controller-derived identity for this repository or bundle.
     pub project_key: String,
     /// Target-side replica used by native Claude and the MCP server.

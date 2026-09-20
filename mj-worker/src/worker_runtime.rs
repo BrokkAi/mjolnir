@@ -228,6 +228,8 @@ pub async fn discover_profile_config(
 }
 
 #[cfg(unix)]
+mod history;
+#[cfg(unix)]
 pub(crate) mod reviewer;
 #[cfg(unix)]
 pub(crate) mod subagents;
@@ -296,6 +298,11 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
         config.harness_home = base.join(&config.harness_home);
     }
     if let Some(memory) = config.project_memory.as_mut() {
+        if let Some(socket) = memory.history_socket.as_mut()
+            && socket.is_relative()
+        {
+            *socket = base.join(&*socket);
+        }
         if memory.root.is_relative() {
             memory.root = base.join(&memory.root);
         }

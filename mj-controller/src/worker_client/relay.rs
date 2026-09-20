@@ -1,6 +1,29 @@
 use super::*;
 
 impl RelayClient {
+    pub async fn history_requests(&mut self) -> Result<Vec<mj_core::history::HistoryRequest>> {
+        if !RelayRequest::HistoryRequests.supported_at(self.protocol_version) {
+            return Ok(Vec::new());
+        }
+        match self.call(RelayRequest::HistoryRequests).await? {
+            RelayResponsePayload::HistoryRequests { requests } => Ok(requests),
+            _ => bail!("relay returned an unexpected history queue response"),
+        }
+    }
+
+    pub async fn complete_history_request(
+        &mut self,
+        result: mj_core::history::HistoryResult,
+    ) -> Result<()> {
+        match self
+            .call(RelayRequest::CompleteHistoryRequest { result })
+            .await?
+        {
+            RelayResponsePayload::HistoryRequestCompleted => Ok(()),
+            _ => bail!("relay returned an unexpected history completion response"),
+        }
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }

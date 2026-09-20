@@ -709,7 +709,11 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: expected_schema_version(&descriptors),
+        schema_version: if input.canonical_session.current_context_start() > 0 {
+            ARCHIVE_SCHEMA_VERSION_CONTEXT
+        } else {
+            expected_schema_version(&descriptors)
+        },
         format: ARCHIVE_FORMAT.to_string(),
         session: (*input.session).clone(),
         target: (*input.target).clone(),
@@ -1277,7 +1281,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
     ensure!(
         header.schema_version == ARCHIVE_SCHEMA_VERSION
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_SHARDED
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_ATTACHMENTS
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1304,7 +1309,8 @@ fn expected_schema_version(payloads: &[PayloadDescriptor]) -> u32 {
 fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
     let expected_schema = expected_schema_version(&manifest.payloads);
     ensure!(
-        manifest.schema_version == expected_schema,
+        manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         manifest.schema_version,
         expected_schema

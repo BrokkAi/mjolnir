@@ -147,7 +147,7 @@ pub fn read(
 /// take the same turn, so the guard lives here and the tests of this module and
 /// of its parent share it.
 #[cfg(test)]
-pub(super) mod testing {
+pub(crate) mod testing {
     /// Held for as long as a test relies on `SESSIONWIKI_DATA`.
     pub(crate) static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

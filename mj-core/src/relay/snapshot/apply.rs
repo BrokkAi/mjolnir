@@ -146,6 +146,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     },
                 );
             }
+            if matches!(command, RelayCommand::ClearContext) {
+                snapshot.activity_turn_started_at_ms = Some(*created_at_ms);
+                snapshot.execution = RelayExecutionState::Running;
+            }
             if matches!(command, RelayCommand::Close { .. }) {
                 snapshot.execution = RelayExecutionState::Closing;
             }
@@ -447,6 +451,36 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.recovery_floor_ordinal = through.ordinal;
                     snapshot.recovery_floor_digest = through.digest;
                 }
+                (
+                    RelayCommand::ClearContext,
+                    RelayCommandOutcome::ContextCleared {
+                        native_session_id,
+                        memory,
+                    },
+                ) => {
+                    snapshot.native_session_id = Some(native_session_id.clone());
+                    snapshot.native_session_opened_ordinal = Some(event.ordinal);
+                    snapshot.native_session_used = false;
+                    snapshot.native_continuity_lost = false;
+                    snapshot.pending_prompt_context = memory
+                        .as_ref()
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| PendingPromptContext {
+                            text: text.clone(),
+                            attached_command_id: None,
+                        });
+                    snapshot.pending_user_shell_contexts.clear();
+                    snapshot.activity_turn_started_at_ms = None;
+                    snapshot.harness_turn = None;
+                    snapshot.capacity_retry = None;
+                    snapshot.native_agents.clear();
+                    snapshot.goal = crate::goal::GoalState {
+                        capability: snapshot.goal.capability.clone(),
+                        known: true,
+                        ..Default::default()
+                    };
+                    snapshot.execution = RelayExecutionState::Idle;
+                }
                 (RelayCommand::RecordNotice { .. }, RelayCommandOutcome::NoticeRecorded) => {}
                 (RelayCommand::BeginCheckpoint { .. }, _) => {
                     bail!("checkpoint barriers complete through checkpoint-ready")
@@ -563,6 +597,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.checkpoint_barrier = None;
                 snapshot.checkpoint_ready_through = None;
                 snapshot.checkpoint_ready_digest = None;
+            }
+            if matches!(command, RelayCommand::ClearContext) {
+                snapshot.activity_turn_started_at_ms = None;
+                snapshot.execution = RelayExecutionState::Idle;
             }
             if matches!(command, RelayCommand::Close { .. })
                 && snapshot.execution == RelayExecutionState::Closing

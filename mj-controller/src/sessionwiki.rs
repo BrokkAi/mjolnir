@@ -10,6 +10,8 @@
 //! this adapter to parse the ones whose checkpoint changed.
 
 mod harness_adapters;
+pub(crate) mod history;
+mod provenance;
 pub mod tags;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -176,7 +178,7 @@ impl MjolnirAdapter {
 
     /// The conversation of a stopped session, read from its newest checkpoint,
     /// with the title the checkpoint recorded.
-    fn checkpointed_transcript(&self, session_id: &str) -> Result<(Vec<Message>, Option<String>)> {
+    fn checkpointed_transcript(&self, session_id: &str) -> Result<IndexedTranscript> {
         let (newest, _) = self.newest_archives();
         let archive = newest
             .get(session_id)
@@ -185,6 +187,7 @@ impl MjolnirAdapter {
             .with_context(|| format!("read checkpoint {}", archive.path.display()))?
             .canonical_session()
             .with_context(|| format!("read the transcript of session {session_id}"))?;
+        let mut evidence = provenance::Evidence::default();
         let messages = snapshot
             .transcript
             .iter()
@@ -199,6 +202,7 @@ impl MjolnirAdapter {
                         mj_core::transcript::materialized_chunks_text(chunks),
                     ),
                     mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => {
+                        evidence.observe(call, item.created_at_ms);
                         (Role::Tool, tool_call_title(call))
                     }
                     _ => return None,
@@ -206,20 +210,31 @@ impl MjolnirAdapter {
                 message(role, text, item.created_at_ms)
             })
             .collect();
-        Ok((messages, snapshot.session.session_title.clone()))
+        Ok(IndexedTranscript {
+            messages,
+            title: snapshot.session.session_title.clone(),
+            evidence,
+        })
     }
 
     /// The conversation of a session that has not stopped, read from the
     /// daemon's own projection. It is the same conversation the checkpoint
     /// would hold, minus whatever has not happened yet.
-    fn projected_transcript(&self, session_id: &str) -> Result<(Vec<Message>, Option<String>)> {
+    fn projected_transcript(&self, session_id: &str) -> Result<IndexedTranscript> {
         let projection = crate::database::load_materialized_session(session_id)
             .with_context(|| format!("read the stored transcript of session {session_id}"))?
             .with_context(|| format!("no stored transcript for session {session_id}"))?;
-        Ok((
-            projected_messages(&projection),
-            projection.session_title.clone(),
-        ))
+        let mut evidence = provenance::Evidence::default();
+        for item in &projection.transcript {
+            if let mj_core::state::TranscriptBody::Tool { call, .. } = &item.body {
+                evidence.observe(call, item.created_at_ms);
+            }
+        }
+        Ok(IndexedTranscript {
+            messages: projected_messages(&projection),
+            title: projection.session_title.clone(),
+            evidence,
+        })
     }
 
     /// The stable key for one session: its checkpoint directory and id. The
@@ -280,6 +295,12 @@ impl MjolnirAdapter {
         }
         (newest, had_error)
     }
+}
+
+struct IndexedTranscript {
+    messages: Vec<Message>,
+    title: Option<String>,
+    evidence: provenance::Evidence,
 }
 
 /// The session a checkpoint file name belongs to, with its generation.
@@ -428,7 +449,11 @@ impl Adapter for MjolnirAdapter {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (messages, snapshot_title) = if sessions.live.contains_key(session_id) {
+        let IndexedTranscript {
+            messages,
+            title: snapshot_title,
+            evidence,
+        } = if sessions.live.contains_key(session_id) {
             self.projected_transcript(session_id)?
         } else {
             self.checkpointed_transcript(session_id)?
@@ -460,8 +485,8 @@ impl Adapter for MjolnirAdapter {
             title,
             subagent: sessions.subagent_ids.contains(session_id),
             messages,
-            touched: Vec::new(),
-            edits: Vec::new(),
+            touched: evidence.paths.into_iter().collect(),
+            edits: evidence.edits,
         })
     }
 }
@@ -661,6 +686,7 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
         .context("sync the SessionWiki index")?;
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
+    provenance::backfill(&mut connection, &mjolnir).context("backfill Mjolnir file provenance")?;
     if since.is_none() {
         // A full pass has walked every store, so the index is complete enough
         // for a search to be trusted. The marker is what a later daemon reads
@@ -1734,8 +1760,10 @@ mod tests {
                             CanonicalTranscriptBody::Tool {
                                 call: serde_json::json!({
                                     "toolCallId": "call-1",
-                                    "title": "Read config.toml",
-                                    "status": "completed"
+                                    "title": "Edit config.toml",
+                                    "kind": "edit",
+                                    "status": "completed",
+                                    "locations": [{"path": "/old/container/config.toml"}]
                                 }),
                                 terminal_outputs: Vec::new(),
                                 terminal_refs: Vec::new(),
@@ -1870,9 +1898,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (Role::User, "index this session"),
-                (Role::Tool, "Read config.toml"),
+                (Role::Tool, "Edit config.toml"),
                 (Role::Assistant, "done"),
             ]
+        );
+        assert_eq!(session.touched, vec!["/old/container/config.toml"]);
+    }
+
+    #[test]
+    fn provenance_backfill_repairs_an_unchanged_checkpoint_without_rebuilding_the_index() {
+        let _held = tags::testing::lock();
+        let (_index_dir, mut connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        write_archive(directory.path(), "old-session", 4);
+        let source = adapter(directory.path(), "old-session");
+        let key = source.key_for("old-session");
+        tags::testing::index_row(&connection, "old-session", "mjolnir");
+        connection
+            .execute(
+                "UPDATE files SET path = ?1 WHERE session_id = 'old-session'",
+                [&key],
+            )
+            .unwrap();
+        provenance::backfill(&mut connection, &source).unwrap();
+        assert_eq!(
+            sessionwiki::index::files_for(&connection, "old-session").unwrap(),
+            vec!["/old/container/config.toml"]
+        );
+        provenance::backfill(&mut connection, &source).unwrap();
+        assert_eq!(
+            sessionwiki::index::sessions_for_file(&connection, "config.toml", 20)
+                .unwrap()
+                .len(),
+            1
         );
     }
 

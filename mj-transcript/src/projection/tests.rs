@@ -2407,3 +2407,60 @@ fn streamed_text_for_one_message_id_becomes_a_single_chunk() {
         "here is the answer"
     );
 }
+
+#[test]
+fn clear_preserves_history_and_adds_one_durable_context_boundary() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::Warning {
+            message: "earlier history".into(),
+        },
+    );
+    let previous = session.transcript[0].clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "clear-request".into(),
+            command: RelayCommand::ClearContext,
+            created_at_ms: 200,
+        },
+    );
+    assert!(matches!(
+        session.execution,
+        MaterializedExecutionState::Running { .. }
+    ));
+    let complete = event(
+        &session,
+        RelayObservation::CommandCompleted {
+            command_id: "clear-request".into(),
+            outcome: RelayCommandOutcome::ContextCleared {
+                native_session_id: "new".into(),
+                memory: None,
+            },
+        },
+    );
+    apply(&mut session, complete.clone());
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert_eq!(session.transcript[0], previous);
+    assert_eq!(
+        session
+            .transcript
+            .iter()
+            .filter(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+            .count(),
+        1
+    );
+    assert!(session.last_turn_outcome.is_none());
+    // The projection refuses duplicate ordinals; command retry deduplication
+    // happens in the durable relay before a second event can be emitted.
+    assert!(project_relay_event(&session, &complete).is_err());
+    assert_eq!(
+        session
+            .transcript
+            .iter()
+            .filter(|item| mj_core::archive::is_context_boundary(&item.stable_id))
+            .count(),
+        1
+    );
+}

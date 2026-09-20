@@ -40,6 +40,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     .write_spec(&supervisor)?;
     let launch = LaunchSpec {
         subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
         goal_recovery: Default::default(),
         command: std::env::current_exe()?,
         args: vec![
@@ -280,6 +282,8 @@ for line in sys.stdin:
         let launch = LaunchSpec {
             bridge_spec_path: None,
             subagent_mcp_socket: None,
+            clear_context_request: None,
+            context_restore: None,
             goal_recovery: Default::default(),
             command: "python3".into(),
             args: vec![script.to_string_lossy().into_owned()],
