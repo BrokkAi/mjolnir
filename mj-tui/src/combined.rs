@@ -355,7 +355,11 @@ pub(crate) fn render_combined_for_test(
     )
 }
 
-fn render_combined_with_theme(
+/// Draws the combined surface with a theme already selected by the caller.
+///
+/// This is useful for deterministic captures and tests. Interactive callers
+/// should use [`render_combined`] so `NO_COLOR` can override configuration.
+pub fn render_combined_with_theme(
     frame: &mut Frame,
     dashboard: &mut DashboardState,
     chats: &mut BTreeMap<String, ActiveChat>,

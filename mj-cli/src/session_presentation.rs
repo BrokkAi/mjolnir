@@ -102,7 +102,9 @@ mod tests {
     use mj_controller::session_manager::ManagedSessionView;
     use mj_controller::targets::ProvisionStage;
     use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
-    use mj_tui::{DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined};
+    use mj_tui::{
+        DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined_with_theme,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -264,12 +266,13 @@ mod tests {
         dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
         terminal
             .draw(|frame| {
-                render_combined(
+                render_combined_with_theme(
                     frame,
                     dashboard,
                     &mut BTreeMap::new(),
                     &BTreeMap::new(),
                     false,
+                    mj_core::config::UiTheme::Midnight,
                 );
             })
             .expect("render dashboard");
