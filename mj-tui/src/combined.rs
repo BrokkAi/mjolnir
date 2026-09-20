@@ -324,7 +324,6 @@ pub fn render_combined(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
     // NO_COLOR wins over the configured theme; the symbol set follows the
     // configuration or, unset, the terminal.
     let theme = theme::effective_theme(dashboard.config.theme);
@@ -364,6 +363,7 @@ fn render_combined_with_theme(
     transcript_selected: bool,
     selected_theme: theme::UiTheme,
 ) -> Vec<String> {
+    dashboard.drawn_failures.clear();
     let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
