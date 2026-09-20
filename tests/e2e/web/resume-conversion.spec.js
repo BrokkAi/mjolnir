@@ -24,10 +24,10 @@ function preview(overrides = {}) {
 
 function session(overrides = {}) {
   return {
-    id: 'stopped',
+    id: 'suspended',
     title: 'Local checkout',
-    state: 'stopped',
-    lifecycle: 'stopped',
+    state: 'suspended',
+    lifecycle: 'suspended',
     workspace_id: 'test',
     profile_id: 'alpha',
     target_id: 'local',
@@ -93,7 +93,7 @@ async function mount(page, { answer = { kind: 'converting-raw-checkout', preview
     }
     return route.fulfill({ status: 404, body: '' });
   });
-  await page.goto('https://viewer.test/#workspace/test/resume/stopped');
+  await page.goto('https://viewer.test/#workspace/test/resume/suspended');
   await expect(page.locator('#resume-detail-view')).toBeVisible();
   return state;
 }
@@ -113,7 +113,7 @@ test('a container destination warns what travels and holds Resume until it is ac
 
   await chooseContainer(page);
   await expect.poll(() => state.preflights.length).toBe(1);
-  expect(state.preflights[0]).toEqual({ session_id: 'stopped', target_id: 'container' });
+  expect(state.preflights[0]).toEqual({ session_id: 'suspended', target_id: 'container' });
 
   await expect(detail(page)).toContainText(
     'Clone https://github.com/example/repo.git (default branch main) into /workspace/stopped/repo on branch mj/session; push to https://github.com/example/repo.git.',

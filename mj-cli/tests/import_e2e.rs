@@ -210,7 +210,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         },
     )
     .await?;
-    controller.close_session(session_id).await?;
+    controller.suspend_session(session_id).await?;
     let final_state = mj_controller::database::load_state()?;
     let checkpoint = final_state.sessions[session_id]
         .checkpoint
@@ -339,7 +339,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.close_session(session_id).await?;
+    controller.suspend_session(session_id).await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
@@ -470,7 +470,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.close_session(session_id).await?;
+    controller.suspend_session(session_id).await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]
@@ -708,7 +708,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         },
     )
     .await?;
-    controller.close_session(session_id).await?;
+    controller.suspend_session(session_id).await?;
     let final_state = mj_controller::database::load_state()?;
     read_archive_verified(
         &final_state.sessions[session_id]

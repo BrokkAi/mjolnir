@@ -574,6 +574,15 @@ pub(super) fn worker_launch_config(
             "MBX_CACHE_DIR".into(),
             build_cache.directory.to_string_lossy().into_owned(),
         );
+        // Compiler symlinks name this worker's private executable. Sharing
+        // them lets another container replace them with an unreachable path.
+        target_environment.insert(
+            "MBX_SHIMS_DIR".into(),
+            Path::new(&targets::worker_root(backend, session_id)?)
+                .join("mbx-shims")
+                .to_string_lossy()
+                .into_owned(),
+        );
         if let Some(max_size) = &build_cache.max_size {
             target_environment.insert("MBX_GC_MAX_TOTAL_SIZE".into(), max_size.clone());
         }

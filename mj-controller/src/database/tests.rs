@@ -3211,6 +3211,8 @@ fn workspace_layout_row_count(path: &Path, workspace_id: &str) -> i64 {
 fn split_layout(first_session: &str, second_session: &str) -> ConversationLayout {
     use mj_core::workspace::{LayoutNode, SplitAxis};
     ConversationLayout {
+        browse: None,
+        pins: Default::default(),
         root: LayoutNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.6,
@@ -3248,7 +3250,9 @@ fn workspace_layout_round_trips_after_reopening_the_database() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
-    let layout = split_layout("session-1", "session-2");
+    let mut layout = split_layout("session-1", "session-2");
+    layout.browse = Some(2);
+    layout.pins.insert("session-1".into(), 5);
 
     save_workspace_layout_to(&database, &workspace.id, &layout).unwrap();
     drop(open(&database).unwrap());
@@ -3268,6 +3272,8 @@ fn workspace_layouts_are_isolated_between_workspaces() {
     let second = create_workspace_at(&database, "Second").unwrap();
     let first_layout = split_layout("session-1", "session-2");
     let second_layout = ConversationLayout {
+        browse: None,
+        pins: Default::default(),
         focus: 1,
         sessions: BTreeMap::from([(1, "session-3".to_owned())]),
         ..ConversationLayout::default()

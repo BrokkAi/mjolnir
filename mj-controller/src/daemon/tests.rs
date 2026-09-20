@@ -44,19 +44,19 @@ fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
 #[test]
 fn graceful_close_retires_worker_polling_only_during_target_teardown() {
     assert!(!lifecycle_owns_worker_target(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Running)
     ));
     assert!(!lifecycle_owns_worker_target(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Checkpointing)
     ));
     assert!(!lifecycle_owns_worker_target(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Closing)
     ));
     assert!(lifecycle_owns_worker_target(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Destroying)
     ));
     assert!(lifecycle_owns_worker_target(
@@ -72,20 +72,20 @@ fn graceful_close_retires_worker_polling_only_during_target_teardown() {
 #[test]
 fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
     assert!(lifecycle_cancellable(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Running)
     ));
     assert!(lifecycle_cancellable(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Checkpointing)
     ));
     assert!(lifecycle_cancellable(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Closing)
     ));
-    assert!(lifecycle_cancellable(LifecycleKind::Close, None));
+    assert!(lifecycle_cancellable(LifecycleKind::Suspend, None));
     assert!(!lifecycle_cancellable(
-        LifecycleKind::Close,
+        LifecycleKind::Suspend,
         Some(SessionState::Destroying)
     ));
     // Only a graceful close has this gate; a forced teardown keeps none.
@@ -1460,7 +1460,7 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let release = Arc::new(tokio::sync::Notify::new());
     let first = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Close, {
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let starts = starts.clone();
             let release = release.clone();
             move |_state, _session_id, _cancelled| async move {
@@ -1474,7 +1474,7 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     let second = state
         .start_or_join_lifecycle(
             "session-1".into(),
-            LifecycleKind::Close,
+            LifecycleKind::Suspend,
             |_state, _session_id, _cancelled| async move {
                 panic!("joined lifecycle request started duplicate work")
             },
@@ -1506,7 +1506,7 @@ async fn close_keeps_worker_target_available_for_checkpoint_lease() {
     let state = test_runtime_state();
     let release = Arc::new(tokio::sync::Notify::new());
     let result = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Close, {
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let release = release.clone();
             move |_state, _session_id, _cancelled| async move {
                 release.notified().await;
@@ -1799,7 +1799,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
         ActiveLifecycle {
             operation_id: "closing-operation".into(),
             create_control: None,
-            kind: LifecycleKind::Close,
+            kind: LifecycleKind::Suspend,
             cancelled: Arc::new(AtomicBool::new(false)),
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
@@ -1846,7 +1846,7 @@ async fn session_projection_reads_lifecycles_without_relocking_the_controller() 
     let state = test_runtime_state();
     let release = Arc::new(tokio::sync::Notify::new());
     let running = state
-        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Close, {
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Suspend, {
             let release = release.clone();
             move |_, _, _| async move {
                 release.notified().await;
@@ -2010,7 +2010,7 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
         .insert(session.id.clone(), session.clone());
     let release = Arc::new(tokio::sync::Notify::new());
     let result = state
-        .start_or_join_lifecycle("destroying".into(), LifecycleKind::Close, {
+        .start_or_join_lifecycle("destroying".into(), LifecycleKind::Suspend, {
             let release = release.clone();
             move |_state, _session_id, _cancelled| async move {
                 release.notified().await;
@@ -2976,4 +2976,103 @@ async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
     assert_eq!(response.request_id, 8);
     assert!(matches!(response.result, Ok(DaemonReply::Pong)));
     sender.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn suspension_intent_survives_restart_and_missing_worker_reports_failure() {
+    const NAME: &str = "suspension_intent_survives_restart_and_missing_worker_reports_failure";
+    const CHILD: &str = "MJ_TEST_SUSPENSION_RESTART_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Suspend restart").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut session = runtime_test_session("restart-suspend", &workspace.id, SessionState::Running);
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(&session.id),
+    });
+    session.last_error = Some("old connection failure".into());
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+    state.prepare_suspension(&session.id).await.unwrap();
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(stored.sessions[&session.id].state, SessionState::Closing);
+    assert!(interrupted_suspend_session_ids(&Controller::load().unwrap()).contains(&session.id));
+    // A new runtime has no in-memory requests from the earlier daemon.
+    let restarted = test_runtime_state_loading_the_store();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(15),
+        restarted.suspend_session(session.id.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(failure.is_err());
+    let restored = crate::database::load_state().unwrap();
+    let retained = &restored.sessions[&session.id];
+    assert_eq!(retained.target, session.target);
+    assert!(
+        retained
+            .public_error()
+            .unwrap()
+            .starts_with(mj_core::state::CLOSE_FAILURE_PREFIX)
+    );
+    assert!(!restarted.close_is_requested(&session.id));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_child_suspension_reports_the_child_on_the_retained_parent() {
+    const NAME: &str = "failed_child_suspension_reports_the_child_on_the_retained_parent";
+    const CHILD: &str = "MJ_TEST_SUSPENSION_CHILD_FAILURE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Parent suspension").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut parent = runtime_test_session("parent-suspend", &workspace.id, SessionState::Running);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(&parent.id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let mut child = runtime_test_session("child-suspend", &workspace.id, SessionState::Running);
+    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(&child.id),
+    });
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(&child.id, &parent.id))
+        .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            state.suspend_session(parent.id.clone())
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    let restored = crate::database::load_state().unwrap();
+    assert_eq!(restored.sessions[&parent.id].target, parent.target);
+    assert!(
+        restored.sessions[&parent.id]
+            .public_error()
+            .unwrap()
+            .contains(&child.id)
+    );
 }

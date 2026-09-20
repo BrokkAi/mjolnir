@@ -222,7 +222,7 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if ((await session.count()) === 0) break;
       await session.locator('[data-session-menu]').click();
-      const stop = session.getByRole('menuitem', { name: 'Stop session', exact: true });
+      const stop = session.getByRole('menuitem', { name: 'Suspend session', exact: true });
       if ((await stop.count()) === 0) {
         await page.waitForTimeout(1000);
         continue;

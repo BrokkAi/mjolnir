@@ -118,11 +118,26 @@ pub(crate) fn attention_level(
 }
 
 impl DashboardState {
+    pub(crate) fn command_session_id(&self) -> Option<&str> {
+        self.command_session_override.as_deref().or_else(|| {
+            if self.focus == Focus::Prompt {
+                self.current_session_id()
+            } else {
+                self.selected_session_id()
+            }
+        })
+    }
+
+    pub(crate) fn command_session(&self) -> Option<&SessionRecord> {
+        self.state.sessions.get(self.command_session_id()?)
+    }
+
     pub(crate) fn selected_session(&self) -> Option<&SessionRecord> {
-        let selected = self.selected_session_id.as_deref()?;
-        self.ordered_sessions()
-            .into_iter()
-            .find(|session| session.id == selected)
+        self.state.sessions.get(
+            self.command_session_override
+                .as_deref()
+                .or(self.selected_session_id())?,
+        )
     }
 
     /// The live sessions the Sessions pane is showing, as indices into
@@ -734,6 +749,7 @@ impl DashboardState {
                 });
             view.selected_session_id = Some(session_id.to_owned());
             view.focus = Focus::Prompt;
+            self.navigation_session = Some(session_id.to_owned());
             return DashboardAction::SelectWorkspace {
                 workspace_id: workspace_id.to_owned(),
             };
@@ -921,7 +937,7 @@ impl DashboardState {
 
     /// The selected session, if its target template creates a container.
     pub(crate) fn selected_container_session(&self) -> Option<&SessionRecord> {
-        let session = self.selected_session()?;
+        let session = self.command_session()?;
         matches!(
             self.config.targets.get(&session.target_template_id)?,
             HelTargetTemplate::LocalPodman { .. }

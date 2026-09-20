@@ -639,7 +639,7 @@ fn closing_workspace_confirms_counts_and_supports_cancellation_while_busy() {
     workspace.workspace.session_count = 2;
     dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
     let rendered = draw_manager(&dashboard).join("\n");
-    assert!(rendered.contains("Stop 2 session(s)"), "{rendered}");
+    assert!(rendered.contains("Suspend 2 session(s)"), "{rendered}");
     assert!(rendered.contains("Resumable histories"));
     assert!(rendered.contains("Discard 0 saved draft(s)"));
     assert_eq!(

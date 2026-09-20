@@ -22,11 +22,22 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             ..
         } => &["Keep importing", "Cancel import"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
-        Confirmation::DestroyStopped { .. } => &["No", "Yes", "Yes, delete branch"],
-        Confirmation::CloseFailed { .. } => &["Cancel", "Force stop", "Retry stop"],
-        Confirmation::StopWithSubagents { .. } => &["Cancel", "Stop children and parent"],
-        Confirmation::CloseSession { .. } => &["Cancel", "Close session"],
-        Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Stop now"],
+        Confirmation::DestroyStopped { .. } => {
+            &["Cancel", "Destroy session", "Destroy and delete branch"]
+        }
+        Confirmation::CloseFailed {
+            can_discard: false, ..
+        } => &["Cancel", "Retry suspension"],
+        Confirmation::CloseFailed {
+            can_discard: true, ..
+        } => &[
+            "Cancel",
+            "Discard changes since checkpoint…",
+            "Retry suspension",
+        ],
+        Confirmation::DiscardSinceCheckpoint { .. } => &["Cancel", "Discard changes"],
+        Confirmation::SuspendSession { .. } => &["Cancel", "Suspend session"],
+        Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
@@ -43,7 +54,9 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             "Retry move",
             "Resume previous settings",
         ],
-        Confirmation::ForceDestroy { .. } => &["No", "Yes", "Yes, delete branch"],
+        Confirmation::ForceDestroy { .. } => {
+            &["Cancel", "Destroy session", "Destroy and delete branch"]
+        }
     }
 }
 
@@ -110,8 +123,8 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::ForceDestroy { .. }
             | Confirmation::DestroyStopped { .. }
             | Confirmation::CloseFailed { .. }
-            | Confirmation::StopWithSubagents { .. }
-            | Confirmation::CloseSession { .. }
+            | Confirmation::DiscardSinceCheckpoint { .. }
+            | Confirmation::SuspendSession { .. }
             | Confirmation::InterruptWork { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::ConvertRawCheckout { .. }
@@ -1167,7 +1180,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             (" Move this checkout into the target? ", lines)
         }
         Confirmation::DestroyStopped { session_id, .. } => (
-            " Permanently destroy stopped session? ",
+            " Destroy suspended session? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
                 Line::raw(""),
@@ -1180,13 +1193,15 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 ),
             ],
         ),
-        Confirmation::CloseFailed { session_id, error } => (
-            " Stop could not complete ",
+        Confirmation::CloseFailed {
+            session_id, error, ..
+        } => (
+            " Suspension could not complete ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
                 Line::raw(""),
                 Line::styled(
-                    format!("Stop failed: {error}"),
+                    format!("Suspension failed: {error}"),
                     Style::default().fg(theme::palette().warning),
                 ),
             ],
@@ -1198,7 +1213,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             if *restart {
                 " Restart while working? "
             } else {
-                " Stop while working? "
+                " Suspend while working? "
             },
             vec![
                 Line::raw(format!("Session: {session_id}")),
@@ -1210,28 +1225,41 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 Line::raw(if *restart {
                     "Restarting ends that turn; the workspace and the conversation so far are kept."
                 } else {
-                    "Stopping ends that turn, saves a recovery copy, and frees the target."
+                    "Suspending ends that turn, saves a recovery copy, and frees the target."
                 }),
             ],
         ),
-        Confirmation::CloseSession { session_id } => (
-            " Close session? ",
+        Confirmation::SuspendSession {
+            session_id,
+            active_children,
+            interrupting,
+        } => {
+            let mut lines = vec![
+                Line::raw(format!("Session: {session_id}")),
+                Line::raw("Save a recovery copy and release the environment."),
+                Line::raw("You can resume this session later."),
+            ];
+            if *interrupting {
+                lines.push(Line::raw("The current turn will be interrupted."));
+            }
+            if *active_children > 0 {
+                lines.push(Line::raw(format!(
+                    "This also suspends {active_children} active sub-agent(s) first."
+                )));
+            }
+            (" Suspend session? ", lines)
+        }
+        Confirmation::DiscardSinceCheckpoint {
+            session_id,
+            checkpoint,
+        } => (
+            " Discard changes since checkpoint? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
-                Line::raw("Stop this session and any active sub-agents."),
-                Line::raw("Resumable history is preserved. Work in progress will be interrupted."),
-            ],
-        ),
-        Confirmation::StopWithSubagents { session_id, count } => (
-            " Stop parent and sub-agents? ",
-            vec![
-                Line::raw(format!("Session: {session_id}")),
-                Line::raw(""),
-                Line::styled(
-                    format!("This session has {count} active sub-agent(s)."),
-                    Style::default().fg(theme::palette().warning),
-                ),
-                Line::raw("Mjolnir will stop the children first, then save and stop the parent."),
+                Line::raw(format!("Recovery copy: {}", checkpoint.created_at)),
+                Line::raw("Release the environment using this older recovery copy."),
+                Line::raw("All work since that copy may be permanently lost."),
+                Line::raw("The recovery copy remains available for Resume."),
             ],
         ),
         Confirmation::RecoverFailed {
@@ -1319,12 +1347,16 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             (" Move recovery ", lines)
         }
         Confirmation::ForceDestroy { session_id } => (
-            " Delete session? ",
+            " Destroy session? ",
             vec![
                 Line::raw(format!("Session: {session_id}")),
                 Line::raw(""),
-                Line::raw("Delete this session, its worktree, and its recovery archive?"),
-                Line::raw("Its git branch stays in the repository unless you choose to delete it."),
+                Line::raw(
+                    "Permanently destroy this session, its environment, and its recovery archive?",
+                ),
+                Line::raw(
+                    "Its managed branch is kept unless explicitly deleted. Work only in the environment is lost.",
+                ),
             ],
         ),
     }
@@ -1345,8 +1377,8 @@ pub(crate) fn render_confirmation(
         Confirmation::Dismiss { .. } => 8,
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
-        Confirmation::StopWithSubagents { .. } => 10,
-        Confirmation::CloseSession { .. } => 10,
+        Confirmation::DiscardSinceCheckpoint { .. } => 12,
+        Confirmation::SuspendSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
@@ -1359,8 +1391,16 @@ pub(crate) fn render_confirmation(
     lines.push(confirmation_key_line(buttons));
     lines.push(Line::raw(""));
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let extra = 1;
-    let height = popup_height(&paragraph, 72, nominal.saturating_add(extra), area);
+    let inner_width = crate::widgets::centered_rect(72, 1, area)
+        .width
+        .saturating_sub(2);
+    let buttons_width: usize = buttons
+        .iter()
+        .map(|label| Line::raw(*label).width() + 5)
+        .sum();
+    let stacked = buttons_width.saturating_sub(1) > usize::from(inner_width);
+    let controls_height = if stacked { buttons.len() as u16 } else { 1 };
+    let height = popup_height(&paragraph, 72, nominal, area).saturating_add(controls_height + 2);
     let popup = centered_modal(frame, surfaces, 72, height, area);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
@@ -1370,7 +1410,6 @@ pub(crate) fn render_confirmation(
         clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
         return;
     }
-    let controls_height = 1;
     let body = Rect::new(
         inner.x,
         inner.y,
@@ -1404,17 +1443,29 @@ pub(crate) fn render_confirmation(
             .title(title_line),
         popup,
     );
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    Dialog::render_actions(
-        frame,
-        footer,
-        &buttons
-            .iter()
-            .enumerate()
-            .map(|(index, label)| (DialogControl::ConfirmButton(index), *label, true))
-            .collect::<Vec<_>>(),
-        &mut form,
+    let footer = Rect::new(
+        inner.x,
+        inner.bottom().saturating_sub(controls_height),
+        inner.width,
+        controls_height,
     );
+    let actions = buttons
+        .iter()
+        .enumerate()
+        .map(|(index, label)| (DialogControl::ConfirmButton(index), *label, true))
+        .collect::<Vec<_>>();
+    if stacked {
+        for (row, action) in actions.iter().enumerate() {
+            Dialog::render_actions(
+                frame,
+                Rect::new(footer.x, footer.y + row as u16, footer.width, 1),
+                std::slice::from_ref(action),
+                &mut form,
+            );
+        }
+    } else {
+        Dialog::render_actions(frame, footer, &actions, &mut form);
+    }
     form.end_frame(DialogControl::ConfirmButton(initial_confirmation_button(
         confirmation,
         buttons,

@@ -2251,7 +2251,7 @@ fn search_finds_a_setting_by_what_it_does_rather_than_its_name() {
 fn search_selects_a_switch_without_flipping_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
-    search(&mut dashboard, "show stopped");
+    search(&mut dashboard, "show suspended");
     dashboard.handle_key(key(KeyCode::Enter));
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     assert_eq!(dialog.path, vec!["advanced".to_owned()]);

@@ -348,7 +348,7 @@ test('bundle save stays single-flight and a late result cannot alter a replaceme
 test('resume choices stay selected through revisions and are used by Resume', async ({ page }) => {
   const state = await mount(page);
   state.snapshot.sessions.push({
-    id: 'stopped', title: 'Stopped test', state: 'stopped', lifecycle: 'stopped',
+    id: 'suspended', title: 'Suspended test', state: 'suspended', lifecycle: 'suspended',
     workspace_id: 'test', profile_id: 'alpha', target_id: 'local',
     capabilities: { resume: true }, compatible_resume_targets: ['local', 'remote'],
     queued_prompts: [{ id: 'queued', text: 'queued work' }],
@@ -357,8 +357,8 @@ test('resume choices stay selected through revisions and are used by Resume', as
   await page.evaluate(() => { location.hash = '#workspace/test/resume'; });
   await expect(page.locator('#resume-list-view')).toBeVisible();
   await expect(page.locator('#resume-detail-view')).toBeHidden();
-  await page.locator('#resumable [data-session-id="stopped"]').click();
-  await expect(page).toHaveURL(/\/resume\/stopped$/);
+  await page.locator('#resumable [data-session-id="suspended"]').click();
+  await expect(page).toHaveURL(/\/resume\/suspended$/);
   const detail = page.locator('#resume-detail');
   await detail.locator('[data-role="resume-profile"] select').selectOption('beta');
   await detail.locator('[data-role="resume-target"] select').selectOption('remote');
@@ -369,7 +369,7 @@ test('resume choices stay selected through revisions and are used by Resume', as
   await detail.getByRole('button', { name: 'Resume', exact: true }).click();
   await expect.poll(() => state.actions.length).toBe(1);
   await expect(page).toHaveURL(/#workspace\/test$/);
-  expect(state.actions[0]).toEqual({ action: 'resume', session_id: 'stopped', workspace_id: 'test', profile_id: 'beta', target_id: 'remote', queue: 'discard' });
+  expect(state.actions[0]).toEqual({ action: 'resume', session_id: 'suspended', workspace_id: 'test', profile_id: 'beta', target_id: 'remote', queue: 'discard' });
 });
 
 

@@ -26,7 +26,7 @@ test('reconnected pending and uncertain operations cannot silently become cancel
   assert.equal(state(session).label, 'Delivery unconfirmed');
   session.cancelling_prompt_id = 'turn-1';
   assert.equal(state(session).pending, true);
-  assert.equal(state(session).label, 'Stopping turn…');
+  assert.equal(state(session).label, 'Interrupting turn…');
 });
 
 test('failed steering offers a decision rather than reporting applied input', () => {

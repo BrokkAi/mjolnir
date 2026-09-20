@@ -892,7 +892,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
                         if session.state.is_active() {
-                            daemon.close_session(session_id.clone()).await?;
+                            daemon.suspend_session(session_id.clone()).await?;
                         }
                         anyhow::ensure!(
                             !cancelled.load(Ordering::Acquire),
@@ -920,6 +920,19 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::Open { session_id } => {
             context.open_chat_session(&session_id);
+        }
+        DashboardAction::PinSession { session_id, pane } => {
+            if context.dashboard.pane_session(pane).is_none() {
+                context.pin_session_in(&session_id, pane);
+            } else {
+                context
+                    .dashboard
+                    .set_notice("That pane is no longer empty.");
+            }
+        }
+        DashboardAction::UnpinSession { session_id } => context.unpin_session(&session_id),
+        DashboardAction::SplitConversation { pane, direction } => {
+            context.split_conversation_pane(pane, direction)
         }
         DashboardAction::OpenSessionInSplit {
             session_id,
@@ -1095,12 +1108,12 @@ pub(crate) async fn apply_dashboard_action(
             };
             start_session_launch(context, action);
         }
-        DashboardAction::Close { session_id } => {
+        DashboardAction::Suspend { session_id } => {
             context
                 .dashboard
-                .set_notice(format!("Stopping {}…", short_id(&session_id)));
+                .set_notice(format!("Suspending {}…", short_id(&session_id)));
             let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
@@ -1109,7 +1122,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .close_session(session_id)
+                            .suspend_session(session_id)
                             .await
                     })??;
                     Ok(LifecycleSuccess::Closed)
@@ -1127,9 +1140,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
-        DashboardAction::ForceStop { session_id } => {
+        DashboardAction::DiscardSinceCheckpoint {
+            session_id,
+            checkpoint,
+        } => {
             let request =
-                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Stopping);
+                context.begin_lifecycle_operation(&session_id, SessionOperationKind::Suspending);
             mark_active_chat_retiring(context.chats.get_mut(&session_id), &session_id);
             spawn_lifecycle_operation(
                 request,
@@ -1138,7 +1154,7 @@ pub(crate) async fn apply_dashboard_action(
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
-                            .force_stop_session(session_id)
+                            .discard_since_checkpoint(session_id, checkpoint)
                             .await
                     })??;
                     Ok(LifecycleSuccess::ForceStopped)

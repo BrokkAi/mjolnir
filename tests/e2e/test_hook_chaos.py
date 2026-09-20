@@ -307,7 +307,7 @@ def finish(lab: Lab) -> None:
             continue
         session_id = str(session["id"])
         status, _ = lab.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action for {session_id} returned {status}")

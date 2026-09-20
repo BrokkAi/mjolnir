@@ -126,79 +126,74 @@ pub(super) async fn transcript(
     }))
 }
 
-pub(super) async fn close(
+pub(super) async fn suspend(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    request: Option<Json<CloseRequest>>,
+    request: Option<Json<SuspendRequest>>,
 ) -> Result<StatusCode, ApiFailure> {
-    let force = request.as_ref().is_some_and(|request| request.force);
-    let active_children = if force {
-        // A force close destroys the children with the parent, so an active
-        // child is not a reason to refuse it.
-        0
-    } else {
+    let active_children = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
         session
             .subagent_session_ids
             .iter()
-            .filter(|child_id| {
-                snapshot.sessions.iter().any(|child| {
-                    child.id == child_id.as_str()
-                        && !matches!(
-                            child.state.as_str(),
-                            "stopped" | "lost" | "error" | "destroyed-with-data-loss"
-                        )
-                })
+            .filter(|id| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .any(|child| child.id == id.as_str() && child.lifecycle.is_dashboard_visible())
             })
             .count()
     };
     if active_children > 0
         && !request
             .as_ref()
-            .is_some_and(|request| request.acknowledge_active_subagents)
+            .is_some_and(|r| r.acknowledge_active_subagents)
     {
         return Err(ApiFailure::conflict(format!(
-            "session has {} sub-agent(s); retry with acknowledge_active_subagents=true to stop children first",
-            active_children
+            "session has {active_children} sub-agent(s); retry with acknowledge_active_subagents=true to suspend children first"
         )));
     }
     backend(&state)?.cancel_start(session_id.clone()).await?;
-    if force {
-        let delete_branch = request
-            .as_ref()
-            .is_some_and(|request| request.delete_branch);
-        return send_action(
-            &state,
-            ControllerAction::ForceClose {
-                session_id,
-                delete_branch,
-            },
-        )
-        .await;
-    }
-    send_action(&state, ControllerAction::Close { session_id }).await
+    send_action(&state, ControllerAction::Suspend { session_id }).await
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CloseRequest {
+pub(super) struct SuspendRequest {
     #[serde(default)]
     pub(super) acknowledge_active_subagents: bool,
-    /// Destroy the session instead of checkpointing it. Irreversible.
-    #[serde(default)]
-    pub(super) force: bool,
-    /// Delete the managed worktree's branch along with the session. Only
-    /// meaningful with `force`; without it the branch stays in the repository.
+}
+
+pub(super) async fn destroy(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    request: Option<Json<DestroyRequest>>,
+) -> Result<StatusCode, ApiFailure> {
+    backend(&state)?.cancel_start(session_id.clone()).await?;
+    let delete_branch = request.is_some_and(|r| r.delete_branch);
+    send_action(
+        &state,
+        ControllerAction::Destroy {
+            session_id,
+            delete_branch,
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DestroyRequest {
     #[serde(default)]
     pub(super) delete_branch: bool,
 }
 
-pub(super) async fn cancel_turn(
+pub(super) async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
-    send_action(&state, ControllerAction::CancelTurn { session_id }).await
+    send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
 pub(super) async fn send_action(

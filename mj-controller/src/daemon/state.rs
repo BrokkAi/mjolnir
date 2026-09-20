@@ -379,7 +379,22 @@ impl RuntimeState {
         reference: &str,
         failure: &LifecycleFailure,
     ) {
-        let prefix = mj_core::state::CLOSE_FAILURE_PREFIX;
+        self.record_lifecycle_failure(
+            session_id,
+            reference,
+            failure,
+            mj_core::state::CLOSE_FAILURE_PREFIX,
+        )
+        .await;
+    }
+
+    pub(crate) async fn record_lifecycle_failure(
+        self: &Arc<Self>,
+        session_id: &str,
+        reference: &str,
+        failure: &LifecycleFailure,
+        prefix: &str,
+    ) {
         let cause = match &failure.refusal {
             Some(refusal) => format!("{prefix}: {refusal}"),
             None => {

@@ -20,6 +20,8 @@ The old ACP `settle_steer` cancels on every response other than `injected`. A se
 
 ## Decision Log
 
+2026-09-20: The user pulled upstream and explicitly requested conflict resolution and push. Preserve upstream suspension/destruction and pinned-session behavior alongside typed steering. Upstream already owns migration 42 and daemon protocol 30; retain that migration unchanged, append the steering migration as 43, and advance the combined daemon protocol to 31. Validate using `MJ_INSTANCE=merge-validation` (the environment form of `--instance`) and isolated config/data roots; no live instance operations.
+
 2026-09-20: The user selected an explicit offer to cancel after steering failure. Escape dismisses that offer and never confirms it. Repeated Escape cannot escalate a pending operation.
 
 2026-09-20: Completion describes a turn, not an agent lifetime. Both Codex and Mjolnir-managed children can receive further work using prior context. Retain histories; never infer availability from replay or opaque identifier suffixes.
@@ -75,6 +77,8 @@ Subagent tests cover completed-to-running follow-up, parent moves with independe
 No live store upgrades, profile moves, harness restarts, pushes, or adapter publication are authorized by this implementation. Use isolated stores for all migration/restore tests. Preserve existing migrations; classify new migrations and advance read/write compatibility when older readers or writers cannot preserve the new durable semantics. Failed validation must be corrected without deleting working files of running processes. Existing unrelated untracked plans, `1q`, and `mj.sqlite3` remain untouched.
 
 ## Artifacts and Notes
+
+Merge validation (2026-09-20): all eight conflicts resolved while retaining both feature sets. The full `cargo test` suite, final interruption-feedback test, `cargo clippy --all-targets -- -D warnings`, formatting, 43 web unit tests, and 88 deterministic browser tests passed (three existing browser skips). Rust validation used `MJ_INSTANCE=merge-validation` with dedicated `/mnt/optane/hel-merge-validation` config/data roots. The user explicitly authorized completing the pulled merge and pushing it.
 
 The first web unit run outside the restricted sandbox passed 43 tests. Browser validation found and corrected a stale count assertion and a native-only navigation guard; the new Escape/reconnect/cancel-choice test passes. Rust validation found and corrected migration ordering, an outdated compatibility-floor assertion, and finishing retained streaming transcript entries on disconnect. `cargo check --workspace --all-targets` includes the optional desktop crate and cannot run on this host without Pango/JavaScriptCore development libraries; required plain Cargo checks use the repository default members, which exclude desktop. The full `cargo test` run passed (zero failures); `cargo clippy --all-targets -- -D warnings` passed. Final viewer checks passed 43 Node unit tests and 85 deterministic browser tests, with three existing browser skips. The last review corrected cancellation capability validation and added an assertion that submission acceptance does not clear turn-control feedback; the affected chat, controller, and worker packages all passed the final recheck. The final all-target clippy and formatting checks also passed. The user's original incident established a cancellation timeout and harness restart, but did not establish which fallback path initiated cancellation.
 

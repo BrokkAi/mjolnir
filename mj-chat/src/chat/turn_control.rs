@@ -60,7 +60,7 @@ impl ChatState {
         self.steering = state.steering.clone();
         self.cancelling_prompt_id = state.cancelling_prompt_id.clone();
         let feedback = if self.cancelling_prompt_id.is_some() {
-            Some("Stopping turn…")
+            Some("Interrupting turn…")
         } else {
             self.steering.as_ref().and_then(|s| match s.status {
                 SteeringStatus::Pending => Some("Steering…"),
@@ -247,7 +247,10 @@ mod tests {
         let mut state = RelaySnapshot::new("owner".into()).operational_state();
         state.cancelling_prompt_id = Some("active".into());
         chat.sync_turn_control(&state);
-        assert_eq!(chat.operation_feedback["turn-control"], "Stopping turn…");
+        assert_eq!(
+            chat.operation_feedback["turn-control"],
+            "Interrupting turn…"
+        );
         assert_eq!(
             chat.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ChatAction::None

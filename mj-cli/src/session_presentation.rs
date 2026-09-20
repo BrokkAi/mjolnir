@@ -38,8 +38,8 @@ pub(crate) fn apply_session_activity(
 pub(crate) const fn lifecycle_kind(kind: RuntimeLifecycleKind) -> SessionOperationKind {
     match kind {
         RuntimeLifecycleKind::Create => SessionOperationKind::Launching,
-        RuntimeLifecycleKind::Close | RuntimeLifecycleKind::ForceStop => {
-            SessionOperationKind::Stopping
+        RuntimeLifecycleKind::Suspend | RuntimeLifecycleKind::ForceStop => {
+            SessionOperationKind::Suspending
         }
         RuntimeLifecycleKind::Resume => SessionOperationKind::Resuming,
         RuntimeLifecycleKind::Move => SessionOperationKind::Moving,
@@ -373,7 +373,7 @@ mod tests {
     fn lifecycle_kinds_cover_stopping_and_destroying_variants() {
         assert_eq!(
             lifecycle_kind(RuntimeLifecycleKind::ForceStop),
-            SessionOperationKind::Stopping
+            SessionOperationKind::Suspending
         );
         assert_eq!(
             lifecycle_kind(RuntimeLifecycleKind::Cleanup),

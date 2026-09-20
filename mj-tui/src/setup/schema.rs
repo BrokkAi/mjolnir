@@ -142,7 +142,7 @@ pub(super) fn label(key: &str) -> String {
         "spinner" => "Activity animation",
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
-        "show_stopped_sessions" => "Show stopped sessions",
+        "show_stopped_sessions" => "Show suspended sessions",
         "session_order" => "Session order",
         "symbols" => "Symbols",
         "notify" => "Notifications",
@@ -551,7 +551,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."
         }
         "archive_after_days" => {
-            "Stopped sessions older than this many days lose their checkpoint and attachments once SessionWiki has indexed them; a fully merged branch goes too. Blank keeps all."
+            "Suspended sessions older than this many days lose their checkpoint and attachments once SessionWiki has indexed them; a fully merged branch goes too. Blank keeps all."
         }
         "subagents" => {
             "Enable Mjolnir-owned child agents and choose their concurrency limit and additional profiles. A parent profile is always eligible for its own children."

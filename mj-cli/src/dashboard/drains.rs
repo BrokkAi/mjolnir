@@ -483,7 +483,7 @@ impl DashboardContext {
                 || matches!(
                     dashboard.session_operation_kind(chat.session_id()),
                     Some(
-                        SessionOperationKind::Stopping
+                        SessionOperationKind::Suspending
                             | SessionOperationKind::Destroying
                             | SessionOperationKind::Moving,
                     )

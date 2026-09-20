@@ -1208,7 +1208,7 @@ pub(crate) fn render_workspace_manager(
                 "Enter saves the new name · Esc closes manager".into()
             }
             WorkspaceManagerView::Close { .. } if dialog.busy == Some(WorkspaceMutation::Close) => {
-                "Stopping sessions · Esc returns to the dashboard".into()
+                "Suspending sessions · Esc returns to the dashboard".into()
             }
             WorkspaceManagerView::Close { .. } => {
                 "Confirm closing the workspace · Esc cancels".into()
@@ -1274,7 +1274,7 @@ pub(crate) fn render_workspace_manager(
             ..
         } => {
             let text = format!(
-                "Close {workspace_name:?}?\n\nStop {session_count} session(s), including active sub-agents.\nResumable histories are preserved.\nDiscard {draft_count} saved draft(s) and any unsent composer text.\nRemove this workspace after all sessions stop."
+                "Close {workspace_name:?}?\n\nSuspend {session_count} session(s), including active sub-agents.\nResumable histories are preserved.\nDiscard {draft_count} saved draft(s) and any unsent composer text.\nRemove this workspace after all sessions are suspended."
             );
             frame.render_widget(
                 Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),

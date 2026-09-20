@@ -382,13 +382,25 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older layout writers discard Browse identity and pin badges.
+    if version < 42 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 42 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (42, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 42;
+             COMMIT;",
+        )?;
+    }
+
     // Breaking: durable steering commands/observations and native availability
     // cannot be interpreted or preserved by older readers and writers.
-    if version < 42 {
+    if version < 43 {
         connection.execute_batch("BEGIN IMMEDIATE;
-            UPDATE schema_compatibility SET minimum_compatible_version = 42 WHERE singleton = 1;
-            INSERT INTO schema_migrations(version, applied_at) VALUES (42, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-            PRAGMA user_version = 42;
+            UPDATE schema_compatibility SET minimum_compatible_version = 43 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (43, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 43;
             COMMIT;")?;
     }
 
@@ -470,8 +482,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 42 adds durable steering and availability.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 42;
+    /// `SCHEMA_VERSION`. Migration 43 adds durable steering and availability.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 43;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -662,7 +674,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(42));
+        assert_eq!(state.minimum_compatible, Some(43));
     }
 
     #[test]

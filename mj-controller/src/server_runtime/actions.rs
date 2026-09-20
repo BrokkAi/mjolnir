@@ -259,10 +259,10 @@ pub(super) async fn apply_phone_action(
                 .await?;
             Ok(())
         }
-        ControllerAction::Close { session_id } => {
-            services.daemon_runtime.close_session(session_id).await
+        ControllerAction::Suspend { session_id } => {
+            services.daemon_runtime.suspend_session(session_id).await
         }
-        ControllerAction::ForceClose {
+        ControllerAction::Destroy {
             session_id,
             delete_branch,
         } => {
@@ -401,7 +401,7 @@ pub(super) async fn apply_phone_action(
                 .await?;
             Ok(())
         }
-        ControllerAction::CancelTurn { session_id } => {
+        ControllerAction::InterruptTurn { session_id } => {
             services
                 .sessions
                 .session(&session_id)

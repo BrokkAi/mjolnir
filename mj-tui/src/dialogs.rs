@@ -298,13 +298,16 @@ pub(crate) enum Confirmation {
     CloseFailed {
         session_id: String,
         error: String,
+        can_discard: bool,
     },
-    StopWithSubagents {
+    SuspendSession {
         session_id: String,
-        count: usize,
+        active_children: usize,
+        interrupting: bool,
     },
-    CloseSession {
+    DiscardSinceCheckpoint {
         session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
     },
     /// Stop or restart asked for while the agent is mid-turn. An idle session
     /// stops without asking; this exists for the one case a mis-click costs
@@ -991,6 +994,11 @@ impl DashboardState {
     /// Show the recovery choices after a checkpointed close could not finish.
     pub fn show_close_failure(&mut self, session_id: String, error: impl Into<String>) {
         self.mode = Mode::Confirm(ConfirmDialog::new(Confirmation::CloseFailed {
+            can_discard: self
+                .state
+                .sessions
+                .get(&session_id)
+                .is_some_and(|s| s.checkpoint.is_some()),
             session_id,
             error: error.into(),
         }));
@@ -1488,21 +1496,71 @@ impl DashboardState {
                     delete_branch: index == 2,
                 }
             }
-            (Confirmation::CloseFailed { session_id, .. }, 1) => {
-                self.cancel_modal();
-                DashboardAction::ForceStop { session_id }
-            }
-            (Confirmation::CloseFailed { session_id, .. }, 2) => {
-                self.cancel_modal();
-                DashboardAction::Close { session_id }
+            (
+                Confirmation::CloseFailed {
+                    session_id,
+                    can_discard: true,
+                    ..
+                },
+                1,
+            ) => {
+                if let Some(checkpoint) = self
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|s| s.checkpoint.clone())
+                {
+                    self.mode =
+                        Mode::Confirm(ConfirmDialog::new(Confirmation::DiscardSinceCheckpoint {
+                            session_id,
+                            checkpoint,
+                        }));
+                } else {
+                    self.set_notice("No recovery copy is available. Retry suspension.");
+                }
+                DashboardAction::None
             }
             (
-                Confirmation::StopWithSubagents { session_id, .. }
-                | Confirmation::CloseSession { session_id },
+                Confirmation::DiscardSinceCheckpoint {
+                    session_id,
+                    checkpoint,
+                },
+                1,
+            ) => {
+                if self
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|s| s.checkpoint.as_ref())
+                    != Some(&checkpoint)
+                {
+                    self.cancel_modal();
+                    self.set_notice(
+                        "The recovery copy changed. Review it before discarding changes.",
+                    );
+                    return DashboardAction::None;
+                }
+                self.cancel_modal();
+                DashboardAction::DiscardSinceCheckpoint {
+                    session_id,
+                    checkpoint,
+                }
+            }
+            (Confirmation::CloseFailed { session_id, .. }, 2)
+            | (
+                Confirmation::CloseFailed {
+                    session_id,
+                    can_discard: false,
+                    ..
+                },
                 1,
             ) => {
                 self.cancel_modal();
-                DashboardAction::Close { session_id }
+                DashboardAction::Suspend { session_id }
+            }
+            (Confirmation::SuspendSession { session_id, .. }, 1) => {
+                self.cancel_modal();
+                DashboardAction::Suspend { session_id }
             }
             (
                 Confirmation::InterruptWork {
@@ -1515,7 +1573,7 @@ impl DashboardState {
                 if restart {
                     DashboardAction::RestartSession { session_id }
                 } else {
-                    DashboardAction::Close { session_id }
+                    DashboardAction::Suspend { session_id }
                 }
             }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {

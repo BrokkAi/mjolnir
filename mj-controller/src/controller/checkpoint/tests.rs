@@ -2511,7 +2511,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         .unwrap();
     let executor = RecordingExecutor::default();
     let deferred = controller
-        .close_session_for_move(
+        .suspend_session_for_move(
             LATCH_RELAY_SESSION,
             &executor,
             &channels.control,

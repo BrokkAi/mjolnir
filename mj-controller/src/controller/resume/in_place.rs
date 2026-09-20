@@ -23,7 +23,7 @@ use crate::targets::CommandExecutor;
 impl Controller {
     /// Replace the harness of a sealed session without rebuilding its target.
     ///
-    /// The session must be the one [`Controller::close_session_for_move`] left
+    /// The session must be the one [`Controller::suspend_session_for_move`] left
     /// behind for an in-place swap: `Closing`, with its verified checkpoint and
     /// its target still on the record. On success the session is `Running` on
     /// `profile_id` in the same target. On any failure the session is torn down

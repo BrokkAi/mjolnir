@@ -1287,6 +1287,7 @@ fn web_configuration_repair_action_explains_missing_entries_without_a_request() 
     let source = viewer_source("async function runSessionAction(", "sessions.onclick");
     let setup = r#"
 const pendingActions = new Set();
+const pendingLifecycleActions = new Map();
 const snapshot = { sessions: [{ id: 'broken', configuration_issue: 'Restore bundle project in config.toml' }] };
 const errorNode = { textContent: '' };
 "#;
@@ -1358,7 +1359,7 @@ fn embedded_viewer_displays_capacity_retry_deadlines() {
         "function sessionActivityLabel(",
         "function updateSessionActivity(",
     );
-    let setup = "function isTransitioningSession() { return false; }";
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
     let checks = r#"
 const session = { lifecycle: 'live', capacity_retry: { attempt: 2, retry_at_ms: 120000 } };
 if (sessionActivityLabel(session, 60000) !== 'Model at capacity · retrying in 1m00s') throw Error('missing retry countdown');
@@ -1405,6 +1406,7 @@ fn embedded_viewer_sends_the_selected_resume_workspace() {
     let source = viewer_source("async function runSessionAction", "sessions.onclick =");
     let setup = r#"
 const pendingActions = new Set();
+const pendingLifecycleActions = new Map();
 const snapshot = { sessions: [] };
 let sent = null;
 function selectedWorkspaceId() { return "workspace-b"; }
@@ -1437,6 +1439,7 @@ fn embedded_viewer_warns_before_stopping_an_active_session() {
     let source = viewer_source("async function runSessionAction", "sessions.onclick =");
     let setup = r#"
 const pendingActions = new Set();
+const pendingLifecycleActions = new Map();
 const snapshot = {
   sessions: [
 { id: "active", chat_phase: "running" },
@@ -1449,15 +1452,15 @@ function navigate() {}
 "#;
     let checks = r#"
 const errorNode = { textContent: "" };
-await runSessionAction({ action: "close", id: "active" }, errorNode);
-await runSessionAction({ action: "close", id: "idle" }, errorNode);
-if (!questions[0].startsWith("Stop active session?\n\n")) {
+await runSessionAction({ action: "suspend", id: "active" }, errorNode);
+await runSessionAction({ action: "suspend", id: "idle" }, errorNode);
+if (!questions[0].startsWith("Suspend session?\n\n")) {
   throw new Error(`active close warning was ${JSON.stringify(questions[0])}`);
 }
 if (!questions[0].includes("current turn will be interrupted")) {
   throw new Error(`active close omitted interruption: ${JSON.stringify(questions[0])}`);
 }
-if (!questions[1].startsWith("Stop session?\n\n")) {
+if (!questions[1].startsWith("Suspend session?\n\n")) {
   throw new Error(`idle close warning was ${JSON.stringify(questions[1])}`);
 }
 "#;
@@ -1589,16 +1592,16 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
 /// from the controller's precise state has to be the controller's own.
 #[test]
 fn lifecycle_categories_decide_what_the_dashboard_shows() {
-    use ViewerLifecycleCategory::{Failed, Live, Starting, Stopped, Stopping};
+    use ViewerLifecycleCategory::{Failed, Live, Starting, Suspended, Suspending};
 
     for (state, expected, on_dashboard) in [
         (SessionState::Provisioning, Starting, true),
         (SessionState::Running, Live, true),
         (SessionState::Disconnected, Live, true),
         (SessionState::Checkpointing, Live, true),
-        (SessionState::Closing, Stopping, true),
-        (SessionState::Destroying, Stopping, true),
-        (SessionState::Stopped, Stopped, false),
+        (SessionState::Closing, Suspending, true),
+        (SessionState::Destroying, Suspending, true),
+        (SessionState::Stopped, Suspended, false),
         (SessionState::Lost, Failed, false),
         (SessionState::Error, Failed, false),
         (SessionState::DestroyedWithDataLoss, Failed, false),
@@ -1644,7 +1647,7 @@ fn compatible_resume_targets_are_the_complement_of_the_incompatible_ones() {
 async fn actions_are_refused_when_their_capability_is_false() {
     for (body, capability) in [
         (
-            r#"{"action":"cancel-turn","session_id":"session-1"}"#,
+            r#"{"action":"interrupt-turn","session_id":"session-1"}"#,
             "cancel_turn",
         ),
         (
@@ -3225,7 +3228,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
     let error = validate_action(
-        &ControllerAction::Close {
+        &ControllerAction::Suspend {
             session_id: "not-managed".into(),
         },
         &snapshot,
@@ -3728,7 +3731,9 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
                 Request::post("/api/actions")
                     .header(COOKIE, cookie)
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"action":"close","session_id":"session-1"}"#))
+                    .body(Body::from(
+                        r#"{"action":"suspend","session_id":"session-1"}"#,
+                    ))
                     .unwrap(),
             ),
         );

@@ -2054,7 +2054,7 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
     runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let deferred = controller
-            .close_session_for_move(
+            .suspend_session_for_move(
                 LATCH_RELAY_SESSION,
                 &executor,
                 &channels.control,

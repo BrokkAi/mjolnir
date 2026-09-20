@@ -117,6 +117,7 @@ impl DurableRelay {
         ))
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn replied_verdict_is_current(&self, generation: u64) -> bool {
         let facts = self.activity_facts();
         self.replied_verdict_pending
@@ -124,10 +125,12 @@ impl DurableRelay {
             && blocked(&facts).is_none()
     }
 
+    #[cfg(unix)]
     pub(crate) fn retry_replied_verdict(&mut self, generation: u64) {
         self.retry_replied_verdict_at(generation, Instant::now());
     }
 
+    #[cfg(any(unix, test))]
     fn retry_replied_verdict_at(&mut self, generation: u64, now: Instant) {
         if self.replied_verdict_is_current(generation) {
             let delay = self.replied_verdict.retry_delay;

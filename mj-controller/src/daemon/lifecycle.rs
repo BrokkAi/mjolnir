@@ -102,7 +102,7 @@ impl RuntimeState {
                     .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
                 // The operation's own id is also what a failure reports as its
-                // reference, so a person holding "the close did not finish"
+                // reference, so a person holding "the suspension did not finish"
                 // can find the daemon-log entry that says why.
                 let operation_reference = new_command_id("lifecycle")?;
                 lifecycle.insert(
@@ -172,13 +172,28 @@ impl RuntimeState {
                     // and exited. A failure puts the record back in the state
                     // it had, so without this the person is never told (#1081).
                     if let Err(failure) = &result
-                        && kind == LifecycleKind::Close
+                        && kind == LifecycleKind::Suspend
                     {
                         state
                             .record_failed_close(
                                 &operation_session_id,
                                 &operation_reference,
                                 failure,
+                            )
+                            .await;
+                    }
+                    if let Err(failure) = &result
+                        && matches!(
+                            kind,
+                            LifecycleKind::ForceDestroy | LifecycleKind::DestroyStopped
+                        )
+                    {
+                        state
+                            .record_lifecycle_failure(
+                                &operation_session_id,
+                                &operation_reference,
+                                failure,
+                                mj_core::state::DESTRUCTION_FAILURE_PREFIX,
                             )
                             .await;
                     }

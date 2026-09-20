@@ -1027,14 +1027,14 @@ kind = "bare"
         self.record_action("clients-converged", session_id=session_id, clients=3)
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}")
         self.record_action("close", session_id=session_id)
         self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
-            "stopped session",
+            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
+            "suspended session",
         )
 
         quit_one = first.quit()
@@ -1109,12 +1109,12 @@ kind = "bare"
 
         started = time.monotonic()
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"active close action returned {status}")
         stopped = self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
+            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
             "active session to stop without the barrier grace period",
         )
         elapsed = time.monotonic() - started
@@ -1155,8 +1155,10 @@ kind = "bare"
         if status != 202:
             raise ScenarioFailure(f"resume after active Stop returned {status}")
         self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "running",
-            "session resumed from active Stop archive",
+            lambda value: (session := self.session(value, session_id) or {}).get("state")
+            == "running"
+            and session.get("conversation_available"),
+            "resumed session transcript available from active Stop archive",
         )
         status, transcript = self.request("GET", f"/api/conversations/{session_id}")
         if status != 200 or not isinstance(transcript, dict):
@@ -1175,12 +1177,12 @@ kind = "bare"
         )
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"cleanup close returned {status}")
         self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
+            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
             "resumed session cleanup",
         )
         client.quit()
@@ -1262,13 +1264,13 @@ kind = "bare"
         self.record_action("unanswered-turn", session_id=session_id, report=report)
 
         status, _ = self.request(
-            "POST", "/api/actions", {"action": "close", "session_id": session_id}
+            "POST", "/api/actions", {"action": "suspend", "session_id": session_id}
         )
         if status != 202:
             raise ScenarioFailure(f"close action returned {status}")
         self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "stopped",
-            "stopped unanswered-prompt session",
+            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
+            "suspended unanswered-prompt session",
         )
         client.quit()
         self.record_process("stopped", "tui-1", client.process.pid)

@@ -1758,14 +1758,14 @@ async fn escape_names_steering_through_submission_and_acceptance() {
                 value: "next-model".into(),
             }),
             "Esc cancels",
-            "Stopping turn…",
+            "Interrupting turn…",
             "Cancellation requested",
         ),
         (
             Some(true),
             None,
             "Esc cancels",
-            "Stopping turn…",
+            "Interrupting turn…",
             "Cancellation requested",
         ),
     ] {

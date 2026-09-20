@@ -105,7 +105,7 @@ impl CommandPalette {
 /// "Stop" means nothing without saying what it stops.
 fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
     if scope == Scope::Session
-        && let Some(session) = dashboard.selected_session()
+        && let Some(session) = dashboard.command_session()
     {
         return if dashboard.go.is_some() {
             dashboard.go_conversation_title(&session.id)
@@ -280,7 +280,7 @@ impl DashboardState {
             ranked_for: String::new(),
             form: RefCell::new(Dialog::default()),
             session_only: false,
-            session_id: self.selected_session_id.clone(),
+            session_id: self.command_session_id().map(str::to_owned),
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
@@ -420,12 +420,12 @@ impl DashboardState {
                         self.set_notice("This session is no longer available.");
                         return DashboardAction::None;
                     };
-                    if self.selected_session_id.as_deref() != Some(id.as_str()) {
-                        self.selected_session_id = Some(id);
-                    }
+                    self.command_session_override = Some(id);
                 }
                 self.mode = Mode::Dashboard;
-                return self.run_available_command(entry.id);
+                let action = self.run_available_command(entry.id);
+                self.command_session_override = None;
+                return action;
             }
             _ => {}
         }
@@ -857,7 +857,7 @@ mod tests {
         // and the list now runs past 44 rows.
         let lines = drawn(&mut dashboard, 120, 90);
         let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
-        let stop = row_of(&lines, "Stop session").expect("Stop session");
+        let stop = row_of(&lines, "Suspend session").expect("Suspend session");
         let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
         assert!(heading < stop, "{lines:#?}");
         assert!(stop < anywhere, "{lines:#?}");
@@ -892,20 +892,19 @@ mod tests {
     #[test]
     fn palette_ranks_prefix_matches_before_substring_matches() {
         let dashboard = dashboard_with_session(running_session());
-        // "Cancel operation" carries "stop" in its description, so it is a
-        // substring match; "Stop session" is a prefix match on the label.
+        // The suspension label ranks ahead of unrelated description matches.
         let all = palette_entries(&dashboard, "");
         assert!(
             all.iter()
                 .any(|entry| entry.id == CommandId::CancelOperation
-                    || entry.id == CommandId::StopSession)
+                    || entry.id == CommandId::SuspendSession)
         );
 
-        let matched = palette_entries(&dashboard, "stop");
+        let matched = palette_entries(&dashboard, "suspend");
         assert!(
             matched
                 .iter()
-                .any(|entry| entry.id == CommandId::StopSession),
+                .any(|entry| entry.id == CommandId::SuspendSession),
             "{matched:?}"
         );
         assert!(
@@ -1034,14 +1033,14 @@ mod tests {
     }
 
     #[test]
-    fn palette_stops_without_opening_another_modal() {
+    fn palette_suspends_an_idle_session_without_confirmation() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         open_palette(&mut dashboard);
-        type_query(&mut dashboard, "stop");
+        type_query(&mut dashboard, "suspend");
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Close {
+            DashboardAction::Suspend {
                 session_id: "session-1".into()
             }
         );
@@ -1119,7 +1118,7 @@ mod tests {
     fn palette_esc_returns_to_the_dashboard_without_a_side_effect() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        let before = dashboard.selected_session().cloned();
+        let before = dashboard.command_session().cloned();
         open_palette(&mut dashboard);
         type_query(&mut dashboard, "stop");
         assert_eq!(
@@ -1128,6 +1127,6 @@ mod tests {
         );
         assert_eq!(dashboard.mode, Mode::Dashboard);
         assert_eq!(dashboard.notice(), None);
-        assert_eq!(dashboard.selected_session().cloned(), before);
+        assert_eq!(dashboard.command_session().cloned(), before);
     }
 }

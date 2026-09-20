@@ -132,19 +132,6 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    /// The working directory is process-wide state and these tests run as
-    /// threads in one process, so the test that moves the directory and the
-    /// tests that assert it never moved cannot overlap. `CWD_SWITCH` cannot
-    /// serve: `with_short_socket_name` takes it, so taking it here too would
-    /// deadlock.
-    static CWD_OBSERVERS: Mutex<()> = Mutex::new(());
-
-    fn serialize_working_directory() -> std::sync::MutexGuard<'static, ()> {
-        CWD_OBSERVERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Nested directories whose joined length is guaranteed to exceed
     /// `sun_path` on every supported platform.
     fn deep_directory(base: &Path) -> PathBuf {
@@ -158,7 +145,27 @@ mod tests {
 
     #[test]
     fn bind_and_connect_work_through_a_path_longer_than_sun_path() {
-        let _serialized = serialize_working_directory();
+        // Changing cwd affects every thread, including concurrent subprocess
+        // launches. Exercise the long-path fallback in its own process.
+        const CHILD: &str = "MJ_LONG_SOCKET_PATH_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "local_sockets::tests::bind_and_connect_work_through_a_path_longer_than_sun_path",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1");
+            let output = crate::subprocess::run_with_input(&mut command, &[]).unwrap();
+            assert!(
+                output.status.success(),
+                "long socket path test failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
         let temporary = tempfile::tempdir().expect("tempdir");
         let socket = deep_directory(temporary.path()).join("control.sock");
         assert!(socket.as_os_str().len() > unix_socket_path_limit());
@@ -184,7 +191,6 @@ mod tests {
 
     #[test]
     fn a_short_path_binds_without_switching_directory() {
-        let _serialized = serialize_working_directory();
         let temporary = tempfile::tempdir().expect("tempdir");
         let socket = temporary.path().join("short.sock");
 

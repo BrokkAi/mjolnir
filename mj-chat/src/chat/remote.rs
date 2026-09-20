@@ -95,7 +95,7 @@ impl ChatRemoteOperation {
             Self::Cancel { intent, .. } => Some((
                 "turn-control".into(),
                 match intent {
-                    TurnControlIntent::Cancel => "Stopping turn…",
+                    TurnControlIntent::Cancel => "Interrupting turn…",
                     TurnControlIntent::Steer => "Steering turn…",
                 }
                 .into(),

@@ -66,18 +66,18 @@ impl Controller {
     /// provisioned target. Checkpoint failure is deliberately non-destructive,
     /// except when the checkpoint's worker restart left no live worker: that
     /// records `Error` and keeps the target for a later resume or forced close.
-    pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
-        self.close_session_controlled(session_id, &ProcessExecutor)
+    pub async fn suspend_session(&mut self, session_id: &str) -> Result<()> {
+        self.suspend_session_controlled(session_id, &ProcessExecutor)
             .await
     }
 
-    pub async fn close_session_controlled(
+    pub async fn suspend_session_controlled(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if self
-            .close_session_controlled_with_manager(
+            .suspend_session_controlled_with_manager(
                 session_id,
                 executor,
                 None,
@@ -91,13 +91,13 @@ impl Controller {
         Ok(())
     }
 
-    pub async fn close_session_managed_controlled(
+    pub async fn suspend_session_managed_controlled(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<bool> {
-        self.close_session_controlled_with_manager(
+        self.suspend_session_controlled_with_manager(
             session_id,
             executor,
             Some(manager),
@@ -107,7 +107,7 @@ impl Controller {
         .await
     }
 
-    pub(super) async fn close_session_for_move(
+    pub(super) async fn suspend_session_for_move(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -118,7 +118,7 @@ impl Controller {
     ) -> Result<bool> {
         self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
             .await?;
-        self.close_session_controlled_with_manager(
+        self.suspend_session_controlled_with_manager(
             session_id,
             executor,
             Some(manager),
@@ -128,7 +128,7 @@ impl Controller {
         .await
     }
 
-    async fn close_session_controlled_with_manager(
+    async fn suspend_session_controlled_with_manager(
         &mut self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -327,7 +327,7 @@ impl Controller {
             RelayExecutionState::Idle | RelayExecutionState::Running => {
                 lease.release();
                 return self
-                    .close_session_controlled_with_manager(
+                    .suspend_session_controlled_with_manager(
                         session_id,
                         executor,
                         Some(manager),
@@ -431,22 +431,15 @@ impl Controller {
         Ok(true)
     }
 
-    /// Record why a close failed on a session the close left in its earlier
-    /// state, so the person who asked for it learns that it did not finish.
-    ///
-    /// A close that ended in a state of its own — interrupted and resumable,
-    /// or left without a live worker — has already recorded the reason that
-    /// fits that state, and it says more than this one does, so it is kept.
-    /// Reports whether anything changed.
+    /// Publish a safe lifecycle failure even if a previous internal error exists.
+    /// Detailed diagnostics belong in logs; the stored outcome must be visible
+    /// on all control surfaces. Reports whether the session still exists.
     pub fn record_failed_close(&mut self, session_id: &str, cause: &str) -> Result<bool> {
         let Some(record) = self.state.sessions.get(session_id) else {
             return Ok(false);
         };
-        // A reason from an earlier close of this session is replaced, so a
-        // repeated close reports its own log entry rather than an older one.
-        if record.last_error.is_some() && record.public_error().is_none() {
-            return Ok(false);
-        }
+        // The supervisor logs the detailed failure. Always publish this safe
+        // outcome, including when an older raw error was already recorded.
         let previous = record.clone();
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.last_error = Some(cause.to_owned());
@@ -498,19 +491,19 @@ impl Controller {
     ///
     /// Returns whether target storage cleanup was deferred, like the graceful
     /// close does.
-    pub fn close_session_without_checkpoint(
+    pub fn suspend_session_without_checkpoint(
         &mut self,
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<bool> {
-        self.close_session_without_checkpoint_with(
+        self.suspend_session_without_checkpoint_with(
             session_id,
             executor,
             crate::database::save_lifecycle_session,
         )
     }
 
-    fn close_session_without_checkpoint_with(
+    fn suspend_session_without_checkpoint_with(
         &mut self,
         session_id: &str,
         executor: &impl CommandExecutor,
@@ -1058,10 +1051,14 @@ fn apply_close_checkpoint_failure(
         record.state = SessionState::Error;
         record.last_error = Some(format!(
             "close failed and left the session without a live worker; retry the close, \
-             resume from its checkpoint, or close it with --force: {error:#}"
+             resume from its checkpoint, or explicitly destroy it with mj destroy: {error:#}"
         ));
     } else {
-        record.state = previous.state;
+        record.state = if previous.state == SessionState::Closing {
+            SessionState::Running
+        } else {
+            previous.state
+        };
     }
     record.last_checkpoint_error = Some(format!("{error:#}"));
     record.updated_at = updated_at;

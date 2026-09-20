@@ -104,7 +104,7 @@ impl RuntimeState {
                     "workspace close cancelled"
                 );
                 state
-                    .close_session(session_id.clone())
+                    .suspend_session(session_id.clone())
                     .await
                     .with_context(|| format!("stop session {session_id}"))
             });

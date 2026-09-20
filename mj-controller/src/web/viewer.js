@@ -123,6 +123,7 @@ let snapshot,
 /// disabled it: state decides, so a re-render cannot lose the fact and a
 /// failure cannot leave a button dead.
 const pendingActions = new Set();
+const pendingLifecycleActions = new Map();
 /// Stop failures are tied to a task identity, so a fresh snapshot can redraw
 /// the row without losing the inline error that tells the person what failed.
 const backgroundTaskErrors = new Map();
@@ -598,7 +599,7 @@ function isLoadingConversationSession(session) {
 }
 
 function isDashboardSession(session) {
-  return ['live', 'starting', 'stopping'].includes(session.lifecycle)
+  return ['live', 'starting', 'suspending'].includes(session.lifecycle)
     || isTransitioningSession(session);
 }
 
@@ -822,7 +823,8 @@ function sessionMenuActions(session) {
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
-  if (can.stop) actions.push(['Stop session', 'danger', 'close']);
+  if (can.suspend) actions.push(['Suspend session…', 'secondary', 'suspend']);
+  if (can.destroy) actions.push(['Destroy session…', 'danger', 'destroy']);
   if (can.resume) actions.push(['Resume', '', 'resume']);
   if (can.move_session) actions.push(['Move…', '', 'move']);
   return actions;
@@ -955,7 +957,7 @@ function operationLabel(operation, now) {
     create: 'Starting',
     resume: 'Resuming',
     move: 'Moving',
-    stop: 'Stopping',
+    suspend: 'Suspending',
     destroy: 'Destroying',
     cleanup: 'Cleaning up',
     checkpoint: 'Checkpointing',
@@ -965,9 +967,12 @@ function operationLabel(operation, now) {
 
 function sessionActivityLabel(session, now = serverClockMs()) {
   if (session.operation) return operationLabel(session.operation, now);
+  if (pendingLifecycleActions.has(`destroy:${session.id}`)) return 'Destroying…';
+  if (pendingLifecycleActions.has(`suspend:${session.id}`)) return 'Suspending…';
+  if (session.launch_error) return session.launch_error;
   if (session.configuration_issue) return 'Needs configuration repair';
   if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
-  if (['starting', 'stopping', 'failed'].includes(session.lifecycle)) {
+  if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
   if (session.capacity_retry) {
@@ -1133,8 +1138,8 @@ function sessionLifecycleLabel(session) {
   const labels = {
     live: 'Live',
     starting: 'Starting',
-    stopping: 'Stopping',
-    stopped: 'Stopped',
+    suspending: 'Suspending',
+    suspended: 'Suspended',
     failed: 'Failed',
   };
   if (session.lifecycle && labels[session.lifecycle]) return labels[session.lifecycle];
@@ -2532,6 +2537,8 @@ function resumeCardSignature(session) {
     session.profile_id,
     session.target_id,
     session.capabilities?.resume,
+    session.capabilities?.destroy,
+    session.launch_error,
     session.capabilities?.open,
     session.lifecycle,
     session.operation?.kind,
@@ -2564,12 +2571,14 @@ function updateResumeCard(card, session, rebuild = false) {
   ensureResumeConversionPreflight(session);
   const focused = document.activeElement;
   const previousFocus = card.contains(focused) ? focused.closest?.('[data-role]')?.dataset?.role : null;
+  const destroyButton = card.querySelector('button[data-action="destroy"]');
+  if (destroyButton) destroyButton.disabled = pendingActions.has(`destroy:${session.id}`);
   const signature = resumeCardSignature(session);
   if (!rebuild && card._signature === signature) {
     card._session = session;
     const draft = resumeDraft(session);
     card._errorNode.textContent = draft.error;
-    card._pendingNode.textContent = pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
+    card._pendingNode.textContent = pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '';
     card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
     const submit = card.querySelector('button[data-action="resume"]');
     if (submit) {
@@ -2624,7 +2633,7 @@ function updateResumeCard(card, session, rebuild = false) {
   }
   const noRecovery = !recovery?.checkpoint_retained && ['lost', 'destroyed-with-data-loss'].includes(session.state);
   const canResume = session.capabilities?.resume === true && !queuePinned && !noRecovery;
-  const stale = session.capabilities?.open === true || ['live', 'starting', 'stopping'].includes(session.lifecycle);
+  const stale = session.capabilities?.open === true || ['live', 'starting', 'suspending'].includes(session.lifecycle);
   card._invalid = false;
   if (stale) {
     body.append(el('p', 'dim', 'This session is active now and cannot be resumed.'));
@@ -2691,10 +2700,15 @@ function updateResumeCard(card, session, rebuild = false) {
     body.append(row);
     card._invalid = !draft.profileId || !draft.targetId || conversionBlocksResume(draft);
   }
-  const pendingNode = el('p', 'dim', pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
+  const pendingNode = el('p', 'dim', pendingActions.has(`destroy:${session.id}`) ? 'Destroying…' : pendingActions.has(`resume:${session.id}`) ? 'Requesting resume…' : '');
   pendingNode.setAttribute('role', 'status');
   card._pendingNode = pendingNode;
   body.append(pendingNode);
+  if (session.capabilities?.destroy) {
+    const destroy = action('Destroy session…', 'danger', { action: 'destroy', id: session.id });
+    body.append(destroy);
+  }
+  if (session.launch_error) body.append(el('p', 'error', session.launch_error));
   const errorNode = el('p', 'error', draft.error);
   errorNode.dataset.resumeError = 'true';
   errorNode.setAttribute('role', 'alert');
@@ -3247,6 +3261,7 @@ function showLogin() {
   }
   // Nothing from the previous viewer may survive a sign-out in this tab.
   pendingActions.clear();
+  pendingLifecycleActions.clear();
   backgroundTaskErrors.clear();
   resumeRows.clear();
   resumeCards.clear();
@@ -3264,10 +3279,56 @@ function showLogin() {
   closeMenu();
 }
 
+// Acceptance hands ownership to the daemon. Keep pending feedback until a
+// snapshot observes the operation or its final result, including reconnects.
+function reconcileLifecycleActions() {
+  for (const [key, pending] of pendingLifecycleActions) {
+    const session = snapshot.sessions.find(item => item.id === pending.id);
+    const running = session?.operation || session?.lifecycle === 'suspending';
+    const finished = !session || (pending.action === 'suspend' && session.lifecycle === 'suspended')
+      || (session.launch_error && session.launch_error !== pending.previousError)
+      || (pending.observed && !running);
+    if (finished) {
+      pendingLifecycleActions.delete(key);
+      pendingActions.delete(key);
+    } else if (running) pending.observed = true;
+  }
+}
+
+function confirmSessionDestruction(session) {
+  if (!session) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const dialog = el('dialog', 'session-destroy-dialog');
+    dialog.setAttribute('aria-label', 'Destroy session');
+    dialog.append(el('h2', '', 'Destroy session?'));
+    dialog.append(el('p', '', session.title || session.id));
+    dialog.append(el('p', '', 'Permanently remove this session, its environment, and its recovery archive. Work held only in the environment will be lost. This also destroys its sub-agents.'));
+    const label = el('label');
+    const branch = el('input');
+    branch.type = 'checkbox';
+    branch.checked = false;
+    label.append(branch, document.createTextNode(' Also delete the managed branch'));
+    dialog.append(label, el('p', 'dim', 'Keeping the managed branch does not preserve work held only inside the environment.'));
+    const controls = el('div', 'row');
+    const cancel = button('Cancel', 'secondary');
+    const destroy = button('Destroy session', 'danger');
+    const finish = choice => { dialog.close(); dialog.remove(); resolve(choice); };
+    cancel.onclick = () => finish(null);
+    destroy.onclick = () => finish(branch.checked);
+    dialog.oncancel = event => { event.preventDefault(); finish(null); };
+    controls.append(cancel, destroy);
+    dialog.append(controls);
+    document.body.append(dialog);
+    dialog.showModal();
+    cancel.focus();
+  });
+}
+
 async function refresh() {
   try {
     snapshot = await request('/api/snapshot');
     snapshotReceivedAtMs = Date.now();
+    reconcileLifecycleActions();
     seedDashboardOrders(snapshot);
     renderMenuVersion();
     login.classList.add('hidden');
@@ -5329,7 +5390,7 @@ function renderConversationTransition(session) {
     && backgroundTasks.children.length === 0
   );
   document.querySelector('#prompt-form').hidden = unavailable;
-  cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.cancel_turn);
+  cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.interrupt_turn);
   if (!unavailable) return;
   conversationTransitionTitle.textContent = loading ? 'Loading conversation' : session.title || session.id;
   conversationTransitionStage.textContent = loading ? 'Waiting for the conversation…' : sessionActivityLabel(session);
@@ -5507,8 +5568,8 @@ function turnControlState(session) {
   const queued = (session?.queued_prompts || [])[0];
   return {
     pending, uncertain, failed,
-    label: session?.cancelling_prompt_id ? 'Stopping turn…' : steering?.status === 'pending' ? 'Steering…'
-      : uncertain ? 'Delivery unconfirmed' : queued ? 'Steer queued prompt' : 'Stop turn',
+    label: session?.cancelling_prompt_id ? 'Interrupting turn…' : steering?.status === 'pending' ? 'Steering…'
+      : uncertain ? 'Delivery unconfirmed' : queued ? 'Steer queued prompt' : 'Interrupt turn',
     command: session?.active_prompt_id ? queued
       ? { type: 'steer', data: { active_prompt_id: session.active_prompt_id, queued_prompt_id: queued.id || queued.command_id } }
       : { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null,
@@ -5585,7 +5646,7 @@ function renderConversationHeader(session) {
     'hidden',
     isTransitioningSession(session)
       || isLoadingConversationSession(session)
-      || !session.capabilities?.cancel_turn,
+      || !session.capabilities?.interrupt_turn,
   );
 
   renderTurnControl(session);
@@ -5839,19 +5900,21 @@ async function runSessionAction(dataset, errorNode, extra) {
     });
     return true;
   }
-  if (dataset.action === 'close') {
+  if (dataset.action === 'suspend') {
     const session = snapshot.sessions.find(item => item.id === dataset.id);
-    const active = session?.chat_phase === 'running';
     const activeChildren = (session?.subagent_session_ids || [])
       .map(id => snapshot.sessions.find(item => item.id === id))
-      .filter(child => child && !['stopped', 'lost', 'error', 'destroyed-with-data-loss'].includes(child.state));
-    const childWarning = activeChildren.length
-      ? `\n\nThis also stops ${activeChildren.length} active sub-agent${activeChildren.length === 1 ? '' : 's'} first.`
-      : '';
-    const question = (active
-      ? 'Stop active session?\n\nThe current turn will be interrupted. Mjolnir will then save a recovery copy and destroy the target.'
-      : 'Stop session?\n\nMjolnir will save a recovery copy and destroy the target.') + childWarning;
-    if (!confirm(question)) return;
+      .filter(child => child && ['live', 'starting', 'suspending'].includes(child.lifecycle));
+    const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
+      + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
+      + (activeChildren.length ? `\n\nThis also suspends ${activeChildren.length} active sub-agent(s) first.` : '');
+    if (!confirm(question)) return false;
+  }
+  if (dataset.action === 'destroy') {
+    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    const choice = await confirmSessionDestruction(session);
+    if (choice === null) return false;
+    extra = { ...extra, delete_branch: choice };
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
@@ -5873,17 +5936,30 @@ async function runSessionAction(dataset, errorNode, extra) {
     }
   }
   pendingActions.add(key);
+  const lifecycle = ['suspend', 'destroy'].includes(dataset.action);
+  if (lifecycle) {
+    const session = snapshot.sessions.find(item => item.id === dataset.id);
+    pendingLifecycleActions.set(key, { id: dataset.id, action: dataset.action, previousError: session?.launch_error, observed: false });
+  }
   renderRoute();
   try {
-    await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    if (lifecycle) {
+      await request(`/api/v1/sessions/${dataset.id}/${dataset.action}`, {
+        method: 'POST', body: JSON.stringify(dataset.action === 'suspend'
+          ? { acknowledge_active_subagents: true } : { delete_branch: extra.delete_branch }),
+      });
+    } else {
+      await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+    }
     errorNode.textContent = '';
     await refresh();
     return true;
   } catch (err) {
+    pendingLifecycleActions.delete(key);
     errorNode.textContent = err.message;
     return false;
   } finally {
-    pendingActions.delete(key);
+    if (!pendingLifecycleActions.has(key)) pendingActions.delete(key);
     renderRoute();
   }
 }
@@ -5955,6 +6031,7 @@ resumeDetail.onclick = async e => {
     } : {}),
   });
   if (success
+    && target.dataset.action === 'resume'
     && route.name === 'resume'
     && route.sessionId === session.id
     && route.workspaceId === workspaceId
@@ -6021,7 +6098,7 @@ cancelTurnButton.onclick = async () => {
   const control = turnControlState(session);
   if (control.pending || control.uncertain) return;
   if (control.command) await submitTurnControl(session, control.command);
-  else await sendAction({ action: 'cancel-turn', session_id: currentSession });
+  else await sendAction({ action: 'interrupt-turn', session_id: currentSession });
 };
 conversationTransitionCancel.onclick = async () => {
   const id = conversationTransitionCancel.dataset.id || currentSession;

@@ -23,9 +23,9 @@ function session(id, projectKey, projectLabel, options = {}) {
     open: true,
     prompt: false,
     run_shell: false,
-    cancel_turn: false,
+    interrupt_turn: false,
     cancel_operation: false,
-    stop: false,
+    suspend: false,
     rename: false,
     resume: false,
     set_config: false,
@@ -132,6 +132,13 @@ async function mount(page, sessions) {
         headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
         body: ': fixture\n\n',
       });
+    }
+    const lifecycle = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(suspend|destroy)$/);
+    if (lifecycle) {
+      const body = { action: lifecycle[2], session_id: lifecycle[1], ...route.request().postDataJSON() };
+      state.actions.push(body);
+      if (state.failAction?.action === body.action) return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: state.failAction.error }) });
+      return route.fulfill({ status: 202, body: '' });
     }
     if (pathname === '/api/actions') {
       const body = route.request().postDataJSON();
@@ -409,7 +416,7 @@ test('compact cards sort initial activity, expose metadata, clocks, attention, a
 
 test('transition cards show compact stages and suppress a late transcript response', async ({ page }) => {
   const state = await mount(page, [
-    session('stopping', 'project-transition', 'Transition', {
+    session('suspending', 'project-transition', 'Transition', {
       capabilities: { open: true },
     }),
     session('other-live', 'project-other', 'Other'),
@@ -417,19 +424,19 @@ test('transition cards show compact stages and suppress a late transcript respon
   state.conversation = transcript('old conversation must not return');
   state.holdConversation = true;
 
-  await card(page, 'stopping').click();
-  await expect(page).toHaveURL(/#conversation\/stopping$/);
+  await card(page, 'suspending').click();
+  await expect(page).toHaveURL(/#conversation\/suspending$/);
   await expect.poll(() => state.conversationRequests).toBe(1);
 
-  const stopping = state.snapshot.sessions.find(item => item.id === 'stopping');
+  const stopping = state.snapshot.sessions.find(item => item.id === 'suspending');
   Object.assign(stopping, {
-    lifecycle: 'stopping',
+    lifecycle: 'suspending',
     state: 'closing',
     transitioning: true,
     operation: {
       id: 'stop-operation-1',
-      session_id: 'stopping',
-      kind: 'stop',
+      session_id: 'suspending',
+      kind: 'suspend',
       started_at_epoch_seconds: Math.floor((SERVER_TIME_MS - 60_000) / 1_000),
       stages: [
         {
@@ -449,7 +456,7 @@ test('transition cards show compact stages and suppress a late transcript respon
       open: false,
       cancel_operation: true,
       rename: false,
-      stop: false,
+      suspend: false,
     },
   });
   await refresh(page, state);
@@ -475,7 +482,7 @@ test('transition cards show compact stages and suppress a late transcript respon
   await expect(page.locator('#conversation-feed')).not.toContainText('old conversation must not return');
   await expect(page.locator('#conversation-transition')).toBeVisible();
   await page.locator('#back').click();
-  await expect(card(page, 'stopping').locator('.session-activity')).toHaveText(/Stop target · Remove storage/);
+  await expect(card(page, 'suspending').locator('.session-activity')).toHaveText(/Stop target · Remove storage/);
 });
 
 test('a live route survives transition completion while its conversation projection catches up', async ({ page }) => {
@@ -701,7 +708,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   const state = await mount(page, [
     session('openable', 'project-menu', 'Menu', {
       activity: SERVER_TIME_MS - 1_000,
-      capabilities: { rename: true, cancel_operation: true, stop: true },
+      capabilities: { rename: true, cancel_operation: true, suspend: true },
     }),
     session('non-openable', 'project-locked', 'Locked', {
       activity: SERVER_TIME_MS - 2_000,
@@ -718,7 +725,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Rename', 'Cancel operation', 'Stop session']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Rename', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
@@ -756,14 +763,14 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect.poll(() => state.actions.filter(action => action.session_id === 'non-openable')).toHaveLength(1);
   expect(state.actions.at(-1)).toMatchObject({ action: 'cancel', session_id: 'non-openable' });
 
-  state.failAction = { action: 'close', error: 'stop failed in fixture' };
+  state.failAction = { action: 'suspend', error: 'stop failed in fixture' };
   await openTrigger.click();
   let confirmed = false;
   page.once('dialog', async dialog => {
-    confirmed = dialog.type() === 'confirm' && dialog.message().includes('Stop session?');
+    confirmed = dialog.type() === 'confirm' && dialog.message().includes('Suspend session?');
     await dialog.accept();
   });
-  await openMenu.getByRole('menuitem', { name: 'Stop session' }).click();
+  await openMenu.getByRole('menuitem', { name: 'Suspend session…' }).click();
   await expect(page.locator('#action-error')).toHaveText('stop failed in fixture');
   expect(confirmed).toBe(true);
 
@@ -843,7 +850,7 @@ test('sub-agent workspace hides children from the normal list and closes back to
 
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
   const parent = session('steering', 'project', 'Project', {
-    queued: 1, capabilities: { prompt: true, cancel_turn: true },
+    queued: 1, capabilities: { prompt: true, interrupt_turn: true },
   });
   parent.active_prompt_id = 'turn-one'; parent.chat_phase = 'running';
   const state = await mount(page, [parent]);
@@ -892,4 +899,61 @@ test('a moved parent keeps 23 native histories without claiming any are working'
   await page.locator('#subagents-button').click();
   await expect(page.getByRole('button', { name: 'View history' })).toHaveCount(23);
   await expect(page.getByRole('heading', { name: 'History and availability unknown' })).toBeVisible();
+});
+
+test('suspension remains pending after acceptance and exposes failure after reconnect', async ({ page }) => {
+  const state = await mount(page, [session('suspend-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
+  const current = card(page, 'suspend-me');
+  await current.locator('button[aria-label^="Actions for"]').click();
+  page.once('dialog', dialog => dialog.dismiss());
+  await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  expect(state.actions).toHaveLength(0);
+  await current.locator('button[aria-label^="Actions for"]').click();
+  page.once('dialog', dialog => dialog.accept());
+  await current.getByRole('menuitem', { name: 'Suspend session…' }).click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toEqual({ action: 'suspend', session_id: 'suspend-me', acknowledge_active_subagents: true });
+  await expect(current.locator('.session-activity')).toHaveText('Suspending…');
+  await current.locator('button[aria-label^="Actions for"]').click();
+  await expect(current.getByRole('menuitem', { name: 'Suspend session…' })).toBeDisabled();
+  const saved = state.snapshot.sessions[0];
+  saved.launch_error = 'the suspension did not finish: checkpoint unavailable';
+  saved.has_error = true;
+  await reconnect(page, state);
+  await expect(current.locator('.session-activity')).toHaveText(saved.launch_error);
+  await page.reload();
+  await expect(current.locator('.session-activity')).toHaveText(saved.launch_error);
+});
+
+test('destroy is separately confirmed and defaults to keeping the branch', async ({ page }) => {
+  const state = await mount(page, [session('destroy-me', 'project', 'Project', { capabilities: { suspend: true, destroy: true } })]);
+  const current = card(page, 'destroy-me');
+  await current.locator('button[aria-label^="Actions for"]').click();
+  await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Destroy session' });
+  await expect(dialog).toContainText('Work held only in the environment will be lost');
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(state.actions).toHaveLength(0);
+  await current.locator('button[aria-label^="Actions for"]').click();
+  await current.getByRole('menuitem', { name: 'Destroy session…' }).click();
+  await dialog.getByRole('button', { name: 'Destroy session', exact: true }).click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'destroy-me', delete_branch: false });
+  await expect(current.locator('.session-activity')).toHaveText('Destroying…');
+  state.snapshot.sessions = [];
+  await refresh(page, state);
+  await expect(current).toHaveCount(0);
+});
+
+test('destroying retained history offers explicit branch deletion', async ({ page }) => {
+  const state = await mount(page, [session('retained', 'project', 'Project', { lifecycle: 'suspended', capabilities: { open: false, resume: true, destroy: true } }), session('live-other', 'project', 'Project')]);
+  await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}/resume/retained`);
+  await page.getByRole('button', { name: 'Destroy session…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Destroy session' });
+  await dialog.getByRole('checkbox').check();
+  await dialog.getByRole('button', { name: 'Destroy session', exact: true }).click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toEqual({ action: 'destroy', session_id: 'retained', delete_branch: true });
+  await expect(page.getByRole('button', { name: 'Destroy session…', exact: true })).toBeDisabled();
 });

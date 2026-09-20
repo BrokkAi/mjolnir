@@ -62,18 +62,85 @@ pub(super) async fn run_session_actor(
     let mut reviewer_cancellation = tokio_util::sync::CancellationToken::new();
     let mut interval = tokio::time::interval(SESSION_SYNC_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    enum Event {
+        Returned(Option<Box<ReturnedConnection>>),
+        Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
+        Tick,
+        Command(Option<ActorCommand>),
+        Retirement(std::result::Result<(), watch::error::RecvError>),
+    }
     loop {
         lifecycle.set_retirement_requested(*retirement.borrow_and_update());
         if lifecycle.should_stop() {
             break;
         }
-        tokio::select! {
-            completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => {
+        let event = tokio::select! {
+            // Release and command use separate channels. Apply a queued return
+            // before admitting the next lease, even when both are ready.
+            biased;
+            returned = releases.recv(), if !releases.is_closed() || !releases.is_empty() => Event::Returned(returned.map(Box::new)),
+            // Keep the remaining work fair: a slow sync must not starve commands.
+            event = async {
+                tokio::select! {
+                    completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
+                    _ = interval.tick() => Event::Tick,
+                    command = commands.recv() => Event::Command(command),
+                    changed = retirement.changed() => Event::Retirement(changed),
+                }
+            } => event,
+        };
+        match event {
+            Event::Returned(returned) => {
+                let Some(returned) = returned else { continue };
+                if lifecycle.return_lease(returned.lease_id) {
+                    // A dropped lease returns no connection; `submit_actor_command`
+                    // reconnects on demand, so the drain needs no special case.
+                    connection = returned.connection;
+                    failures = 0;
+                    interval.reset();
+                    // A lease syncs the connection it borrowed, so this actor's
+                    // next sync can find nothing left to apply. Publish what the
+                    // returned connection already knows or watchers keep reading
+                    // pre-lease state.
+                    if let Some(returned) = connection.as_ref() {
+                        publish_view(
+                            &target.session_id,
+                            ManagedSessionView {
+                                snapshot: Some(returned.snapshot()),
+                                connected: true,
+                                error: None,
+                            },
+                            &view_tx,
+                            &updates,
+                        );
+                    }
+                    let retiring = *retirement.borrow();
+                    while let Some(deferred) = deferred_submits.pop_front() {
+                        if retiring {
+                            if deferred
+                                .reply
+                                .send(Err("session target is changing".into()))
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    session_id = %target.session_id,
+                                    operation = "submit",
+                                    "deferred submit rejection receiver was already closed"
+                                );
+                            }
+                            continue;
+                        }
+                        deliver_submit(&target, &mut connection, deferred, &view_tx, &updates)
+                            .await;
+                    }
+                }
+            }
+            Event::Reviewer(completed) => {
                 if let Some(Err(error)) = completed {
                     tracing::error!(session_id = %target.session_id, %error, "reviewer operation task failed");
                 }
             }
-            _ = interval.tick() => {
+            Event::Tick => {
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if lifecycle.should_stop() {
                     break;
@@ -81,19 +148,21 @@ pub(super) async fn run_session_actor(
                 if lifecycle.is_leased() {
                     continue;
                 }
-                let result = sync_actor_connection(
-                    &target,
-                    &mut connection,
-                ).await;
+                let result = sync_actor_connection(&target, &mut connection).await;
                 match result {
                     Ok(snapshot) => {
                         failures = 0;
                         if let Some(snapshot) = snapshot {
-                            publish_view(&target.session_id, ManagedSessionView {
-                                snapshot: Some(snapshot),
-                                connected: true,
-                                error: None,
-                            }, &view_tx, &updates);
+                            publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot: Some(snapshot),
+                                    connected: true,
+                                    error: None,
+                                },
+                                &view_tx,
+                                &updates,
+                            );
                         }
                     }
                     Err(error) => {
@@ -111,7 +180,9 @@ pub(super) async fn run_session_actor(
                             "session relay sync failed: {error:#}"
                         );
                         let recovery_due = !integrity
-                            && !crate::controller::move_session::move_owns_session(&target.session_id)
+                            && !crate::controller::move_session::move_owns_session(
+                                &target.session_id,
+                            )
                             && failures >= UNREACHABLE_FAILURE_THRESHOLD
                             && worker_connect_needs_restart(&error)
                             && target.worker_recovery.is_some()
@@ -128,15 +199,20 @@ pub(super) async fn run_session_actor(
                             if recovery_due {
                                 detail.push_str("; checking whether the relay worker is dead");
                             }
-                            publish_view(&target.session_id, ManagedSessionView {
-                                snapshot,
-                                connected: false,
-                                error: Some(if integrity {
-                                    ViewError::ProjectionIntegrity(detail)
-                                } else {
-                                    ViewError::Unreachable(detail)
-                                }),
-                            }, &view_tx, &updates);
+                            publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot,
+                                    connected: false,
+                                    error: Some(if integrity {
+                                        ViewError::ProjectionIntegrity(detail)
+                                    } else {
+                                        ViewError::Unreachable(detail)
+                                    }),
+                                },
+                                &view_tx,
+                                &updates,
+                            );
                         }
                         // A session whose record has reached a terminal state
                         // is never coming back on this actor. Without this the
@@ -154,14 +230,21 @@ pub(super) async fn run_session_actor(
                                 "session reached a terminal state; retiring its relay actor"
                             );
                             let snapshot = view_tx.borrow().snapshot.clone();
-                            publish_view(&target.session_id, ManagedSessionView {
-                                snapshot,
-                                connected: false,
-                                error: Some(ViewError::Unreachable(match last_error {
-                                    Some(cause) => format!("this session ended as {state:?}: {cause}"),
-                                    None => format!("this session ended as {state:?}"),
-                                })),
-                            }, &view_tx, &updates);
+                            publish_view(
+                                &target.session_id,
+                                ManagedSessionView {
+                                    snapshot,
+                                    connected: false,
+                                    error: Some(ViewError::Unreachable(match last_error {
+                                        Some(cause) => {
+                                            format!("this session ended as {state:?}: {cause}")
+                                        }
+                                        None => format!("this session ended as {state:?}"),
+                                    })),
+                                },
+                                &view_tx,
+                                &updates,
+                            );
                             break;
                         }
                         if recovery_due {
@@ -170,13 +253,18 @@ pub(super) async fn run_session_actor(
                                 .worker_recovery
                                 .clone()
                                 .expect("recovery eligibility requires a plan");
-                            let restart_unresponsive =
-                                worker_connect_allows_live_restart(&error);
+                            let restart_unresponsive = worker_connect_allows_live_restart(&error);
                             tracing::warn!(
                                 session_id = target.session_id,
                                 "relay worker is unreachable; probing it before recovery: {error:#}"
                             );
-                            match recover_worker_for_session(plan, restart_unresponsive, Some(target.session_id.clone())).await {
+                            match recover_worker_for_session(
+                                plan,
+                                restart_unresponsive,
+                                Some(target.session_id.clone()),
+                            )
+                            .await
+                            {
                                 Ok(
                                     outcome @ (WorkerRecoveryOutcome::RestartedDead
                                     | WorkerRecoveryOutcome::RestartedUnresponsive),
@@ -198,13 +286,18 @@ pub(super) async fn run_session_actor(
                                             unreachable!()
                                         }
                                     };
-                                    publish_view(&target.session_id, ManagedSessionView {
-                                        snapshot,
-                                        connected: false,
-                                        error: Some(ViewError::Unreachable(format!(
-                                            "{error:#}; {recovery}"
-                                        ))),
-                                    }, &view_tx, &updates);
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(format!(
+                                                "{error:#}; {recovery}"
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
                                     interval.reset_after(RECONNECT_INTERVAL);
                                 }
                                 Ok(WorkerRecoveryOutcome::Alive) => {
@@ -213,13 +306,18 @@ pub(super) async fn run_session_actor(
                                         "relay transport failed but the worker is alive; leaving it running"
                                     );
                                     let snapshot = view_tx.borrow().snapshot.clone();
-                                    publish_view(&target.session_id, ManagedSessionView {
-                                        snapshot,
-                                        connected: false,
-                                        error: Some(ViewError::Unreachable(format!(
-                                            "{error:#}; relay worker is still alive, so it was not restarted"
-                                        ))),
-                                    }, &view_tx, &updates);
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(format!(
+                                                "{error:#}; relay worker is still alive, so it was not restarted"
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
                                     interval.reset_after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Starting) => {
@@ -228,13 +326,18 @@ pub(super) async fn run_session_actor(
                                         "relay worker is still starting; leaving it running"
                                     );
                                     let snapshot = view_tx.borrow().snapshot.clone();
-                                    publish_view(&target.session_id, ManagedSessionView {
-                                        snapshot,
-                                        connected: false,
-                                        error: Some(ViewError::Unreachable(format!(
-                                            "{error:#}; relay worker is still recovering its durable state, so it was not restarted"
-                                        ))),
-                                    }, &view_tx, &updates);
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(format!(
+                                                "{error:#}; relay worker is still recovering its durable state, so it was not restarted"
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
                                     interval.reset_after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Suppressed) => {
@@ -260,14 +363,19 @@ pub(super) async fn run_session_actor(
                                 }
                                 Ok(WorkerRecoveryOutcome::WorkspaceMissing(directory)) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
-                                    publish_view(&target.session_id, ManagedSessionView {
-                                        snapshot,
-                                        connected: false,
-                                        error: Some(ViewError::TargetMissing(format!(
-                                            "the worker working directory {} is missing; resume this session from its recovery archive to restore it",
-                                            directory.display(),
-                                        ))),
-                                    }, &view_tx, &updates);
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::TargetMissing(format!(
+                                                "the worker working directory {} is missing; resume this session from its recovery archive to restore it",
+                                                directory.display(),
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
                                     interval.reset_after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Err(recovery_error) => {
@@ -276,13 +384,18 @@ pub(super) async fn run_session_actor(
                                         "automatic relay worker recovery failed safely: {recovery_error:#}"
                                     );
                                     let snapshot = view_tx.borrow().snapshot.clone();
-                                    publish_view(&target.session_id, ManagedSessionView {
-                                        snapshot,
-                                        connected: false,
-                                        error: Some(ViewError::Unreachable(format!(
-                                            "{error:#}; could not confirm the relay worker was dead, so it was not restarted: {recovery_error:#}"
-                                        ))),
-                                    }, &view_tx, &updates);
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(format!(
+                                                "{error:#}; could not confirm the relay worker was dead, so it was not restarted: {recovery_error:#}"
+                                            ))),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
                                     interval.reset_after(reconnect_delay(failures));
                                 }
                             }
@@ -292,7 +405,7 @@ pub(super) async fn run_session_actor(
                     }
                 }
             }
-            command = commands.recv() => {
+            Event::Command(command) => {
                 let Some(command) = command else { break };
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if !lifecycle.accepts_new_work() {
@@ -312,8 +425,14 @@ pub(super) async fn run_session_actor(
                         admission,
                         reply,
                     } => {
-                        if crate::controller::move_session::move_refuses_command(&target.session_id, &command) {
-                            let _ = reply.send(Err("session is moving; keep the draft and retry after Move finishes".into()));
+                        if crate::controller::move_session::move_refuses_command(
+                            &target.session_id,
+                            &command,
+                        ) {
+                            let _ = reply.send(Err(
+                                "session is moving; keep the draft and retry after Move finishes"
+                                    .into(),
+                            ));
                             continue;
                         }
                         // A turn under review holds its session's prompts. The
@@ -330,13 +449,14 @@ pub(super) async fn run_session_actor(
                                 )
                         });
                         if admission.is_some() && !admitted {
-                            let _ = reply.send(Err(
-                                "review delivery admission is no longer valid".into(),
-                            ));
+                            let _ = reply
+                                .send(Err("review delivery admission is no longer valid".into()));
                             continue;
                         }
-                        if matches!(&command, RelayCommand::Prompt { .. } | RelayCommand::ClearContext)
-                            && !admitted
+                        if matches!(
+                            &command,
+                            RelayCommand::Prompt { .. } | RelayCommand::ClearContext
+                        ) && !admitted
                             && let Some(refusal) =
                                 crate::review_host::prompt_refusal(&target.session_id)
                         {
@@ -348,9 +468,14 @@ pub(super) async fn run_session_actor(
                             let _ = reply.send(Err(refusal.to_owned().into()));
                             continue;
                         }
-                        if lifecycle.is_leased() && (matches!(command, RelayCommand::ClearContext)
-                            || matches!(&command, RelayCommand::Prompt { prompt } if matches!(mj_core::acp::context_command(prompt), Some((mj_core::acp::ContextCommand::Clear, _))))) {
-                            let _ = reply.send(Err("/clear requires an idle session; a lifecycle operation is running".into()));
+                        if lifecycle.is_leased()
+                            && (matches!(command, RelayCommand::ClearContext)
+                                || matches!(&command, RelayCommand::Prompt { prompt } if matches!(mj_core::acp::context_command(prompt), Some((mj_core::acp::ContextCommand::Clear, _)))))
+                        {
+                            let _ = reply.send(Err(
+                                "/clear requires an idle session; a lifecycle operation is running"
+                                    .into(),
+                            ));
                             continue;
                         }
                         if lifecycle.is_leased() {
@@ -369,7 +494,13 @@ pub(super) async fn run_session_actor(
                         deliver_submit(
                             &target,
                             &mut connection,
-                            DeferredSubmit { queued_at, command_id, command, admission, reply },
+                            DeferredSubmit {
+                                queued_at,
+                                command_id,
+                                command,
+                                admission,
+                                reply,
+                            },
                             &view_tx,
                             &updates,
                         )
@@ -394,18 +525,23 @@ pub(super) async fn run_session_actor(
                             }
                             continue;
                         }
-                        let result = sync_actor_connection(
-                            &target,
-                            &mut connection,
-                        ).await.map(|snapshot| {
-                            if let Some(snapshot) = snapshot {
-                                publish_view(&target.session_id, ManagedSessionView {
-                                    snapshot: Some(snapshot),
-                                    connected: true,
-                                    error: None,
-                                }, &view_tx, &updates);
-                            }
-                        });
+                        let result =
+                            sync_actor_connection(&target, &mut connection)
+                                .await
+                                .map(|snapshot| {
+                                    if let Some(snapshot) = snapshot {
+                                        publish_view(
+                                            &target.session_id,
+                                            ManagedSessionView {
+                                                snapshot: Some(snapshot),
+                                                connected: true,
+                                                error: None,
+                                            },
+                                            &view_tx,
+                                            &updates,
+                                        );
+                                    }
+                                });
                         if result.is_err() {
                             connection = None;
                         }
@@ -417,20 +553,27 @@ pub(super) async fn run_session_actor(
                                 "explicit relay synchronization failed"
                             );
                         }
-                    if reply.send(result.map_err(|error| format!("{error:#}"))).is_err() {
-                        tracing::debug!(
-                            session_id = %target.session_id,
-                            operation = "sync",
-                            "sync result receiver was already closed"
-                        );
-                    }
+                        if reply
+                            .send(result.map_err(|error| format!("{error:#}")))
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                session_id = %target.session_id,
+                                operation = "sync",
+                                "sync result receiver was already closed"
+                            );
+                        }
                     }
                     ActorCommand::Reviewer {
                         role,
                         action,
                         reply,
                     } => {
-                        if lifecycle.is_leased() || crate::controller::move_session::move_owns_session(&target.session_id) {
+                        if lifecycle.is_leased()
+                            || crate::controller::move_session::move_owns_session(
+                                &target.session_id,
+                            )
+                        {
                             // A lifecycle operation owns the connection, and a
                             // reviewer action is not worth deferring: the user
                             // is waiting on its answer now.
@@ -455,7 +598,8 @@ pub(super) async fn run_session_actor(
                         // the primary's relay or serialize independent roles.
                         // Cache each role's connection so transcript polling
                         // does not launch a new SSH/Podman proxy every time.
-                        let cached = reviewer_connections.entry(role.clone())
+                        let cached = reviewer_connections
+                            .entry(role.clone())
                             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
                             .clone();
                         let (finished, tail) = oneshot::channel::<()>();
@@ -466,7 +610,8 @@ pub(super) async fn run_session_actor(
                             if let Some(previous) = previous {
                                 let _ = previous.await;
                             }
-                            run_reviewer_operation(target, role, action, reply, cached, cancelled).await;
+                            run_reviewer_operation(target, role, action, reply, cached, cancelled)
+                                .await;
                             drop(finished);
                         });
                     }
@@ -495,9 +640,8 @@ pub(super) async fn run_session_actor(
                         }
                         let result = async {
                             sync_actor_connection(&target, &mut connection).await?;
-                            let connection = connection
-                                .as_mut()
-                                .context("relay is disconnected")?;
+                            let connection =
+                                connection.as_mut().context("relay is disconnected")?;
                             connection
                                 .respond_elicitation(elicitation_id, response)
                                 .await?;
@@ -539,16 +683,14 @@ pub(super) async fn run_session_actor(
                     }
                     ActorCommand::InstallPromptContext { text, reply } => {
                         if lifecycle.is_leased() {
-                            let _ = reply.send(Err(
-                                "session is reserved for a lifecycle operation".into(),
-                            ));
+                            let _ = reply
+                                .send(Err("session is reserved for a lifecycle operation".into()));
                             continue;
                         }
                         let result = async {
                             sync_actor_connection(&target, &mut connection).await?;
-                            let connection = connection
-                                .as_mut()
-                                .context("relay is disconnected")?;
+                            let connection =
+                                connection.as_mut().context("relay is disconnected")?;
                             connection.install_prompt_context(text).await
                         }
                         .await;
@@ -582,16 +724,14 @@ pub(super) async fn run_session_actor(
                         reply,
                     } => {
                         if lifecycle.is_leased() {
-                            let _ = reply.send(Err(
-                                "session is reserved for a lifecycle operation".into(),
-                            ));
+                            let _ = reply
+                                .send(Err("session is reserved for a lifecycle operation".into()));
                             continue;
                         }
                         let result = async {
                             sync_actor_connection(&target, &mut connection).await?;
-                            let connection = connection
-                                .as_mut()
-                                .context("relay is disconnected")?;
+                            let connection =
+                                connection.as_mut().context("relay is disconnected")?;
                             connection.stop_background_task(background_task_id).await?;
                             Ok::<_, anyhow::Error>(connection.snapshot())
                         }
@@ -655,20 +795,18 @@ pub(super) async fn run_session_actor(
                         reviewer_cancellation = tokio_util::sync::CancellationToken::new();
                         reviewer_connections.clear();
                         reviewer_tails.clear();
-                        let result = sync_actor_connection(
-                            &target,
-                            &mut connection,
-                        )
-                        .await
-                        .map(|_| {
-                            next_lease_id = next_lease_id.wrapping_add(1).max(1);
-                            (
-                                lease_id,
-                                connection
-                                    .take()
-                                    .expect("successful sync retained its connection"),
-                            )
-                        });
+                        let result =
+                            sync_actor_connection(&target, &mut connection)
+                                .await
+                                .map(|_| {
+                                    next_lease_id = next_lease_id.wrapping_add(1).max(1);
+                                    (
+                                        lease_id,
+                                        connection
+                                            .take()
+                                            .expect("successful sync retained its connection"),
+                                    )
+                                });
                         if result.is_err() {
                             connection = None;
                         }
@@ -690,53 +828,7 @@ pub(super) async fn run_session_actor(
                     }
                 }
             }
-            returned = releases.recv() => {
-                let Some(returned) = returned else { continue };
-                if lifecycle.return_lease(returned.lease_id) {
-                    // A dropped lease returns no connection; `submit_actor_command`
-                    // reconnects on demand, so the drain needs no special case.
-                    connection = returned.connection;
-                    failures = 0;
-                    interval.reset();
-                    // A lease syncs the connection it borrowed, so this actor's
-                    // next sync can find nothing left to apply. Publish what the
-                    // returned connection already knows or watchers keep reading
-                    // pre-lease state.
-                    if let Some(returned) = connection.as_ref() {
-                        publish_view(&target.session_id, ManagedSessionView {
-                            snapshot: Some(returned.snapshot()),
-                            connected: true,
-                            error: None,
-                        }, &view_tx, &updates);
-                    }
-                    let retiring = *retirement.borrow();
-                    while let Some(deferred) = deferred_submits.pop_front() {
-                        if retiring {
-                            if deferred
-                                .reply
-                                .send(Err("session target is changing".into()))
-                                .is_err()
-                            {
-                                tracing::debug!(
-                                    session_id = %target.session_id,
-                                    operation = "submit",
-                                    "deferred submit rejection receiver was already closed"
-                                );
-                            }
-                            continue;
-                        }
-                        deliver_submit(
-                            &target,
-                            &mut connection,
-                            deferred,
-                            &view_tx,
-                            &updates,
-                        )
-                        .await;
-                    }
-                }
-            }
-            changed = retirement.changed() => {
+            Event::Retirement(changed) => {
                 if changed.is_err() {
                     break;
                 }

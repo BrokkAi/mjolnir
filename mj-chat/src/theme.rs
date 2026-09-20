@@ -184,6 +184,8 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
 /// so switching the set changes all of them together.
 #[derive(Debug)]
 pub struct Glyphs {
+    pub pin: &'static str,
+    pub pinned: &'static str,
     pub working: &'static str,
     pub waiting: &'static str,
     pub unread: &'static str,
@@ -238,6 +240,8 @@ pub struct Glyphs {
 }
 
 pub const UNICODE_GLYPHS: Glyphs = Glyphs {
+    pin: "◇",
+    pinned: "◆",
     working: "◐",
     waiting: "!",
     unread: "✓",
@@ -289,6 +293,8 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
 };
 
 pub const ASCII_GLYPHS: Glyphs = Glyphs {
+    pin: "+",
+    pinned: "*",
     working: "*",
     waiting: "!",
     unread: "+",
@@ -826,5 +832,70 @@ mod tests {
         assert_eq!(colors.surface_raised, rgb(32, 32, 32));
         assert!(contrast(colors.text, colors.surface_raised) >= 7.0);
         assert!(contrast(colors.accent, colors.selection) >= 4.5);
+    }
+}
+
+/// Stable pin names remain distinct when colors repeat or color is disabled.
+pub fn pin_label(mut id: u32) -> String {
+    let mut label = Vec::new();
+    loop {
+        label.push((b'A' + (id % 26) as u8) as char);
+        if id < 26 {
+            break;
+        }
+        id = id / 26 - 1;
+    }
+    label.into_iter().rev().collect()
+}
+
+pub fn pin_color(id: u32) -> Color {
+    if is_mono() {
+        return palette().text;
+    }
+    let colors = if current() == UiTheme::Light {
+        [
+            rgb(0, 105, 135),
+            rgb(112, 65, 165),
+            rgb(40, 110, 95),
+            rgb(155, 65, 115),
+            rgb(65, 85, 165),
+            rgb(115, 95, 40),
+            rgb(0, 110, 115),
+            rgb(125, 75, 80),
+        ]
+    } else {
+        [
+            rgb(100, 215, 235),
+            rgb(190, 160, 250),
+            rgb(130, 210, 180),
+            rgb(235, 160, 205),
+            rgb(145, 175, 250),
+            rgb(205, 195, 135),
+            rgb(125, 215, 215),
+            rgb(215, 175, 175),
+        ]
+    };
+    colors[(id % 8) as usize]
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_labels_remain_unique_after_the_color_palette_repeats() {
+        assert_eq!(pin_label(0), "A");
+        assert_eq!(pin_label(25), "Z");
+        assert_eq!(pin_label(26), "AA");
+        assert_eq!(pin_label(51), "AZ");
+        assert_eq!(pin_label(52), "BA");
+        for selected in [UiTheme::Light, UiTheme::Midnight, UiTheme::Mono] {
+            with_theme(selected, || {
+                assert_eq!(pin_color(0), pin_color(8));
+                if selected == UiTheme::Mono {
+                    assert_eq!(pin_color(0), palette().text);
+                }
+            });
+        }
     }
 }

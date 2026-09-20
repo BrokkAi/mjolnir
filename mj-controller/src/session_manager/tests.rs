@@ -1943,6 +1943,58 @@ async fn lease_a_live_actor() -> (LeasedActor, u64, StandaloneSession) {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn released_connection_can_be_leased_again_immediately() {
+    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            DEFERRED_SUBMIT_TEST_CHILD,
+            "released_connection_can_be_leased_again_immediately",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("actor did not process the returned connection");
+    let (actor, mut lease_id, mut connection) = lease_a_live_actor().await;
+    let (reply, response) = oneshot::channel();
+    actor
+        .commands
+        .try_send(ActorCommand::Lease { reply })
+        .unwrap();
+    assert!(
+        response.await.unwrap().is_err(),
+        "an active lease stays exclusive"
+    );
+    for _ in 0..32 {
+        let (reply, response) = oneshot::channel();
+        // No await between these sends: both channels are ready when the
+        // current-thread runtime next polls the actor.
+        actor
+            .releases
+            .send(ReturnedConnection {
+                lease_id,
+                connection: Some(connection),
+            })
+            .unwrap();
+        actor
+            .commands
+            .try_send(ActorCommand::Lease { reply })
+            .unwrap();
+        (lease_id, connection) = response
+            .await
+            .unwrap()
+            .expect("a returned lease must not reject the next lifecycle operation");
+    }
+    actor.retirement.send_replace(true);
+    actor
+        .releases
+        .send(ReturnedConnection {
+            lease_id,
+            connection: Some(connection),
+        })
+        .unwrap();
+}
+
+#[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
 ) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {

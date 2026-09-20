@@ -87,9 +87,9 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
         columns.push(if !chat.activity_reachable {
             "Unreachable".to_owned()
         } else if chat.phase == crate::chat::WorkerPhase::Closed {
-            "Closed".to_owned()
+            "Agent ended".to_owned()
         } else if chat.phase == crate::chat::WorkerPhase::Closing {
-            "Closing".to_owned()
+            "Agent shutdown".to_owned()
         } else if !chat.pending_elicitations.is_empty() {
             "Question".to_owned()
         } else {

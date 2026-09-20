@@ -748,7 +748,7 @@ fn stoppable_background_task_keyboard_activation_is_deduplicated() {
     assert!(
         drawn_transcript(&mut chat, 80, 16)
             .iter()
-            .any(|line| line.contains("Stopping…"))
+            .any(|line| line.contains("Interrupting…"))
     );
 
     // The disabled pending control cannot submit a second request.

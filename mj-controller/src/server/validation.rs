@@ -437,8 +437,8 @@ fn validate_action_against(
         }
         ControllerAction::Move { request } => validate_move_request(request, snapshot)?,
         ControllerAction::Open { session_id }
-        | ControllerAction::Close { session_id }
-        | ControllerAction::ForceClose { session_id, .. }
+        | ControllerAction::Suspend { session_id }
+        | ControllerAction::Destroy { session_id, .. }
         | ControllerAction::Cancel { session_id }
         | ControllerAction::StartReview { session_id } => {
             validate_public_id(session_id)?;
@@ -488,7 +488,7 @@ fn validate_action_against(
             let session = require_session_record(snapshot, session_id)?;
             let allowed = match command {
                 mj_core::relay::RelayCommand::CancelTurnFor { .. } => {
-                    session.capabilities.cancel_turn
+                    session.capabilities.interrupt_turn
                 }
                 mj_core::relay::RelayCommand::Steer { .. }
                 | mj_core::relay::RelayCommand::ResolveSteering { .. } => {
@@ -502,10 +502,10 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::CancelTurn { session_id } => {
+        ControllerAction::InterruptTurn { session_id } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
-            if !session.capabilities.cancel_turn {
+            if !session.capabilities.interrupt_turn {
                 return Err(ApiError::new(
                     StatusCode::CONFLICT,
                     "this session has no turn to cancel",

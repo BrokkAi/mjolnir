@@ -85,6 +85,9 @@ impl DashboardState {
             self.modal_click_transition = None;
             self.suppress_modal_release = false;
         }
+        if self.pane_menu.is_some() {
+            return self.handle_pane_menu_event(Event::Key(key));
+        }
         if is_paste_shortcut(key) {
             self.record_event_handled();
             return DashboardAction::PasteFromClipboard;
@@ -117,7 +120,12 @@ impl DashboardState {
         if matches!(self.mode, Mode::Help(_)) {
             return self.handle_help_key(key);
         }
-        self.handle_dashboard_key(key)
+        let before = self.selected_session_id.clone();
+        let action = self.handle_dashboard_key(key);
+        if before != self.selected_session_id {
+            self.request_selected_browse();
+        }
+        action
     }
 
     pub(crate) fn text_input_focused(&self) -> bool {
@@ -174,7 +182,11 @@ impl DashboardState {
             return DashboardAction::None;
         }
         let before = self.dialog_layer_key();
+        let selected_before = self.selected_session_id.clone();
         let action = self.handle_mouse_inner(mouse);
+        if selected_before != self.selected_session_id {
+            self.request_selected_browse();
+        }
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) && before != self.dialog_layer_key()
         {
             self.modal_click_transition = Some((mouse.column, mouse.row, now));
@@ -189,6 +201,17 @@ impl DashboardState {
             // Reaching for the mouse abandons a half-typed chord.
             self.prefix_pending = false;
             self.resize_mode = false;
+        }
+        if self.pane_menu.is_some() {
+            return self.handle_pane_menu_event(Event::Mouse(mouse));
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            && matches!(self.mode, Mode::Dashboard)
+            && let Some(pane) = self.chat_region_contains(mouse.column, mouse.row)
+        {
+            self.begin_pane_menu(pane);
+            self.record_event_handled();
+            return DashboardAction::None;
         }
         if matches!(self.mode, Mode::Help(_)) {
             return self.handle_help_mouse(mouse);
@@ -562,24 +585,6 @@ impl DashboardState {
     /// resume wizard this used to do - the row is red, and the dialog says
     /// what failed.
     pub(crate) fn open_selected_session(&mut self) -> DashboardAction {
-        self.open_selected_session_into(None)
-    }
-
-    /// Opens the selected session in a new pane beside or under the focused
-    /// one, through the same guards Enter uses.
-    pub(crate) fn open_selected_session_in_split(
-        &mut self,
-        direction: ratatui::layout::Direction,
-    ) -> DashboardAction {
-        self.open_selected_session_into(Some(direction))
-    }
-
-    /// `split` of `None` opens into the focused pane; `Some(direction)` asks
-    /// for a new pane in that direction first.
-    fn open_selected_session_into(
-        &mut self,
-        split: Option<ratatui::layout::Direction>,
-    ) -> DashboardAction {
         let Some(session) = self.selected_session() else {
             return DashboardAction::None;
         };
@@ -652,12 +657,6 @@ impl DashboardState {
         }
         let session_id = session.id.clone();
         self.focus_prompt();
-        match split {
-            Some(direction) => DashboardAction::OpenSessionInSplit {
-                session_id,
-                direction,
-            },
-            None => DashboardAction::Open { session_id },
-        }
+        DashboardAction::Open { session_id }
     }
 }

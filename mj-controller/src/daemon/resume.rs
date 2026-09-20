@@ -124,7 +124,11 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub(super) async fn force_stop_session(self: &Arc<Self>, session_id: String) -> Result<()> {
+    pub(super) async fn discard_since_checkpoint(
+        self: &Arc<Self>,
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    ) -> Result<()> {
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -134,22 +138,33 @@ impl RuntimeState {
         })
         .await?;
         for child_id in children {
-            Box::pin(self.force_stop_session(child_id.clone()))
+            Box::pin(self.suspend_session(child_id.clone()))
                 .await
-                .with_context(|| format!("force-stop sub-agent {child_id} before its parent"))?;
+                .with_context(|| {
+                    format!("suspend sub-agent {child_id} before discarding parent changes")
+                })?;
         }
         let operation_session_id = session_id.clone();
         let result = self
             .run_lifecycle(
                 operation_session_id,
                 LifecycleKind::ForceStop,
-                |state, session_id, cancelled| async move {
+                move |state, session_id, cancelled| async move {
                     blocking(move || {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
                             CancellableProcessExecutor::new(cancelled),
                             state,
                             session_id.clone(),
+                        );
+                        ensure!(
+                            controller
+                                .state
+                                .sessions
+                                .get(&session_id)
+                                .and_then(|s| s.checkpoint.as_ref())
+                                == Some(&checkpoint),
+                            "the recovery copy changed; review it before discarding changes"
                         );
                         let deferred = controller.force_stop(&session_id, &executor)?;
                         Ok(if deferred {

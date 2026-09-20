@@ -483,23 +483,26 @@ fn render_combined_themed(
         sidebar_area.width,
         sidebar_area.height.saturating_sub(sidebar_top),
     );
-    let selected_transition = dashboard.selected_session().and_then(|session| {
-        dashboard
-            .transition_kind(&session.id)
-            .map(|kind| (session.id.clone(), kind, false))
-            .or_else(|| {
-                dashboard
-                    .transition_failure_kind(&session.id)
-                    .map(|kind| (session.id.clone(), kind, true))
-            })
-    });
+    let selected_transition = dashboard
+        .current_session_id()
+        .and_then(|id| dashboard.state.sessions.get(id))
+        .and_then(|session| {
+            dashboard
+                .transition_kind(&session.id)
+                .map(|kind| (session.id.clone(), kind, false))
+                .or_else(|| {
+                    dashboard
+                        .transition_failure_kind(&session.id)
+                        .map(|kind| (session.id.clone(), kind, true))
+                })
+        });
     // With no conversation the prompt band holds the two-line guidance that
     // stands in for a composer, so it asks for the rows to show both. A
     // retiring transition uses only the compact status panel. A
     // Starting/Resuming transition or an in-flight attach parks the real
     // composer in the band (the standby prompt), whose height grows with the
     // wrapped draft exactly like an attached chat's.
-    let selected_session_id = dashboard.selected_session_id().map(str::to_owned);
+    let selected_session_id = dashboard.current_session_id().map(str::to_owned);
     // Pane widths do not depend on the band's height, so they can be measured
     // before the bands are allocated — which is what the composer heights the
     // allocation needs are measured against.
@@ -871,11 +874,6 @@ fn render_combined_themed(
     {
         let native_id = dashboard
             .pane_session(pane_id)
-            .or_else(|| {
-                pane_focused
-                    .then(|| dashboard.selected_session_id())
-                    .flatten()
-            })
             .filter(|id| dashboard.is_native_agent(id))
             .map(str::to_owned);
         if let Some(id) = native_id {
@@ -1151,8 +1149,10 @@ fn render_combined_themed(
     if !chat_drew_footer {
         render_footer(frame, footer_area, dashboard);
     }
+    crate::pane_controls::render_pane_chrome(frame, dashboard);
     dashboard.end_surface_frame();
     render_modal(frame, area, dashboard);
+    crate::pane_controls::render_pane_menu(frame, area, dashboard);
     drawn_sessions
 }
 
@@ -1213,8 +1213,7 @@ fn focused_chat_on_screen(
     (chats.contains_key(session_id)
         && chat_shows_in_pane(opening, session_id)
         && dashboard.transition_kind(session_id).is_none()
-        && dashboard.transition_failure_kind(session_id).is_none()
-        && dashboard.selected_session_id() == Some(session_id))
+        && dashboard.transition_failure_kind(session_id).is_none())
     .then(|| session_id.to_owned())
 }
 
@@ -1833,9 +1832,13 @@ mod tests {
     /// Retiring transitions keep the status panel: there is no conversation
     /// to type toward while the session is being stopped.
     #[test]
-    fn a_stopping_transition_keeps_the_status_panel() {
+    fn a_suspending_transition_keeps_the_status_panel() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Suspending,
+            None,
+        );
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
             .draw(|frame| {
@@ -1851,7 +1854,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("ctrl+b shift+c to cancel stopping")),
+                .any(|line| line.contains("ctrl+b shift+c to cancel suspending")),
             "cancel chord missing: {lines:?}"
         );
     }
@@ -1891,7 +1894,11 @@ mod tests {
         );
 
         dashboard.finish_session_operation("session-1");
-        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+        dashboard.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Suspending,
+            None,
+        );
         assert_eq!(dashboard.standby_prompt_session(), None);
     }
 

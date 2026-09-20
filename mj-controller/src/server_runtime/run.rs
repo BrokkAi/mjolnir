@@ -1264,18 +1264,16 @@ pub async fn run_server(
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    if let ControllerAction::Close { session_id } = &request.action {
-                        if closing_actions.contains_key(session_id) {
-                            if request.reply.send(ActionOutcome::accepted()).is_err() { tracing::debug!(%session_id, "repeated close reply dropped"); }
-                            continue;
+                    if let ControllerAction::Suspend { session_id } = &request.action {
+                        if !closing_actions.contains_key(session_id) {
+                            request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         }
-                        request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         daemon_runtime.request_close(session_id);
                     }
                     // A force close runs even while a graceful close for the
                     // same session is still in flight; that stuck close is
                     // exactly what it is meant to take over.
-                    if let ControllerAction::ForceClose { session_id, .. } = &request.action {
+                    if let ControllerAction::Destroy { session_id, .. } = &request.action {
                         request_phone_action_cancellation(session_id, &action_sessions, &action_cancellations);
                         daemon_runtime.request_close(session_id);
                     }
@@ -1300,7 +1298,7 @@ pub async fn run_server(
                     let started = action_started_tx.clone();
                     next_action_id = next_action_id.wrapping_add(1).max(1);
                     let action_id = next_action_id;
-                    if let ControllerAction::Close { session_id } | ControllerAction::ForceClose { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
+                    if let ControllerAction::Suspend { session_id } | ControllerAction::Destroy { session_id, .. } = &action { closing_actions.insert(session_id.clone(), action_id); }
                     if let ControllerAction::New { workspace_id, .. } = &action {
                         let workspace_id = if workspace_id.is_empty() && phone_workspaces.len() == 1 {
                             phone_workspaces[0].id.clone()
@@ -1314,19 +1312,37 @@ pub async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    action_replies.accept(action_id, &action, reply);
+                    let suspension_reply = if matches!(action, ControllerAction::Suspend { .. }) {
+                        Some(reply)
+                    } else {
+                        action_replies.accept(action_id, &action, reply);
+                        None
+                    };
                     let notice_action = match &action {
                         ControllerAction::SetConfig { .. } => Some("Configuration change"),
-                        ControllerAction::CancelTurn { .. } => Some("Cancellation"),
+                        ControllerAction::InterruptTurn { .. } => Some("Cancellation"),
                         ControllerAction::CancelShell { .. } => Some("Shell cancellation"),
                         ControllerAction::RemoveQueuedPrompt { .. } => Some("Queued prompt removal"),
                         ControllerAction::RespondElicitation { .. } => Some("Answer"),
                         _ => None,
                     };
                     let notice_sessions = session_control.clone();
+                    let failure_runtime = daemon_runtime.clone();
+                    let lifecycle_failure_prefix = match &action {
+                        ControllerAction::Suspend { .. } => Some(mj_core::state::CLOSE_FAILURE_PREFIX),
+                        ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
+                        _ => None,
+                    };
                     tokio::spawn(async move {
                         let joined = tokio::task::spawn_blocking(move || {
+                            let mut suspension_reply = suspension_reply;
                             let result = (|| -> Result<()> {
+                                if let ControllerAction::Suspend { session_id } = &action {
+                                    mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
+                                    if let Some(reply) = suspension_reply.take() {
+                                        let _ = reply.send(ActionOutcome::accepted());
+                                    }
+                                }
                                 if control.cancelled.load(Ordering::Acquire) {
                                     bail!("phone action cancelled");
                                 }
@@ -1346,7 +1362,15 @@ pub async fn run_server(
                                     &control,
                                 ))?
                             })();
-                            result.map_err(|error| PhoneActionFailure::of(&error))
+                            let result = result.map_err(|error| PhoneActionFailure::of(&error));
+                            if let Some(reply) = suspension_reply {
+                                let outcome = match &result {
+                                    Ok(()) => ActionOutcome::accepted(),
+                                    Err(failure) => failure.outcome(&action_reference(action_id)),
+                                };
+                                let _ = reply.send(outcome);
+                            }
+                            result
                         })
                         .await;
                         let result = match joined {
@@ -1355,6 +1379,11 @@ pub async fn run_server(
                                 "phone action task failed: {error}"
                             ))),
                         };
+                        if let (Err(failure), Some(prefix), Some(id)) = (&result, lifecycle_failure_prefix, &session_id) {
+                            failure_runtime.record_lifecycle_failure(id, &action_reference(action_id), &crate::daemon::LifecycleFailure {
+                                detail: failure.detail.clone(), refusal: failure.refusal.clone(),
+                            }, prefix).await;
+                        }
                         let notice = match (&result, notice_action, &session_id) {
                             (Err(failure), Some(action), Some(session_id)) => {
                                 Some((session_id.clone(), failure.conversation_notice(action, action_id)))

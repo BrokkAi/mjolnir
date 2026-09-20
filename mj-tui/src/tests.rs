@@ -1134,7 +1134,7 @@ fn a_stopping_transition_offers_no_standby_composer() {
     let mut session = stopped_session();
     session.state = SessionState::Running;
     let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Stopping, None);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
     dashboard.focus_prompt();
 
     assert_eq!(
@@ -2573,23 +2573,19 @@ fn a_split_shows_its_session_in_the_new_pane_and_takes_the_focus() {
     assert_eq!(dashboard.pane_session(first), Some("session-1"));
     assert_eq!(dashboard.pane_for_session("session-1"), Some(first));
     // Focusing a pane moves the Sessions highlight onto what it shows.
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
     dashboard.focus_pane(first);
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 }
 
 #[test]
-fn closing_the_last_pane_empties_it_instead_of_refusing() {
+fn closing_the_browse_pane_is_refused_without_displacing_its_session() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let only = dashboard.focused_pane();
-
-    let closed = dashboard.close_pane(only);
-
-    assert_eq!(closed.as_deref(), Some("session-1"));
+    assert_eq!(dashboard.close_pane(only), None);
     assert_eq!(dashboard.focused_pane(), only);
-    assert_eq!(dashboard.current_session_id(), None);
-    assert!(dashboard.pane_session_ids().is_empty());
+    assert_eq!(dashboard.current_session_id(), Some("session-1"));
 }
 
 #[test]
@@ -2637,15 +2633,15 @@ fn a_restored_pane_whose_session_is_gone_opens_empty() {
 /// The session row's menu is where a split is created, so both commands have
 /// to be in it.
 #[test]
-fn the_session_menu_offers_both_split_commands() {
+fn the_session_menu_offers_pin_controls() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.focus_sessions();
     dashboard.begin_session_palette();
 
     let lines = drawn(&mut dashboard, 120, 60);
     let joined = lines.join("\n");
-    assert!(joined.contains("Open in split right"), "{joined}");
-    assert!(joined.contains("Open in split below"), "{joined}");
+    assert!(joined.contains("Pin session"), "{joined}");
+    assert!(joined.contains("Unpin session"), "{joined}");
 }
 
 /// The pane commands belong where a conversation is: at the composer, and in
@@ -2756,22 +2752,19 @@ fn a_session_installs_into_the_pane_that_asked_and_leaves_any_other() {
     assert_eq!(dashboard.pane_for_session("session-1"), Some(second));
 }
 
-/// The Sessions highlight follows the keyboard. After a close the keyboard is
-/// in the surviving pane, so the highlight has to be on what that pane shows —
-/// otherwise the selection would pull the closed pane's session back in.
+/// Closing a pin preserves the independent list cursor.
 #[test]
-fn closing_a_pane_moves_the_highlight_onto_the_surviving_pane() {
+fn closing_a_pane_preserves_the_list_cursor() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     let first = dashboard.focused_pane();
     let second = dashboard
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-
-    let closed = dashboard.close_pane(second);
-
-    assert_eq!(closed.as_deref(), Some("session-2"));
-    assert_eq!(dashboard.focused_pane(), first);
+        .unwrap();
+    dashboard.focus_pane(first);
+    dashboard.select_active_session("session-1");
+    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-1"));
+    assert_eq!(dashboard.focused_pane(), second);
     assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 }
 
@@ -2800,43 +2793,32 @@ fn a_restored_layout_never_shows_one_session_in_two_panes() {
 /// session in the new pane, so the test does that step the way `mj-cli`
 /// does and then closes the pane with its own key.
 #[test]
-fn the_pane_keys_split_beside_the_conversation_and_close_the_pane() {
+fn the_pane_keys_split_beside_the_conversation_and_close_a_pin() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
     dashboard.select_active_session("session-2");
     dashboard.focus_prompt();
     let first = dashboard.focused_pane();
-
     let action = chord(&mut dashboard, CommandId::OpenSessionSplitRight);
-
-    let DashboardAction::OpenSessionInSplit {
-        session_id,
-        direction,
-    } = action
-    else {
-        panic!("the split key should ask for a split: {action:?}");
+    let DashboardAction::SplitConversation { pane, direction } = action else {
+        panic!("expected a targeted split: {action:?}");
     };
-    assert_eq!(session_id, "session-2");
+    assert_eq!(pane, first);
     assert_eq!(direction, ratatui::layout::Direction::Horizontal);
-    let second = dashboard
-        .split_focused_pane(direction, Some(&session_id))
-        .expect("the test conversation area has room for two panes");
-    assert_eq!(dashboard.conversation_layout.pane_count(), 2);
-    assert_eq!(dashboard.focused_pane(), second);
-
+    let browse = dashboard.split_conversation_pane(pane, direction).unwrap();
+    assert_eq!(dashboard.focused_pane(), browse);
+    assert_eq!(dashboard.pane_session(browse), None);
+    assert_eq!(dashboard.pin_id("session-1"), Some(0));
+    dashboard.focus_pane(first);
     assert_eq!(
         chord(&mut dashboard, CommandId::ClosePane),
-        DashboardAction::ClosePane { pane: second }
+        DashboardAction::ClosePane { pane: first }
     );
-    assert_eq!(dashboard.close_pane(second).as_deref(), Some("session-2"));
+    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-1"));
+    assert_eq!(dashboard.browse_pane(), browse);
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
-    assert_eq!(dashboard.focused_pane(), first);
 }
 
-/// Every conversation pane carries a close chip on its title row, and the
-/// chip names its own pane: clicking the unfocused pane's chip asks to close
-/// that pane and leaves the keyboard, and the Sessions highlight with it,
-/// where they were.
 #[test]
 fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2853,12 +2835,12 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
         let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
         (transcript.right() - 3, transcript.y)
     };
-    for pane in [first, second] {
-        let (column, row) = chip(&dashboard, pane);
+    {
+        let (column, row) = chip(&dashboard, first);
         assert_eq!(
             lines[row as usize].chars().nth(column as usize),
             Some('×'),
-            "every pane draws a close chip on its title row: {lines:#?}"
+            "pinned panes draw a close chip on their title row: {lines:#?}"
         );
     }
 
@@ -2872,7 +2854,7 @@ fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
         DashboardAction::ClosePane { pane: first }
     );
     assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
 }
 
 /// The last-pane key returns the keyboard to the pane it came from, and says
@@ -2924,16 +2906,17 @@ fn closing_a_pane_leaves_no_previous_pane_to_return_to() {
         .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
         .expect("the test conversation area has room for two panes");
     dashboard.focus_pane(first);
+    dashboard.focus_pane(second);
     dashboard.focus_prompt();
 
-    dashboard.close_pane(second);
+    dashboard.close_pane(first);
 
     assert_eq!(
         chord(&mut dashboard, CommandId::FocusLastPane),
         DashboardAction::None
     );
     assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
-    assert_eq!(dashboard.focused_pane(), first);
+    assert_eq!(dashboard.focused_pane(), second);
 }
 
 /// Zoom fills the conversation band with the focused pane: the other panes
@@ -3160,7 +3143,7 @@ fn closing_an_unfocused_pane_leaves_the_keyboard_where_it_was() {
     assert_eq!(closed.as_deref(), Some("session-1"));
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
     assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
     assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
@@ -3176,7 +3159,7 @@ fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
 
     let action = chord(&mut dashboard, CommandId::OpenSessionSplitBelow);
 
-    let DashboardAction::OpenSessionInSplit { direction, .. } = action else {
+    let DashboardAction::SplitConversation { direction, .. } = action else {
         panic!("the stacked split key should ask for a split: {action:?}");
     };
     assert_eq!(direction, ratatui::layout::Direction::Vertical);
@@ -3189,7 +3172,7 @@ fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
         DashboardAction::ConversationPanesChanged { focus_moved: true }
     );
     assert_eq!(dashboard.focused_pane(), first);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
 }
 
 /// A split key pressed with nothing selected still splits; the new pane is
@@ -3205,7 +3188,8 @@ fn a_split_key_with_no_selection_asks_for_an_empty_pane() {
     assert_eq!(dashboard.selected_session_id(), None);
     assert_eq!(
         chord(&mut dashboard, CommandId::OpenSessionSplitRight),
-        DashboardAction::SplitPane {
+        DashboardAction::SplitConversation {
+            pane: dashboard.focused_pane(),
             direction: ratatui::layout::Direction::Horizontal
         }
     );
@@ -3230,7 +3214,7 @@ fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
 
     assert_eq!(restored.focused_pane(), second);
     assert_eq!(restored.current_session_id(), Some("session-2"));
-    assert_eq!(restored.selected_session_id(), Some("session-2"));
+    assert_eq!(restored.selected_session_id(), Some("session-1"));
 }
 
 /// Three live sessions in the default workspace and one in `other`: `asks`
@@ -4048,17 +4032,17 @@ fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
 }
 
 #[test]
-fn stop_and_restart_ask_only_while_the_agent_is_working() {
+fn idle_suspension_runs_immediately_and_working_suspension_warns() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    // Idle: both run at once.
     assert_eq!(
-        dashboard.dispatch_command(CommandId::StopSession),
-        DashboardAction::Close {
+        dashboard.dispatch_command(CommandId::SuspendSession),
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
-    // Working: both ask, and the letter for the second button answers.
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    // Working suspension also explains that it interrupts the turn.
     dashboard
         .session_details
         .get_mut("session-1")
@@ -4069,7 +4053,7 @@ fn stop_and_restart_ask_only_while_the_agent_is_working() {
         AttentionLevel::Working
     );
     assert_eq!(
-        dashboard.dispatch_command(CommandId::StopSession),
+        dashboard.dispatch_command(CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Confirm(_)));
@@ -4077,18 +4061,18 @@ fn stop_and_restart_ask_only_while_the_agent_is_working() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Stop while working?")),
+            .any(|line| line.contains("The current turn will be interrupted.")),
         "{lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("c Cancel") && line.contains("s Stop now")),
+            .any(|line| line.contains("c Cancel") && line.contains("s Suspend session")),
         "{lines:#?}"
     );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Char('s'))),
-        DashboardAction::Close {
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );
@@ -4121,23 +4105,23 @@ fn every_confirmation_button_answers_a_unique_letter() {
         ['d', 'o', 's']
     );
     assert_eq!(
-        confirmation_accelerators(&["Cancel", "Force stop", "Retry stop"]),
+        confirmation_accelerators(&["Cancel", "Force stop", "Retry suspension"]),
         ['c', 'f', 'r']
     );
 
     // The delete dialog's third button is reachable by its letter.
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
-    dashboard.dispatch_command(CommandId::ForceDestroySession);
+    dashboard.dispatch_command(CommandId::DestroySession);
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("d Yes, delete branch")),
+            .any(|line| line.contains("a Destroy and delete branch")),
         "{lines:#?}"
     );
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('d'))),
+        dashboard.handle_key(key(KeyCode::Char('a'))),
         DashboardAction::ForceDestroy {
             session_id: "session-1".into(),
             delete_branch: true
@@ -4252,7 +4236,7 @@ fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
         .unwrap_or_else(|| panic!("the session row: {lines:#?}"));
     // The prefix and the last characters of the name survive; the middle does
     // not, which is what makes room for the counts.
-    assert!(row.contains("⎇ mj/d45dc"), "{row:?}");
+    assert!(row.contains("⎇ mj/d45"), "{row:?}");
     assert!(row.contains("…"), "{row:?}");
     assert!(row.contains("80 ↑1 ↓2 ±2"), "{row:?}");
 }
@@ -4579,11 +4563,11 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     dashboard.set_state(state);
     assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
     assert!(matches!(
-        dashboard.dispatch_command(crate::actions::CommandId::StopSession),
+        dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
         DashboardAction::None
     ));
     assert_eq!(
-        chord(&mut dashboard, CommandId::CloseSession),
+        chord(&mut dashboard, CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(
@@ -4746,26 +4730,76 @@ fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
 }
 
 #[test]
-fn close_session_always_confirms_and_cancel_is_safe() {
+fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
     let mut dashboard = dashboard_with_session(running_session());
+    let mut child = running_session();
+    child.id = "child".into();
+    dashboard.state.subagents.insert(
+        child.id.clone(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: "session-1".into(),
+            task_name: "child task".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: Default::default(),
+            initial_prompt: "inspect".into(),
+            request_key: "request".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+        },
+    );
+    dashboard.state.sessions.insert(child.id.clone(), child);
+    assert_eq!(dashboard.attention_level("session-1"), AttentionLevel::Idle);
     assert_eq!(
-        chord(&mut dashboard, CommandId::CloseSession),
+        chord(&mut dashboard, CommandId::SuspendSession),
+        DashboardAction::None
+    );
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::Confirm(dialog) if matches!(
+            dialog.confirmation,
+            crate::dialogs::Confirmation::SuspendSession {
+                active_children: 1,
+                interrupting: false,
+                ..
+            }
+        )
+    ));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+}
+
+#[test]
+fn working_session_suspension_confirms_and_cancel_is_safe() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    assert_eq!(
+        chord(&mut dashboard, CommandId::SuspendSession),
         DashboardAction::None
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::CloseSession { .. }))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(dialog.confirmation, crate::dialogs::Confirmation::SuspendSession { .. }))
     );
-    // Enter initially activates Cancel, even when the session is idle.
+    // Enter initially activates Cancel.
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
     );
     assert!(matches!(dashboard.mode, Mode::Dashboard));
-    chord(&mut dashboard, CommandId::CloseSession);
+    chord(&mut dashboard, CommandId::SuspendSession);
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::Close {
+        DashboardAction::Suspend {
             session_id: "session-1".into()
         }
     );

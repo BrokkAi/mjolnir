@@ -930,7 +930,7 @@ async fn invalid_model_is_rejected_before_bundling_or_provisioning() {
 #[test]
 fn closing_supersedes_a_failed_initial_configuration() {
     let observation = WaitObservation {
-        lifecycle: Some(ViewerLifecycleCategory::Stopping),
+        lifecycle: Some(ViewerLifecycleCategory::Suspending),
         start_status: Some(StartStatus::Failed {
             message: "bad model".into(),
         }),
@@ -1381,19 +1381,19 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
 async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
-            snapshot.sessions[0].capabilities.cancel_turn = true;
+            snapshot.sessions[0].capabilities.interrupt_turn = true;
         });
 
     for (path, expected) in [
         (
-            "/api/v1/sessions/session-1/close",
-            ControllerAction::Close {
+            "/api/v1/sessions/session-1/suspend",
+            ControllerAction::Suspend {
                 session_id: "session-1".into(),
             },
         ),
         (
-            "/api/v1/sessions/session-1/cancel-turn",
-            ControllerAction::CancelTurn {
+            "/api/v1/sessions/session-1/interrupt-turn",
+            ControllerAction::InterruptTurn {
                 session_id: "session-1".into(),
             },
         ),
@@ -1420,16 +1420,16 @@ async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
 
     let response = tokio::spawn(
         app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/close"))
+            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"force":true}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         ),
     );
     let request = actions.recv().await.unwrap();
     assert_eq!(
         request.action,
-        ControllerAction::ForceClose {
+        ControllerAction::Destroy {
             session_id: "session-1".into(),
             delete_branch: false,
         }
@@ -1456,7 +1456,7 @@ async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), adjust);
     let response = app
         .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/close"))
+            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1468,16 +1468,16 @@ async fn a_forced_close_ignores_active_subagents_that_refuse_a_plain_close() {
         api_app(Arc::new(FakeBackend::default()), adjust);
     let response = tokio::spawn(
         app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/close"))
+            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"force":true}"#))
+                .body(Body::from(r#"{}"#))
                 .unwrap(),
         ),
     );
     let request = actions.recv().await.unwrap();
     assert_eq!(
         request.action,
-        ControllerAction::ForceClose {
+        ControllerAction::Destroy {
             session_id: "session-1".into(),
             delete_branch: false,
         }
@@ -1497,16 +1497,16 @@ async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
 
     let response = tokio::spawn(
         app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/close"))
+            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"force":true,"delete_branch":true}"#))
+                .body(Body::from(r#"{"delete_branch":true}"#))
                 .unwrap(),
         ),
     );
     let request = actions.recv().await.unwrap();
     assert_eq!(
         request.action,
-        ControllerAction::ForceClose {
+        ControllerAction::Destroy {
             session_id: "session-1".into(),
             delete_branch: true,
         }
@@ -1524,7 +1524,7 @@ fn a_force_close_is_not_wire_representable() {
     // The browser viewer posts this enum to `/actions`, so a wire request
     // must not be able to ask for the destructive variant.
     assert!(
-        serde_json::from_str::<ControllerAction>(r#"{"action":"force-close","session_id":"s"}"#)
+        serde_json::from_str::<ControllerAction>(r#"{"action":"destroy","session_id":"s"}"#)
             .is_err()
     );
 }
@@ -1534,7 +1534,7 @@ async fn cancel_turn_is_refused_when_there_is_no_turn_to_cancel() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
         .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/cancel-turn"))
+            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1911,7 +1911,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
     assert_eq!(decision.message.as_deref(), Some("transport failed"));
 
     let mut stopped = idle(Some(completed(10, "end_turn")));
-    stopped.lifecycle = Some(ViewerLifecycleCategory::Stopped);
+    stopped.lifecycle = Some(ViewerLifecycleCategory::Suspended);
     assert_eq!(
         resolve_wait(&stopped, &anything).unwrap().outcome,
         WaitOutcome::Stopped,
@@ -2023,7 +2023,7 @@ fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
     // "stopped" while the close was still running, and never see how it ended.
     let running_close = WaitObservation {
         closing: true,
-        lifecycle: Some(ViewerLifecycleCategory::Stopping),
+        lifecycle: Some(ViewerLifecycleCategory::Suspending),
         ..idle(Some(completed(10, "end_turn")))
     };
     assert_eq!(resolve_wait(&running_close, &request), None);
@@ -2032,7 +2032,9 @@ fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
     // close recorded is what the wait has to report: the request that asked
     // for the close was answered when it was admitted.
     let failed_close = WaitObservation {
-        close_failure: Some("the close did not finish: the checkpoint could not be written".into()),
+        close_failure: Some(
+            "the suspension did not finish: the checkpoint could not be written".into(),
+        ),
         lifecycle: Some(ViewerLifecycleCategory::Live),
         ..idle(Some(completed(10, "end_turn")))
     };
@@ -2040,13 +2042,13 @@ fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
     assert_eq!(decision.outcome, WaitOutcome::Error);
     assert_eq!(
         decision.message.as_deref(),
-        Some("the close did not finish: the checkpoint could not be written"),
+        Some("the suspension did not finish: the checkpoint could not be written"),
         "reporting the finished turn instead would call a failed close a success"
     );
 
     // A close that reached its destination still ends the wait as stopped.
     let finished_close = WaitObservation {
-        lifecycle: Some(ViewerLifecycleCategory::Stopped),
+        lifecycle: Some(ViewerLifecycleCategory::Suspended),
         ..idle(Some(completed(10, "end_turn")))
     };
     assert_eq!(
@@ -2131,26 +2133,19 @@ fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
 }
 
 #[test]
-fn a_running_session_publishes_a_failed_close_but_not_a_raw_error() {
+fn a_running_session_publishes_safe_lifecycle_failures_from_current_and_older_records() {
     let (config, mut state) = sample_config_state();
-
-    // The same running session, with the sentence a failed close records
-    // instead of the raw chain the fixture starts with. A failed close leaves
-    // the session running, so gating this on the state would hide it.
-    state.sessions.get_mut("session-1").unwrap().last_error = Some(format!(
-        "{}; the daemon log records the reason under reference lifecycle-9",
-        mj_core::state::CLOSE_FAILURE_PREFIX
-    ));
-    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let running = ApiSession::from(&snapshot.sessions[0]);
-    assert_eq!(
-        running.error.as_deref(),
-        Some(
-            "the close did not finish; the daemon log records the reason under reference lifecycle-9"
-        ),
-        "a close that failed has to reach the person who asked for it"
-    );
-
+    for prefix in [
+        mj_core::state::CLOSE_FAILURE_PREFIX,
+        mj_core::state::DESTRUCTION_FAILURE_PREFIX,
+        "the close did not finish",
+    ] {
+        let reason =
+            format!("{prefix}; the daemon log records the reason under reference lifecycle-9");
+        state.sessions.get_mut("session-1").unwrap().last_error = Some(reason.clone());
+        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+        assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, Some(reason));
+    }
     // A later successful transition clears the record, and with it the report.
     state.sessions.get_mut("session-1").unwrap().last_error = None;
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
@@ -2600,7 +2595,7 @@ fn input_aware_wait_is_opt_in_and_respects_completed_turns_and_stopping() {
         resolve_wait(&observation, &request).unwrap().outcome,
         WaitOutcome::Finished
     );
-    observation.lifecycle = Some(ViewerLifecycleCategory::Stopping);
+    observation.lifecycle = Some(ViewerLifecycleCategory::Suspending);
     assert_eq!(
         resolve_wait(&observation, &request).unwrap().outcome,
         WaitOutcome::Stopped
@@ -2627,7 +2622,7 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
-/// Make the fixture session look the way `mj close` leaves one: stopped, with
+/// Make the fixture session look the way `mj suspend` leaves one: suspended, with
 /// resume as the thing it can do next.
 fn make_stopped(snapshot: &mut ViewerSnapshot) {
     snapshot.workspaces.push(super::super::ViewerWorkspace {
@@ -2636,7 +2631,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     });
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
-    session.lifecycle = ViewerLifecycleCategory::Stopped;
+    session.lifecycle = ViewerLifecycleCategory::Suspended;
     session.capabilities.resume = true;
     session.capabilities.prompt = false;
     session.incompatible_resume_targets.clear();
@@ -2762,7 +2757,7 @@ fn a_wait_follows_a_running_resume_and_reports_why_a_failed_one_stopped() {
     // While the resume runs, the durable record still says stopped. Answering
     // `stopped` there would tell a caller its session will never come up.
     let mut observation = WaitObservation {
-        lifecycle: Some(ViewerLifecycleCategory::Stopped),
+        lifecycle: Some(ViewerLifecycleCategory::Suspended),
         resuming: true,
         ..Default::default()
     };
@@ -2828,4 +2823,40 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     let body = json_body(response).await;
     assert_eq!(body["session"]["id"], SPAWNED_CHILD);
     assert_eq!(body["task_name"], "probe");
+}
+
+#[tokio::test]
+async fn suspension_rejects_destruction_flags_and_removed_routes() {
+    for (route, body, expected) in [
+        (
+            "suspend",
+            r#"{"force":true}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "suspend",
+            r#"{"delete_branch":true}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "destroy",
+            r#"{"force":true}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("close", "{}", StatusCode::NOT_FOUND),
+        ("cancel-turn", "{}", StatusCode::NOT_FOUND),
+    ] {
+        let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+        let response = app
+            .oneshot(
+                bearer(Request::post(format!("/api/v1/sessions/session-1/{route}")))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{route}: {body}");
+        assert!(actions.try_recv().is_err());
+    }
 }
