@@ -2246,6 +2246,8 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
     .0;
     assert!(!without.target_environment.contains_key("MBX_CACHE_DIR"));
     assert!(!without.environment.contains_key("MBX_CACHE_DIR"));
+    assert!(!without.target_environment.contains_key("MBX_SHIMS_DIR"));
+    assert!(!without.environment.contains_key("MBX_SHIMS_DIR"));
 
     session.build_cache = Some(mj_core::state::SessionBuildCache {
         host: "local-podman".into(),
@@ -2266,6 +2268,9 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
     .0;
     // `target_environment` is what reaches the harness, its terminals, and
     // the reviewer sidecar, not just the harness process.
+    let shims = format!("/var/lib/hel/workers/{session_id}/mbx-shims");
+    assert_eq!(with.target_environment.get("MBX_SHIMS_DIR"), Some(&shims));
+    assert_eq!(with.environment.get("MBX_SHIMS_DIR"), Some(&shims));
     assert_eq!(
         with.target_environment
             .get("MBX_CACHE_DIR")
@@ -2296,6 +2301,32 @@ fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
         Some("off")
     );
     assert!(!without.target_environment.contains_key("MBX_SUMMARY"));
+
+    let mj_core::config::TargetTemplate::LocalPodman { container } = &template else {
+        unreachable!()
+    };
+    let docker = targets::TargetLocator::LocalDocker {
+        borrowed_from: None,
+        container_id: targets::resource_name(session_id).unwrap(),
+    };
+    let docker_template = mj_core::config::TargetTemplate::LocalDocker {
+        container: container.clone(),
+    };
+    // A relaunch and the other container engine use the same persistent path.
+    for (backend, template) in [(&locator, &template), (&docker, &docker_template)] {
+        let launch = worker_launch_config(
+            &session,
+            &profile,
+            Some(&bundle),
+            backend,
+            session_id,
+            Some(&workspace),
+            template,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(launch.target_environment.get("MBX_SHIMS_DIR"), Some(&shims));
+    }
 }
 
 #[test]
@@ -2401,6 +2432,12 @@ fn a_child_opens_its_parents_container_workspace() {
     child.last_profile = "glm".into();
     child.project_directory = None;
     child.container_workspace = Some(parent_workspace.clone());
+    child.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local".into(),
+        directory: PathBuf::from("/mnt/fast/mbx-cache"),
+        max_size: None,
+        target_root: None,
+    });
 
     let (launch, _, _) = worker_launch_config(
         &child,
@@ -2416,6 +2453,10 @@ fn a_child_opens_its_parents_container_workspace() {
     assert_eq!(
         launch.cwd,
         PathBuf::from(format!("/workspace/{parent_id}/project"))
+    );
+    assert_eq!(
+        launch.target_environment.get("MBX_SHIMS_DIR"),
+        Some(&format!("/var/lib/hel/workers/{child_id}/mbx-shims"))
     );
 }
 

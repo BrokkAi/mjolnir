@@ -10,9 +10,9 @@ Two containers sharing an MBX build cache currently overwrite compiler symlinks 
 
 - [x] (2026-09-20) Inspect issue, both repositories, shim installation, configuration, and container availability; agree on explicit isolation.
 - [x] (2026-09-20) Upgrade local MBX and Mjolnir's pin to checksum-verified 1.15.0; full Cargo tests, clippy, formatting, and diff checks pass.
-- [ ] Implement MBX configuration and behavior tests in `../mr-boxington` (code and focused tests complete; documentation and full checks pending).
-- [ ] Reproduce the collision and validate private shims with real containers.
-- [ ] Integrate Mjolnir worker environment, run checks, and commit each repository's changes.
+- [x] (2026-09-20) Implement and commit MBX configuration, generated documentation, and behavior tests as `3da3fd8`; 1,237 workspace tests and dev clippy pass. Remaining CI checks are complete; three stock-release shell-test failures are documented below.
+- [x] (2026-09-20) Reproduce the collision and pass the two-container acceptance experiment, including CMake recovery, restart, replacement, and peer removal. Disposable containers removed.
+- [x] (2026-09-20) Integrate Mjolnir worker environment; 4,147 tests, dev clippy, formatting, and diff checks pass. The integration and final evidence are recorded in the commit accompanying this plan.
 
 ## Surprises & Discoveries
 
@@ -26,7 +26,7 @@ MBX 1.15.0 still installs persistent C/C++ shims under the shared cache. Mjolnir
 
 ## Outcomes & Retrospective
 
-Implementation and validation are pending. Do not describe 1.15.0 as containing the fix.
+The explicit setting and Mjolnir integration are implemented and validated. Both dev-profile suites and clippy pass. Live Podman acceptance passes without expanding the design. Upstream full CI has three existing shell-test failures reproduced with the official 1.15.0 binary; all other completed gates pass. Local MBX is stock 1.15.0; production delivery still needs a released upstream setting. No remote publication was performed.
 
 ## Context and Orientation
 
@@ -75,3 +75,15 @@ The only new public configuration is MBX `shims_dir` / `MBX_SHIMS_DIR`. Use the 
 2026-09-20: Created after user approval, including the explicit stopping rule and release dependency.
 
 2026-09-20: Local upgrade and independent pin validation passed. Podman baseline reproduced exit 127 in container A after container B replaced the shared compiler symlink. Focused upstream private-shim tests pass. Artifact logs are under `/mnt/optane/hel3-1099`.
+
+2026-09-20 validation evidence: `container-baseline.log` records container A exit 127 after B replaces the shared `cc` symlink. `container-acceptance.log` records 3 cache hits in the second checkout, successful concurrent C/C++ and Rust builds, 2 hits after executable replacement, and 2 hits after removal of the peer container. All fixture executables returned the expected native result of 15. A legacy CMake configuration failed with error 127 naming the old shared `cc`; running `mbx exec cmake --fresh -S <source> -B <build>` with the new setting restored it. Reapply original configure options when using `--fresh`. No user cache was modified by this acceptance fixture.
+
+2026-09-20 validation environment: the MBX linker test initially failed because inherited `LIBRARY_PATH=/usr/lib/wsl/lib:` adds a relative current-directory search path. That same test passed after clearing host `LIBRARY_PATH` and `LD_LIBRARY_PATH`; full workspace validation then passed without source changes. MBX commands use `env -u NO_COLOR -u LIBRARY_PATH -u LD_LIBRARY_PATH MBX_DISABLE=1`. Mjolnir uses `env -u NO_COLOR MBX_DISABLE=1`. The upstream CI task runner was absent from PATH, so an isolated mise 2026.9.2 was downloaded under the task artifact directory. The documented wasm target was installed for upstream behavioral tests.
+
+2026-09-20 review: Mjolnir's pin update is committed as `01a52a13`. Upstream generated configuration documentation and the site/link checks pass. The complete upstream CI gate is still running. The patched portable test binary is `/mnt/optane/hel3-1099/mbx-patched`; it can be selected for development through the existing controller `MJ_MBX_BINARY` override. The local default executable remains the verified stock 1.15.0 requested by the user. No release, push, or PR has been performed.
+
+2026-09-20 final validation: `mise run ci` completed with exactly three failures in `test/cc_standalone_exec.bats`: “a make build's C objects restore into a second checkout”, “gdb and full debug objects restore across checkouts and invalidate on source changes”, and “objects retaining absolute source paths cache without leaking another checkout's FILE string”. All three were also reproduced using the checksum-verified official 1.15.0 binary (`mbx-baseline-bats.log`); no unrelated fixes were made. The first two fail expected cache-hit assertions and the third cannot find the expected recorded build. The final CI run used caching enabled, an isolated cache, and the isolated mise executable on PATH (`mbx-ci-clean.log`). An earlier run's build-only `MBX_DISABLE=1` setting and missing mise on PATH caused additional test-harness failures; these were removed for the final result.
+
+The generated-documentation check, documentation build and 4,488-link scan, terminal/PTY tests, full Rust workspace suite, and release diagnostic test passed. Both dev and release clippy and formatting passed; the lint/release tasks were also completed independently so failure of the shell suite could not cancel them (`mbx-ci-remaining.log`). Final source diffs remain limited to the approved setting, its integration, documentation, and regression tests. The upstream unrelated untracked script is preserved.
+
+For a repeatable container experiment, the task artifacts contain `container-check.py` (run with `setup`) and `accept-private.py`. The latter uses the portable patched build, exercises both installed copies against the shared isolated cache, tests the documented CMake recovery, and stops/removes the disposable containers on success. Baseline and acceptance logs are preserved. No Docker daemon was available; Docker launch configuration was verified by the controller behavior tests. The public release dependency remains intentionally unresolved rather than inventing a release version or publishing without authorization.
