@@ -1033,7 +1033,7 @@ fn import_safety_defaults_to_ignoring_untracked_files_and_can_include_them() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("[✓] Ignore untracked files"));
+    assert!(rendered.contains("☑ Ignore untracked files"));
     assert!(rendered.contains(" Cancel "));
     assert!(rendered.contains(" Continue "));
     assert!(rendered.contains("Space toggles the checkbox."));

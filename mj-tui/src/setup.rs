@@ -11,10 +11,12 @@ use crate::{
     },
     widgets::{centered_modal_fixed, dismissible_modal_title},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
+    Checkbox, ChoiceList, ColumnAlign, ColumnSplit, ComboBox, ComboBoxState, ControlKind, Dialog,
     Interaction, PopupSide, TextField,
 };
 use mj_chat::path_input::PathInput;
@@ -558,16 +560,16 @@ fn value_summary(
                 && path.len() == 2
                 && key == "enabled" =>
         {
-            if *value { "☑" } else { "☐" }.to_owned()
+            Checkbox::marker(*value).to_owned()
         }
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
         // through `automatic`, whatever the machine asks for.
         Value::Bool(_) | Value::Null if is_build_cache_field(&child_path, "enabled") => {
             if value.as_bool().unwrap_or(true) {
-                automatic.unwrap_or_else(|| "☑".to_owned())
+                automatic.unwrap_or_else(|| Checkbox::marker(true).to_owned())
             } else {
-                "☐".to_owned()
+                Checkbox::marker(false).to_owned()
             }
         }
         Value::Bool(value) => if *value { "On" } else { "Off" }.to_owned(),
@@ -1201,8 +1203,8 @@ impl SetupDialog {
         }
         let label = match &preview.result {
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
-                "enabled" if preview.off_reason.is_some() => "☐".to_owned(),
-                "enabled" => "☑".to_owned(),
+                "enabled" if preview.off_reason.is_some() => Checkbox::marker(false).to_owned(),
+                "enabled" => Checkbox::marker(true).to_owned(),
                 "directory" => preview
                     .directory
                     .as_ref()
@@ -1954,6 +1956,17 @@ impl DashboardState {
             Some(Interaction::Select(List, index)) => {
                 if dialog.selected != index {
                     dialog.selected = index;
+                }
+                if matches!(&event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left))
+                    && dialog.selected_path().is_some_and(|path| {
+                        is_build_cache_field(&path, "enabled")
+                            || dialog
+                                .draft
+                                .pointer(&pointer(&path))
+                                .is_some_and(Value::is_boolean)
+                    })
+                {
+                    dialog.open_selected();
                 }
             }
             Some(Interaction::Toggle(List)) => {

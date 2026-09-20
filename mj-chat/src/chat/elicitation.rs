@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 
 use crate::components::{
-    ButtonRow, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
+    ButtonRow, Checkbox, ChoiceList, ControlKind, FieldEdit, Form, Interaction, TextField,
 };
 use crate::selection::{
     ContentPos, FrameSurfaces, SelectionRange, SurfaceFrame, SurfaceId, extract_rows,
@@ -1196,21 +1196,9 @@ fn render_elicitation_body(
                 }
             }
         } else if let FieldValue::Boolean(_) = dialog.values[display.field] {
-            let row = focus
-                .focused_row
-                .unwrap_or(0)
-                .saturating_sub(usize::from(focus_scroll));
-            let area = if row < usize::from(focus_area.height) {
-                Rect::new(
-                    focus_area.x,
-                    focus_area.y + row as u16,
-                    focus_area.width.min(5),
-                    1,
-                )
-            } else {
-                Rect::default()
-            };
-            form.register(id, ControlKind::Checkbox, area, true);
+            // The title and description label this boolean too: clicking
+            // any of them toggles the same control as clicking its mark.
+            form.register(id, ControlKind::Checkbox, chunks[1], true);
         }
     } else {
         render_focus(frame, focus_area, &focus, focus_scroll, focused);
@@ -1436,11 +1424,7 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 if dialog.option_cursors[display.field] == index {
                     focused_row = Some(lines.len());
                 }
-                let marker = if !custom_active && selected.contains(&index) {
-                    "☑"
-                } else {
-                    "☐"
-                };
+                let marker = Checkbox::marker(!custom_active && selected.contains(&index));
                 let style = if dialog.option_cursors[display.field] == index {
                     Style::default()
                         .fg(theme::palette().accent)
@@ -1462,14 +1446,18 @@ fn focus_content(dialog: &ElicitationDialog) -> FocusContent<'_> {
                 dialog,
                 display,
                 options.len(),
-                "☐",
-                "☑",
+                Checkbox::marker(false),
+                Checkbox::marker(true),
             );
         }
         (ElicitationFieldKind::Boolean { .. }, FieldValue::Boolean(selected)) => {
             focused_row = Some(lines.len());
             lines.push(Line::styled(
-                if *selected { "☑ Yes" } else { "☐ No" },
+                format!(
+                    "{} {}",
+                    Checkbox::marker(*selected),
+                    if *selected { "Yes" } else { "No" }
+                ),
                 Style::default().fg(theme::palette().accent),
             ));
         }

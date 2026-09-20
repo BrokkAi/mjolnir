@@ -525,6 +525,39 @@ fn mouse_click_toggles_the_focused_boolean_through_the_form() {
 }
 
 #[test]
+fn clicking_the_boolean_field_title_toggles_it() {
+    let mut dialog = ElicitationDialog::new(request(
+        ElicitationFieldKind::Boolean {
+            default: Some(false),
+        },
+        false,
+    ));
+    let buffer = rendered_in_pane(&dialog, 100, 30);
+    let title = &dialog.request.fields[0].title;
+    let (column, row) = (0..buffer.area.height)
+        .find_map(|row| {
+            let text = (0..buffer.area.width)
+                .map(|col| buffer[(col, row)].symbol())
+                .collect::<String>();
+            text.find(title)
+                .map(|byte| (text[..byte].chars().count() as u16, row))
+        })
+        .expect("field title is rendered");
+    for kind in [
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        dialog.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    assert!(matches!(dialog.values[0], FieldValue::Boolean(true)));
+}
+
+#[test]
 fn revise_edits_feedback_inline_and_submits_it_with_the_action() {
     let mut dialog = plan_review(4);
 

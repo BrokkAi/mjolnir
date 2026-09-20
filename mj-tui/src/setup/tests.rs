@@ -63,6 +63,36 @@ fn subagent_profile_choices_are_checkboxes_and_false_entries_are_not_persisted()
     );
 }
 
+#[test]
+fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_toggling() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    choose(&mut dashboard, "codex-1");
+    for expected in [false, true] {
+        let lines = drawn(&mut dashboard, 140, 40);
+        let (column, row) = point(&lines, "Enabled");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+            drawn(&mut dashboard, 140, 40);
+        }
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], expected);
+        assert!(dialog.editor.is_none());
+    }
+    dashboard.handle_key(key(KeyCode::Down));
+    dashboard.handle_key(key(KeyCode::Up));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], true);
+}
+
 fn choose(dashboard: &mut DashboardState, name: &str) {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");

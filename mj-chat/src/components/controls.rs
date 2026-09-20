@@ -583,6 +583,16 @@ impl TextField {
 pub struct Checkbox;
 
 impl Checkbox {
+    /// The shared checked/unchecked symbol, respecting ASCII terminals.
+    pub fn marker(checked: bool) -> &'static str {
+        match (theme::ascii(), checked) {
+            (false, true) => "☑",
+            (false, false) => "☐",
+            (true, true) => "[x]",
+            (true, false) => "[ ]",
+        }
+    }
+
     /// Draws and registers a checkbox.
     pub fn render<K: Copy + Eq>(
         frame: &mut Frame<'_>,
@@ -594,9 +604,9 @@ impl Checkbox {
         id: K,
     ) {
         form.register(id, ControlKind::Checkbox, area, enabled);
-        let mark = if checked { theme::glyphs().check } else { " " };
+        let mark = Self::marker(checked);
         frame.render_widget(
-            Paragraph::new(format!("[{mark}] {label}")).style(control_style(form, id, enabled)),
+            Paragraph::new(format!("{mark} {label}")).style(control_style(form, id, enabled)),
             area,
         );
     }
