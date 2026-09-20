@@ -4104,21 +4104,10 @@ fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.focus_sessions();
     chord(&mut dashboard, CommandId::Help);
-    dashboard.handle_key(key(KeyCode::Char('/')));
     dashboard.handle_key(key(KeyCode::Char('x')));
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(
         matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()),
-        "{:?}",
-        dashboard.mode
-    );
-    // Esc leaves a focused filter box even with nothing in it, so closing help
-    // from there takes one more press: the list has to have the keyboard back
-    // before Esc means the overlay.
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(
-        matches!(&dashboard.mode, Mode::Help(overlay) if !overlay.search_focused),
         "{:?}",
         dashboard.mode
     );

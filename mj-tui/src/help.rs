@@ -201,7 +201,7 @@ impl DashboardState {
         self.mode = Mode::Help(HelpOverlay {
             scroll: 0,
             query: TextInput::new(),
-            search_focused: false,
+            search_focused: true,
             return_to: Box::new(previous),
             form: RefCell::new(Form::default()),
             area: Cell::new(Rect::default()),
@@ -374,9 +374,12 @@ impl DashboardState {
                     self.close_help();
                     return DashboardAction::None;
                 }
+                KeyCode::Esc if overlay.query.is_empty() => {
+                    self.close_help();
+                    return DashboardAction::None;
+                }
                 KeyCode::Esc => {
                     overlay.query.clear();
-                    overlay.search_focused = false;
                     overlay.scroll = 0;
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -568,7 +571,9 @@ pub(crate) fn render_help(
         theme::title(true),
         true,
     );
-    let footer = if overlay.search_focused {
+    let footer = if overlay.search_focused && overlay.query.is_empty() {
+        " ↑↓ scroll · Type to filter · Esc / Enter closes "
+    } else if overlay.search_focused {
         " ↑↓ scroll · Esc clears search · Enter closes "
     } else {
         " ↑↓ scroll · / filter · Esc closes "
@@ -799,10 +804,9 @@ mod tests {
         assert!(
             drawn(&mut dashboard, 200, 100)
                 .join("\n")
-                .contains("/ filter")
+                .contains("Type to filter")
         );
 
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -833,14 +837,14 @@ mod tests {
         assert_eq!(overlay.query, "");
         assert!(overlay.search_focused);
 
-        // Esc unfocuses and clears rather than closing.
+        // Esc clears the query and keeps typing available.
         dashboard.handle_key(key(KeyCode::Char('x')));
         dashboard.handle_key(key(KeyCode::Esc));
         let Mode::Help(overlay) = &dashboard.mode else {
             panic!("Esc must clear the filter before it closes anything");
         };
         assert_eq!(overlay.query, "");
-        assert!(!overlay.search_focused);
+        assert!(overlay.search_focused);
         let rendered = drawn(&mut dashboard, 200, 100).join("\n");
         assert!(rendered.contains("Command palette"), "{rendered}");
         assert!(rendered.contains("Create session"), "{rendered}");
@@ -857,7 +861,6 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
 
         dashboard.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         let Mode::Help(overlay) = &dashboard.mode else {
@@ -891,7 +894,6 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -940,16 +942,12 @@ mod tests {
         assert_eq!(overlay.scroll, lines - body);
     }
 
-    /// Esc answers the innermost thing there is: the query, then the box it was
-    /// typed in, and only then the overlay. Emptying the box with Ctrl-U leaves
-    /// it focused, so the next Esc has to leave the box rather than close the
-    /// dialog around a focused input.
+    /// An empty focused filter must not add an extra Escape before closing.
     #[test]
-    fn esc_leaves_the_focused_help_filter_before_it_closes_help() {
+    fn esc_closes_help_when_the_focused_filter_is_empty() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in "palette".chars() {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -961,18 +959,13 @@ mod tests {
         assert!(overlay.search_focused, "Ctrl-U keeps the box focused");
 
         dashboard.handle_key(key(KeyCode::Esc));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("Esc must leave the filter box before it closes help");
-        };
-        assert!(!overlay.search_focused);
-        dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(dashboard.mode, Mode::Dashboard);
     }
 
     /// While the filter has focus every printable key is filter text, so the
     /// keys that close or scroll the overlay must not steal them back.
     #[test]
-    fn help_closes_on_enter_and_question_mark_but_not_while_filtering() {
+    fn help_closes_on_enter_and_treats_printable_keys_as_filter_text() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
 
@@ -981,11 +974,6 @@ mod tests {
         assert_eq!(dashboard.mode, Mode::Dashboard);
 
         chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('?')));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-
-        chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Char('/')));
         for character in ['?', 'j', 'k'] {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
@@ -1025,15 +1013,14 @@ mod tests {
                 matches!(dashboard.mode, Mode::Help(_)),
                 "{focus:?} did not open help"
             );
-            // The same key closes it again.
+            // Another question mark searches for that shortcut.
             dashboard.handle_key(key(KeyCode::Char('?')));
-            assert_eq!(dashboard.mode, Mode::Dashboard);
+            assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query == "?"));
         }
     }
 
     fn filter(dashboard: &mut DashboardState, query: &str) {
         dashboard.begin_help();
-        dashboard.handle_key(key(KeyCode::Char('/')));
         dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         dashboard.handle_paste(query);
     }
@@ -1164,8 +1151,9 @@ mod tests {
         use crossterm::event::MouseButton;
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_help();
-        dashboard.handle_paste("ignored");
-        assert!(dashboard.help_search_generation().is_none());
+        dashboard.handle_paste("initial");
+        assert_eq!(dashboard.help_search_request().unwrap().query, "initial");
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         let rows = drawn(&mut dashboard, 120, 35);
         let (x, y) = point(&rows, "filter:");
         for kind in [

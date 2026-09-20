@@ -1531,7 +1531,7 @@ impl DashboardState {
         {
             // Escape peels one layer at a time: the query first, then the box's
             // hold on the keyboard, and only then the dialog. This is the order
-            // the help overlay and the Sessions pane's own filter already use.
+            // the Sessions pane's own filter already uses.
             if key.code == KeyCode::Esc {
                 if !dialog.search.is_empty() {
                     return self.clear_resume_search();
