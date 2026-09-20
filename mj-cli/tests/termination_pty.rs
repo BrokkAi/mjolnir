@@ -250,6 +250,15 @@ fn spawn_dashboard_pty_with_local_target(
     pending_session: bool,
     local_target: bool,
 ) -> DashboardPty {
+    spawn_dashboard_pty_with_prefix(exit_when_idle, pending_session, local_target, None)
+}
+
+fn spawn_dashboard_pty_with_prefix(
+    exit_when_idle: bool,
+    pending_session: bool,
+    local_target: bool,
+    prefix: Option<&str>,
+) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
     let config_directory = directory.path().join("config/hel");
     let data_directory = directory.path().join("data/hel");
@@ -283,6 +292,12 @@ image = "ubuntu:24.04"
 "#,
     )
     .expect("write Hel test config");
+    if let Some(prefix) = prefix {
+        let path = config_root.join("hel/config.toml");
+        let mut config = mj_core::config::Config::load_from(&path).unwrap();
+        config.keys.prefix = prefix.into();
+        config.save_to(&path).unwrap();
+    }
     if local_target {
         let path = config_root.join("hel/config.toml");
         let mut config = mj_core::config::Config::load_from(&path).unwrap();
@@ -377,6 +392,9 @@ image = "ubuntu:24.04"
         // into thousands of threads on large CI machines during parallel runs.
         .env("TOKIO_WORKER_THREADS", "2")
         .env("RAYON_NUM_THREADS", "2");
+    if prefix.is_some() {
+        command.args(["--instance", "prefix-key-regression"]);
+    }
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
         command.args(["--workspace", workspace]);
@@ -711,6 +729,30 @@ fn sigterm_restores_real_pty_terminal() {
         output.contains("\x1b[?25h"),
         "missing cursor restoration: {output:?}"
     );
+}
+
+#[test]
+fn control_backslash_prefix_detaches_from_a_real_terminal() {
+    let mut fixture = spawn_dashboard_pty_with_prefix(true, false, false, Some(r"ctrl+\"));
+    let mut output = Vec::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        READY_MARKER,
+    );
+    // The actual byte emitted by a traditional terminal for Ctrl+backslash.
+    fixture
+        .master
+        .write_all(b"\x1cq")
+        .expect("send configured detach chord");
+    let status = wait_for_exit(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        "Ctrl+backslash q",
+    );
+    assert!(status.success(), "PTY child exit: {status}");
 }
 
 #[test]

@@ -213,6 +213,20 @@ pub fn normalize_key_combo(mut combo: KeyCombo) -> KeyCombo {
         KeyName::Char(_) => combo.modifiers.shift = false,
         _ => {}
     }
+    // Legacy terminals share control bytes 0x1c..=0x1f between these
+    // punctuation keys and digits. Crossterm decodes the bytes as digits;
+    // enhanced keyboard protocols can deliver the punctuation instead.
+    // Normalize configuration and events alike so matching and conflict
+    // detection agree across both encodings.
+    if combo.modifiers.ctrl {
+        combo.name = match combo.name {
+            KeyName::Char('4') => KeyName::Char('\\'),
+            KeyName::Char('5') => KeyName::Char(']'),
+            KeyName::Char('6') => KeyName::Char('^'),
+            KeyName::Char('7') => KeyName::Char('_'),
+            name => name,
+        };
+    }
     combo
 }
 
