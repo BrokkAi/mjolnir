@@ -26,10 +26,10 @@ use mj_core::state::{
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
-pub(super) const MBX_VERSION: &str = "1.12.0";
+pub(super) const MBX_VERSION: &str = "1.15.0";
 
-const MBX_X86_64_SHA256: &str = "b0d90013e5e4e55419b75db897a6b9eed0f0e3b7bc49edf355e0e6490fda6de2";
-const MBX_AARCH64_SHA256: &str = "738b97bf260137aed70cd3cf849925d1f1bec5f1ba446f5e61ed851ae649bc7b";
+const MBX_X86_64_SHA256: &str = "bf9fcc7ed39e4923588f6c25a781aa59eb466fec347102a3bb1a0c2acd12ebf8";
+const MBX_AARCH64_SHA256: &str = "d0bb6c0eb4b4ba9abed39516ab769ca62429e3e47b548848ac40becee6870c2a";
 
 /// Overrides the download with a local mbx binary for the current machine's
 /// architecture. Used for development against an unreleased mbx.
@@ -1038,7 +1038,7 @@ mod tests {
     fn a_native_mbx_supplies_the_cache_directory_and_its_own_limits() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1106,7 +1106,7 @@ mod tests {
     fn a_relocated_target_root_is_reported_for_its_own_mount() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1134,7 +1134,7 @@ mod tests {
     fn a_target_root_that_cannot_be_cloned_into_still_gets_the_cache() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1184,7 +1184,7 @@ mod tests {
         let _isolated = isolated();
         let mut answers = plain_host();
         answers.retain(|(needle, _, _)| *needle != "$m\" --version");
-        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.12.0"));
+        answers.push(("$m\" --version", 0, "/home/dev/.cargo/bin/mbx\nmbx 1.15.0"));
         answers.push((
             "/home/dev/.cargo/bin/mbx cache dir --json",
             0,
@@ -1315,7 +1315,7 @@ mod tests {
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
 
         let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, "mbx\nmbx 1.12.0"),
+            ("$m\" --version", 0, "mbx\nmbx 1.15.0"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1334,7 +1334,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some("1.12.0"));
+        assert_eq!(preview.native_mbx.as_deref(), Some("1.15.0"));
         assert_eq!(
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))
