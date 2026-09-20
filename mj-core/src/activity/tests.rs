@@ -597,3 +597,32 @@ fn expected_continuation_yields_to_observed_work_and_owns_no_work() {
     facts.prompt_started_at_ms = Some(100);
     assert!(matches!(classify(&facts), ActivityState::Turn { .. }));
 }
+
+#[test]
+fn inferred_idle_preserves_owned_background_work_and_foreground_precedence() {
+    let mut facts = ActivityFacts {
+        background_commands: 4,
+        inferred_idle_since_ms: Some(100),
+        ..Default::default()
+    };
+    assert_eq!(
+        classify(&facts),
+        ActivityState::Idle {
+            since_ms: Some(100)
+        }
+    );
+    assert!(has_work_in_flight(&facts));
+    assert!(!is_quiet(&facts));
+    assert!(!safe_to_replace(&facts, HarnessKind::Claude));
+    facts.active_user_shells = 1;
+    assert!(matches!(classify(&facts), ActivityState::Background { .. }));
+    facts.active_user_shells = 0;
+    facts.prompt_started_at_ms = Some(200);
+    assert!(matches!(classify(&facts), ActivityState::Turn { .. }));
+    facts.prompt_started_at_ms = None;
+    facts.goal_running = true;
+    assert!(!classify(&facts).is_idle());
+    facts.goal_running = false;
+    facts.capacity_retry_armed = true;
+    assert!(!classify(&facts).is_idle());
+}

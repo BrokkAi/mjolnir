@@ -1,6 +1,9 @@
 //! Hel's target-side worker: the daemon and stdio proxy that run inside a
 //! container or on an SSH host.
 
+/// Default diagnostics include the local Jev decision trail. Explicit RUST_LOG overrides it.
+pub const DEFAULT_WORKER_LOG_FILTER: &str = "warn,mj_jev=info";
+
 pub mod user_shell;
 pub mod worker_runtime;
 

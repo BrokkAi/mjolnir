@@ -13,7 +13,7 @@ Restore session opening and live chat updates when native subagents have large t
 - [x] 2026-09-20: Implemented metadata-only native snapshots and independent background projection loading.
 - [x] 2026-09-20: Moved native history reads off the bounded daemon reply; added persistent feed failures and actionable oversized-response errors.
 - [x] 2026-09-20: Added regression tests; full workspace tests, final-source Clippy, and formatting passed.
-- [ ] Commit the validated implementation and verify live refresh using the rebuilt daemon.
+- [x] 2026-09-20: Committed implementation as d516fa97; installed with scripts/install.sh, restarted only the daemon, and verified the live snapshot and bifrost-fuzz conversation in a fresh TUI.
 
 ## Surprises & Discoveries
 
@@ -55,4 +55,8 @@ Use existing crates, Tokio watch channels and supervised tasks, controller datab
 
 ## Outcomes & Retrospective
 
-Focused native tests passed (39 tests), followed by a passing full dev-profile workspace suite including convergence/replay tests. Final-source Clippy and formatting passed. Release installation and live verification remain pending.
+Focused native tests passed (39 tests), followed by a passing full dev-profile workspace suite including convergence/replay tests. Final-source Clippy and formatting passed. The release installation succeeded through `scripts/install.sh`. `mj daemon restart` replaced daemon PID 987076 with 1476342 using protocol 28; bifrost-fuzz worker PID 998106 was preserved. The all-workspace response returned 338 records and 21 native summaries in 1,441,424 bytes (106 ms), with bifrost-fuzz connected, no error, and projection ordinal 9636. The CLI transcript includes the original question and completed #3486 answer. A separate tmux client opened the conversation and rendered that answer; it was then detached gracefully. Existing clients must reopen once because their old protocol cannot decode the new summary type. No push was performed.
+
+## Artifacts and Notes
+
+Validation logs are `/mnt/optane/hel-snapshot-tests.log` and `/mnt/optane/hel-snapshot-clippy-final.log`; installation is recorded in `/mnt/optane/hel-snapshot-install.log`. The successful terminal capture is `/mnt/optane/hel-bifrost-recovered-tui.txt`, and the read-only API response is `/mnt/optane/hel-bifrost-recovered-transcript.json`. These are local verification artifacts, not product documentation.
