@@ -26,7 +26,8 @@ pub(super) fn load_materialized_session_summary_from(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<MaterializedSessionSummary>> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
     let row = connection
         .query_row(
             "SELECT applied_event_ordinal, last_activity_at_ms, execution_state,
@@ -55,6 +56,8 @@ pub(super) fn load_materialized_session_summary_from(
         return Ok(None);
     };
 
+    #[cfg(test)]
+    super::tests::after_materialized_frontier_read();
     let last_user_message = last_materialized_user_message(&connection, session_id)?;
     let last_agent_message = last_materialized_agent_message(&connection, session_id)?;
     let last_agent_message_follows_last_user =
@@ -355,7 +358,8 @@ pub(super) fn load_materialized_finished_turn_message_from(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<String>> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
@@ -399,7 +403,8 @@ pub(super) fn load_materialized_turn_summary_from(
     turn_start_position: u64,
     turn_completed_position: u64,
 ) -> Result<TurnSummary> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
     let turn_number = connection.query_row(
         "SELECT COUNT(*)
          FROM materialized_transcript_items
@@ -668,7 +673,10 @@ pub(super) fn load_materialized_projection_tail_from(
     session_id: &str,
     transcript_limit: usize,
 ) -> Result<Option<(MaterializedSession, ProjectionWindow)>> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    // Frontier, mutable transcript bodies, and window metadata must describe
+    // one WAL snapshot even if the daemon commits between these queries.
+    let connection = reader.transaction()?;
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
@@ -838,12 +846,13 @@ pub(super) fn load_materialized_session_from(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<MaterializedSession>> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
     load_materialized_session_with(&connection, session_id)
 }
 
 pub(super) fn load_materialized_session_with(
-    connection: &Connection,
+    connection: &rusqlite::Transaction<'_>,
     session_id: &str,
 ) -> Result<Option<MaterializedSession>> {
     let Some(fields) = read_materialized_session_fields(connection, session_id)? else {
@@ -922,6 +931,8 @@ pub(super) fn read_materialized_session_fields(
     else {
         return Ok(None);
     };
+    #[cfg(test)]
+    super::tests::after_materialized_frontier_read();
     Ok(Some(MaterializedSessionFields {
         applied_event_ordinal,
         applied_event_digest,
