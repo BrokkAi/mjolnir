@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mj_controller::database::DetachedSessionDraft;
-use mj_core::config::{Config, ProjectBundle, is_bare_project_target};
-use mj_core::remote_git::{default_branch, display_url, resolve_repository};
+use mj_core::config::{Config, ProjectBundle};
 use mj_core::state::{
     MaterializedSession, MovePreparation, ProjectSourceIdentity, SessionRecord, SessionState, State,
 };
@@ -382,43 +381,24 @@ pub(crate) struct LifecycleReloaded {
     result: std::result::Result<Controller, String>,
 }
 
-fn resolve_remote_repositories(
-    config: &Config,
-    bundle_id: &str,
-    target_template_id: &str,
-    executor: &impl mj_controller::targets::CommandExecutor,
-) -> Result<Vec<RemoteRepositoryPreview>> {
-    let target = config
-        .targets
-        .get(target_template_id)
-        .with_context(|| format!("unknown target template {target_template_id:?}"))?;
-    if is_bare_project_target(target) {
-        return Ok(Vec::new());
+impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOutcome {
+    fn from(result: mj_controller::controller::NewSessionPreflight) -> Self {
+        if !result.remote_repairs.is_empty() {
+            return Self::Repair(result.remote_repairs);
+        }
+        Self::Ready(
+            result
+                .remote_repositories
+                .into_iter()
+                .map(|repository| RemoteRepositoryPreview {
+                    repository_id: repository.id,
+                    fetch_url: repository.fetch_url,
+                    default_branch: repository.default_branch,
+                    push_urls: repository.push_urls,
+                })
+                .collect(),
+        )
     }
-    let bundle = config
-        .bundles
-        .get(bundle_id)
-        .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
-    bundle
-        .repositories
-        .iter()
-        .map(|repository| {
-            let source = resolve_repository(repository, executor)
-                .with_context(|| format!("repository {:?}", repository.id))?;
-            let default_branch = default_branch(&source, executor)
-                .with_context(|| format!("repository {:?}", repository.id))?;
-            Ok(RemoteRepositoryPreview {
-                repository_id: repository.id.clone(),
-                fetch_url: display_url(&source.fetch_url),
-                default_branch,
-                push_urls: source
-                    .push_urls
-                    .iter()
-                    .map(|url| display_url(url))
-                    .collect(),
-            })
-        })
-        .collect()
 }
 
 impl DashboardContext {
