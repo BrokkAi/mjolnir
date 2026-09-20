@@ -13,7 +13,7 @@ Mj should spare the operator redundant replies such as “yes, run the tests I a
 - [x] Shared classifier, proxy endpoint, and configuration implemented; proxy checks, tests, deployment, and synthetic smoke checks pass.
 - [x] Durable guarded relay admission and continuation state implemented; focused worker tests pass.
 - [x] Supervised daemon decisions, review coordination, and visible status implemented; race and settlement tests pass.
-- [x] Behavior tests, isolated acceptance, required checks, and documentation completed; committing validated changes on the current branch.
+- [x] Behavior tests, isolated acceptance, required checks, and documentation completed. Implementation committed as `0e3f98ff`; evaluation artifacts committed separately on the same branch.
 
 ## Surprises & Discoveries
 
