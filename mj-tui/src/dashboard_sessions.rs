@@ -12,9 +12,9 @@ use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhaus
 /// first, then a session nothing can be learned about because its worker is
 /// unreachable, then a question the agent cannot proceed without, then a
 /// finished answer nobody has read, then work in progress, then idle, then
-/// anything stopped or still starting. It is one scale for the row symbol,
-/// the band colour, the priority sort, the attention queue, and the badges,
-/// so they can never disagree.
+/// anything stopped or still starting. Rows and priority sorting retain the
+/// session's status; the attention queue and badges omit failures already read
+/// in this terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttentionLevel {
     Inactive,
@@ -576,7 +576,7 @@ impl DashboardState {
             .values()
             .filter(|session| self.is_listed_top_level_session(session, &session.workspace_id))
             .filter_map(|session| {
-                let level = self.attention_level(&session.id);
+                let level = self.attention_notice_level(&session.id);
                 level.needs_person().then(|| {
                     (
                         std::cmp::Reverse(level),
@@ -598,8 +598,7 @@ impl DashboardState {
             .collect()
     }
 
-    /// The most urgent level among `sessions` and how many of them need a
-    /// person at all, for a badge. `None` when none of them do.
+    /// The most urgent unseen level and the number of sessions at that level.
     fn attention_summary<'a>(
         &self,
         sessions: impl IntoIterator<Item = &'a SessionRecord>,
@@ -607,11 +606,13 @@ impl DashboardState {
         sessions
             .into_iter()
             .filter_map(|session| {
-                let level = self.attention_level(&session.id);
+                let level = self.attention_notice_level(&session.id);
                 level.needs_person().then_some(level)
             })
             .fold(None, |summary, level| match summary {
-                Some((top, count)) => Some((top.max(level), count + 1)),
+                Some((top, count)) if level == top => Some((top, count + 1)),
+                Some((top, count)) if level < top => Some((top, count)),
+                Some(_) => Some((level, 1)),
                 None => Some((level, 1)),
             })
     }
@@ -652,7 +653,7 @@ impl DashboardState {
     pub(crate) fn attention_badge_summary(&self) -> Option<(AttentionLevel, usize)> {
         let queue = self.attention_queue();
         let top = queue.iter().map(|entry| entry.level).max()?;
-        Some((top, queue.len()))
+        Some((top, queue.iter().filter(|entry| entry.level == top).count()))
     }
 
     /// Moves to the next (`1`) or previous (`-1`) session in the attention

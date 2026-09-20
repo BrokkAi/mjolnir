@@ -297,9 +297,12 @@ the way. When nothing is waiting, the footer says so. While something is, the
 footer names the key with the same badge the tabs carry, for example
 `o next (!2)`.
 
-A badge is the most urgent level's symbol followed by how many sessions need
-you at all: `×1` when one has failed, `!2` when the most urgent of two is a
-question, `✓3` for three unread answers. Red means something broke; the
+A badge is the most urgent level's symbol followed by the number of sessions
+at that level: `×1` for one unseen failure, `!2` for two questions, `✓3` for
+three unread answers. Viewing a failed session's explanation clears its
+failure notice in the current terminal; the session row still shows that it
+failed. A changed error or another failure after recovery is flagged again.
+Red means something broke; the
 attention colour means something is only waiting on you. Each workspace tab
 carries the badge for its own sessions, a folded project heading carries one
 for its hidden rows, and a minimized Sessions pane carries one in its title.

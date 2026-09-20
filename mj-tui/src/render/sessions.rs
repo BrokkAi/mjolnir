@@ -1083,8 +1083,7 @@ pub(crate) fn attention_color(level: AttentionLevel) -> Color {
 }
 
 /// The ` ×1` or ` ✓3` a folded heading, a workspace tab, or the footer
-/// carries: the most urgent level's glyph and how many sessions need a
-/// person at all.
+/// carries: the most urgent unseen level's glyph and its session count.
 pub(crate) fn attention_badge(summary: Option<(AttentionLevel, usize)>) -> Option<Span<'static>> {
     let (level, count) = summary?;
     Some(Span::styled(

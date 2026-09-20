@@ -13,6 +13,20 @@ use mj_core::config::NotifyMode;
 
 use crate::{AttentionLevel, DashboardState};
 
+/// A failure shown in this terminal. A changed error or a recovered session
+/// starts a new notice; viewing an error does not change its underlying state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewedFailure {
+    state: mj_core::state::SessionState,
+    message: Option<String>,
+}
+
+impl ViewedFailure {
+    pub(crate) fn matches(&self, session: &mj_core::state::SessionRecord) -> bool {
+        self.state == session.state && self.message == session.last_error
+    }
+}
+
 /// One thing worth interrupting the person for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
@@ -35,6 +49,39 @@ pub(crate) struct AttentionEpisode {
 }
 
 impl DashboardState {
+    pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
+        let level = self.attention_level(session_id);
+        if level == AttentionLevel::Failed
+            && self.viewed_failures.get(session_id).is_some_and(|seen| {
+                self.state
+                    .sessions
+                    .get(session_id)
+                    .is_some_and(|session| seen.matches(session))
+            })
+        {
+            AttentionLevel::Inactive
+        } else {
+            level
+        }
+    }
+
+    /// Remember only failures whose explanation was actually drawn, not rows
+    /// merely selected behind a modal or while the terminal is too small.
+    pub(crate) fn failure_drawn(&mut self, session_id: &str) {
+        if self.modal_open() {
+            return;
+        }
+        if let Some(session) = self.state.sessions.get(session_id) {
+            self.drawn_failures.insert(
+                session_id.to_owned(),
+                ViewedFailure {
+                    state: session.state,
+                    message: session.last_error.clone(),
+                },
+            );
+        }
+    }
+
     /// The notifications due at `now_ms`, each reported exactly once per
     /// episode. Sessions the person is already looking at are marked as
     /// reported without a notification, so switching away later does not
@@ -54,7 +101,7 @@ impl DashboardState {
             .collect::<Vec<_>>();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
         for id in ids {
-            let level = self.attention_level(&id);
+            let level = self.attention_notice_level(&id);
             if !level.needs_person() {
                 episodes.remove(&id);
                 continue;

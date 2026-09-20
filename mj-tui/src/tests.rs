@@ -3312,32 +3312,32 @@ fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
 }
 
 #[test]
-fn a_badge_names_the_most_urgent_level_and_counts_every_flagged_session() {
+fn a_badge_counts_only_sessions_at_its_displayed_attention_level() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
     // Default holds one question and one unread answer.
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Waiting, 2))
+        Some((AttentionLevel::Waiting, 1))
     );
 
     dashboard.set_session_connectivity("done", false);
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Unreachable, 2))
+        Some((AttentionLevel::Unreachable, 1))
     );
 
     let session = dashboard.state.sessions.get_mut("quiet").unwrap();
     session.state = SessionState::Error;
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 3))
+        Some((AttentionLevel::Failed, 1))
     );
 
     let badge =
         crate::render::sessions::attention_badge(dashboard.workspace_attention_summary("default"))
             .expect("a workspace with three flagged sessions carries a badge");
-    assert_eq!(badge.content, " \u{d7}3");
+    assert_eq!(badge.content, " \u{d7}1");
     assert_eq!(
         badge.style.fg,
         Some(mj_chat::theme::palette().session_error),
@@ -3350,12 +3350,92 @@ fn a_badge_names_the_most_urgent_level_and_counts_every_flagged_session() {
 }
 
 #[test]
+fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them() {
+    let mut failed = running_session();
+    failed.id = "failed".into();
+    failed.state = SessionState::Error;
+    failed.last_error = Some("worker stopped unexpectedly".into());
+    let mut dashboard = dashboard_with_session(failed);
+    let mut state = dashboard.state.clone();
+    for index in 0..5 {
+        let mut session = running_session();
+        session.id = format!("done-{index}");
+        state.sessions.insert(session.id.clone(), session);
+    }
+    dashboard.set_state(state);
+    for index in 0..5 {
+        let detail = dashboard
+            .session_details
+            .get_mut(&format!("done-{index}"))
+            .unwrap();
+        detail.agent_message_latest_content_ordinals = vec![1];
+        detail.unread_agent_messages = 1;
+    }
+    dashboard.select_active_session("failed");
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1))
+    );
+    drawn(&mut dashboard, 40, 10);
+    dashboard.acknowledge_render();
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1)),
+        "a terminal-too-small warning does not show the failure"
+    );
+
+    let screen = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(screen.contains("worker stopped unexpectedly"), "{screen}");
+    dashboard.acknowledge_render();
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Unread, 5))
+    );
+    assert_eq!(
+        dashboard.attention_badge_summary(),
+        Some((AttentionLevel::Unread, 5))
+    );
+    assert_eq!(
+        dashboard.attention_level("failed"),
+        AttentionLevel::Failed,
+        "reading a failure does not fix the failed session"
+    );
+
+    dashboard.set_state(dashboard.state.clone());
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Unread, 5)),
+        "refreshing unchanged state must not resurrect the notice"
+    );
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut("failed").unwrap().last_error = Some("a different failure".into());
+    dashboard.set_state(state);
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1)),
+        "a new error needs attention again"
+    );
+    drawn(&mut dashboard, 140, 40);
+    dashboard.acknowledge_render();
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut("failed").unwrap().state = SessionState::Running;
+    dashboard.set_state(state.clone());
+    state.sessions.get_mut("failed").unwrap().state = SessionState::Error;
+    dashboard.set_state(state);
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1)),
+        "a later failure after recovery is a new episode even with the same text"
+    );
+}
+
+#[test]
 fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Waiting, 2))
+        Some((AttentionLevel::Waiting, 1))
     );
 
     // A data-loss session is a terminal failure the Sessions pane never lists;
@@ -3372,7 +3452,7 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
         );
         assert_eq!(
             dashboard.workspace_attention_summary("default"),
-            Some((AttentionLevel::Waiting, 2)),
+            Some((AttentionLevel::Waiting, 1)),
             "{state:?} must not turn the badge red or raise its count"
         );
         assert!(
@@ -3388,7 +3468,7 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
     dashboard.state.sessions.get_mut("quiet").unwrap().state = SessionState::Error;
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 3))
+        Some((AttentionLevel::Failed, 1))
     );
 }
 
@@ -3404,7 +3484,7 @@ fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
         .materialized_applied_event_ordinal = Some(4);
     assert_eq!(
         dashboard.sessions_attention_summary(),
-        Some((AttentionLevel::Waiting, 2))
+        Some((AttentionLevel::Waiting, 1))
     );
 
     chord(&mut dashboard, CommandId::MarkAllRead);
@@ -3531,8 +3611,8 @@ fn the_footer_names_the_next_key_only_while_something_waits() {
     let lines = drawn(&mut dashboard, 200, 40);
     let footer = lines.last().unwrap();
     // The hint carries the same badge as the tabs: the most urgent glyph and
-    // how many sessions need a person.
-    assert!(footer.contains("o next (!3)"), "{footer}");
+    // how many sessions need that kind of attention.
+    assert!(footer.contains("o next (!2)"), "{footer}");
 
     let mut quiet = dashboard_with_session(running_session());
     let lines = drawn(&mut quiet, 200, 40);
@@ -3552,9 +3632,9 @@ fn workspace_tabs_and_folded_headings_carry_attention_badges() {
         .iter()
         .find(|line| line.contains("Default") && line.contains("Other"))
         .expect("workspace tab row");
-    // A tab shows its most urgent glyph and the total it is flagging: the
+    // A tab counts only its most urgent kind of attention: the
     // default workspace holds one question and one unread answer.
-    assert!(tabs.contains("Default !2"), "{tabs}");
+    assert!(tabs.contains("Default !1"), "{tabs}");
     assert!(tabs.contains("Other !1"), "{tabs}");
 
     // Folding the project that holds the unread session puts its count on

@@ -579,6 +579,12 @@ impl DashboardState {
             }
         }
         self.state = state;
+        self.viewed_failures.retain(|id, seen| {
+            self.state
+                .sessions
+                .get(id)
+                .is_some_and(|session| seen.matches(session))
+        });
         self.session_details
             .retain(|session_id, _| self.state.sessions.contains_key(session_id));
         self.project_sources

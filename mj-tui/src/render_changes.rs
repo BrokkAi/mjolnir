@@ -70,6 +70,7 @@ impl DashboardState {
     /// requested by input or background content, so the next timer checks the
     /// displayed baseline rather than the previous timer check.
     pub fn acknowledge_render(&mut self) {
+        self.viewed_failures.append(&mut self.drawn_failures);
         self.render_change_snapshot.clock = self.current_clock_signature();
         self.render_change_snapshot.animation = self.current_animation_signature();
     }

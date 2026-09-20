@@ -324,6 +324,7 @@ pub fn render_combined(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
+    dashboard.drawn_failures.clear();
     // NO_COLOR wins over the configured theme; the symbol set follows the
     // configuration or, unset, the terminal.
     let theme = theme::effective_theme(dashboard.config.theme);
@@ -873,6 +874,9 @@ fn render_combined_themed(
             match (chat, pane_transition) {
                 (_, None) if pane_failed.is_some() => {
                     let session_id = pane_failed.unwrap_or_default();
+                    if transcript_area.height > 3 {
+                        dashboard.failure_drawn(&session_id);
+                    }
                     render_empty_transcript(
                         frame,
                         transcript_area,
@@ -1055,6 +1059,11 @@ fn render_combined_themed(
                     } else {
                         EmptyConversation::NoConversationOpen
                     };
+                    if let Some(session_id) = failed.as_deref()
+                        && transcript_area.height > 3
+                    {
+                        dashboard.failure_drawn(session_id);
+                    }
                     render_empty_transcript(
                         frame,
                         transcript_area,
@@ -1468,6 +1477,9 @@ fn render_transition_surface(
         failed,
         pane_focused,
     } = surface;
+    if failed && transcript_area.height > 3 {
+        dashboard.failure_drawn(session_id);
+    }
     let Some(session) = dashboard.state.sessions.get(session_id) else {
         return;
     };
