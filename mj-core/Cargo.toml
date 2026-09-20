@@ -13,6 +13,7 @@ include = [
     "tests/fixtures/fake-command.sh",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
+    "src/help_search/question.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
