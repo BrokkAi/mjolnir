@@ -635,6 +635,10 @@ pub enum RuntimeEvent {
     CancelApplied {
         request_id: String,
     },
+    SteeringUnconfirmed {
+        request_id: String,
+        message: String,
+    },
     SteerApplied {
         request_id: String,
         queued_command_id: String,

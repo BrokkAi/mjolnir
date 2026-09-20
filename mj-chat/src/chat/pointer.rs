@@ -93,6 +93,10 @@ impl ChatState {
         if let Some(dialog) = self.elicitation.as_ref() {
             return dialog.component_handles_mouse_at(mouse.column, mouse.row);
         }
+        if self.turn_control_dialog_open {
+            return self.turn_control_dialog.captures_pointer()
+                || self.turn_control_dialog.contains(mouse.column, mouse.row);
+        }
         // The background-task dialog answers for the rectangle it drew,
         // border included, and for nothing else: outside it the pointer
         // belongs to whatever the host drew beside this conversation.
@@ -268,6 +272,9 @@ impl ChatState {
                 }
             }
             return ChatAction::None;
+        }
+        if self.turn_control_dialog_open {
+            return self.handle_turn_control_dialog(Event::Mouse(mouse));
         }
         if self.task_dialog_open {
             let result = self.task_dialog_form.handle(&Event::Mouse(mouse));

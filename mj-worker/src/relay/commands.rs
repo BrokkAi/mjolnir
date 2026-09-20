@@ -13,6 +13,91 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
+    fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
+        match command {
+            RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            } => {
+                if self.snapshot.checkpoint_barrier.is_some() {
+                    return Err("A checkpoint is already admitted".into());
+                }
+                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
+                    != Some(active_prompt_id)
+                {
+                    return Err("The requested turn is no longer running".into());
+                }
+                if !self.snapshot.queued_prompts.first().is_some_and(|q|
+                    q.command_id == *queued_prompt_id && matches!(q.payload, StoredQueuedRelayPayload::Prompt { .. }))
+                {
+                    return Err("The queued prompt changed; steering was not sent".into());
+                }
+                if self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .is_some_and(|s| s.holds_queue())
+                    || self.snapshot.cancelling_prompt_id.is_some()
+                {
+                    return Err(
+                        "Turn control is already pending; no additional request was sent".into(),
+                    );
+                }
+            }
+            RelayCommand::CancelTurnFor { active_prompt_id } => {
+                if self.snapshot.checkpoint_barrier.is_some() {
+                    return Err("A checkpoint is already admitted".into());
+                }
+                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
+                    != Some(active_prompt_id)
+                {
+                    return Err("The requested turn is no longer running".into());
+                }
+                if self.snapshot.cancelling_prompt_id.is_some() {
+                    return Err("Cancellation is already pending".into());
+                }
+            }
+            RelayCommand::ResolveSteering { steering_id } => {
+                let Some(steering) = self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .filter(|s| &s.command_id == steering_id)
+                else {
+                    return Err("The steering operation changed".into());
+                };
+                if steering.status != mj_core::relay::SteeringStatus::Unconfirmed
+                    || self.snapshot.active_prompt.is_some()
+                {
+                    return Err(
+                        "Wait for the original turn to settle before retrying uncertain input"
+                            .into(),
+                    );
+                }
+            }
+            RelayCommand::RemoveQueuedPrompt { queued_command_id }
+                if self.snapshot.steering.as_ref().is_some_and(|s| {
+                    &s.queued_prompt_id == queued_command_id && s.holds_queue()
+                }) && self.snapshot.active_prompt.is_some() =>
+            {
+                return Err("Wait for steering to settle before removing its prompt".into());
+            }
+            RelayCommand::ClearQueuedPrompts
+                if self
+                    .snapshot
+                    .steering
+                    .as_ref()
+                    .is_some_and(|s| s.holds_queue())
+                    && self.snapshot.active_prompt.is_some() =>
+            {
+                return Err("Wait for steering to settle before clearing the queue".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(super) fn submit_command(
         &mut self,
         command_id: &str,
@@ -253,6 +338,14 @@ impl DurableRelay {
                 None,
             )));
         }
+        if let Err(message) = self.validate_turn_control(&command) {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                message,
+                false,
+                None,
+            )));
+        }
         if let RelayCommand::Cancel = command
             && self.snapshot.active_prompt.is_none()
             && self
@@ -475,7 +568,9 @@ impl DurableRelay {
             RelayCommand::CompleteCheckpoint { .. } => RelayCommandOutcome::CheckpointCompleted,
             RelayCommand::ReleaseCheckpoint { .. } => RelayCommandOutcome::CheckpointReleased,
             RelayCommand::AdvanceRecoveryFloor { .. } => RelayCommandOutcome::RecoveryFloorAdvanced,
-            RelayCommand::RecordNotice { .. } => RelayCommandOutcome::NoticeRecorded,
+            RelayCommand::RecordNotice { .. } | RelayCommand::ResolveSteering { .. } => {
+                RelayCommandOutcome::NoticeRecorded
+            }
             _ => RelayCommandOutcome::QueueChanged {
                 removed_command_ids,
             },
@@ -518,7 +613,43 @@ impl DurableRelay {
         if self.checkpoint_only || !acp_session_configured || maximum == 0 {
             return Ok(Vec::new());
         }
+        // Reject controls whose targets settled between admission and dispatch.
+        let stale: Vec<_> = self
+            .snapshot
+            .dispatches
+            .iter()
+            .filter_map(|(id, d)| {
+                if !matches!(
+                    d.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                ) {
+                    return None;
+                }
+                let target = match &d.command {
+                    RelayCommand::Steer {
+                        active_prompt_id, ..
+                    }
+                    | RelayCommand::CancelTurnFor { active_prompt_id } => active_prompt_id,
+                    _ => return None,
+                };
+                (self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(target))
+                    .then_some(id.clone())
+            })
+            .collect();
+        for id in stale {
+            self.record_command_rejected(&id, "The requested turn is no longer running")?;
+        }
         self.promote_next_queued_command()?;
+        if self
+            .snapshot
+            .steering
+            .as_ref()
+            .is_some_and(|s| s.holds_queue())
+        {
+            while let Some((barrier_id, _)) = self.next_queued_checkpoint() {
+                self.record_command_rejected(&barrier_id, "Resolve uncertain steering delivery before checkpointing or moving this session")?;
+            }
+        }
         if self.snapshot.checkpoint_barrier.is_none() {
             if let Some((barrier_id, barrier_ordinal)) = self.next_queued_checkpoint() {
                 let mut earlier_controls = self.queued_controls_before(barrier_ordinal);
@@ -529,6 +660,11 @@ impl DurableRelay {
                 // agent's workspace, so the barrier waits for it exactly as it
                 // waits for a prompt.
                 } else if !self.effectful_command_in_progress()
+                    && !self
+                        .snapshot
+                        .steering
+                        .as_ref()
+                        .is_some_and(|s| s.holds_queue())
                     && self.snapshot.harness_turn.is_none()
                 {
                     self.append_relay_event(
@@ -577,7 +713,7 @@ impl DurableRelay {
         for (accepted_ordinal, command_id) in claimable {
             let steering_prompt = matches!(
                 next_snapshot.dispatches[&command_id].command,
-                RelayCommand::Cancel
+                RelayCommand::Cancel | RelayCommand::Steer { .. }
             )
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
@@ -837,6 +973,8 @@ impl DurableRelay {
                     && !matches!(
                         dispatch.command,
                         RelayCommand::Cancel
+                            | RelayCommand::Steer { .. }
+                            | RelayCommand::CancelTurnFor { .. }
                             | RelayCommand::CancelTurn
                             | RelayCommand::GoalControl { .. }
                     )
@@ -1150,6 +1288,11 @@ impl DurableRelay {
         // `active_prompt` is the real gate on dispatch.
         if self.checkpoint_only
             || self.snapshot.active_prompt.is_some()
+            || self
+                .snapshot
+                .steering
+                .as_ref()
+                .is_some_and(|s| s.holds_queue())
             || self.promoted_config_in_progress()
             || self.snapshot.checkpoint_barrier.is_some()
             || matches!(

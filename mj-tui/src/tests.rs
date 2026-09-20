@@ -15,6 +15,52 @@ use crate::test_support::*;
 use crate::render::render;
 
 #[test]
+fn retained_subagents_do_not_count_as_working_after_profile_move() {
+    use mj_core::native_agent::*;
+    let mut parent = running_session();
+    let mut dashboard = dashboard_with_session(parent.clone());
+    let agents: Vec<_> = (0..23)
+        .map(|i| {
+            let agent = NativeAgent {
+                owner_session_id: parent.id.clone(),
+                session_id: format!("child-{i}"),
+                parent_session_id: None,
+                name: format!("Child {i}"),
+                task: "Inspect code".into(),
+                capabilities: NativeAgentCapabilities::default(),
+                state: if i < 17 {
+                    NativeAgentState::Completed
+                } else {
+                    NativeAgentState::Disconnected
+                },
+                availability: NativeAgentAvailability::Unknown,
+                availability_reason: None,
+                stable_id: None,
+            };
+            NativeAgentView {
+                generation_ordinal: 1,
+                projection: mj_core::state::MaterializedSession::empty(agent.view_id()),
+                agent,
+            }
+        })
+        .collect();
+    dashboard.set_native_agents(agents.clone());
+    parent.last_profile = "destination-profile".into();
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    dashboard.set_state(state);
+    assert_eq!(dashboard.subagent_count_for(&parent.id), 23);
+    assert_eq!(dashboard.working_subagent_count_for(&parent.id), 0);
+    dashboard.open_subagent_workspace(parent.id.clone());
+    assert_eq!(dashboard.ordered_sessions().len(), 23);
+    let mut resumed = agents;
+    resumed[0].agent.state = NativeAgentState::Running;
+    resumed[0].agent.availability = NativeAgentAvailability::Available;
+    dashboard.set_native_agents(resumed);
+    assert_eq!(dashboard.working_subagent_count_for(&parent.id), 1);
+}
+
+#[test]
 fn inert_pointer_motion_is_not_consumed() {
     let mut dashboard = dashboard_with_session(running_session());
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -4502,6 +4548,9 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
     let parent = running_session();
     let mut dashboard = dashboard_with_session(parent.clone());
     let agent = NativeAgent {
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: None,
         owner_session_id: parent.id.clone(),
         session_id: "native-child".into(),
         parent_session_id: None,

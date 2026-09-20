@@ -6,6 +6,19 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn native_agent_history(
+        &self,
+        owner: String,
+        child: String,
+        before: Option<(u64, String)>,
+    ) -> BoxFuture<'_, AnyResult<mj_core::native_agent::NativeAgentHistoryPage>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::database::native_agent_history(&owner, &child, before)
+            })
+            .await?
+        })
+    }
     fn events(
         &self,
         filter: crate::database::ApiEventFilter,

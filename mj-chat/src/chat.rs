@@ -247,6 +247,7 @@ pub enum ChatEventOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatAction {
+    TurnControl(mj_core::relay::RelayCommand),
     None,
     OpenSubagents,
     Prompt(String),
@@ -331,9 +332,6 @@ struct QueuedPrompt {
 enum TurnControlIntent {
     Cancel,
     Steer,
-    /// A queued prompt can still be applied when an older worker does not
-    /// report whether it will steer or cancel and start the next turn.
-    ApplyQueued,
 }
 
 impl TurnControlIntent {
@@ -341,7 +339,6 @@ impl TurnControlIntent {
         match self {
             Self::Cancel => "Esc cancels",
             Self::Steer => "Esc steers next",
-            Self::ApplyQueued => "Esc applies next",
         }
     }
 
@@ -349,7 +346,6 @@ impl TurnControlIntent {
         let action = match self {
             Self::Cancel => "Cancellation",
             Self::Steer => "Steering request",
-            Self::ApplyQueued => "Queued prompt request",
         };
         format!("{action} failed: {error}")
     }
@@ -637,6 +633,7 @@ pub struct ChatState {
     task_dialog_form: Form<BackgroundTaskControl>,
     task_control_area: Option<Rect>,
     subagent_count: usize,
+    subagent_working_count: usize,
     subagent_control_focused: bool,
     subagent_control_area: Option<Rect>,
     task_dialog_area: Option<Rect>,
@@ -662,6 +659,15 @@ pub struct ChatState {
     /// so cancellation and the composer's cancel hint key on this instead.
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
+    active_prompt_id: Option<String>,
+    steering: Option<mj_core::relay::SteeringOperation>,
+    cancelling_prompt_id: Option<String>,
+    turn_control_submitting: bool,
+    turn_control_error: Option<String>,
+    turn_control_target: Option<String>,
+    turn_control_awaiting_state: Option<String>,
+    turn_control_dialog_open: bool,
+    turn_control_dialog: crate::components::Dialog<turn_control::Control>,
     /// What the session is doing beyond `phase`: the turn the harness started
     /// on its own, and the commands the agent left running.
     session_activity: mj_client::usage_format::SessionActivity,
@@ -690,6 +696,7 @@ mod input_state;
 mod keys;
 mod pointer;
 mod status;
+mod turn_control;
 
 impl ChatState {
     pub fn new(snapshot: &WorkerSnapshot, events: &[SequencedEvent]) -> Self {
@@ -790,6 +797,7 @@ impl ChatState {
             task_dialog_form: Form::new(),
             task_control_area: None,
             subagent_count: 0,
+            subagent_working_count: 0,
             subagent_control_focused: false,
             subagent_control_area: None,
             task_dialog_area: None,
@@ -810,6 +818,15 @@ impl ChatState {
                 ..mj_client::usage_format::SessionActivity::default()
             },
             steering_supported: None,
+            active_prompt_id: None,
+            steering: None,
+            cancelling_prompt_id: None,
+            turn_control_submitting: false,
+            turn_control_error: None,
+            turn_control_target: None,
+            turn_control_awaiting_state: None,
+            turn_control_dialog_open: false,
+            turn_control_dialog: turn_control::dialog(),
             current_step_started_at_ms: None,
             frame_surfaces: FrameSurfaces::new(),
             footer_command_areas: RefCell::new(Vec::new()),

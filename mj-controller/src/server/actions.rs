@@ -8,6 +8,10 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ControllerAction {
+    TurnControl {
+        session_id: String,
+        command: mj_core::relay::RelayCommand,
+    },
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,

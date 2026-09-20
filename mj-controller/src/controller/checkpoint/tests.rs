@@ -266,6 +266,9 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         latest_credential_sync_signal: None,
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
+            native_agents: Vec::new(),
+            steering: None,
+            cancelling_prompt_id: None,
             clear_context: false,
             clear_context_started_at_ms: None,
             native_agent_count: 0,

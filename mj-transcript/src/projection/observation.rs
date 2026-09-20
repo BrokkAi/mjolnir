@@ -7,6 +7,7 @@ pub(super) fn project_observation(
     mutation: &mut MaterializedSessionMutation,
 ) -> Result<()> {
     match &event.observation {
+        RelayObservation::SteeringUnconfirmed { .. } => {}
         RelayObservation::NativeAgent { .. } => {
             mutation.native_agent = Some(event.clone());
         }

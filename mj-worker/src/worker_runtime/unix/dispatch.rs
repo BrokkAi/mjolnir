@@ -538,6 +538,15 @@ pub(crate) fn record_runtime_event(
             in_flight.remove(&request_id);
             relay.record_command_completed(&request_id, RelayCommandOutcome::Cancelled)?;
         }
+        RuntimeEvent::SteeringUnconfirmed {
+            request_id,
+            message,
+        } => {
+            relay.record_observation(RelayObservation::SteeringUnconfirmed {
+                command_id: request_id,
+                message,
+            })?;
+        }
         RuntimeEvent::SteerApplied {
             request_id,
             queued_command_id,
@@ -736,6 +745,24 @@ pub(crate) fn dispatch_pending(
                     root,
                 }
             }
+            CommandRequest::Steer {
+                request_id,
+                active_prompt_id,
+                mut steering_prompt,
+            } => {
+                steering_prompt.attachment_root = Some(
+                    relay
+                        .lock()
+                        .expect("relay state lock poisoned")
+                        .root()
+                        .to_path_buf(),
+                );
+                CommandRequest::Steer {
+                    request_id,
+                    active_prompt_id,
+                    steering_prompt,
+                }
+            }
             CommandRequest::Cancel {
                 request_id,
                 mut steering_prompt,
@@ -854,14 +881,29 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
             request_id,
             mode_id: mode_id.clone(),
         }),
-        RelayCommand::Cancel => Some(CommandRequest::Cancel {
+        RelayCommand::Steer {
+            active_prompt_id, ..
+        } => claimed
+            .steering_prompt
+            .clone()
+            .map(|steering_prompt| CommandRequest::Steer {
+                request_id,
+                active_prompt_id: active_prompt_id.clone(),
+                steering_prompt,
+            }),
+        RelayCommand::CancelTurnFor { active_prompt_id } => Some(CommandRequest::CancelTurnFor {
             request_id,
-            steering_prompt: claimed.steering_prompt.clone(),
+            active_prompt_id: active_prompt_id.clone(),
         }),
         RelayCommand::CancelTurn => Some(CommandRequest::Cancel {
             request_id,
             steering_prompt: None,
         }),
+        RelayCommand::Cancel => Some(CommandRequest::Cancel {
+            request_id,
+            steering_prompt: claimed.steering_prompt.clone(),
+        }),
+
         RelayCommand::Close { .. } => Some(CommandRequest::Close { request_id }),
         RelayCommand::BeginCheckpoint { .. }
         | RelayCommand::RunUserShell { .. }
@@ -871,7 +913,8 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::CompleteCheckpoint { .. }
         | RelayCommand::ReleaseCheckpoint { .. }
         | RelayCommand::AdvanceRecoveryFloor { .. }
-        | RelayCommand::RecordNotice { .. } => None,
+        | RelayCommand::RecordNotice { .. }
+        | RelayCommand::ResolveSteering { .. } => None,
     }
 }
 

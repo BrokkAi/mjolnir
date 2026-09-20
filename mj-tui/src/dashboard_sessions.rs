@@ -399,7 +399,29 @@ impl DashboardState {
                     .filter(|(_, pane)| pane.agent.parent_view_id() == parent_id)
                     .filter_map(|(id, _)| self.state.sessions.get(id)),
             );
-            children.sort_by_cached_key(|session| session.creation_order_key());
+            children.sort_by_cached_key(|session| {
+                let group = if let Some(pane) = self.native_agents.get(&session.id) {
+                    if pane.agent.state == mj_core::native_agent::NativeAgentState::Running {
+                        0
+                    } else if pane.agent.availability
+                        == mj_core::native_agent::NativeAgentAvailability::Available
+                    {
+                        1
+                    } else {
+                        2
+                    }
+                } else if self.session_details.get(&session.id).is_some_and(|d| {
+                    d.activity
+                        .is_working(d.current_turn_started_at, d.awaiting_input)
+                }) {
+                    0
+                } else if session.state == SessionState::Running {
+                    1
+                } else {
+                    2
+                };
+                (group, session.creation_order_key())
+            });
             return children;
         }
         let Some(active_workspace_id) = self.active_workspace_id.as_deref() else {

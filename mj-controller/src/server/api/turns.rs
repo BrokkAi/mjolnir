@@ -1,5 +1,38 @@
 use super::*;
 
+#[derive(Default, Deserialize)]
+pub(super) struct NativeHistoryQuery {
+    before_position: Option<u64>,
+    before_id: Option<String>,
+}
+
+pub(super) async fn native_agent_history(
+    State(state): State<ServerState>,
+    Path((owner, child)): Path<(String, String)>,
+    Query(query): Query<NativeHistoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &owner)?;
+    let before = query.before_position.zip(query.before_id);
+    let page = backend(&state)?
+        .native_agent_history(owner, child, before)
+        .await?;
+    let items = page
+        .items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "stable_id": item.stable_id,
+                "position": item.position,
+                "role": mj_core::transcript::transcript_item_role(&item.body),
+                "text": mj_transcript::transcript::transcript_item_text(item),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"generation": page.generation_ordinal, "items": items, "has_more": page.has_more}),
+    ))
+}
+
 pub(super) async fn prompt(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

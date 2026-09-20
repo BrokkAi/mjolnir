@@ -2160,6 +2160,9 @@ fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
 fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,

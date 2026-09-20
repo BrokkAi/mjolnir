@@ -4,6 +4,216 @@ use super::background::{
     CLAUDE_ORIGIN_META_KEY, CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text,
 };
 use super::*;
+
+#[test]
+fn native_replay_does_not_publish_provisional_work_or_lose_retained_agents() {
+    use mj_core::native_agent::{NativeAgentEvent, NativeAgentState};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let spawn = |id: &str| NativeAgentEvent::Spawned {
+        session_id: id.into(),
+        parent_session_id: None,
+        name: id.into(),
+        task: "task".into(),
+        capabilities: Default::default(),
+    };
+    for event in [
+        spawn("retained"),
+        NativeAgentEvent::State {
+            session_id: "retained".into(),
+            state: NativeAgentState::Completed,
+        },
+        NativeAgentEvent::ReplayBegin,
+        spawn("replayed"),
+    ] {
+        relay
+            .record_observation(RelayObservation::NativeAgent { event })
+            .unwrap();
+    }
+    assert_eq!(relay.operational_state().native_agent_count, 0);
+    assert_eq!(relay.operational_state().native_agents.len(), 1);
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::ReplayCommit,
+        })
+        .unwrap();
+    assert_eq!(relay.operational_state().native_agents.len(), 2);
+    assert_eq!(relay.operational_state().native_agent_count, 0);
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::Disconnected,
+        })
+        .unwrap();
+    assert_eq!(relay.operational_state().native_agent_count, 0);
+}
+
+#[test]
+fn uncertain_steering_survives_restart_and_requires_explicit_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-first",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("first")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-queued",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("next")],
+        },
+    );
+    submit_relay(
+        &mut relay,
+        "checkpoint-earlier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    let steer = RelayCommand::Steer {
+        active_prompt_id: "prompt-first".into(),
+        queued_prompt_id: "prompt-queued".into(),
+    };
+    submit_relay(&mut relay, "steer-first", steer.clone());
+    assert!(
+        relay
+            .submit_command("steer-repeat", steer)
+            .unwrap()
+            .is_err()
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(relay.snapshot.checkpoint_barrier.is_none());
+    assert_eq!(
+        claimed[0]
+            .steering_prompt
+            .as_ref()
+            .unwrap()
+            .queued_command_id,
+        "prompt-queued"
+    );
+    relay
+        .record_command_interrupted("steer-first", "connection lost")
+        .unwrap();
+    relay
+        .record_command_interrupted("prompt-first", "harness restarted")
+        .unwrap();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(
+        relay
+            .submit_command(
+                "checkpoint-held",
+                RelayCommand::BeginCheckpoint { reason: None }
+            )
+            .unwrap()
+            .is_err()
+    );
+    drop(relay);
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        mj_core::relay::SteeringStatus::Unconfirmed
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    submit_relay(
+        &mut relay,
+        "resolve-steering",
+        RelayCommand::ResolveSteering {
+            steering_id: "steer-first".into(),
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "prompt-queued");
+}
+
+#[test]
+fn steering_rejects_changed_queue_and_consumes_late_confirmed_input_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-first",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("first")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "prompt-queued",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("next")],
+        },
+    );
+    assert!(
+        relay
+            .submit_command(
+                "steer-stale",
+                RelayCommand::Steer {
+                    active_prompt_id: "prompt-first".into(),
+                    queued_prompt_id: "changed-queue".into()
+                }
+            )
+            .unwrap()
+            .is_err()
+    );
+    submit_relay(
+        &mut relay,
+        "steer-first",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-queued".into(),
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    assert!(
+        relay
+            .submit_command(
+                "remove-pending",
+                RelayCommand::RemoveQueuedPrompt {
+                    queued_command_id: "prompt-queued".into()
+                }
+            )
+            .unwrap()
+            .is_err()
+    );
+    relay
+        .record_observation(RelayObservation::SteeringUnconfirmed {
+            command_id: "steer-first".into(),
+            message: "slow acknowledgment".into(),
+        })
+        .unwrap();
+    relay
+        .record_command_completed(
+            "steer-first",
+            RelayCommandOutcome::Steered {
+                queued_command_id: "prompt-queued".into(),
+            },
+        )
+        .unwrap();
+    assert!(relay.operational_state().queued_prompts.is_empty());
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        mj_core::relay::SteeringStatus::Applied
+    );
+    relay
+        .record_command_interrupted("prompt-first", "stopped")
+        .unwrap();
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert!(
+        relay
+            .submit_command(
+                "cancel-stale",
+                RelayCommand::CancelTurnFor {
+                    active_prompt_id: "prompt-first".into()
+                }
+            )
+            .unwrap()
+            .is_err()
+    );
+}
 use test_support::*;
 
 #[test]

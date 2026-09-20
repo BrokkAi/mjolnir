@@ -480,6 +480,28 @@ fn validate_action_against(
                 return Err(ApiError::bad_request("this session cannot be renamed"));
             }
         }
+        ControllerAction::TurnControl {
+            session_id,
+            command,
+        } => {
+            validate_public_id(session_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            let allowed = match command {
+                mj_core::relay::RelayCommand::CancelTurnFor { .. } => {
+                    session.capabilities.cancel_turn
+                }
+                mj_core::relay::RelayCommand::Steer { .. }
+                | mj_core::relay::RelayCommand::ResolveSteering { .. } => {
+                    session.capabilities.prompt
+                }
+                _ => false,
+            };
+            if !allowed {
+                return Err(ApiError::bad_request(
+                    "this turn-control action is unavailable",
+                ));
+            }
+        }
         ControllerAction::CancelTurn { session_id } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;

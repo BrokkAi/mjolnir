@@ -36,6 +36,8 @@ pub async fn run_server(
     let mut pending_elicitations = std::collections::BTreeMap::new();
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
+    let mut native_agents =
+        load_native_agents(controller.state.sessions.keys().cloned().collect()).await?;
     let mut materialized_activity = load_materialized_activity(&controller).await?;
     let mut project_sources = PhoneProjectSources::default();
     let (records, lifecycles) = daemon_runtime.session_projection();
@@ -61,6 +63,7 @@ pub async fn run_server(
         &phone_workspaces,
         &quotas,
         &PhoneSessionViews {
+            native_agents: &native_agents,
             conversations: &conversations,
             queued_prompts: &queued_prompts,
             active_user_shells: &active_user_shells,
@@ -221,6 +224,8 @@ pub async fn run_server(
         let mut preflight_jobs = tokio::task::JoinSet::new();
         let mut move_preparation_jobs = tokio::task::JoinSet::new();
         let mut move_recovery_jobs = tokio::task::JoinSet::new();
+        let mut native_agent_jobs = tokio::task::JoinSet::new();
+        let mut native_agents_dirty = true;
         let mut background_task_stop_jobs = tokio::task::JoinSet::new();
         let mut background_task_stop_open = true;
         let mut controller_reload_in_flight = false;
@@ -272,6 +277,7 @@ pub async fn run_server(
                     &phone_workspaces,
                     &quotas,
                     &PhoneSessionViews {
+                        native_agents: &native_agents,
                         conversations: &conversations,
                         queued_prompts: &queued_prompts,
                         active_user_shells: &active_user_shells,
@@ -294,6 +300,12 @@ pub async fn run_server(
             };
         }
         loop {
+            if native_agents_dirty && native_agent_jobs.is_empty() {
+                native_agents_dirty = false;
+                native_agent_jobs.spawn(load_native_agents(
+                    controller.state.sessions.keys().cloned().collect(),
+                ));
+            }
             project_sources.synchronize(&controller);
             tokio::select! {
                 _ = termination.cancelled() => break,
@@ -373,6 +385,7 @@ pub async fn run_server(
                     publish_snapshot!(revision);
                 }
                 changed = daemon_revisions.changed() => {
+                    native_agents_dirty = true;
                     if changed.is_err() {
                         failure = feed_stopped(
                             termination.is_cancelled(),
@@ -492,6 +505,7 @@ pub async fn run_server(
                     tokio::task::yield_now().await;
                 }
                 update = worker_updates_rx.recv() => {
+                    native_agents_dirty = true;
                     let Some(update) = update else {
                         failure = feed_stopped(termination.is_cancelled(), "the session manager stopped; the phone server can no longer follow sessions");
                         break;
@@ -1092,6 +1106,18 @@ pub async fn run_server(
                         tracing::warn!(%error, "move preparation task failed");
                     }
                 }
+                result = native_agent_jobs.join_next(), if !native_agent_jobs.is_empty() => {
+                    match result {
+                        Some(Ok(Ok(agents))) => {
+                            native_agents = agents;
+                            revision = daemon_runtime.allocate_revision();
+                            publish_snapshot!(revision);
+                        }
+                        Some(Ok(Err(error))) => tracing::error!(%error, "could not refresh native subagent identities"),
+                        Some(Err(error)) => tracing::error!(%error, "native subagent refresh task failed"),
+                        None => {}
+                    }
+                }
                 move_recovery_job = move_recovery_jobs.join_next(), if !move_recovery_jobs.is_empty() => {
                     if let Some(Err(error)) = move_recovery_job {
                         move_recovery_load_in_flight = false;
@@ -1596,6 +1622,7 @@ pub async fn run_server(
         // Preparation tasks may be inspecting an archive or probing a target;
         // abort and drain them before the HTTP server's channels disappear.
         move_preparation_jobs.shutdown().await;
+        native_agent_jobs.shutdown().await;
         move_recovery_jobs.shutdown().await;
         // Every exit stops in-flight work, whether it was asked for or forced.
         crate::controller::profile_config::cancel_all();

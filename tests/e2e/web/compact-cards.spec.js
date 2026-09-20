@@ -823,7 +823,7 @@ test('sub-agent workspace hides children from the normal list and closes back to
   await expect(card(page, 'child-one')).toHaveCount(0);
   await card(page, 'parent').click();
   await expect(page).toHaveURL(/#conversation\/parent$/);
-  await expect(page.locator('#subagents-button')).toHaveText('Sub-agents 2');
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
   await page.locator('#subagents-button').click();
 
   await expect(page).toHaveURL(/#subagents\/parent$/);
@@ -839,4 +839,57 @@ test('sub-agent workspace hides children from the normal list and closes back to
   await expect(page).toHaveURL(/#subagents\/parent$/);
   await page.getByRole('button', { name: 'Close Parent session sub-agent workspace' }).click();
   await expect(page).toHaveURL(/#conversation\/parent$/);
+});
+
+test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
+  const parent = session('steering', 'project', 'Project', {
+    queued: 1, capabilities: { prompt: true, cancel_turn: true },
+  });
+  parent.active_prompt_id = 'turn-one'; parent.chat_phase = 'running';
+  const state = await mount(page, [parent]);
+  await card(page, 'steering').click();
+  const composer = page.locator('#prompt-text');
+  await composer.fill('keep this draft');
+  await composer.press('Escape');
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0]).toEqual({ action: 'turn-control', session_id: 'steering', command: {
+    type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0' },
+  } });
+  parent.steering = { command_id: 'steer-one', active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0', status: 'pending' };
+  await refresh(page, state);
+  await expect(page.locator('#cancel-turn')).toHaveText('Steering…');
+  await composer.press('Escape');
+  expect(state.actions).toHaveLength(1);
+  await reconnect(page, state);
+  await expect(page.locator('#cancel-turn')).toBeDisabled();
+  parent.steering.status = 'failed'; parent.steering.message = 'Adapter refused steering';
+  await refresh(page, state);
+  const cancel = page.getByRole('button', { name: 'Cancel turn and apply queued prompt', exact: true });
+  await expect(cancel).toBeVisible();
+  await composer.press('Escape');
+  await expect(cancel).toHaveCount(0);
+  expect(state.actions).toHaveLength(1);
+  // A new failure offers a fresh, deliberate choice.
+  parent.steering.command_id = 'steer-two';
+  await refresh(page, state);
+  await cancel.click();
+  await expect.poll(() => state.actions.length).toBe(2);
+  expect(state.actions[1].command).toEqual({ type: 'cancel_turn_for', data: { active_prompt_id: 'turn-one' } });
+  await expect(composer).toHaveText('keep this draft');
+});
+
+test('a moved parent keeps 23 native histories without claiming any are working', async ({ page }) => {
+  const parent = session('native-parent', 'project', 'Project');
+  parent.native_subagents = Array.from({ length: 23 }, (_, i) => ({
+    session_id: `child-${i}`, name: `Helper ${i}`, state: i < 17 ? 'completed' : 'disconnected', availability: 'unknown',
+  }));
+  const state = await mount(page, [parent]);
+  await card(page, 'native-parent').click();
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  parent.profile_id = 'another-profile';
+  await reconnect(page, state);
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  await page.locator('#subagents-button').click();
+  await expect(page.getByRole('button', { name: 'View history' })).toHaveCount(23);
+  await expect(page.getByRole('heading', { name: 'History and availability unknown' })).toBeVisible();
 });

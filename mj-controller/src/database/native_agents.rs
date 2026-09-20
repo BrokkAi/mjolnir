@@ -69,17 +69,26 @@ pub(super) fn load_native_agents_from(
     owner: &str,
     limit: usize,
 ) -> Result<Vec<NativeAgentView>> {
+    load_native_agents_at(connection, owner, limit, 0)
+}
+
+fn load_native_agents_at(
+    connection: &Connection,
+    owner: &str,
+    limit: usize,
+    staging: i64,
+) -> Result<Vec<NativeAgentView>> {
     let mut statement = connection
-        .prepare("SELECT body FROM native_agents WHERE owner=?1 AND staging=0 ORDER BY child")?;
+        .prepare("SELECT body FROM native_agents WHERE owner=?1 AND staging=?2 ORDER BY child")?;
     let bodies = statement
-        .query_map([owner], |row| row.get::<_, String>(0))?
+        .query_map(params![owner, staging], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     bodies
         .into_iter()
         .map(|body| {
             let mut view: NativeAgentView = serde_json::from_str(&body)?;
             view.projection.transcript =
-                transcript(connection, owner, &view.agent.session_id, 0, limit)?;
+                transcript(connection, owner, &view.agent.session_id, staging, limit)?;
             Ok(view)
         })
         .collect()
@@ -113,7 +122,21 @@ pub(super) fn apply_native_agent_event(
         bail!("expected native agent observation")
     };
     match event {
+        NativeAgentEvent::Availability { reports, complete } => {
+            for mut view in load_native_agents_from(connection, owner, 0)? {
+                view.agent.apply_availability(reports, *complete);
+                save(connection, &view, 0)?;
+            }
+            return Ok(());
+        }
         NativeAgentEvent::ReplayBegin => {
+            for mut view in load_native_agents_from(connection, owner, 0)? {
+                view.agent.invalidate_availability();
+                if view.agent.state == NativeAgentState::Running {
+                    view.agent.state = NativeAgentState::Disconnected;
+                }
+                save(connection, &view, 0)?;
+            }
             connection.execute(
                 "DELETE FROM native_agents WHERE owner=?1 AND staging=1",
                 [owner],
@@ -131,8 +154,14 @@ pub(super) fn apply_native_agent_event(
                 |row| row.get(0),
             )?;
             if staging {
+                for mut view in load_native_agents_at(connection, owner, 0, 1)? {
+                    view.agent.finish_replay();
+                    view.projection.execution = MaterializedExecutionState::Idle;
+                    finish_streaming(connection, owner, &view.agent.session_id, 1)?;
+                    save(connection, &view, 1)?;
+                }
                 connection.execute(
-                    "DELETE FROM native_agents WHERE owner=?1 AND staging=0",
+                    "DELETE FROM native_agents WHERE owner=?1 AND staging=0 AND child IN (SELECT child FROM native_agents WHERE owner=?1 AND staging=1)",
                     [owner],
                 )?;
                 connection.execute(
@@ -150,13 +179,14 @@ pub(super) fn apply_native_agent_event(
             )?;
             connection.execute("DELETE FROM native_agent_replay WHERE owner=?1", [owner])?;
             for mut view in load_native_agents_from(connection, owner, 0)? {
+                view.agent.invalidate_availability();
                 if view.agent.state == NativeAgentState::Running {
                     view.agent.state = NativeAgentState::Disconnected;
-                    view.projection.execution = MaterializedExecutionState::Idle;
-                    finish_streaming(connection, owner, &view.agent.session_id, 0)?;
-                    view.projection.applied_event_ordinal = relay.ordinal;
-                    save(connection, &view, 0)?;
                 }
+                view.projection.execution = MaterializedExecutionState::Idle;
+                finish_streaming(connection, owner, &view.agent.session_id, 0)?;
+                view.projection.applied_event_ordinal = relay.ordinal;
+                save(connection, &view, 0)?;
             }
             return Ok(());
         }
@@ -194,6 +224,9 @@ pub(super) fn apply_native_agent_event(
                 bail!("native child {child} update precedes spawn for owner {owner}");
             };
             let agent = NativeAgent {
+                availability: Default::default(),
+                availability_reason: None,
+                stable_id: None,
                 owner_session_id: owner.to_owned(),
                 session_id: session_id.clone(),
                 parent_session_id: parent_session_id.clone(),
@@ -370,6 +403,98 @@ mod tests {
     }
 
     #[test]
+    fn completed_children_remain_reusable_but_replay_does_not_prove_availability() {
+        use mj_core::native_agent::{NativeAgentAvailability, NativeAgentAvailabilityReport};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.sqlite3");
+        save_session_to(&path, &super::super::tests::session("owner", "project")).unwrap();
+        let connection = open(&path).unwrap();
+        let apply = |ordinal, update| {
+            apply_native_agent_event(&connection, "owner", &event(ordinal, update)).unwrap()
+        };
+        apply(1, spawn("child", None));
+        apply(2, text("child", "retained context"));
+        apply(
+            3,
+            NativeAgentEvent::State {
+                session_id: "child".into(),
+                state: NativeAgentState::Completed,
+            },
+        );
+        apply(
+            4,
+            NativeAgentEvent::Availability {
+                reports: vec![NativeAgentAvailabilityReport {
+                    session_id: "child".into(),
+                    stable_id: Some("stable-child".into()),
+                    state: None,
+                    availability: NativeAgentAvailability::Available,
+                    reason: None,
+                }],
+                complete: true,
+            },
+        );
+        let reusable = load_native_agents_from(&connection, "owner", 200).unwrap();
+        assert_eq!(reusable[0].agent.state, NativeAgentState::Completed);
+        assert_eq!(
+            reusable[0].agent.availability,
+            NativeAgentAvailability::Available
+        );
+        apply(
+            5,
+            NativeAgentEvent::State {
+                session_id: "child".into(),
+                state: NativeAgentState::Running,
+            },
+        );
+        assert_eq!(
+            load_native_agents_from(&connection, "owner", 200).unwrap()[0]
+                .projection
+                .transcript,
+            reusable[0].projection.transcript
+        );
+        apply(6, NativeAgentEvent::ReplayBegin);
+        apply(7, NativeAgentEvent::ReplayCommit);
+        let retained = load_native_agents_from(&connection, "owner", 200).unwrap();
+        assert_eq!(
+            retained.len(),
+            1,
+            "missing replay must retain inspectable history"
+        );
+        assert_eq!(
+            retained[0].agent.availability,
+            NativeAgentAvailability::Unknown
+        );
+        assert_eq!(retained[0].agent.state, NativeAgentState::Disconnected);
+        apply(
+            8,
+            NativeAgentEvent::Availability {
+                reports: vec![],
+                complete: false,
+            },
+        );
+        assert_eq!(
+            load_native_agents_from(&connection, "owner", 200).unwrap()[0]
+                .agent
+                .availability,
+            NativeAgentAvailability::Unknown
+        );
+        apply(
+            9,
+            NativeAgentEvent::Availability {
+                reports: vec![],
+                complete: true,
+            },
+        );
+        let missing = load_native_agents_from(&connection, "owner", 200).unwrap();
+        assert_eq!(
+            missing[0].agent.availability,
+            NativeAgentAvailability::Unavailable
+        );
+        assert_eq!(missing[0].projection.transcript.len(), 1);
+    }
+
+    #[test]
     fn native_replay_is_atomic_and_does_not_duplicate_child_history() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.sqlite3");
@@ -380,9 +505,11 @@ mod tests {
         };
         apply(1, spawn("child", None));
         apply(2, text("child", &"x".repeat(80_000)));
-        let original = load_native_agents_from(&connection, "owner", 200).unwrap();
+        let mut original = load_native_agents_from(&connection, "owner", 200).unwrap();
         assert_eq!(original[0].projection.transcript.len(), 1);
         apply(3, NativeAgentEvent::ReplayBegin);
+        original[0].agent.invalidate_availability();
+        original[0].agent.state = NativeAgentState::Disconnected;
         apply(4, spawn("child", None));
         apply(5, text("child", "replacement"));
         assert_eq!(

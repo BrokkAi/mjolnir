@@ -29,6 +29,32 @@ impl DashboardState {
             })
     }
 
+    pub fn working_subagent_count_for(&self, parent: &str) -> usize {
+        let managed = self
+            .state
+            .subagents
+            .values()
+            .filter(|a| a.parent_session_id == parent)
+            .filter(|a| {
+                self.session_details
+                    .get(&a.child_session_id)
+                    .is_some_and(|d| {
+                        d.activity
+                            .is_working(d.current_turn_started_at, d.awaiting_input)
+                    })
+            })
+            .count();
+        let native: BTreeSet<_> = self
+            .native_agents
+            .values()
+            .filter(|p| {
+                p.agent.parent_view_id() == parent && p.agent.state == NativeAgentState::Running
+            })
+            .map(|p| p.agent.stable_id.as_ref().unwrap_or(&p.agent.session_id))
+            .collect();
+        managed + native.len()
+    }
+
     pub fn subagent_count_for(&self, parent: &str) -> usize {
         self.state
             .subagents
@@ -60,7 +86,11 @@ impl DashboardState {
             {
                 row.id = id.clone();
                 row.title = view.agent.name.clone();
-                row.session_title_override = Some(view.agent.name.clone());
+                row.session_title_override = Some(format!(
+                    "{} · {}",
+                    view.agent.name,
+                    view.agent.lifecycle_label()
+                ));
                 row.acp_session_title = None;
                 row.state = if view.agent.state == NativeAgentState::Running {
                     SessionState::Running
@@ -214,7 +244,7 @@ impl DashboardState {
         let Some(pane) = self.native_agents.get_mut(id) else {
             return;
         };
-        let title = format!(" {} · {:?} ", pane.agent.name, pane.agent.state);
+        let title = format!(" {} · {} ", pane.agent.name, pane.agent.lifecycle_label());
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(transcript_area);
         frame.render_widget(block, transcript_area);

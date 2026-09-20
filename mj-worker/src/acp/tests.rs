@@ -3030,12 +3030,14 @@ async fn steering_bridge(
     stream: tokio::io::DuplexStream,
     observed: mpsc::UnboundedSender<serde_json::Value>,
     mut complete: mpsc::Receiver<()>,
+    steering_outcome: &'static str,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut prompt_id = None;
+    let mut held_steering_id = None;
     loop {
         tokio::select! {
             line = lines.next_line() => {
@@ -3079,10 +3081,14 @@ async fn steering_bridge(
                         prompt_id = Some(id);
                         continue;
                     }
+                    SESSION_STEERING_METHOD if steering_outcome == "hold" => {
+                        held_steering_id = Some(id);
+                        continue;
+                    }
                     SESSION_STEERING_METHOD => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {"outcome": "injected"},
+                        "result": {"outcome": steering_outcome},
                     }),
                     _ => continue,
                 };
@@ -3093,6 +3099,11 @@ async fn steering_bridge(
             complete = complete.recv() => {
                 if complete.is_none() {
                     break;
+                }
+                if let Some(id) = held_steering_id.take() {
+                    let response = serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"outcome":"injected"}});
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                    continue;
                 }
                 let Some(id) = prompt_id.take() else {
                     continue;
@@ -3112,17 +3123,20 @@ async fn steering_bridge(
 
 #[tokio::test]
 async fn cancel_steers_the_queued_prompt_when_the_agent_supports_it() {
-    exercise_image_steering(false).await;
+    exercise_image_steering(false, "injected").await;
 }
 
 #[tokio::test]
 async fn ten_large_photos_reach_acp_for_both_prompt_and_steering() {
-    tokio::time::timeout(Duration::from_secs(20), exercise_image_steering(true))
-        .await
-        .expect("large image delivery must not deadlock");
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        exercise_image_steering(true, "injected"),
+    )
+    .await
+    .expect("large image delivery must not deadlock");
 }
 
-async fn exercise_image_steering(with_images: bool) {
+async fn exercise_image_steering(with_images: bool, steering_outcome: &'static str) {
     use base64::Engine as _;
     let images_root = tempfile::tempdir().unwrap();
     let store = mj_core::attachment::AttachmentStore::worker(images_root.path());
@@ -3155,7 +3169,12 @@ async fn exercise_image_steering(with_images: bool) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let (complete_tx, complete_rx) = mpsc::channel(1);
-    let bridge = tokio::spawn(steering_bridge(bridge_stream, observed_tx, complete_rx));
+    let bridge = tokio::spawn(steering_bridge(
+        bridge_stream,
+        observed_tx,
+        complete_rx,
+        steering_outcome,
+    ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(4);
@@ -3231,13 +3250,14 @@ async fn exercise_image_steering(with_images: bool) {
         }
     }
     request_tx
-        .send(CommandRequest::Cancel {
+        .send(CommandRequest::Steer {
             request_id: "cancel-1".into(),
-            steering_prompt: Some(ClaimedSteeringPrompt {
+            active_prompt_id: "prompt-1".into(),
+            steering_prompt: ClaimedSteeringPrompt {
                 attachment_root: with_images.then(|| images_root.path().to_path_buf()),
                 queued_command_id: "queued-1".into(),
                 prompt: blocks("change direction"),
-            }),
+            },
         })
         .await
         .unwrap();
@@ -3256,16 +3276,47 @@ async fn exercise_image_steering(with_images: bool) {
         steering["params"]["_meta"]["steering"]["idleBehavior"],
         "promptRequired"
     );
-    wait_for_runtime_event(&mut event_rx, |event| {
-        matches!(
-            event,
-            RuntimeEvent::SteerApplied {
-                request_id,
-                queued_command_id,
-            } if request_id == "cancel-1" && queued_command_id == "queued-1"
-        )
-    })
-    .await;
+    if steering_outcome == "hold" {
+        tokio::time::advance(Duration::from_secs(31)).await;
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::SteeringUnconfirmed { .. })
+        })
+        .await;
+        request_tx
+            .send(CommandRequest::Steer {
+                request_id: "steer-repeat".into(),
+                active_prompt_id: "prompt-1".into(),
+                steering_prompt: ClaimedSteeringPrompt {
+                    attachment_root: None,
+                    queued_command_id: "queued-1".into(),
+                    prompt: blocks("change direction"),
+                },
+            })
+            .await
+            .unwrap();
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "steer-repeat")).await;
+        assert!(
+            observed_rx.try_recv().is_err(),
+            "a repeated steer must not cancel or inject again"
+        );
+        complete_tx.send(()).await.unwrap();
+    }
+    if steering_outcome == "failed" {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandRejected { request_id, .. } if request_id == "cancel-1")).await;
+    } else if steering_outcome == "startedNewTurn" {
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event, RuntimeEvent::CommandInterrupted { request_id, .. } if request_id == "cancel-1")).await;
+    } else {
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(
+                event,
+                RuntimeEvent::SteerApplied {
+                    request_id,
+                    queued_command_id,
+                } if request_id == "cancel-1" && queued_command_id == "queued-1"
+            )
+        })
+        .await;
+    }
     assert!(
         observed_rx.try_recv().is_err(),
         "steering must not send cancel"
@@ -3286,6 +3337,21 @@ async fn exercise_image_steering(with_images: bool) {
         .expect("runtime task does not panic")
         .expect("steering does not fail the runtime");
     bridge.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn steering_timeout_keeps_observing_and_repeated_escape_never_cancels() {
+    exercise_image_steering(false, "hold").await;
+}
+
+#[tokio::test]
+async fn failed_steering_does_not_fall_back_to_cancellation() {
+    exercise_image_steering(false, "failed").await;
+}
+
+#[tokio::test]
+async fn unexpected_steering_delivery_is_held_without_cancellation() {
+    exercise_image_steering(false, "startedNewTurn").await;
 }
 
 #[tokio::test(start_paused = true)]

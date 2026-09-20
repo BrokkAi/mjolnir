@@ -810,6 +810,9 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
+                native_agents: Vec::new(),
+                steering: None,
+                cancelling_prompt_id: None,
                 clear_context: false,
                 clear_context_started_at_ms: None,
                 native_agent_count: 0,

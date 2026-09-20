@@ -4,6 +4,8 @@ use super::*;
 /// controller's durable state. They arrive from relay snapshots rather than
 /// from disk, so they travel together instead of as separate arguments.
 pub(super) struct PhoneSessionViews<'a> {
+    pub(super) native_agents:
+        &'a std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
     pub(super) conversations:
         &'a std::collections::BTreeMap<String, crate::server::BrowserTranscript>,
     pub(super) queued_prompts:
@@ -412,6 +414,7 @@ pub(super) fn viewer_snapshot(
     revision: u64,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
+        native_agents,
         conversations,
         reviews,
         queued_prompts,
@@ -536,6 +539,11 @@ pub(super) fn viewer_snapshot(
             session.transitioning = true;
         }
         let live = operational.get(&session.id);
+        session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
+        session.steering = live.and_then(|s| s.steering.clone());
+        session.active_prompt_id =
+            live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));
+        session.cancelling_prompt_id = live.and_then(|s| s.cancelling_prompt_id.clone());
         // One answer for every session, whether or not the daemon can see its
         // worker. A worker the daemon has lost is reported as what was last
         // known about it, never as idle: a turn that outlives a daemon
@@ -731,4 +739,24 @@ pub(super) async fn load_materialized_activity(
     })
     .await
     .context("materialized activity startup task failed")?
+}
+
+/// Load retained native identities off the control loop, including stopped owners.
+pub(super) async fn load_native_agents(
+    owners: Vec<String>,
+) -> Result<std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>> {
+    tokio::task::spawn_blocking(move || {
+        owners
+            .into_iter()
+            .map(|owner| {
+                let agents = crate::database::load_native_agent_summaries(&owner)?
+                    .into_iter()
+                    .map(|summary| summary.agent)
+                    .collect();
+                Ok((owner, agents))
+            })
+            .collect()
+    })
+    .await
+    .context("load native subagent identities")?
 }

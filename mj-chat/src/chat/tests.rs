@@ -701,7 +701,7 @@ fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
     chat.set_subagent_count(2);
 
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Sub-agents (2)"), "{screen}");
+    assert!(screen.contains("Subagents · 0 working"), "{screen}");
     let area = chat
         .subagent_control_area
         .expect("sub-agent control hitbox");

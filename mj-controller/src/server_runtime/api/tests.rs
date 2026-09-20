@@ -311,6 +311,9 @@ fn ready_view(model: &str) -> ManagedSessionView {
         }))
         .expect("the fixture describes a select the schema accepts");
     let operational = mj_core::relay::RelayOperationalState {
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,

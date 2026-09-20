@@ -413,6 +413,8 @@ impl DashboardContext {
             }
             let count = dashboard.subagent_count_for(chat.session_id());
             chat.set_subagent_count(count);
+            let working = dashboard.working_subagent_count_for(chat.session_id());
+            chat.set_subagent_working_count(working);
         }
     }
 

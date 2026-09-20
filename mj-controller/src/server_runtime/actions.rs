@@ -380,12 +380,36 @@ pub(super) async fn apply_phone_action(
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             Ok(())
         }
+        ControllerAction::TurnControl {
+            session_id,
+            command,
+        } => {
+            anyhow::ensure!(
+                matches!(
+                    command,
+                    RelayCommand::Steer { .. }
+                        | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ResolveSteering { .. }
+                ),
+                "unsupported turn-control command"
+            );
+            services
+                .sessions
+                .session(&session_id)
+                .await?
+                .submit(new_command_id("phone-turn-control")?, command)
+                .await?;
+            Ok(())
+        }
         ControllerAction::CancelTurn { session_id } => {
             services
                 .sessions
                 .session(&session_id)
                 .await?
-                .submit(new_command_id("phone-cancel-turn")?, RelayCommand::Cancel)
+                .submit(
+                    new_command_id("phone-cancel-turn")?,
+                    RelayCommand::CancelTurn,
+                )
                 .await?;
             Ok(())
         }

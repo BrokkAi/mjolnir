@@ -57,6 +57,9 @@ fn session_record(id: &str) -> SessionRecord {
 
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,

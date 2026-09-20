@@ -1295,14 +1295,10 @@ pub(super) fn start_steer(
 }
 
 pub(super) async fn settle_steer(
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
     events: &mpsc::Sender<RuntimeEvent>,
-    terminals: &TerminalRegistry,
     pending: PendingSteer,
     outcome: std::result::Result<serde_json::Value, agent_client_protocol::Error>,
-    turn_running: bool,
-) -> Result<bool> {
+) -> Result<()> {
     match outcome
         .as_ref()
         .ok()
@@ -1318,30 +1314,51 @@ pub(super) async fn settle_steer(
                 },
             )
             .await?;
-            Ok(false)
+            Ok(())
         }
-        outcome => {
-            let detached_turn = outcome == Some("startedNewTurn");
-            if turn_running || detached_turn {
-                apply_cancel(
-                    connection,
-                    session_id,
-                    pending.request_id,
-                    events,
-                    terminals,
-                )
-                .await?;
-                Ok(true)
-            } else {
-                emit_runtime_event(
-                    events,
-                    RuntimeEvent::CancelApplied {
-                        request_id: pending.request_id,
-                    },
-                )
-                .await?;
-                Ok(false)
-            }
+        _ if outcome.as_ref().is_err_and(|error| {
+            !matches!(
+                error.code,
+                agent_client_protocol::ErrorCode::InvalidRequest
+                    | agent_client_protocol::ErrorCode::InvalidParams
+                    | agent_client_protocol::ErrorCode::MethodNotFound
+                    | agent_client_protocol::ErrorCode::AuthRequired
+            )
+        }) || outcome.as_ref().is_ok_and(|v| {
+            !matches!(
+                v.get("outcome").and_then(serde_json::Value::as_str),
+                Some("failed" | "promptRequired")
+            )
+        }) =>
+        {
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandInterrupted {
+                    request_id: pending.request_id,
+                    message: format!(
+                        "Unexpected steering response; delivery is unconfirmed: {outcome:?}"
+                    ),
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        _ => {
+            let message = match outcome {
+                Ok(value) => {
+                    format!("Steering was not confirmed: {value}. The prompt remains queued.")
+                }
+                Err(error) => format!("Steering failed: {error}. The prompt remains queued."),
+            };
+            emit_runtime_event(
+                events,
+                RuntimeEvent::CommandRejected {
+                    request_id: pending.request_id,
+                    message,
+                },
+            )
+            .await?;
+            Ok(())
         }
     }
 }
@@ -1361,6 +1378,8 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::SetSessionMode { request_id, .. } => {
                 ("SetSessionMode", Some(request_id))
             }
+            CommandRequest::CancelTurnFor { request_id, .. } => ("CancelTurnFor", Some(request_id)),
+            CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),
             CommandRequest::Close { request_id } => ("Close", Some(request_id)),
             CommandRequest::ResolveElicitation { .. } => ("ResolveElicitation", None),

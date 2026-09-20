@@ -277,6 +277,9 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
             operational: mj_core::relay::RelayOperationalState {
+                native_agents: Vec::new(),
+                steering: None,
+                cancelling_prompt_id: None,
                 clear_context: false,
                 clear_context_started_at_ms: None,
                 native_agent_count: 0,
@@ -1737,15 +1740,15 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         (
             Some(false),
             Some(QueuedCommandKind::Prompt),
-            "Esc cancels",
-            "Stopping turn…",
+            "Esc steers next",
+            "Steering turn…",
             "Cancellation requested",
         ),
         (
             None,
             Some(QueuedCommandKind::Prompt),
-            "Esc applies next",
-            "Applying queued prompt…",
+            "Esc steers next",
+            "Steering turn…",
             "Queued prompt requested",
         ),
         (
@@ -1778,6 +1781,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             Notices::default(),
         );
         let mut materialized = MaterializedSession::empty("steering-session");
+        let steering = queue_kind.as_ref().is_some_and(|kind| kind.is_prompt());
         if let Some(kind) = queue_kind {
             materialized.queued_prompts.push(MaterializedQueuedPrompt {
                 accepted_ordinal: None,
@@ -1819,16 +1823,34 @@ async fn escape_names_steering_through_submission_and_acceptance() {
         })
         .await
         .expect("turn control request completes");
-        assert!(matches!(
+        assert_eq!(
             fixture.submitted.recv().await,
-            Some(RelayCommand::Cancel)
-        ));
+            Some(if steering {
+                RelayCommand::Steer {
+                    active_prompt_id: "running-prompt".into(),
+                    queued_prompt_id: "queued-correction".into(),
+                }
+            } else {
+                RelayCommand::CancelTurnFor {
+                    active_prompt_id: "running-prompt".into(),
+                }
+            })
+        );
 
         // A newer view may already have consumed the queue. The reply
         // must still describe the request that was actually submitted.
         chat.state.queued_prompts.clear();
         apply_chat_remote_result(&mut chat.state, result);
         assert_eq!(chat.state.notice(), previous_feedback);
+        assert!(
+            chat.state.operation_feedback.contains_key("turn-control"),
+            "acceptance is not execution"
+        );
+        chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(
+            fixture.submitted.try_recv().is_err(),
+            "Escape cannot escalate while waiting for execution state"
+        );
     }
 }
 
@@ -1986,7 +2008,7 @@ fn subagents_are_blue_highlighted_as_clickable_on_prompt_border() {
     let label = (area.x..area.right())
         .map(|x| buffer[(x, area.y)].symbol())
         .collect::<String>();
-    assert_eq!(label, " Sub-agents (2) ");
+    assert_eq!(label, " Subagents · 0 working ");
     assert!((area.x..area.right()).all(|x| {
         let cell = &buffer[(x, area.y)];
         cell.bg == theme::palette().selection && cell.fg == theme::palette().text

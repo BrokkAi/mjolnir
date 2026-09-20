@@ -5,6 +5,62 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[derive(Deserialize)]
+struct Inventory {
+    agents: Vec<mj_core::native_agent::NativeAgentAvailabilityReport>,
+    complete: bool,
+}
+
+fn decode_inventory(value: Value) -> Result<Inventory> {
+    let inventory: Inventory = serde_json::from_value(value)?;
+    let mut identities = BTreeSet::new();
+    for agent in &inventory.agents {
+        ensure!(
+            !agent.session_id.is_empty() && identities.insert(&agent.session_id),
+            "availability inventory has empty or duplicate identities"
+        );
+        ensure!(
+            agent.stable_id.as_ref().is_none_or(|id| !id.is_empty()),
+            "availability inventory has an empty stable identity"
+        );
+    }
+    Ok(inventory)
+}
+
+/// Only called after the adapter explicitly negotiates this read-only extension.
+pub(super) async fn refresh_availability(
+    connection: &super::ConnectionTo<super::Agent>,
+    session_id: &super::SessionId,
+    events: &super::mpsc::Sender<super::RuntimeEvent>,
+) -> Result<()> {
+    let request = super::UntypedMessage {
+        method: "_session/subagents/availability".into(),
+        params: serde_json::json!({ "sessionId": session_id }),
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connection.send_request(request).block_task(),
+    )
+    .await;
+    let inventory = match response {
+        Ok(Ok(value)) => decode_inventory(value).map_err(|e| e.to_string()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("availability query timed out".into()),
+    };
+    let event = match inventory {
+        Ok(inventory) => super::RuntimeEvent::NativeAgent {
+            event: NativeAgentEvent::Availability {
+                reports: inventory.agents,
+                complete: inventory.complete,
+            },
+        },
+        Err(error) => super::RuntimeEvent::Warning {
+            message: format!("Subagent availability remains unknown: {error}"),
+        },
+    };
+    super::emit_runtime_event(events, event).await
+}
+
 #[derive(Default)]
 pub(super) struct NativeAgentRouter {
     children: BTreeSet<String>,
@@ -91,6 +147,19 @@ impl NativeAgentRouter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn availability_inventory_requires_explicit_evidence_and_unique_identities() {
+        let agent = json!({"session_id":"child", "availability":"available", "stable_id":"stable"});
+        assert!(decode_inventory(json!({"agents":[agent.clone()]})).is_err());
+        assert!(
+            decode_inventory(json!({"agents":[agent.clone(), agent.clone()], "complete":true}))
+                .is_err()
+        );
+        let inventory = decode_inventory(json!({"agents":[agent], "complete":false})).unwrap();
+        assert!(!inventory.complete);
+        assert_eq!(inventory.agents[0].stable_id.as_deref(), Some("stable"));
+    }
 
     #[test]
     fn routes_nested_children_without_consuming_parent_output() {

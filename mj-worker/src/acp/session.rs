@@ -28,7 +28,7 @@ pub(super) async fn serve_session(
             serde_json::json!({
                 "air": {
                     "version": 1,
-                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions"] } else { vec!["nativeSubagentSessions"] }
+                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions", "nativeSubagentAvailability"] } else { vec!["nativeSubagentSessions", "nativeSubagentAvailability"] }
                 }
             }),
         );
@@ -89,6 +89,14 @@ pub(super) async fn serve_session(
                 .any(|value| value == "nativeSubagentSessions")
         });
     let steering_supported = steering_supported_from_meta(initialized.meta.as_ref());
+    let availability_supported = initialized
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("nativeSubagentAvailability"))
+        .and_then(|v| v.get("supported"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
         .then(|| grok::model_state(initialized.meta.as_ref()))
@@ -293,6 +301,10 @@ pub(super) async fn serve_session(
                 false,
             )
         };
+
+    if availability_supported {
+        native_agents::refresh_availability(connection, &session_id, events).await?;
+    }
 
     // Launch flags and environment are applied before the bridge starts. ACP
     // modes are selected after the session exists, before any prompt can run.
@@ -672,6 +684,7 @@ pub(super) async fn serve_session(
                 let mut prompt_running = true;
                 let mut cancel_deadline = None;
                 let mut pending_steer: Option<PendingSteer> = None;
+                let mut steering_deadline = None;
                 let input_verdict = async {
                     if let Some(client) = &verdict_client {
                         verdict_client::await_input_verdict(spec, client).await;
@@ -718,21 +731,18 @@ pub(super) async fn serve_session(
                                 {
                                     Ok(outcome) => {
                                         settle_steer(
-                                            connection,
-                                            &session_id,
                                             events,
-                                            terminals,
                                             pending,
                                             outcome,
-                                            false,
                                         )
                                         .await?;
                                     }
                                     Err(_) => {
                                         emit_runtime_event(
                                             events,
-                                            RuntimeEvent::CancelApplied {
+                                            RuntimeEvent::CommandInterrupted {
                                                 request_id: pending.request_id,
+                                                message: "Steering delivery unconfirmed after the turn ended; queued input is held for review".into(),
                                             },
                                         )
                                         .await?;
@@ -951,6 +961,13 @@ pub(super) async fn serve_session(
                             .await?;
                             return Ok(Some(SessionRestart::Resume(session_id.to_string())));
                         }
+                        _ = async { tokio::time::sleep_until(steering_deadline.expect("guarded steering deadline")).await }, if steering_deadline.is_some() && pending_steer.is_some() => {
+                            steering_deadline = None;
+                            emit_runtime_event(events, RuntimeEvent::SteeringUnconfirmed {
+                                request_id: pending_steer.as_ref().expect("pending steering").request_id.clone(),
+                                message: "No steering acknowledgment after 30s. Delivery is unconfirmed; the prompt remains held.".into(),
+                            }).await?;
+                        }
                         steer_outcome = async {
                             pending_steer
                                 .as_mut()
@@ -959,30 +976,41 @@ pub(super) async fn serve_session(
                                 .as_mut()
                                 .await
                         }, if pending_steer.is_some() => {
+                            steering_deadline = None;
                             let pending = pending_steer
                                 .take()
                                 .expect("steering branch is guarded");
-                            if settle_steer(
-                                connection,
-                                &session_id,
-                                events,
-                                terminals,
-                                pending,
-                                steer_outcome,
-                                true,
-                            )
-                            .await?
-                                && cancel_deadline.is_none()
-                            {
-                                cancel_deadline =
-                                    Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
-                            }
+                            settle_steer(events, pending, steer_outcome).await?;
                         }
                         command = requests.recv() => match command {
+                            Some(CommandRequest::CancelTurnFor { request_id: cancel_id, active_prompt_id }) => {
+                                if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() {
+                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "The requested turn is no longer available for cancellation".into() }).await?;
+                                } else {
+                                    implementation_rx.close(); approved_plan = None; implementation_deadline = None;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
+                                    cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
+                                }
+                            }
+                            Some(CommandRequest::Steer { request_id: steer_id, active_prompt_id, steering_prompt }) => {
+                                if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() || pending_steer.is_some() || !steering_supported {
+                                    emit_runtime_event(events, RuntimeEvent::CommandRejected {
+                                        request_id: steer_id,
+                                        message: if !steering_supported { "This harness does not support steering" } else { "The requested turn is no longer available for steering" }.into(),
+                                    }).await?;
+                                } else {
+                                    pending_steer = Some(start_steer(connection, &session_id, steer_id, steering_prompt));
+                                    steering_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                                }
+                            }
                             Some(CommandRequest::Cancel {
                                 request_id: cancel_id,
                                 steering_prompt,
                             }) => {
+                                if steering_prompt.is_some() && pending_steer.is_some() {
+                                    emit_runtime_event(events, RuntimeEvent::CommandRejected { request_id: cancel_id, message: "Steering is already pending".into() }).await?;
+                                    continue;
+                                }
                                 implementation_rx.close();
                                 approved_plan = None;
                                 implementation_deadline = None;
@@ -992,30 +1020,19 @@ pub(super) async fn serve_session(
                                         request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None }).await?;
                                     break;
                                 }
-                                if steering_supported
-                                    && pending_steer.is_none()
-                                    && cancel_deadline.is_none()
-                                    && let Some(steering_prompt) = steering_prompt
-                                {
-                                    pending_steer = Some(start_steer(
-                                        connection,
-                                        &session_id,
-                                        cancel_id,
-                                        steering_prompt,
-                                    ));
+                                if let Some(steering_prompt) = steering_prompt {
+                                    if !steering_supported || cancel_deadline.is_some() {
+                                        emit_runtime_event(events, RuntimeEvent::CommandRejected {
+                                            request_id: cancel_id,
+                                            message: "Steering is not available. The prompt remains queued; cancel the turn explicitly to apply it next.".into(),
+                                        }).await?;
+                                    } else {
+                                        pending_steer = Some(start_steer(connection, &session_id, cancel_id, steering_prompt));
+                                    }
                                 } else {
-                                    apply_cancel(
-                                        connection,
-                                        &session_id,
-                                        cancel_id,
-                                        events,
-                                        terminals,
-                                    )
-                                    .await?;
+                                    apply_cancel(connection, &session_id, cancel_id, events, terminals).await?;
                                     if cancel_deadline.is_none() {
-                                        cancel_deadline = Some(
-                                            tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT,
-                                        );
+                                        cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }
                                 }
                             }
@@ -1290,6 +1307,17 @@ pub(super) async fn serve_session(
                         .await?;
                     }
                 }
+            }
+            CommandRequest::CancelTurnFor { request_id, .. }
+            | CommandRequest::Steer { request_id, .. } => {
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::CommandRejected {
+                        request_id,
+                        message: "The requested turn is no longer running".into(),
+                    },
+                )
+                .await?;
             }
             CommandRequest::Cancel { request_id, .. } => {
                 apply_cancel(connection, &session_id, request_id, events, terminals).await?;

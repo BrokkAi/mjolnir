@@ -161,6 +161,15 @@ pub enum CommandRequest {
         target: mj_core::relay::BackgroundTaskStopTarget,
         resolved: oneshot::Sender<std::result::Result<(), String>>,
     },
+    CancelTurnFor {
+        request_id: String,
+        active_prompt_id: String,
+    },
+    Steer {
+        request_id: String,
+        active_prompt_id: String,
+        steering_prompt: ClaimedSteeringPrompt,
+    },
     Cancel {
         request_id: String,
         steering_prompt: Option<ClaimedSteeringPrompt>,

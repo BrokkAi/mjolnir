@@ -87,6 +87,10 @@ impl ViewerSnapshot {
                     .map(|child| child.child_session_id.clone())
                     .collect();
                 ViewerSession {
+                    native_subagents: Vec::new(),
+                    steering: None,
+                    active_prompt_id: None,
+                    cancelling_prompt_id: None,
                     capacity_retry: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
@@ -262,6 +266,14 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<mj_core::relay::SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_prompt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
     pub id: String,

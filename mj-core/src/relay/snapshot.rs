@@ -77,6 +77,19 @@ pub enum RelayCommand {
     /// separate from [`RelayCommand::Cancel`], whose UI semantics may steer
     /// the next queued prompt into the running turn.
     CancelTurn,
+    /// Steer exactly this queued prompt into exactly this running turn.
+    Steer {
+        active_prompt_id: String,
+        queued_prompt_id: String,
+    },
+    /// Explicit cancellation cannot drift onto a subsequent turn.
+    CancelTurnFor {
+        active_prompt_id: String,
+    },
+    /// Release held input only after the user reviews uncertain delivery.
+    ResolveSteering {
+        steering_id: String,
+    },
     Cancel,
     Close {
         barrier_command_id: String,
@@ -111,6 +124,7 @@ pub enum RelayCommand {
 impl RelayCommand {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::Steer { .. } | Self::CancelTurnFor { .. } | Self::ResolveSteering { .. } => 17,
             Self::ClearContext => 15,
             Self::RunUserShell { .. } | Self::CancelUserShell { .. } => 5,
             Self::GoalControl { .. } => 11,
@@ -136,7 +150,8 @@ impl RelayCommand {
     pub fn is_relay_local(&self) -> bool {
         matches!(
             self,
-            Self::RemoveQueuedPrompt { .. }
+            Self::ResolveSteering { .. }
+                | Self::RemoveQueuedPrompt { .. }
                 | Self::ClearQueuedPrompts
                 | Self::CompleteCheckpoint { .. }
                 | Self::ReleaseCheckpoint { .. }
@@ -154,6 +169,8 @@ impl RelayCommand {
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
                 | Self::CancelTurn
+                | Self::Steer { .. }
+                | Self::CancelTurnFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
         )
@@ -178,6 +195,9 @@ impl RelayCommand {
             Self::GoalControl { .. } => RelayCommandKind::GoalControl,
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
+            Self::Steer { .. } => RelayCommandKind::Steer,
+            Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
             Self::Close { .. } => RelayCommandKind::Close,
             Self::BeginCheckpoint { .. } => RelayCommandKind::BeginCheckpoint,
@@ -192,6 +212,8 @@ impl RelayCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayCommandKind {
+    Steer,
+    ResolveSteering,
     ClearContext,
     Prompt,
     RunUserShell,
@@ -209,6 +231,35 @@ pub enum RelayCommandKind {
     ReleaseCheckpoint,
     AdvanceRecoveryFloor,
     RecordNotice,
+}
+
+/// Durable delivery state, independent of transport acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringStatus {
+    Pending,
+    Unconfirmed,
+    Failed,
+    Applied,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteeringOperation {
+    pub command_id: String,
+    pub active_prompt_id: String,
+    pub queued_prompt_id: String,
+    pub status: SteeringStatus,
+    pub message: Option<String>,
+}
+
+impl SteeringOperation {
+    pub fn holds_queue(&self) -> bool {
+        matches!(
+            self.status,
+            SteeringStatus::Pending | SteeringStatus::Unconfirmed
+        )
+    }
 }
 
 /// Payload-free queue identity exposed in attach/status responses.
@@ -404,6 +455,12 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_agents: Vec<crate::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
     #[serde(default)]
     pub clear_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -705,6 +762,10 @@ pub struct RelayEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    SteeringUnconfirmed {
+        command_id: String,
+        message: String,
+    },
     NativeAgent {
         event: crate::native_agent::NativeAgentEvent,
     },
@@ -935,8 +996,14 @@ pub struct HandledRelayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<SteeringOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub native_agents: BTreeMap<String, crate::native_agent::NativeAgent>,
+    #[serde(default)]
+    pub native_agent_replay: Option<BTreeMap<String, crate::native_agent::NativeAgent>>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1012,7 +1079,10 @@ pub struct RelaySnapshot {
 impl RelaySnapshot {
     pub fn new(session_id: String) -> Self {
         Self {
+            steering: None,
+            cancelling_prompt_id: None,
             native_agents: BTreeMap::new(),
+            native_agent_replay: None,
             goal: Default::default(),
             capacity_retry: None,
             activity_turn_started_at_ms: None,
@@ -1055,6 +1125,9 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
+            native_agents: self.native_agents.values().cloned().collect(),
+            steering: self.steering.clone(),
+            cancelling_prompt_id: self.cancelling_prompt_id.clone(),
             clear_context: false,
             clear_context_started_at_ms: self
                 .dispatches

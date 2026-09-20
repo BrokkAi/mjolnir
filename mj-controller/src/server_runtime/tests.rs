@@ -291,6 +291,9 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
     use mj_core::relay::{RelayExecutionState, RelayOperationalState};
 
     let operational = |agent_capabilities| RelayOperationalState {
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,
@@ -377,6 +380,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
             &[],
             &std::collections::BTreeMap::new(),
             &PhoneSessionViews {
+                native_agents: &Default::default(),
                 conversations: &std::collections::BTreeMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
@@ -447,6 +451,9 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
+        native_agents: Vec::new(),
+        steering: None,
+        cancelling_prompt_id: None,
         clear_context: false,
         clear_context_started_at_ms: None,
         native_agent_count: 0,
@@ -518,6 +525,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             &[],
             &std::collections::BTreeMap::new(),
             &PhoneSessionViews {
+                native_agents: &Default::default(),
                 conversations: &std::collections::BTreeMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
@@ -678,6 +686,7 @@ fn snapshot_with_project_sources(
         &[],
         &Default::default(),
         &PhoneSessionViews {
+            native_agents: &Default::default(),
             conversations: &Default::default(),
             queued_prompts: &Default::default(),
             active_user_shells: &Default::default(),
@@ -1176,6 +1185,7 @@ fn a_quota_reads_stale_only_once_its_next_refresh_is_overdue() {
             &[],
             &quotas,
             &PhoneSessionViews {
+                native_agents: &Default::default(),
                 conversations: &std::collections::BTreeMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
@@ -1260,6 +1270,7 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
         &[],
         &std::collections::BTreeMap::new(),
         &PhoneSessionViews {
+            native_agents: &Default::default(),
             conversations: &std::collections::BTreeMap::new(),
             queued_prompts: &std::collections::BTreeMap::new(),
             active_user_shells: &std::collections::BTreeMap::new(),
