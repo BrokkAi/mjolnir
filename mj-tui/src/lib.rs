@@ -71,7 +71,7 @@ mod docs_screenshots;
 mod test_support;
 
 pub use crate::actions::CommandId;
-pub use crate::combined::render_combined;
+pub use crate::combined::{render_combined, render_combined_with_theme};
 pub use crate::dialogs::{ImportProfileOption, ImportSessionOption};
 pub use crate::go::GoMode;
 pub use crate::ingest::{

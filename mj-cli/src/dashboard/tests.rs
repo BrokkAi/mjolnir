@@ -405,12 +405,13 @@ fn draw_with_selection(
     let mut text = None;
     terminal
         .draw(|frame| {
-            render_combined(
+            mj_tui::render_combined_with_theme(
                 frame,
                 dashboard,
                 &mut BTreeMap::new(),
                 &BTreeMap::new(),
                 false,
+                mj_core::config::UiTheme::Midnight,
             );
             text = draw_selection(frame, selection, dashboard.frame_surfaces());
         })
