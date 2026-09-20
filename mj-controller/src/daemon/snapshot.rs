@@ -275,7 +275,7 @@ impl RuntimeState {
         let native_agents = blocking(move || {
             let mut agents = Vec::new();
             for owner in native_owners {
-                agents.extend(crate::database::load_native_agents(&owner, 200)?);
+                agents.extend(crate::database::load_native_agent_summaries(&owner)?);
             }
             Ok(agents)
         })

@@ -320,6 +320,7 @@ pub(crate) struct DashboardContext {
     worker_targets_tx: watch::Sender<Vec<WorkerPollTarget>>,
     worker: Feed<SessionManagerUpdates>,
     runtime_state: Feed<watch::Receiver<RuntimeStateUpdate>>,
+    runtime_health: Feed<watch::Receiver<mj_controller::pollers::RuntimeFeedHealth>>,
     /// Reviews the daemon is running. The chat renders one of these rather
     /// than driving a review of its own.
     runtime_reviews: Feed<watch::Receiver<Vec<mj_controller::review_host::RuntimeReviewView>>>,
@@ -689,6 +690,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.runtime_config.wait(), if context.runtime_config.is_open() => {
                 context.runtime_config.accept(update);
+            }
+            update = context.runtime_health.wait(), if context.runtime_health.is_open() => {
+                context.runtime_health.accept(update);
             }
             update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
                 context.runtime_state.accept(update);
@@ -1524,6 +1528,7 @@ impl DashboardContext {
             worker_targets_tx,
             worker: Feed::new(worker_updates_rx),
             runtime_state: Feed::new(runtime_state_rx),
+            runtime_health: Feed::new(remote_worker.health),
             runtime_reviews: Feed::new(runtime_reviews_rx),
             runtime_notices: Feed::new(runtime_notices_rx),
             reported_notice_id,

@@ -1475,6 +1475,7 @@ pub struct NoticeRecord {
 #[derive(Debug, Default)]
 struct NoticeSlot {
     notice: Option<Notice>,
+    persistent_failure: Option<String>,
     /// Bumped when the displayed text changes, so a dirty-gated renderer can
     /// tell that the bar moved without keeping a copy of its text.
     generation: u64,
@@ -1616,6 +1617,9 @@ impl Notices {
     /// afterwards, so a caller can tell a survivor from a dismissal.
     pub fn dismiss(&self, now: std::time::Instant) -> bool {
         let mut slot = self.lock();
+        if slot.persistent_failure.is_some() {
+            return false;
+        }
         match slot.notice.as_ref() {
             None => true,
             Some(notice) => {
@@ -1630,10 +1634,32 @@ impl Notices {
 
     /// The current notice, if any.
     pub fn current(&self) -> Option<String> {
-        self.lock()
-            .notice
-            .as_ref()
-            .map(|notice| notice.text.clone())
+        let slot = self.lock();
+        slot.persistent_failure
+            .clone()
+            .or_else(|| slot.notice.as_ref().map(|notice| notice.text.clone()))
+    }
+
+    /// A continuing feed failure stays visible until its owner reports recovery.
+    /// Transient notices remain available after recovery and in the notice log.
+    pub fn set_persistent_failure(&self, error: Option<String>) {
+        let error = error.map(|text| sanitize_terminal_text(&text));
+        let mut slot = self.lock();
+        if slot.persistent_failure == error {
+            return;
+        }
+        if let Some(text) = &error {
+            slot.history.push_back(NoticeRecord {
+                text: text.clone(),
+                at: std::time::Instant::now(),
+                failure: true,
+            });
+            while slot.history.len() > NOTICE_HISTORY {
+                slot.history.pop_front();
+            }
+        }
+        slot.persistent_failure = error;
+        slot.generation = slot.generation.wrapping_add(1);
     }
 
     /// Counts displayed-text changes to the shared slot. A renderer that

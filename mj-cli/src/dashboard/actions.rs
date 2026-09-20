@@ -130,12 +130,11 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let updates = context.dashboard_io_tx.clone();
             tokio::spawn(async move {
-                let result = async {
-                    let mut client = daemon::connect_existing().await?;
-                    client
-                        .native_agent_history(owner.clone(), child.clone(), before)
-                        .await
-                }
+                let result = mj_controller::pollers::load_native_agent_history(
+                    owner.clone(),
+                    child.clone(),
+                    before,
+                )
                 .await
                 .map_err(|error: anyhow::Error| format!("{error:#}"));
                 if let Err(error) = updates.send(DashboardIoUpdate::NativeAgentHistory {

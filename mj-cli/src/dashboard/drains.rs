@@ -26,6 +26,9 @@ impl DashboardContext {
         self.cancel_stale_path_input();
         self.drain_quota_updates();
         self.drain_runtime_state();
+        while let Some(health) = self.runtime_health.next_ready() {
+            self.notices.set_persistent_failure(health.error());
+        }
         self.drain_worker_updates();
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
@@ -50,6 +53,7 @@ impl DashboardContext {
             self.quota.take_delivered(),
             self.worker.take_delivered(),
             self.runtime_state.take_delivered(),
+            self.runtime_health.take_delivered(),
             self.runtime_reviews.take_delivered(),
             self.runtime_notices.take_delivered(),
             self.runtime_config.take_delivered(),

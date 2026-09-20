@@ -2939,3 +2939,37 @@ async fn workspace_close_stops_independent_sessions_concurrently_and_retries_aft
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn oversized_response_reports_its_size_and_keeps_connection_usable() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sender = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        for (request_id, result) in [
+            (7, Ok(DaemonReply::Text("x".repeat(MAX_FRAME_BYTES)))),
+            (8, Ok(DaemonReply::Pong)),
+        ] {
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    result,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+    assert_eq!(response.request_id, 7);
+    let error = response.result.unwrap_err();
+    assert!(error.contains("text response for request 7"), "{error}");
+    assert!(error.contains(&MAX_FRAME_BYTES.to_string()), "{error}");
+    let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+    assert_eq!(response.request_id, 8);
+    assert!(matches!(response.result, Ok(DaemonReply::Pong)));
+    sender.await.unwrap();
+}

@@ -89,6 +89,8 @@ mod capacity;
 pub use capacity::*;
 mod runtime_feed;
 pub use runtime_feed::*;
+mod native_agents;
+pub use native_agents::{RuntimeFeedHealth, load_native_agent_history};
 mod remote;
 pub use remote::*;
 mod lifecycle;
