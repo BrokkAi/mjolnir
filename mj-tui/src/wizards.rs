@@ -67,6 +67,7 @@ pub(crate) enum WizardControl {
     BundleList,
     TargetList,
     ProjectDirectory,
+    RecentProject(usize),
     NewBundleRepositories,
     NewBundleSource,
     NewBundleRemove,

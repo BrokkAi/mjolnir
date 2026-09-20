@@ -397,6 +397,7 @@ impl DashboardState {
             | WizardControl::BundleList
             | WizardControl::TargetList
             | WizardControl::ProjectDirectory
+            | WizardControl::RecentProject(_)
             | WizardControl::MountSource
             | WizardControl::MountDestination
             | WizardControl::MountAccess

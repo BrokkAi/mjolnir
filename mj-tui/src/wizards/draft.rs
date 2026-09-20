@@ -288,6 +288,15 @@ impl WizardDraft for NewWizard {
             return Err(self);
         }
         if self.step == WizardStep::ProjectDirectory {
+            if let WizardControl::RecentProject(index) = id {
+                if let Some(directory) = self.project_history.get(index) {
+                    self.project_history_index = index;
+                    self.project_directory = directory.to_string_lossy().into_owned().into();
+                    self.project_directory_error = None;
+                    self.form.get_mut().focus(WizardControl::ProjectDirectory);
+                }
+                return Ok(dashboard.keep(self));
+            }
             return Ok(dashboard.validate_new_project(self));
         }
         Err(self)
@@ -464,6 +473,13 @@ impl WizardDraft for NewWizard {
                     self.project_directory.control_kind(),
                     true,
                 );
+                for index in 0..self.project_history.len().min(5) {
+                    form.declare_with_enabled(
+                        WizardControl::RecentProject(index),
+                        ControlKind::Button,
+                        true,
+                    );
+                }
                 declare_wizard_buttons(form, true, true);
             }
             WizardStep::NewBundle => {

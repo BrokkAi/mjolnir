@@ -3911,6 +3911,50 @@ fn the_project_step_draws_its_recent_list_and_hints_above_the_buttons() {
     }
 }
 
+#[test]
+fn clicking_a_recent_project_fills_the_field_and_enter_validates_it() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut dashboard = dashboard_at_local_project_step(&["/work/older", "/work/newer"]);
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.project_directory_error = Some("previous path was invalid".into());
+    }
+    let lines = drawn(&mut dashboard, 140, 40);
+    let row = row_of(&lines, "/work/older");
+    let column = lines[row].find("/work/older").unwrap();
+    let column = lines[row][..column].chars().count() as u16;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        assert_eq!(
+            dashboard.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row: row as u16,
+                modifiers: KeyModifiers::NONE,
+            }),
+            DashboardAction::None
+        );
+        drawn(&mut dashboard, 140, 40);
+    }
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("clicking a recent directory stays on the project step")
+    };
+    assert_eq!(wizard.project_directory, "/work/older");
+    assert_eq!(wizard.project_directory.cursor(), "/work/older".len());
+    assert_eq!(wizard.project_history_index, 1);
+    assert!(wizard.project_directory_error.is_none());
+    assert_eq!(
+        wizard.form.borrow().focused(),
+        Some(WizardControl::ProjectDirectory)
+    );
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory { .. }
+    ));
+}
+
 /// The completion popup belongs to the dialog that owns the field: it may cover
 /// the rows under the field, but the button row and the dialog's frame stay
 /// readable, and no candidate is drawn on the dashboard behind the modal.

@@ -128,12 +128,14 @@ pub(crate) fn render_new_wizard(
             ));
             lines.push(Line::raw(""));
         }
+        let mut history_start = None;
         if !wizard.project_history.is_empty() {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "Recent on this host (↑/↓ selects):",
+                "Recent on this host (click or ↑/↓ selects):",
                 Style::default().fg(theme::palette().muted),
             ));
+            history_start = Some(lines.len());
             lines.extend(wizard.project_history.iter().take(5).enumerate().map(
                 |(index, directory)| {
                     Line::styled(
@@ -208,6 +210,19 @@ pub(crate) fn render_new_wizard(
                 button_y.saturating_sub(field_y.saturating_add(1)),
             ),
         );
+        if let Some(start) = history_start {
+            for index in 0..wizard.project_history.len().min(5) {
+                let row = content.y.saturating_add((start + index + 1) as u16);
+                if row < button_y {
+                    form.register(
+                        WizardControl::RecentProject(index),
+                        ControlKind::Button,
+                        Rect::new(content.x, row, content.width, 1),
+                        true,
+                    );
+                }
+            }
+        }
         PathField::render_within(
             frame,
             Rect::new(
