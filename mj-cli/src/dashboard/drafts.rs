@@ -1,5 +1,20 @@
 use super::*;
 
+/// Transfer the latest local draft into both sides of an asynchronous attach:
+/// the chat being prepared and the composer the person can edit meanwhile.
+pub(super) fn prepare_attach_draft(
+    cache: &mut ComposerDraftCache,
+    dashboard: &mut DashboardState,
+    session: &mj_core::state::SessionRecord,
+) -> String {
+    if let Some(text) = dashboard.take_standby_prompt_draft(&session.id) {
+        cache.capture(&session.id, text, &session.draft_input);
+    }
+    let draft = cache.open(&session.id, &session.draft_input).text;
+    dashboard.seed_standby_prompt(&session.id, draft.clone());
+    draft
+}
+
 impl DashboardContext {
     /// Opens the conversation for `session_id` without waiting on the session
     /// manager. Attaching can involve worker/relay I/O, so the result comes
@@ -177,14 +192,11 @@ impl DashboardContext {
         let bundle_id = session_record.bundle_id.clone();
         // A draft typed while the session's transition ran belongs to this
         // composer now; it wins over the warm chat's older captured text.
-        if let Some(text) = self.dashboard.take_standby_prompt_draft(&session_id) {
-            self.composer_drafts
-                .capture(&session_id, text, &session_record.draft_input);
-        }
-        let draft = self
-            .composer_drafts
-            .open(&session_id, &session_record.draft_input)
-            .text;
+        let draft = prepare_attach_draft(
+            &mut self.composer_drafts,
+            &mut self.dashboard,
+            &session_record,
+        );
         let context = mj_chat::chat::ChatSessionContext {
             config: self.controller.config.clone(),
             session: session_record,

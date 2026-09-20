@@ -178,6 +178,90 @@ fn populated_dashboard() -> DashboardState {
     DashboardState::new(config, state, std::collections::BTreeMap::new())
 }
 
+#[test]
+fn switching_sessions_preserves_drafts_through_the_rendered_attach_composer() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    cache.capture("session-1", "first unsent prompt".into(), "");
+    cache.capture("session-2", "second unsent prompt".into(), "");
+    let first = live_session("session-1", "2026-09-19T00:00:00Z");
+    let second = live_session("session-2", "2026-09-19T00:00:00Z");
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+
+    for (session, expected) in [
+        (&first, "first unsent prompt"),
+        (&second, "second unsent prompt"),
+        (&first, "first unsent prompt!"),
+    ] {
+        assert_eq!(
+            drafts::prepare_attach_draft(&mut cache, &mut dashboard, session),
+            expected
+        );
+        dashboard.select_active_session(&session.id);
+        dashboard.set_current_session(Some(&session.id));
+        dashboard.set_opening_session(Some(&session.id));
+        dashboard.focus_prompt();
+        let pane = dashboard.focused_pane();
+        terminal
+            .draw(|frame| {
+                render_combined(
+                    frame,
+                    &mut dashboard,
+                    &mut BTreeMap::new(),
+                    &BTreeMap::from([(pane, session.id.clone())]),
+                    false,
+                );
+            })
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            screen.contains(expected),
+            "the pending composer must show the saved draft"
+        );
+        dashboard.handle_key(plain_key(KeyCode::Char('!')));
+    }
+    assert_eq!(
+        dashboard.take_standby_prompt_draft("session-1").as_deref(),
+        Some("first unsent prompt!!")
+    );
+    assert_eq!(
+        dashboard.take_standby_prompt_draft("session-2").as_deref(),
+        Some("second unsent prompt!")
+    );
+}
+
+#[test]
+fn clearing_a_draft_during_attach_does_not_restore_the_old_cached_text() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    let mut session = live_session("session-1", "2026-09-19T00:00:00Z");
+    session.draft_input = "legacy draft".into();
+    drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session);
+    dashboard.select_active_session(&session.id);
+    dashboard.set_current_session(Some(&session.id));
+    dashboard.set_opening_session(Some(&session.id));
+    dashboard.focus_prompt();
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+    ));
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL,
+    ));
+    assert_eq!(
+        drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session),
+        ""
+    );
+    assert_eq!(cache.open(&session.id, "stale daemon draft").text, "");
+}
+
 /// The loop draws once per wakeup. The once-a-second clock is one of the
 /// two wakeups allowed to decline that frame, and it declines when none of
 /// the values it polls has moved.
