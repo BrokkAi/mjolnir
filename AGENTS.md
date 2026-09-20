@@ -139,6 +139,12 @@ Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that mat
 
 ## Testing Guidelines
 
+Always test new code in a separate named instance using `--instance <test-name>`.
+Use that instance for every daemon, TUI, CLI, and end-to-end test invocation of
+the new build. Never point a test build at the host's default instance or live
+session data: protocol and store changes must not disrupt ongoing session work.
+Keep automated tests' existing isolated configuration and data directories.
+
 Classify every new database migration as compatible or breaking, with a short
 reason beside it. Advance the migration revision for every change; raise the
 minimum compatible read/write revision only for breaking changes, in the same
