@@ -47,6 +47,10 @@ pub(super) struct ConversationProjectionResult {
 /// control loop remains the sole owner of these maps; background tasks only
 /// return completed browser projections through `results`.
 pub(super) struct ConversationProjectionDispatcher {
+    projectors: std::collections::BTreeMap<
+        String,
+        Arc<std::sync::Mutex<mj_client::transcript::BrowserTranscriptProjector>>,
+    >,
     pub(super) in_flight: std::collections::BTreeMap<String, (ConversationProjectionKey, u64)>,
     pub(super) pending: std::collections::BTreeMap<String, ConversationProjectionRequest>,
     pub(super) completed: std::collections::BTreeMap<String, ConversationProjectionKey>,
@@ -62,6 +66,7 @@ impl ConversationProjectionDispatcher {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
+            projectors: Default::default(),
             in_flight: std::collections::BTreeMap::new(),
             pending: std::collections::BTreeMap::new(),
             completed: std::collections::BTreeMap::new(),
@@ -158,10 +163,12 @@ impl ConversationProjectionDispatcher {
                 // An inactive session, or a result from an earlier lifecycle
                 // generation, must not resurrect a conversation. Its next
                 // active update gets a fresh generation.
+                self.projectors.remove(&session_id);
                 self.completed.remove(&session_id);
                 None
             }
             Err(error) => {
+                self.projectors.remove(&session_id);
                 tracing::warn!(
                     session_id = %session_id,
                     "browser transcript projection failed: {error}"
@@ -184,6 +191,7 @@ impl ConversationProjectionDispatcher {
     /// session. An in-flight task is allowed to finish; `finish` receives the
     /// current active-state guard and discards its result.
     pub(super) fn forget(&mut self, session_id: &str) {
+        self.projectors.remove(session_id);
         self.pending.remove(session_id);
         self.completed.remove(session_id);
         let generation = self.generations.entry(session_id.to_owned()).or_default();
@@ -199,8 +207,10 @@ impl ConversationProjectionDispatcher {
             .collect()
     }
 
-    pub(super) fn start(&self, request: ConversationProjectionRequest) {
+    pub(super) fn start(&mut self, request: ConversationProjectionRequest) {
         let session_id = request.materialized.session_id.clone();
+        let projector = Arc::clone(self.projectors.entry(session_id.clone()).or_default());
+        let queued_at = Instant::now();
         let key = request.key;
         let generation = request.generation;
         let permits = Arc::clone(&self.permits);
@@ -213,14 +223,21 @@ impl ConversationProjectionDispatcher {
             } {
                 Ok(permit) => {
                     let projection = tokio::task::spawn_blocking(move || {
-                        mj_client::transcript::materialized_browser_transcript(
-                            &request.materialized,
-                        )
+                        let started = Instant::now();
+                        let mut projector = projector.lock().map_err(|error| format!("browser projector poisoned: {error}"))?;
+                        let transcript = projector.project(&request.materialized);
+                        tracing::debug!(target: "mj_controller::latency", session_id = %request.materialized.session_id,
+                            ordinal = request.materialized.applied_event_ordinal,
+                            queue_ms = started.duration_since(queued_at).as_secs_f64() * 1000.0,
+                            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                            "browser transcript projected");
+                        Ok::<_, String>(transcript)
                     })
                     .await;
                     drop(permit);
                     projection
                         .map_err(|error| format!("transcript projection task failed: {error}"))
+                        .and_then(std::convert::identity)
                 }
                 Err(error) => Err(format!("transcript projection worker stopped: {error}")),
             };

@@ -10,6 +10,8 @@ pub(super) struct PendingSubmission {
     represented: bool,
     finished: bool,
     recorded_at_ms: i64,
+    #[serde(skip)]
+    started_at: Option<std::time::Instant>,
 }
 
 impl ChatState {
@@ -48,6 +50,7 @@ impl ChatState {
             represented: false,
             finished: false,
             recorded_at_ms: mj_core::clock::epoch_millis(),
+            started_at: Some(std::time::Instant::now()),
         });
         self.anchor = TranscriptAnchor::Bottom;
         self.invalidate_render_cache();
@@ -64,6 +67,9 @@ impl ChatState {
                         || item.stable_id == format!("shell:{}", pending.id)
                 })
             {
+                if let Some(started) = pending.started_at.take() {
+                    self.submission_renders.push((pending.id.clone(), started));
+                }
                 pending.represented = true;
             }
         }

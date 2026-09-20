@@ -109,6 +109,7 @@ pub(super) async fn run_remote_session_actor(
     while let Some(command) = commands.recv().await {
         let request = match command {
             ActorCommand::Submit {
+                queued_at: _,
                 command_id,
                 command,
                 admission,

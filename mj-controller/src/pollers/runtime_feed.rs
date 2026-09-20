@@ -132,10 +132,12 @@ pub(super) async fn load_runtime_projection(session_id: String) -> Result<Stored
         .context("projection readers stopped")?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let started = Instant::now();
         let result = crate::database::load_materialized_projection_tail(
             &session_id,
             crate::database::PROJECTION_TAIL_ITEMS,
         );
+        tracing::debug!(target: "mj_controller::latency", %session_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection loaded");
         // A blocking SQLite read can outlive cancellation of its subscriber.
         if let Err(error) = &result {
             tracing::warn!(%session_id, %error, "could not load runtime projection");

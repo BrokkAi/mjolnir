@@ -1946,6 +1946,7 @@ async fn submit_a_deferred_prompt(
     actor
         .commands
         .send(ActorCommand::Submit {
+            queued_at: Instant::now(),
             command_id: new_command_id("prompt").unwrap(),
             command: RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new("hello"))],

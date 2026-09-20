@@ -306,6 +306,7 @@ pub(super) async fn run_session_actor(
                 }
                 match command {
                     ActorCommand::Submit {
+                        queued_at,
                         command_id,
                         command,
                         admission,
@@ -357,6 +358,7 @@ pub(super) async fn run_session_actor(
                             // connection. Hold the prompt instead of rejecting it
                             // and deliver it when the lease comes back.
                             deferred_submits.push_back(DeferredSubmit {
+                                queued_at,
                                 command_id,
                                 command,
                                 admission,
@@ -367,7 +369,7 @@ pub(super) async fn run_session_actor(
                         deliver_submit(
                             &target,
                             &mut connection,
-                            DeferredSubmit { command_id, command, admission, reply },
+                            DeferredSubmit { queued_at, command_id, command, admission, reply },
                             &view_tx,
                             &updates,
                         )
@@ -784,6 +786,7 @@ pub(super) async fn deliver_submit(
     updates: &CoalescedUpdateSender,
 ) {
     let DeferredSubmit {
+        queued_at,
         command_id,
         command,
         admission,
@@ -803,7 +806,13 @@ pub(super) async fn deliver_submit(
         let _ = reply.send(Err("review delivery admission is no longer valid".into()));
         return;
     }
+    let started = Instant::now();
+    tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
+        %command_id, queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0, "submission dispatched");
     let result = submit_actor_command(target, connection, &command_id, &command).await;
+    tracing::debug!(target: "mj_controller::latency", session_id = %target.session_id,
+        %command_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        accepted_ordinal = ?result.as_ref().ok(), "submission answered");
     if let Err(error) = result.as_ref() {
         tracing::warn!(
             session_id = %target.session_id,
@@ -1110,6 +1119,9 @@ pub(super) fn publish_view(
     // Compare and replace under one lock acquisition; a separate
     // `watch.borrow()` check would reacquire the lock and invite the
     // read-then-write deadlock this function's callers must avoid.
+    tracing::debug!(target: "mj_controller::latency", %session_id,
+        ordinal = ?view.snapshot.as_ref().map(|s| s.materialized.applied_event_ordinal),
+        "session view publication");
     let changed = watch.send_if_modified(|current| {
         if view_is_unchanged(current, &view) {
             return false;

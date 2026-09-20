@@ -12,6 +12,7 @@ pub(crate) fn render_transcript(
     title_controls: u16,
     pane_focused: bool,
 ) {
+    let render_started = std::time::Instant::now();
     let viewport_height = usize::from(area.height.saturating_sub(2));
     chat.last_viewport_height = viewport_height;
     let block = theme::panel(pane_focused).padding(Padding::horizontal(1));
@@ -39,6 +40,12 @@ pub(crate) fn render_transcript(
         Paragraph::new(visible).style(Style::default().fg(theme::palette().text)),
         inner,
     );
+    for (command_id, started) in chat.submission_renders.drain(..) {
+        tracing::debug!(target: "mj_chat::latency", %command_id,
+            render_ms = render_started.elapsed().as_secs_f64() * 1000.0,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "authoritative submission frame prepared");
+    }
     chat.rebuild_transcript_tool_click_targets(inner, top, visible_rows);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
     let track = Rect::new(

@@ -544,6 +544,7 @@ pub struct ChatState {
     /// rebuilds `entries` from the projection, which never saw these.
     unsent_prompts: Vec<UnsentPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
+    submission_renders: Vec<(String, std::time::Instant)>,
     /// The command id of the last turn recorded as unanswered, so the same
     /// projection arriving again does not record it twice (#970).
     unanswered_turn: Option<String>,
@@ -730,6 +731,7 @@ impl ChatState {
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
             pending_submissions: Vec::new(),
+            submission_renders: Vec::new(),
             unanswered_turn: None,
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
@@ -970,6 +972,7 @@ impl ChatState {
         config_options: &[SessionConfigOption],
         available_commands: &[AvailableCommand],
     ) {
+        let started = std::time::Instant::now();
         self.reconcile_submissions(session);
         self.reconcile_notices(session);
         let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
@@ -1069,6 +1072,7 @@ impl ChatState {
                 self.set_notice(format!("Could not read goal state: {error:#}"));
             }
         }
+        tracing::debug!(target: "mj_chat::latency", ordinal = session.applied_event_ordinal, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection applied");
         self.keep_unanswered_prompt(session);
         self.set_config_options(config_options);
         self.acp_surface
