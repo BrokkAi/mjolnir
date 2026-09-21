@@ -291,7 +291,6 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
     use mj_core::relay::{RelayExecutionState, RelayOperationalState};
 
     let operational = |agent_capabilities| RelayOperationalState {
-        jev_decision_id: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
         native_agents: Vec::new(),
@@ -454,7 +453,6 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     record.state = SessionState::Running;
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
-        jev_decision_id: None,
         continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
         native_agents: Vec::new(),

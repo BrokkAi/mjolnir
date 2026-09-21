@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 struct TurnContextState {
     generation: u64,
     decision_log: Option<mj_core::jev::DecisionLog>,
-    decision: Option<(u64, String)>,
     user_prompt_tail: String,
     message_id: Option<String>,
     assistant_text_tail: String,
@@ -53,17 +52,6 @@ impl TurnContext {
             .expect("turn context lock poisoned")
             .decision_log
             .clone()
-    }
-    pub fn set_decision(&self, generation: u64, id: String) {
-        self.0.lock().expect("turn context lock poisoned").decision = Some((generation, id));
-    }
-    pub fn decision(&self) -> Option<String> {
-        let state = self.0.lock().expect("turn context lock poisoned");
-        state
-            .decision
-            .as_ref()
-            .filter(|(generation, _)| *generation == state.generation)
-            .map(|(_, id)| id.clone())
     }
     pub fn reset(&self, prompt: &str) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
@@ -334,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_updates_do_not_change_evidence_or_generation_and_new_input_clears_attribution() {
+    fn diagnostic_logging_does_not_change_evidence_or_generation_and_survives_reset() {
         let context = TurnContext::default();
         context.reset("Implement the parser");
         let generation = context.generation();
@@ -349,7 +337,6 @@ mod tests {
         let log = mj_core::jev::DecisionLog::open(dir.path().into()).unwrap();
         context.set_decision_log(log.clone());
         let attempt = log.start("s", "activity", "Who acts?", "Current request");
-        context.set_decision(generation, attempt.id());
         attempt.finish("unchanged", "Kept runtime facts");
         assert_eq!(context.generation(), generation);
         assert_eq!(
@@ -362,9 +349,7 @@ mod tests {
             .unwrap(),
             before
         );
-        assert!(context.decision().is_some());
         context.reset("New work");
-        assert!(context.decision().is_none());
         assert!(context.decision_log().is_some());
     }
 

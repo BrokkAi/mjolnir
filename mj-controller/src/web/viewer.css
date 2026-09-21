@@ -1812,8 +1812,3 @@ body[data-connection='reconnecting'] .connection::before {
 .session-destroy-dialog { max-width: min(32rem, 90vw); color: var(--text); background: var(--surface); border-radius: .5rem; padding: 1.5rem; }
 .session-destroy-dialog::backdrop { background: #0008; }
 .session-destroy-dialog input[type="checkbox"] { width: auto; margin-right: .5rem; }
-
-.jev-decisions { width: min(900px, 92vw); max-height: 85vh; overflow: auto; }
-.jev-decisions pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.jev-decisions details { margin-block: 1rem; }
-.session-activity[role="button"] { cursor: pointer; text-decoration: underline dotted; }

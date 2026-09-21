@@ -25,7 +25,6 @@ pub struct BrowserTranscript {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrowserTranscriptEntry {
-    pub jev_notice: bool,
     /// Submission identity for replacing a client-local pending row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_id: Option<String>,

@@ -106,7 +106,6 @@ fn publish(
     if checking {
         if let Some(snapshot) = &mut view.snapshot {
             snapshot.operational.activity = Some(ActivityState::CheckingContinuation);
-            snapshot.operational.jev_decision_id = None;
         }
     } else {
         (environment.review)(&session_id, &view);

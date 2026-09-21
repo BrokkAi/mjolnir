@@ -87,7 +87,6 @@ impl ViewerSnapshot {
                     .map(|child| child.child_session_id.clone())
                     .collect();
                 ViewerSession {
-                    jev_decision_id: None,
                     targeted_turn_control_supported: false,
                     native_subagents: Vec::new(),
                     steering: None,
@@ -274,8 +273,6 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jev_decision_id: Option<String>,
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

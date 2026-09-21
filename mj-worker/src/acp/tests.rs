@@ -5852,18 +5852,21 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         .unwrap();
     let mut methods = Vec::new();
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
-    let (warned, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
-        let mut warned = false;
+    let (noticed, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
+        let mut noticed = false;
         loop {
             match event_rx.recv().await.unwrap() {
-                RuntimeEvent::Warning { message } => warned |= message.contains("waiting for you"),
+                RuntimeEvent::Notice { message } => {
+                    assert_eq!(message, "Classifier: The agent appears to be waiting for you. The harness may still be running.");
+                    noticed = true;
+                }
                 RuntimeEvent::PromptFinished {
                     stop_reason,
                     diagnostic,
                     ..
                 } => {
                     assert_eq!(stop_reason, mj_core::acp::AWAITING_INPUT_STOP_REASON);
-                    break (warned, diagnostic.unwrap());
+                    break (noticed, diagnostic.unwrap());
                 }
                 _ => {}
             }
@@ -5871,7 +5874,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
     })
     .await
     .unwrap();
-    assert!(warned, "warning precedes completion");
+    assert!(noticed, "classifier notice precedes completion");
     assert_eq!(
         diagnostic.code.as_deref(),
         Some(mj_core::acp::AWAITING_INPUT_STOP_REASON)

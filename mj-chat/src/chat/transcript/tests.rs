@@ -386,7 +386,6 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     chat.render_mode = TranscriptRenderMode::Rich;
     chat.turn_started_at_epoch_seconds = None;
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        jev_decision_id: None,
         pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,

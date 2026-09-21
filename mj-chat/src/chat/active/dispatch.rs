@@ -47,7 +47,6 @@ impl ActiveChat {
     pub(crate) fn dispatch(&mut self, action: ChatAction) -> ChatEventOutcome {
         match action {
             ChatAction::None => return ChatEventOutcome::None,
-            ChatAction::OpenJevDecisions => return ChatEventOutcome::OpenJevDecisions,
             ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();

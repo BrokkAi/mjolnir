@@ -841,8 +841,8 @@ pub(super) async fn serve_session(
                             break;
                         }
                         mut attempt = &mut input_verdict, if prompt_running && cancel_deadline.is_none() => {
-                            let message = "Mj marked this turn as waiting for you · Jev assessment. The harness may still be running. Open Jev decisions for details.".to_owned();
-                            emit_runtime_event(events, RuntimeEvent::Warning { message: message.clone() }).await?;
+                            let message = "Classifier: The agent appears to be waiting for you. The harness may still be running.".to_owned();
+                            emit_runtime_event(events, RuntimeEvent::Notice { message: message.clone() }).await?;
                             emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                 request_id,
                                 stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),

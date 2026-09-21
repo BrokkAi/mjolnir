@@ -582,8 +582,6 @@ pub(crate) fn session_activity_line(
         "Checking continuation".to_owned()
     } else if facts.needs_input() {
         "Question".to_owned()
-    } else if let Some(label) = detail.and_then(|d| d.activity.jev_label()) {
-        label.to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
     } else if detail.is_some_and(|detail| {

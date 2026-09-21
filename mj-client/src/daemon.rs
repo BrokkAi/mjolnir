@@ -384,10 +384,6 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
-    JevDecisions {
-        session_id: String,
-        decision_id: Option<String>,
-    },
     NativeAgentHistory {
         owner: String,
         child: String,
@@ -647,7 +643,6 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
-    JevDecisions(mj_core::jev::DecisionPage),
     NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     Status(DaemonStatus),
@@ -1290,23 +1285,6 @@ impl DaemonClient {
     /// empty and best match first otherwise. The reply carries the state of
     /// the index as well as the rows, so a caller can say the first build is
     /// still running.
-    pub async fn jev_decisions(
-        &mut self,
-        session_id: String,
-        decision_id: Option<String>,
-    ) -> Result<mj_core::jev::DecisionPage> {
-        match self
-            .request(DaemonAction::JevDecisions {
-                session_id,
-                decision_id,
-            })
-            .await?
-        {
-            DaemonReply::JevDecisions(page) => Ok(page),
-            reply => bail!("unexpected Jev diagnostics reply {reply:?}"),
-        }
-    }
-
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })

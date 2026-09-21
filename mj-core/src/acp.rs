@@ -565,6 +565,9 @@ pub enum RuntimeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::usage::TokenUsage>,
     },
+    Notice {
+        message: String,
+    },
     Warning {
         message: String,
     },

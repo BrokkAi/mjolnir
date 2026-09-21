@@ -15,7 +15,6 @@ mod attachment;
 mod composer_drafts;
 mod help_search;
 pub(crate) mod io;
-mod jev;
 mod read_receipts;
 mod workspace_settings;
 
@@ -387,7 +386,6 @@ pub(crate) struct DashboardContext {
     /// replaced it.
     pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
     help_search: help_search::HelpSearch,
-    jev_inspector: jev::JevInspector,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
@@ -794,9 +792,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.follow_selected_session();
             context.refresh_go_context();
             context.refresh_git_status();
-            context
-                .jev_inspector
-                .sync(&context.dashboard, &context.dashboard_io_tx);
             context
                 .help_search
                 .sync(&context.dashboard, &context.dashboard_io_tx);
@@ -1511,7 +1506,6 @@ impl DashboardContext {
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             help_search: help_search::HelpSearch::default(),
-            jev_inspector: jev::JevInspector::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
             import_task_tx,

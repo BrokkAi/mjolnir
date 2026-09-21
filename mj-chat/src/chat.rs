@@ -240,7 +240,6 @@ pub enum ChatEventOutcome {
         reverse: bool,
     },
     OpenSubagents,
-    OpenJevDecisions,
     QuitDetach {
         last_seen_event_ordinal: u64,
     },
@@ -251,7 +250,6 @@ pub enum ChatAction {
     TurnControl(mj_core::relay::RelayCommand),
     None,
     OpenSubagents,
-    OpenJevDecisions,
     Prompt(String),
     RunShell(String),
     RemoveQueuedPrompt {
@@ -614,7 +612,6 @@ pub struct ChatState {
     expanded_tool_calls: BTreeSet<u64>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
     transcript_tool_click_targets: Vec<TranscriptToolClickTarget>,
-    jev_click_targets: Vec<Rect>,
     notices: Notices,
     feedback: Notices,
     connection_feedback: Option<String>,
@@ -788,7 +785,6 @@ impl ChatState {
             transcript_scrollbar: TranscriptScrollbarState::default(),
             expanded_tool_calls: BTreeSet::new(),
             transcript_tool_click_targets: Vec::new(),
-            jev_click_targets: Vec::new(),
             notices: Notices::default(),
             feedback: Notices::default(),
             connection_feedback: None,

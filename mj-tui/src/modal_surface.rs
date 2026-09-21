@@ -127,15 +127,6 @@ macro_rules! dialog_form {
     };
 }
 
-impl DialogModal for crate::jev::JevDialog {
-    dialog_form!(DialogControl);
-    fn prepare(&mut self) {
-        self.form
-            .get_mut()
-            .set_dismiss_actions(&[DialogControl::NoticeLogClose]);
-    }
-}
-
 impl DialogModal for NoticeLogDialog {
     dialog_form!(DialogControl);
 
@@ -405,7 +396,6 @@ mode_surfaces!(
     Rename,
     ChangedFiles,
     NoticeLog,
-    JevDecisions,
     EditContainer,
     Importing,
     ConfirmImportBundle,

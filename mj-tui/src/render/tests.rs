@@ -2057,7 +2057,6 @@ fn add_api_priced_profile(dashboard: &mut DashboardState) {
 fn background_work_reaches_both_session_row_forms() {
     let started_at_ms = i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
     let activity = mj_client::usage_format::SessionActivity {
-        jev_decision_id: None,
         pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,

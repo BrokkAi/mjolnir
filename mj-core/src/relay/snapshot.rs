@@ -477,9 +477,6 @@ pub struct RelayCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
-    /// Process-local attribution; never changes evidence or the relay journal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jev_decision_id: Option<String>,
     #[serde(default)]
     pub continuation: crate::continuation::ContinuationState,
     /// Negotiated connection protocol, supplied by the controller after hello.
@@ -1170,7 +1167,6 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
-            jev_decision_id: None,
             continuation: self.continuation.clone(),
             relay_protocol_version: None,
             native_agents: self.native_agents.values().cloned().collect(),

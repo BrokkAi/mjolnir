@@ -549,17 +549,6 @@ impl DurableRelay {
         state.expected_continuation = facts.expected_continuation;
         state.inferred_idle_since_ms = facts.inferred_idle_since_ms;
         state.activity = Some(mj_core::activity::classify(&facts));
-        if matches!(
-            state.activity,
-            Some(mj_core::activity::ActivityState::Expecting { .. })
-        ) || (facts.inferred_idle_since_ms.is_some()
-            && matches!(
-                state.activity,
-                Some(mj_core::activity::ActivityState::Idle { .. })
-            ))
-        {
-            state.jev_decision_id = self.turn_context.decision();
-        }
         state
     }
 
@@ -732,10 +721,6 @@ impl DurableRelay {
     }
 
     /// The directory holding this relay's durable state.
-    pub fn session_id(&self) -> &str {
-        &self.snapshot.session_id
-    }
-
     pub fn root(&self) -> &Path {
         &self.root
     }

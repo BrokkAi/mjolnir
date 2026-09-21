@@ -219,9 +219,6 @@ async fn run_relay_coordinator_with_verdict(
                                         return Err(error);
                                     }
                                 };
-                                if reason == "applied" && let Some(diagnostic) = &attempt.diagnostic {
-                                    relay.turn_context().set_decision(generation, diagnostic.id());
-                                }
                                 attempt.finish(if reason == "applied" { "applied" } else { "unchanged" }, reason);
                                 if decision == Decision::KeepCurrent {
                                     relay.retry_replied_verdict(generation);
@@ -576,6 +573,9 @@ pub(crate) fn record_runtime_event(
             in_flight.remove(&request_id);
             relay.record_command_completed(&request_id, RelayCommandOutcome::Closed)?;
             relay.record_observation(RelayObservation::Closed)?;
+        }
+        RuntimeEvent::Notice { message } => {
+            relay.record_observation(RelayObservation::Notice { message })?;
         }
         RuntimeEvent::Warning { message } => {
             relay.record_observation(RelayObservation::Warning { message })?;

@@ -74,10 +74,8 @@ fn group(id: CommandId) -> &'static str {
         | RenameWorkspace
         | CloseWorkspace => GROUPS[1],
         OpenSession | SuspendSession | RestartSession | RenameSession | ChangedFiles
-        | JevDecisions | ContainerSettings | MoveSession | DestroySession | MarkAllRead
-        | FilterSessions | NextAttention | PreviousAttention | CancelOperation | ToggleProject => {
-            GROUPS[2]
-        }
+        | ContainerSettings | MoveSession | DestroySession | MarkAllRead | FilterSessions
+        | NextAttention | PreviousAttention | CancelOperation | ToggleProject => GROUPS[2],
         PinSession
         | UnpinSession
         | OpenSessionSplitRight

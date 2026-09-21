@@ -454,24 +454,6 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
-    fn jev_decisions(
-        &self,
-        session: String,
-        id: Option<String>,
-    ) -> BoxFuture<'_, AnyResult<mj_core::jev::DecisionPage>> {
-        Box::pin(async move {
-            assert_eq!(session, "session-1");
-            Ok(mj_core::jev::DecisionPage {
-                decisions: vec![],
-                warnings: vec![if id.is_some() {
-                    "Worker details unavailable".into()
-                } else {
-                    "Older worker: details unsupported".into()
-                }],
-            })
-        })
-    }
-
     fn events(
         &self,
         filter: crate::database::ApiEventFilter,
@@ -2940,44 +2922,4 @@ fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary()
         resolve_wait(&observation, &request).unwrap().outcome,
         WaitOutcome::Finished
     );
-}
-
-#[tokio::test]
-async fn jev_inspection_requires_auth_and_known_session_and_reports_missing_sources() {
-    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    let unauthorized = app
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/sessions/session-1/jev-decisions")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-    for path in [
-        "/api/v1/sessions/session-1/jev-decisions",
-        "/api/v1/sessions/session-1/jev-decisions/rotated-id",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: mj_core::jev::DecisionPage =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert!(body.decisions.is_empty());
-        assert_eq!(body.warnings.len(), 1);
-    }
-    let missing = app
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions/missing/jev-decisions"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }

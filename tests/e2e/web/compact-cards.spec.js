@@ -725,7 +725,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Jev decisions', 'Rename', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Rename', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
@@ -742,7 +742,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   state.snapshot.sessions.find(item => item.id === 'openable').capabilities.rename = false;
   await refresh(page, state);
   await expect(openMenu.getByRole('menuitem', { name: 'Rename' })).toHaveCount(0);
-  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('jev-decisions');
+  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
   await page.keyboard.press('Escape');
   await expect(openMenu).toBeHidden();
   expect(await page.evaluate(() => document.activeElement?.dataset.sessionMenu)).toBe('openable');

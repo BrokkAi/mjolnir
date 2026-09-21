@@ -6,14 +6,6 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
-    fn jev_decisions(
-        &self,
-        _session: String,
-        _decision_id: Option<String>,
-    ) -> BoxFuture<'_, AnyResult<mj_core::jev::DecisionPage>> {
-        Box::pin(async { anyhow::bail!("Jev diagnostics unavailable") })
-    }
-
     fn native_agent_history(
         &self,
         owner: String,

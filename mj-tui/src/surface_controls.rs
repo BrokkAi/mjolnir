@@ -17,7 +17,6 @@ pub(crate) enum SurfaceControl {
     Command(CommandId),
     Footer(CommandId),
     Session(usize),
-    JevDecision(usize),
     /// The close chip on one conversation pane's title row.
     ClosePane(PaneId),
     PaneMenu(PaneId),
@@ -142,16 +141,6 @@ impl DashboardState {
                 SurfaceControl::Command(id) | SurfaceControl::Footer(id) => {
                     self.run_available_command(id)
                 }
-                SurfaceControl::JevDecision(index) => {
-                    if let Some(session) = self.session_menu_ids.get(index).cloned() {
-                        let id = self
-                            .session_details
-                            .get(&session)
-                            .and_then(|d| d.activity.jev_decision_id.clone());
-                        self.open_jev_decisions(session, id);
-                    }
-                    DashboardAction::None
-                }
                 SurfaceControl::Session(index) => {
                     if let Some(id) = self.session_menu_ids.get(index).cloned()
                         && self.state.sessions.contains_key(&id)
@@ -259,20 +248,6 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
     for &(index, row) in &dashboard.session_row_areas {
         if row.width < 5 || row.height == 0 {
             continue;
-        }
-        if row.height > 1
-            && dashboard
-                .session_menu_ids
-                .get(index)
-                .and_then(|id| dashboard.session_details.get(id))
-                .is_some_and(|d| d.activity.jev_label().is_some())
-        {
-            form.register(
-                SurfaceControl::JevDecision(index),
-                ControlKind::Button,
-                Rect::new(row.x, row.y + 1, row.width, 1),
-                true,
-            );
         }
         if row.width >= 10 {
             let pin_area = Rect::new(
