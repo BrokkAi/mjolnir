@@ -347,6 +347,12 @@ impl DurableRelay {
             )));
         }
         if let RelayCommand::Cancel = command
+            && self
+                .snapshot
+                .continuation
+                .quota_recovery
+                .as_ref()
+                .is_none_or(|r| r.submitted)
             && self.snapshot.active_prompt.is_none()
             && self
                 .snapshot
@@ -441,6 +447,58 @@ impl DurableRelay {
                 None,
             )));
         }
+        if let RelayCommand::SetQuotaRecovery { expected, recovery } = &command {
+            let valid = expected.ordinal == self.snapshot.latest_ordinal
+                && expected.digest == self.snapshot.latest_digest
+                && recovery.as_ref().is_none_or(|r| {
+                    self.quota_recovery_admissible(&r.user_command_id, &r.completed_command_id)
+                        && !r.submitted
+                        && r.notice.len() <= 4096
+                        && !r.profile_id.is_empty()
+                        && match (r.reset_at_ms, r.retry_at_ms) {
+                            (Some(reset), Some(retry)) => reset.checked_add(60_000) == Some(retry),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                });
+            if !valid {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "quota recovery evidence is stale",
+                    false,
+                    None,
+                )));
+            }
+        }
+        if let RelayCommand::ResumeAfterQuota {
+            expected,
+            completed_command_id,
+        } = &command
+        {
+            let valid = expected.ordinal == self.snapshot.latest_ordinal
+                && expected.digest == self.snapshot.latest_digest
+                && self
+                    .snapshot
+                    .continuation
+                    .quota_recovery
+                    .as_ref()
+                    .is_some_and(|r| {
+                        !r.submitted
+                            && r.completed_command_id == *completed_command_id
+                            && r.retry_at_ms
+                                .is_some_and(|deadline| deadline <= epoch_millis())
+                            && self
+                                .quota_recovery_admissible(&r.user_command_id, completed_command_id)
+                    });
+            if !valid {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidState,
+                    "quota recovery is not due or its evidence changed",
+                    false,
+                    None,
+                )));
+            }
+        }
         if let RelayCommand::ContinueAuthorizedWork {
             expected,
             user_command_id,
@@ -460,6 +518,7 @@ impl DurableRelay {
                 .plan_mode_active()
             });
             if planning
+                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
                 || !state.eligible()
                 || state.user_command_id.as_ref() != Some(user_command_id)
                 || state.completed_command_id.as_ref() != Some(completed_command_id)
@@ -568,8 +627,14 @@ impl DurableRelay {
         // Recorded before the command starts, and unguarded by dispatch state:
         // a retry that repeats this append is harmless because the projection
         // keys the transcript line on this command, not on the event ordinal.
-        if let RelayCommand::RecordNotice { text } = &command {
-            let message = text.clone();
+        if let Some(message) = match &command {
+            RelayCommand::RecordNotice { text } => Some(text.clone()),
+            RelayCommand::SetQuotaRecovery {
+                recovery: Some(recovery),
+                ..
+            } => Some(recovery.notice.clone()),
+            _ => None,
+        } {
             self.append_relay_event(Some(command_id), RelayObservation::Notice { message })?;
         }
         if state == RelayDispatchState::Queued {
@@ -607,9 +672,9 @@ impl DurableRelay {
             RelayCommand::CompleteCheckpoint { .. } => RelayCommandOutcome::CheckpointCompleted,
             RelayCommand::ReleaseCheckpoint { .. } => RelayCommandOutcome::CheckpointReleased,
             RelayCommand::AdvanceRecoveryFloor { .. } => RelayCommandOutcome::RecoveryFloorAdvanced,
-            RelayCommand::RecordNotice { .. } | RelayCommand::ResolveSteering { .. } => {
-                RelayCommandOutcome::NoticeRecorded
-            }
+            RelayCommand::RecordNotice { .. }
+            | RelayCommand::SetQuotaRecovery { .. }
+            | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,
             _ => RelayCommandOutcome::QueueChanged {
                 removed_command_ids,
             },
@@ -1067,6 +1132,28 @@ impl DurableRelay {
                     .map(|handled| (command_id.clone(), handled.accepted_ordinal))
             })
             .min_by_key(|(_, accepted)| *accepted)
+    }
+
+    fn quota_recovery_admissible(&self, user: &str, completed: &str) -> bool {
+        let c = &self.snapshot.continuation;
+        let planning = self.verdict_harness.is_some_and(|harness| {
+            mj_core::acp::AcpSessionFacts::from_operational(
+                harness,
+                &self.snapshot.config,
+                &self.snapshot.config_options,
+                self.snapshot.modes.as_ref(),
+            )
+            .plan_mode_active()
+        });
+        !planning
+            && !c.quota_suppressed
+            && c.user_command_id.as_deref() == Some(user)
+            && c.completed_command_id.as_deref() == Some(completed)
+            && mj_core::activity::is_quiet(&self.activity_facts())
+            && self.activity_facts().background_commands == 0
+            && self.snapshot.queued_prompts.is_empty()
+            && !self.snapshot.goal.active()
+            && self.pending_close_barrier_id().is_none()
     }
 
     pub fn capacity_retry_deadline(&self) -> Option<i64> {

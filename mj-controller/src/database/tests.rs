@@ -4786,3 +4786,45 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
         .is_err()
     );
 }
+
+#[test]
+fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("isolated-quota-migration.sqlite3");
+    drop(open(&path).unwrap());
+    forget_verified_schema(&path);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TABLE quota_reset_cache;
+        DELETE FROM schema_migrations WHERE version = 44;
+        UPDATE schema_compatibility SET minimum_compatible_version = 43;
+        PRAGMA user_version = 43;",
+    )
+    .unwrap();
+    drop(raw);
+    let connection = open(&path).unwrap();
+    let state = schema::read_schema_state(&connection).unwrap();
+    assert_eq!(state.revision, 44);
+    let floor: i64 = connection
+        .query_row(
+            "SELECT minimum_compatible_version FROM schema_compatibility",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 44, "older JSON readers must be refused");
+    connection
+        .execute("INSERT INTO quota_reset_cache VALUES ('account', '{}')", [])
+        .unwrap();
+    drop(connection);
+    forget_verified_schema(&path);
+    let connection = open(&path).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT body FROM quota_reset_cache WHERE identity='account'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, "{}");
+}

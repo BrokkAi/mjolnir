@@ -1,4 +1,4 @@
-import questions from "../../../mj-core/src/continuation/questions.json" with { type: "json" };
+import questions from "../../../mj-core/src/continuation/questions_v1.json" with { type: "json" };
 export { questions as continuationQuestions };
 export interface ContinuationEvidence { assistant_history_omitted: boolean; messages: { id: string; role: "user" | "assistant"; text: string }[] }
 const encoder = new TextEncoder();
@@ -30,4 +30,24 @@ export function continuationAnswers(value: unknown): Record<string, unknown> | u
     result[key] = { type: "noul", noul: answer.noul };
   }
   return result;
+}
+
+import questionsV2 from "../../../mj-core/src/continuation/questions.json" with { type: "json" };
+export { questionsV2 as continuationQuestionsV2 };
+export interface ContinuationEvidenceV2 extends ContinuationEvidence { quota_message?: string }
+export function continuationRequestV2(value: unknown): value is ContinuationEvidenceV2 {
+  if (!object(value)) return false;
+  const { quota_message, ...ordinary } = value;
+  if (quota_message !== undefined && (typeof quota_message !== "string" || !quota_message.trim() || encoder.encode(quota_message).length > 16384)) return false;
+  if (typeof quota_message === "string" && Object.keys(ordinary).length === 2
+    && typeof ordinary.assistant_history_omitted === "boolean" && Array.isArray(ordinary.messages) && ordinary.messages.length === 0) return true;
+  return continuationRequest(ordinary);
+}
+export function continuationAnswersV2(value: unknown): Record<string, unknown> | undefined {
+  const ordinary = continuationAnswers(value);
+  if (!ordinary || !object(value) || !object(value.answers)) return;
+  const quota = value.answers.quota_limit;
+  if (!object(quota) || quota.type !== "noul" || typeof quota.noul !== "number"
+    || !Number.isFinite(quota.noul) || quota.noul < 0 || quota.noul > 1) return;
+  return { ...ordinary, quota_limit: { type: "noul", noul: quota.noul } };
 }

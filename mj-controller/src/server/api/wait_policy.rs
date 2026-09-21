@@ -48,6 +48,7 @@ pub struct WaitObservation {
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,
     pub queued: usize,
     pub capacity_retry: Option<CapacityRetry>,
+    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub start_status: Option<StartStatus>,
 }
 
@@ -222,12 +223,33 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
         ));
     }
     let retry_pending = |outcome: &MaterializedTurnOutcome| {
-        observation.capacity_retry.is_some()
+        observation.quota_recovery.as_ref().is_some_and(|r| {
+            r.retry_at_ms.is_some() && r.completed_command_id == outcome.command_id
+        }) || observation.capacity_retry.is_some()
             && matches!(
                 &outcome.outcome,
                 TurnOutcomeKind::Completed { stop_reason } if is_capacity_stop_reason(stop_reason)
             )
     };
+    if let Some(recovery) = &observation.quota_recovery
+        && recovery.retry_at_ms.is_none()
+        && observation
+            .last_turn_outcome
+            .as_ref()
+            .is_some_and(|t| t.command_id == recovery.completed_command_id)
+        && request.turn_id.is_none_or(|target| {
+            observation
+                .last_turn_outcome
+                .as_ref()
+                .and_then(|t| t.accepted_ordinal)
+                .is_some_and(|a| a >= target)
+        })
+    {
+        return Some(WaitDecision::simple(
+            WaitOutcome::QuotaLimit,
+            Some(recovery.notice.clone()),
+        ));
+    }
     let target = request.turn_id.or(match &observation.start_status {
         Some(StartStatus::Submitted { turn_id }) => Some(*turn_id),
         _ => None,

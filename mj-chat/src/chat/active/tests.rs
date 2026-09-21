@@ -288,6 +288,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 expected_continuation: None,
                 inferred_idle_since_ms: None,
                 goal: Default::default(),
+
                 capacity_retry: None,
                 activity_turn_started_at_ms: None,
                 store_id: None,
@@ -1879,6 +1880,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -1900,6 +1902,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,
@@ -2034,6 +2037,7 @@ fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
         pursuing_goal: Default::default(),
+        quota_recovery: None,
         capacity_retry: None,
         activity_turn_started_at_ms: None,
         prompt_in_flight: false,

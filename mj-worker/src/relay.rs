@@ -482,14 +482,13 @@ impl DurableRelay {
             };
             let payload = match &dispatch.command {
                 command @ (RelayCommand::Prompt { .. }
-                | RelayCommand::ContinueAuthorizedWork { .. }) => {
-                    StoredQueuedRelayPayload::Prompt {
-                        prompt: command
-                            .prompt_blocks()
-                            .expect("prompt command")
-                            .into_owned(),
-                    }
-                }
+                | RelayCommand::ContinueAuthorizedWork { .. }
+                | RelayCommand::ResumeAfterQuota { .. }) => StoredQueuedRelayPayload::Prompt {
+                    prompt: command
+                        .prompt_blocks()
+                        .expect("prompt command")
+                        .into_owned(),
+                },
                 RelayCommand::SetConfig { key, value } => StoredQueuedRelayPayload::SetConfig {
                     key: key.clone(),
                     value: value.clone(),

@@ -43,3 +43,23 @@ test("continuation fails closed on invalid probabilities, missing answers, and r
   assert.equal((await proxy.fetch(request(), env(false))).status, 429);
   assert.equal((await proxy.fetch(request(), { ...env(), CONTINUATION_RATE_LIMITER: undefined })).status, 503);
 });
+
+test("v2 accepts independent quota evidence and requires a bounded quota answer", async t => {
+  const state = { assistant_history_omitted: true, messages: [], quota_message: "You've hit your session limit · resets 1:20pm (America/Chicago)" };
+  let result: unknown = { answers: { ...answers, quota_limit: { type: "noul", noul: 0.99 } } };
+  t.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
+    const body = JSON.parse(options.body as string);
+    assert.deepEqual(body.state, state);
+    assert.equal(body.questions.quota_limit.type, "noul");
+    return Response.json(result);
+  });
+  const v2 = () => new Request("https://proxy.example/v2/continuation-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  });
+  assert.equal((await proxy.fetch(v2(), env())).status, 200);
+  for (const quota of [undefined, { type: "noul", noul: 1.01 }, { type: "choice", noul: 0.99 }]) {
+    result = { answers: { ...answers, quota_limit: quota } };
+    assert.equal((await proxy.fetch(v2(), env())).status, 502);
+  }
+  assert.equal((await proxy.fetch(request(state), env())).status, 400);
+});

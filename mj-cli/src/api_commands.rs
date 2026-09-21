@@ -589,6 +589,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     {
         lines.push(diagnostic.message.clone());
     }
+    if let Some(recovery) = &response.quota_recovery {
+        lines.push(recovery.notice.clone());
+    }
     if let Some(retry) = &response.capacity_retry {
         lines.push(format!(
             "a capacity retry is armed (attempt {}); do not send another prompt yet",

@@ -147,3 +147,112 @@ fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
         Some("original-prompt")
     );
 }
+
+fn quota_schedule(relay: &DurableRelay, reset_at_ms: Option<i64>) -> RelayCommand {
+    let s = relay.operational_state();
+    RelayCommand::SetQuotaRecovery {
+        expected: RelayCursor {
+            ordinal: s.latest_ordinal,
+            digest: s.latest_digest,
+        },
+        recovery: Some(Box::new(mj_core::continuation::QuotaRecovery {
+            user_command_id: s.continuation.user_command_id.unwrap(),
+            completed_command_id: s.continuation.completed_command_id.unwrap(),
+            profile_id: "isolated-quota-test".into(),
+            reset_at_ms,
+            retry_at_ms: reset_at_ms.map(|t| t + 60_000),
+            notice: "Quota reset scheduled".into(),
+            submitted: false,
+        })),
+    }
+}
+fn quota_resume(relay: &DurableRelay) -> RelayCommand {
+    let s = relay.operational_state();
+    RelayCommand::ResumeAfterQuota {
+        expected: RelayCursor {
+            ordinal: s.latest_ordinal,
+            digest: s.latest_digest,
+        },
+        completed_command_id: s.continuation.completed_command_id.unwrap(),
+    }
+}
+
+#[test]
+fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "user-request", prompt("Implement and test"));
+    completed(&mut relay, "user-request");
+    for attempt in 1..=3 {
+        let id = format!("auto-continue-{attempt}");
+        let cmd = request(&relay);
+        submit_relay(&mut relay, &id, cmd);
+        completed(&mut relay, &id);
+    }
+    let cmd = quota_schedule(&relay, Some(epoch_millis() - 60_001));
+    submit_relay(&mut relay, "quota-schedule", cmd);
+    drop(relay);
+    let mut relay = open(root.path());
+    assert!(relay.snapshot.continuation.quota_recovery.is_some());
+    let cmd = quota_resume(&relay);
+    submit_relay(&mut relay, "quota-retry-1", cmd.clone());
+    submit_relay(&mut relay, "quota-retry-1", cmd);
+    assert_eq!(relay.snapshot.continuation.attempts, 3);
+    assert_eq!(
+        relay.snapshot.continuation.user_command_id.as_deref(),
+        Some("user-request")
+    );
+    completed(&mut relay, "quota-retry-1");
+    assert_eq!(
+        relay.snapshot.continuation.completed_command_id.as_deref(),
+        Some("quota-retry-1")
+    );
+    assert!(!relay.snapshot.continuation.eligible());
+    assert!(
+        relay
+            .submit_command("duplicate-quota", quota_resume(&relay))
+            .unwrap()
+            .is_err()
+    );
+    let cmd = quota_schedule(&relay, Some(epoch_millis() - 60_001));
+    submit_relay(&mut relay, "quota-schedule-next", cmd);
+    let cmd = quota_resume(&relay);
+    submit_relay(&mut relay, "quota-retry-2", cmd);
+    assert_eq!(relay.snapshot.continuation.attempts, 3);
+}
+
+#[test]
+fn quota_retry_requires_a_due_deadline_and_is_cancelled_by_user_work() {
+    for action in ["early", "unknown", "cancel", "prompt", "checkpoint"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = open(root.path());
+        submit_relay(&mut relay, "user-request", prompt("Implement"));
+        completed(&mut relay, "user-request");
+        let reset = match action {
+            "early" => Some(epoch_millis()),
+            "unknown" => None,
+            _ => Some(epoch_millis() - 60_001),
+        };
+        let cmd = quota_schedule(&relay, reset);
+        submit_relay(&mut relay, "quota-schedule", cmd);
+        let retry = quota_resume(&relay);
+        match action {
+            "cancel" => submit_relay(&mut relay, "cancel-quota", RelayCommand::Cancel),
+            "prompt" => submit_relay(&mut relay, "new-user", prompt("Stop; explain first")),
+            "checkpoint" => submit_relay(
+                &mut relay,
+                "checkpoint",
+                RelayCommand::BeginCheckpoint { reason: None },
+            ),
+            _ => 0,
+        };
+        assert!(
+            relay.submit_command("quota-retry", retry).unwrap().is_err(),
+            "{action}"
+        );
+        if matches!(action, "cancel" | "prompt" | "checkpoint") {
+            assert!(relay.snapshot.continuation.quota_recovery.is_none());
+        }
+        assert_eq!(relay.snapshot.continuation.attempts, 0);
+    }
+}

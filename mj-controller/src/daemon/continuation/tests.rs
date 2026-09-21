@@ -97,6 +97,8 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
     let reviews = Arc::new(Mutex::new(Vec::new()));
     let enabled = Arc::new(AtomicBool::new(true));
     let environment = Environment {
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+        profile: Arc::new(|_| Some("test".into())),
         log: Some(decision_log),
         control: remote.control,
         allowed: {
@@ -166,6 +168,7 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
     assert!(reviews.lock().unwrap().is_empty());
     first
         .send(Ok(ContinuationVerdict {
+            quota_limit: 0.0,
             unfinished: 0.0,
             no_input_needed: 1.0,
         }))
@@ -217,6 +220,8 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
     let log_dir = tempfile::tempdir().unwrap();
     let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
     let environment = Environment {
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+        profile: Arc::new(|_| Some("test".into())),
         log: Some(log),
         control: remote.control,
         allowed: Arc::new(|_| true),
@@ -292,6 +297,8 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
         let log = mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap();
         let reviews = Arc::new(Mutex::new(Vec::new()));
         let environment = Environment {
+            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+            profile: Arc::new(|_| Some("test".into())),
             log: Some(log),
             control: remote.control,
             allowed: Arc::new(|_| true),
@@ -336,6 +343,7 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
             .unwrap();
         answer
             .send(Ok(ContinuationVerdict {
+                quota_limit: 0.0,
                 unfinished: 0.99,
                 no_input_needed: 0.99,
             }))
@@ -443,6 +451,199 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
                 .iter()
                 .any(|d| d.status == "failed")
         );
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
+fn recovery_for(
+    v: &ManagedSessionView,
+    retry_at_ms: Option<i64>,
+) -> mj_core::continuation::QuotaRecovery {
+    let c = &v.snapshot.as_ref().unwrap().operational.continuation;
+    mj_core::continuation::QuotaRecovery {
+        user_command_id: c.user_command_id.clone().unwrap(),
+        completed_command_id: c.completed_command_id.clone().unwrap(),
+        profile_id: "test".into(),
+        reset_at_ms: retry_at_ms.map(|t| t - 60_000),
+        retry_at_ms,
+        notice: "Quota limit; waiting for reset".into(),
+        submitted: false,
+    }
+}
+
+#[tokio::test]
+async fn quota_classification_survives_exhausted_allowance_and_oversized_authorization() {
+    let mut remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let environment = Environment {
+        log: None,
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        live: Arc::new(|| ["one".into()].into()),
+        review: Arc::new(|_, _| {}),
+        profile: Arc::new(|_| Some("test".into())),
+        quota: Arc::new(|_, view| Box::pin(async move { Ok(recovery_for(&view, None)) })),
+    };
+    let classifier: Classifier = Arc::new(|evidence, _| {
+        Box::pin(async move {
+            assert!(evidence.messages.is_empty());
+            assert!(
+                evidence
+                    .quota_message
+                    .as_ref()
+                    .unwrap()
+                    .contains("Provider error")
+            );
+            Ok(ContinuationVerdict {
+                quota_limit: 0.99,
+                unfinished: 1.0,
+                no_input_needed: 1.0,
+            })
+        })
+    });
+    let cancellation = CancellationToken::new();
+    let (mut updates, task) = spawn_in(
+        environment,
+        remote.updates,
+        cancellation.clone(),
+        classifier,
+    );
+    remote
+        .publisher
+        .publish("one".into(), view("one", false))
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    let mut blocked = view("one", true);
+    let s = blocked.snapshot.as_mut().unwrap();
+    s.operational.continuation.attempts = 3;
+    s.operational.continuation.suppressed = true;
+    let turn = s.materialized.last_turn_outcome.as_mut().unwrap();
+    turn.outcome = TurnOutcomeKind::Completed {
+        stop_reason: "Error".into(),
+    };
+    turn.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "Subscription allowance consumed".into(),
+        code: None,
+        http_status: None,
+        reset_at: None,
+    });
+    let item = Arc::make_mut(&mut s.materialized.transcript[0]);
+    item.body = TranscriptBody::User {
+        content: vec![json!({"type":"text", "text":"x".repeat(40_000)})],
+    };
+    remote
+        .publisher
+        .publish("one".into(), blocked)
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+        panic!("expected quota scheduling");
+    };
+    assert!(
+        matches!(command, RelayCommand::SetQuotaRecovery { recovery: Some(ref r), .. } if r.retry_at_ms.is_none())
+    );
+    reply
+        .send(Err("end isolated scheduling probe".into()))
+        .unwrap();
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
+    for case in ["future", "unknown", "due", "disabled"] {
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let enabled = case != "disabled";
+        let environment = Environment {
+            log: None,
+            control: remote.control,
+            allowed: Arc::new(move |_| enabled),
+            live: Arc::new(|| ["one".into()].into()),
+            review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
+            profile: Arc::new(|_| Some("test".into())),
+            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
+        };
+        let classifier: Classifier = Arc::new(|_, _| {
+            Box::pin(async { panic!("durable recovery must not be reclassified") })
+        });
+        let cancellation = CancellationToken::new();
+        let (mut updates, task) = spawn_in(
+            environment,
+            remote.updates,
+            cancellation.clone(),
+            classifier,
+        );
+        let mut recovered = view("one", true);
+        let deadline = match case {
+            "unknown" => None,
+            "future" => Some(mj_core::clock::epoch_millis() + 60_000),
+            _ => Some(mj_core::clock::epoch_millis() - 1),
+        };
+        let recovery = recovery_for(&recovered, deadline);
+        recovered
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .continuation
+            .quota_recovery = Some(recovery);
+        remote
+            .publisher
+            .publish("one".into(), recovered)
+            .await
+            .unwrap();
+        receive(&mut updates).await;
+        if matches!(case, "future" | "unknown") {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
+                    .await
+                    .is_err()
+            );
+        } else {
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit {
+                command,
+                reply,
+                command_id,
+                ..
+            } = request
+            else {
+                panic!("expected guarded recovery");
+            };
+            if enabled {
+                assert_eq!(command_id, "quota-retry-3");
+                assert!(matches!(command, RelayCommand::ResumeAfterQuota { .. }));
+            } else {
+                assert!(matches!(
+                    command,
+                    RelayCommand::SetQuotaRecovery { recovery: None, .. }
+                ));
+            }
+            reply.send(Err("end isolated resume probe".into())).unwrap();
+        }
         cancellation.cancel();
         task.await.unwrap().unwrap();
         remote.shutdown.shutdown().await.unwrap();

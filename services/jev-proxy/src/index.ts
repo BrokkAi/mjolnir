@@ -1,4 +1,4 @@
-import { continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
+import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
 import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
@@ -145,7 +145,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest | ContinuationEvidence, key: string, v3 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest | ContinuationEvidence, key: string, v3 = false, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -163,14 +163,14 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? continuationQuestions : v3 ? questions : "transcript_summary" in state ? questionsV2 : questionsV1 }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : v3 ? questions : "transcript_summary" in state ? questionsV2 : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? continuationAnswers(body) : v3 ? answersV3(body) : answers(body);
+        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : v3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -187,7 +187,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const search = url.pathname === "/v1/help-search";
-    const continuation = url.pathname === "/v1/continuation-verdict";
+    const continuationV2 = url.pathname === "/v2/continuation-verdict";
+    const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
     if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
@@ -209,6 +210,7 @@ export default {
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
+    if (continuationV2) return continuationRequestV2(state) ? classify(state, key, false, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);

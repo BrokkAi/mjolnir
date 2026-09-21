@@ -84,6 +84,7 @@ pub(crate) fn evidence_from_items(
     }
     messages.reverse();
     let evidence = ContinuationEvidence {
+        quota_message: None,
         messages,
         assistant_history_omitted,
     };
@@ -102,7 +103,7 @@ pub(crate) async fn classify(
         evidence,
         key.as_deref(),
         "https://api.typesafe.ai/v1/systemone",
-        "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/continuation-verdict",
+        "https://mj-jev-proxy.eng-admin-a63.workers.dev/v2/continuation-verdict",
         diagnostic,
     )
     .await
@@ -127,7 +128,7 @@ async fn ask_logged(
         serde_json::json!(evidence)
     };
     if let Some(diagnostic) = diagnostic {
-        diagnostic.update(None, serde_json::json!({"request":body, "source":if key.is_some() { "direct" } else { "hosted" }, "contract":"continuation-verdict-v1", "questions":serde_json::from_str::<serde_json::Value>(mj_core::continuation::QUESTIONS)?, "model":"jev-latest", "unfinished_threshold":mj_core::continuation::CONFIDENCE, "no_input_needed_threshold":mj_core::continuation::CONFIDENCE, "maximum_continuations":mj_core::continuation::MAX_NUDGES}));
+        diagnostic.update(None, serde_json::json!({"request":body, "source":if key.is_some() { "direct" } else { "hosted" }, "contract":"continuation-verdict-v2", "questions":serde_json::from_str::<serde_json::Value>(mj_core::continuation::QUESTIONS)?, "model":"jev-latest", "unfinished_threshold":mj_core::continuation::CONFIDENCE, "no_input_needed_threshold":mj_core::continuation::CONFIDENCE, "maximum_continuations":mj_core::continuation::MAX_NUDGES}));
     }
     let request = if let Some(key) = key {
         client.post(direct).bearer_auth(key).json(&body)
@@ -153,7 +154,12 @@ async fn ask_logged(
         );
         body.extend_from_slice(&chunk);
     }
-    ContinuationVerdict::parse(&serde_json::from_slice(&body)?)
+    let mut verdict = ContinuationVerdict::parse(&serde_json::from_slice(&body)?)?;
+    if evidence.messages.is_empty() {
+        verdict.unfinished = 0.0;
+        verdict.no_input_needed = 0.0;
+    }
+    Ok(verdict)
 }
 
 #[cfg(test)]
@@ -221,7 +227,7 @@ mod tests {
                 }
                 let mut bytes = vec![0; length];
                 socket.read_exact(&mut bytes).await.unwrap();
-                let response = r#"{"answers":{"unfinished":{"type":"noul","noul":0.99},"no_input_needed":{"type":"noul","noul":0.97}}}"#;
+                let response = r#"{"answers":{"quota_limit":{"type":"noul","noul":0.0},"unfinished":{"type":"noul","noul":0.99},"no_input_needed":{"type":"noul","noul":0.97}}}"#;
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
                 serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
             });

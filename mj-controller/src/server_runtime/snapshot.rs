@@ -205,7 +205,13 @@ pub(super) fn session_capabilities(
         interrupt_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| {
-                state.active_prompt.is_some() || state.capacity_retry.is_some()
+                state.active_prompt.is_some()
+                    || state.capacity_retry.is_some()
+                    || state
+                        .continuation
+                        .quota_recovery
+                        .as_ref()
+                        .is_some_and(|r| !r.submitted)
             }),
         cancel_operation: operation.is_some_and(|operation| operation.cancellable),
         // Stopping a session that is already stopping asks for something that
@@ -619,6 +625,11 @@ pub(super) fn viewer_snapshot(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
+            session.quota_recovery = state
+                .continuation
+                .quota_recovery
+                .clone()
+                .filter(|r| !r.submitted);
             let activity = mj_client::usage_format::SessionActivity::of(state);
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);

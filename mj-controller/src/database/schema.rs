@@ -404,6 +404,17 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;")?;
     }
 
+    // Breaking: new quota recovery commands in stored relay JSON cannot be
+    // read or preserved by older binaries, even though the cache is additive.
+    if version < 44 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            CREATE TABLE quota_reset_cache (identity TEXT PRIMARY KEY, body TEXT NOT NULL);
+            UPDATE schema_compatibility SET minimum_compatible_version = 44 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (44, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 44;
+            COMMIT;")?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -482,8 +493,8 @@ mod reader_tests {
     use super::*;
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 43 adds durable steering and availability.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 43;
+    /// `SCHEMA_VERSION`. Migration 44 adds durable quota recovery commands.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 44;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -522,6 +533,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
+             DROP TABLE quota_reset_cache;
              DROP TABLE native_agent_transcript;
              DROP TABLE native_agents;
              DROP TABLE native_agent_replay;
@@ -674,7 +686,7 @@ mod reader_tests {
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(43));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
     }
 
     #[test]

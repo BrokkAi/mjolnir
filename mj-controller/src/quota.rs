@@ -44,6 +44,22 @@ pub struct ProviderCredential {
 }
 
 impl QuotaRefreshRequest {
+    pub(crate) fn cache_identity(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Hash configuration, never write credentials into the cache key.
+        let mut hash = Sha256::new();
+        hash.update(
+            serde_json::to_vec(&(&self.profile_id, self.harness, &self.environment))
+                .expect("serializable profile"),
+        );
+        hash.update(self.source_home.as_os_str().as_encoded_bytes());
+        if let Some(provider) = &self.provider {
+            hash.update(provider.host.as_bytes());
+            hash.update(provider.api_key.as_bytes());
+        }
+        mj_core::hex::lower_hex(hash.finalize())
+    }
+
     /// Build the request for one configured profile. The harness home
     /// environment is composed here so every caller asks for quota the same
     /// way, and so a provider key is read from exactly one place.
@@ -170,6 +186,7 @@ async fn refresh_profile(
     request: QuotaRefreshRequest,
     mut codex_client: Option<CodexUsageClient>,
 ) -> (QuotaRefreshOutcome, Option<CodexUsageClient>) {
+    let cache_identity = request.cache_identity();
     let credential_path = harness_authentication_marker(request.harness, &request.source_home);
     let credential_before = credential_marker_fingerprint(&credential_path).await;
     let QuotaRefreshRequest {
@@ -370,6 +387,18 @@ async fn refresh_profile(
         error: Some(error.to_string()),
         refreshed_at_epoch_seconds,
     });
+    if report.error.is_none() {
+        let cached = report.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::database::save_quota_cache(&cache_identity, &cached)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "could not preserve quota reset times"),
+            Err(error) => tracing::warn!(%error, "quota cache task failed"),
+        }
+    }
     let credential_after = credential_marker_fingerprint(&credential_path).await;
     let credentials_changed = match (credential_before, credential_after) {
         (Ok(before), Ok(after)) => before != after,
@@ -946,10 +975,34 @@ pub(crate) fn normalize_reset_epoch_seconds(value: &str) -> Option<i64> {
     normalize_reset_at(value, Local::now().fixed_offset()).map(|reset| reset.timestamp())
 }
 
-fn normalize_reset_at(value: &str, now: DateTime<FixedOffset>) -> Option<DateTime<FixedOffset>> {
+pub(crate) fn normalize_reset_at(
+    value: &str,
+    now: DateTime<FixedOffset>,
+) -> Option<DateTime<FixedOffset>> {
     let value = value.trim();
     if value.is_empty() {
         return None;
+    }
+    if let Some((clock, zone)) = value.rsplit_once('(') {
+        let zone: chrono_tz::Tz = zone.strip_suffix(')')?.trim().parse().ok()?;
+        let local_now = now.with_timezone(&zone);
+        let parsed = normalize_reset_at(clock.trim(), local_now.fixed_offset())?;
+        return zone
+            .from_local_datetime(&parsed.naive_local())
+            .single()
+            .map(|t| t.fixed_offset());
+    }
+    if let Some((clock, offset)) = value.rsplit_once(' ')
+        && (offset.starts_with('+') || offset.starts_with('-'))
+    {
+        let offset: FixedOffset = offset.parse().ok()?;
+        return normalize_reset_at(clock, now.with_timezone(&offset));
+    }
+    if let Some(clock) = value
+        .strip_suffix(" UTC")
+        .or_else(|| value.strip_suffix(" GMT"))
+    {
+        return normalize_reset_at(clock, now.with_timezone(&chrono::Utc).fixed_offset());
     }
     if let Ok(epoch) = value.parse::<f64>() {
         let seconds = if epoch.abs() >= 1_000_000_000_000.0 {
@@ -1040,3 +1093,6 @@ fn format_reset_label(reset: DateTime<FixedOffset>) -> String {
 
 #[cfg(test)]
 mod tests;
+
+mod recovery;
+pub(crate) use recovery::{merge_reset_windows, message_reset, recovery_reset};

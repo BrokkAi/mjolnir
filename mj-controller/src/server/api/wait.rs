@@ -108,6 +108,7 @@ pub(super) async fn wait(
                     turn_number: None,
                     elapsed_ms: None,
                     capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
+                    quota_recovery: observation.quota_recovery.clone(),
                     relay,
                     session: ApiSession::from(session),
                 }));
@@ -168,6 +169,7 @@ pub(super) fn build_observation(
             .and_then(|failure| failure.error.clone())
             .or_else(|| session.launch_error.clone()),
         capacity_retry: session.capacity_retry.clone(),
+        quota_recovery: session.quota_recovery.clone(),
         start_status,
         ..WaitObservation::default()
     };
@@ -190,6 +192,12 @@ pub(super) fn build_observation(
         observation
             .capacity_retry
             .clone_from(&snapshot.operational.capacity_retry);
+        observation.quota_recovery = snapshot
+            .operational
+            .continuation
+            .quota_recovery
+            .clone()
+            .filter(|r| !r.submitted);
     } else if let Some(durable) = durable {
         observation.execution = durable.execution;
         observation.active_turn = durable.active_turn.clone();
@@ -264,6 +272,7 @@ pub(super) async fn finish_wait(
         elapsed_ms: summary
             .as_ref()
             .map(|summary| summary.last_changed_at_ms - summary.turn_started_at_ms),
+        quota_recovery: observation.quota_recovery.clone(),
         capacity_retry: observation
             .capacity_retry
             .as_ref()

@@ -4407,3 +4407,19 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[test]
+fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const session = { lifecycle: 'live', quota_recovery: { retry_at_ms: 120000 } };
+if (!sessionActivityLabel(session, 60000).startsWith('Quota limit · resumes ')) throw Error('missing quota deadline');
+session.quota_recovery.retry_at_ms = null;
+if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown') throw Error('missing unknown reset');
+"#;
+    run_viewer_script("quota-recovery", &format!("{setup}\n{source}\n{checks}"));
+}

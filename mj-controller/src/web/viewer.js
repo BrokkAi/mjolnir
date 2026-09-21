@@ -975,6 +975,10 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
+  if (session.quota_recovery) {
+    const deadline = session.quota_recovery.retry_at_ms;
+    return deadline == null ? 'Quota limit · reset time unknown' : `Quota limit · resumes ${new Date(deadline).toLocaleString()}`;
+  }
   if (session.capacity_retry) {
     const seconds = Math.max(0, Math.ceil((session.capacity_retry.retry_at_ms - now) / 1000));
     return `Model at capacity · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;

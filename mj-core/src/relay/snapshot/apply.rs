@@ -85,6 +85,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             resumed,
         } => {
             snapshot.continuation.suppressed = true;
+            if *native_continuity_lost {
+                snapshot.continuation.quota_recovery = None;
+                snapshot.continuation.quota_suppressed = true;
+            }
             snapshot.native_session_id = Some(native_session_id.clone());
             snapshot.native_session_opened_ordinal = Some(event.ordinal);
             // A normal open clears the flag; only the fallback sets it.
@@ -145,12 +149,23 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
                         suppressed: crate::acp::context_command(prompt).is_some(),
+                        quota_suppressed: crate::acp::context_command(prompt).is_some(),
                         ..Default::default()
                     };
                 }
                 RelayCommand::ContinueAuthorizedWork { attempt, .. } => {
                     snapshot.continuation.attempts = *attempt;
                     snapshot.continuation.completed_command_id = None;
+                }
+                RelayCommand::SetQuotaRecovery { recovery, .. } => {
+                    snapshot.continuation.quota_recovery = recovery.as_deref().cloned();
+                }
+                RelayCommand::ResumeAfterQuota { .. } => {
+                    if let Some(recovery) = &mut snapshot.continuation.quota_recovery {
+                        recovery.submitted = true;
+                    }
+                    snapshot.continuation.completed_command_id = None;
+                    snapshot.continuation.suppressed = false;
                 }
                 RelayCommand::Cancel
                 | RelayCommand::CancelTurn
@@ -159,8 +174,22 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::GoalControl { .. }
                 | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
+                    snapshot.continuation.quota_suppressed = true;
                 }
                 _ => {}
+            }
+            if cancels_capacity_retry(command)
+                || matches!(
+                    command,
+                    RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ClearContext
+                        | RelayCommand::BeginCheckpoint { .. }
+                )
+            {
+                snapshot.continuation.quota_recovery = None;
+                if !matches!(command, RelayCommand::Prompt { .. }) {
+                    snapshot.continuation.quota_suppressed = true;
+                }
             }
             if cancels_capacity_retry(command) {
                 if let Some(retry) = snapshot.capacity_retry.as_mut()
@@ -242,7 +271,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 .ok_or_else(|| anyhow!("started unknown relay command {command_id}"))?;
             dispatch.state = RelayDispatchState::Pending;
             match &dispatch.command {
-                RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. } => {
+                RelayCommand::Prompt { .. }
+                | RelayCommand::ContinueAuthorizedWork { .. }
+                | RelayCommand::ResumeAfterQuota { .. } => {
                     let index = snapshot
                         .queued_prompts
                         .iter()
@@ -315,7 +346,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if let RelayCommandOutcome::Prompt { stop_reason, .. } = outcome {
                 snapshot.continuation.completed_command_id =
                     (snapshot.continuation.user_command_id.as_ref() == Some(command_id)
-                        || matches!(command, RelayCommand::ContinueAuthorizedWork { .. }))
+                        || matches!(
+                            command,
+                            RelayCommand::ContinueAuthorizedWork { .. }
+                                | RelayCommand::ResumeAfterQuota { .. }
+                        ))
                     .then(|| command_id.clone());
                 if crate::state::classify_prompt_completion(stop_reason)
                     != crate::state::PromptCompletion::Finished
@@ -343,7 +378,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             match (command, outcome) {
                 (
-                    RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. },
+                    RelayCommand::Prompt { .. }
+                    | RelayCommand::ContinueAuthorizedWork { .. }
+                    | RelayCommand::ResumeAfterQuota { .. },
                     RelayCommandOutcome::Prompt { .. },
                 ) => {
                     if snapshot
@@ -596,7 +633,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     };
                     snapshot.execution = RelayExecutionState::Idle;
                 }
-                (RelayCommand::RecordNotice { .. }, RelayCommandOutcome::NoticeRecorded) => {}
+                (
+                    RelayCommand::RecordNotice { .. } | RelayCommand::SetQuotaRecovery { .. },
+                    RelayCommandOutcome::NoticeRecorded,
+                ) => {}
                 (RelayCommand::BeginCheckpoint { .. }, _) => {
                     bail!("checkpoint barriers complete through checkpoint-ready")
                 }
@@ -771,6 +811,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot.checkpoint_ready_digest = Some(event.digest.clone());
         }
         RelayObservation::HarnessTurnStarted { started_at_ms } => {
+            if snapshot
+                .continuation
+                .quota_recovery
+                .as_ref()
+                .is_some_and(|r| !r.submitted)
+            {
+                snapshot.continuation.quota_recovery = None;
+                snapshot.continuation.quota_suppressed = true;
+            }
             snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
                 started_at_ms: *started_at_ms,

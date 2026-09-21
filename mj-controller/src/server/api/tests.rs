@@ -2923,3 +2923,30 @@ fn session_wait_follows_continuation_but_explicit_turn_wait_keeps_its_boundary()
         WaitOutcome::Finished
     );
 }
+
+#[test]
+fn quota_recovery_keeps_wait_pending_and_unknown_reset_reports_quota() {
+    let mut pending = idle(Some(completed(10, "end_turn")));
+    pending.quota_recovery = Some(mj_core::continuation::QuotaRecovery {
+        user_command_id: "user-request".into(),
+        completed_command_id: pending
+            .last_turn_outcome
+            .as_ref()
+            .unwrap()
+            .command_id
+            .clone(),
+        profile_id: "test-profile".into(),
+        reset_at_ms: Some(1000),
+        retry_at_ms: Some(61000),
+        notice: "No reliable reset time".into(),
+        submitted: false,
+    });
+    assert!(resolve_wait(&pending, &WaitRequest::default()).is_none());
+    pending.quota_recovery.as_mut().unwrap().retry_at_ms = None;
+    assert_eq!(
+        resolve_wait(&pending, &WaitRequest::default())
+            .unwrap()
+            .outcome,
+        WaitOutcome::QuotaLimit
+    );
+}

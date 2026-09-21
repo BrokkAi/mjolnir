@@ -457,6 +457,7 @@ pub(super) async fn run_session_actor(
                             &command,
                             RelayCommand::Prompt { .. }
                                 | RelayCommand::ContinueAuthorizedWork { .. }
+                                | RelayCommand::ResumeAfterQuota { .. }
                                 | RelayCommand::ClearContext
                         ) && !admitted
                             && let Some(refusal) =
@@ -481,7 +482,11 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         if lifecycle.is_leased()
-                            && matches!(command, RelayCommand::ContinueAuthorizedWork { .. })
+                            && matches!(
+                                command,
+                                RelayCommand::ContinueAuthorizedWork { .. }
+                                    | RelayCommand::ResumeAfterQuota { .. }
+                            )
                         {
                             let _ = reply.send(Err(
                                 "automatic continuation cancelled by lifecycle operation".into(),
@@ -908,7 +913,10 @@ pub(super) async fn deliver_submit(
         let _ = reply.send(Err("review delivery admission is no longer valid".into()));
         return;
     }
-    if matches!(command, RelayCommand::ContinueAuthorizedWork { .. }) {
+    if matches!(
+        command,
+        RelayCommand::ContinueAuthorizedWork { .. } | RelayCommand::ResumeAfterQuota { .. }
+    ) {
         if reply.is_closed() {
             return;
         }

@@ -891,7 +891,10 @@ pub(crate) fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'stat
     if !chat.queued_prompts.is_empty() {
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
-    if chat.prompt_in_flight() || chat.session_activity.capacity_retry.is_some() {
+    if chat.prompt_in_flight()
+        || (chat.session_activity.capacity_retry.is_some()
+            || chat.session_activity.quota_recovery.is_some())
+    {
         labels.push(chat.turn_control_intent().escape_hint().to_owned());
     }
     (!labels.is_empty()).then(|| {

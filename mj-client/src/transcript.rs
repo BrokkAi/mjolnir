@@ -467,6 +467,14 @@ pub fn user_label(entry: &ChatEntry) -> &'static str {
         .source
         .0
         .as_ref()
+        .is_some_and(|item| item.stable_id.starts_with("user:quota-retry-"))
+    {
+        return "Automatic · quota recovery";
+    }
+    if entry
+        .source
+        .0
+        .as_ref()
         .and_then(|item| item.stable_id.strip_prefix("user:"))
         .is_some_and(mj_core::relay::is_capacity_retry_command)
     {

@@ -11,6 +11,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 enum Outcome {
     Classified(Result<mj_core::continuation::ContinuationVerdict>),
+    QuotaPrepared(Result<mj_core::continuation::QuotaRecovery>),
     Submitted(Result<Box<ManagedSessionView>>),
 }
 
@@ -47,6 +48,7 @@ fn eligible(view: &ManagedSessionView) -> bool {
         return false;
     };
     view.connected && s.operational.relay_protocol_version.is_some_and(|v| v >= 18)
+        && s.operational.continuation.quota_recovery.as_ref().is_none_or(|r| r.submitted)
         && s.operational.continuation.eligible()
         && mj_core::activity::is_quiet(&s.operational.facts())
         && s.operational.background_commands.is_empty()
@@ -54,6 +56,35 @@ fn eligible(view: &ManagedSessionView) -> bool {
         && s.materialized.pending_elicitations.is_empty()
         && s.materialized.last_turn_outcome.as_ref().is_some_and(|t| matches!(&t.outcome,
             TurnOutcomeKind::Completed { stop_reason } if classify_prompt_completion(stop_reason) == PromptCompletion::Finished))
+}
+
+fn quota_eligible(view: &ManagedSessionView) -> bool {
+    let Some(s) = &view.snapshot else {
+        return false;
+    };
+    let c = &s.operational.continuation;
+    view.connected && s.operational.relay_protocol_version.is_some_and(|v| v >= 20)
+        && !c.quota_suppressed && c.user_command_id.is_some() && c.completed_command_id.is_some()
+        && mj_core::activity::is_quiet(&s.operational.facts())
+        && s.operational.background_commands.is_empty() && !s.operational.goal.active()
+        && s.materialized.pending_elicitations.is_empty()
+        && s.materialized.last_turn_outcome.as_ref().is_some_and(|t| {
+            c.completed_command_id.as_ref() == Some(&t.command_id)
+                && matches!(&t.outcome, TurnOutcomeKind::Completed { stop_reason }
+                    if !mj_core::relay::is_capacity_stop_reason(stop_reason)
+                    && !matches!(classify_prompt_completion(stop_reason), PromptCompletion::Cancelled))
+        })
+}
+
+fn check_eligible(view: &ManagedSessionView) -> bool {
+    eligible(view)
+        || (quota_eligible(view)
+            && view.snapshot.as_ref().is_some_and(|s| {
+                let c = &s.operational.continuation;
+                c.quota_recovery.as_ref().is_none_or(|r| {
+                    c.completed_command_id.as_ref() != Some(&r.completed_command_id)
+                })
+            }))
 }
 
 fn allowed(state: &RuntimeState, session: &str) -> bool {
@@ -83,7 +114,10 @@ struct Environment {
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
     review: ReviewObserver,
+    quota: quota::Resolver,
+    profile: ProfileLookup,
 }
+type ProfileLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ReviewObserver = Arc<dyn Fn(&str, &ManagedSessionView) + Send + Sync>;
 type Classifier = Arc<
     dyn Fn(
@@ -107,7 +141,13 @@ fn publish(
         if let Some(snapshot) = &mut view.snapshot {
             snapshot.operational.activity = Some(ActivityState::CheckingContinuation);
         }
-    } else {
+    } else if view.snapshot.as_ref().is_none_or(|s| {
+        s.operational
+            .continuation
+            .quota_recovery
+            .as_ref()
+            .is_none_or(|r| r.submitted)
+    }) {
         (environment.review)(&session_id, &view);
     }
     tx.send(SessionManagerUpdate { session_id, view });
@@ -135,6 +175,28 @@ pub(super) fn spawn(
             let state = state.clone();
             Arc::new(move || state.live_session_ids())
         },
+        quota: {
+            let state = state.clone();
+            let service = Arc::new(quota::Service::default());
+            Arc::new(move |id, view| {
+                let state = state.clone();
+                let service = service.clone();
+                Box::pin(async move { quota::prepare(&state, &service, &id, &view).await })
+            })
+        },
+        profile: {
+            let state = state.clone();
+            Arc::new(move |id| {
+                state
+                    .controller
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .state
+                    .sessions
+                    .get(id)
+                    .map(|s| s.last_profile.clone())
+            })
+        },
         review: Arc::new(move |id, view| state.review_host().observe(id, view)),
     };
     spawn_in(
@@ -159,6 +221,8 @@ fn spawn_in(
     let task = tokio::spawn(async move {
         let mut seen = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
+        let mut latest = BTreeMap::<String, ManagedSessionView>::new();
+        let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
         let mut jobs = JoinSet::new();
 
         let mut generation = 0_u64;
@@ -171,6 +235,7 @@ fn spawn_in(
                     let Some(update) = update else { break };
                     let id = update.session_id;
                     let view = update.view;
+                    latest.insert(id.clone(), view.clone());
                     let completed = view.snapshot.as_ref().and_then(|s| {
                         s.materialized
                             .last_turn_outcome
@@ -179,7 +244,7 @@ fn spawn_in(
                     });
                     let previous = seen.insert(id.clone(), completed.clone());
                     if let Some(p) = pending.get_mut(&id) {
-                        let unchanged = eligible(&view)
+                        let unchanged = check_eligible(&view)
                             && (environment.allowed)(&id)
                             && view.snapshot.as_ref().is_some_and(|s| {
                                 s.operational.continuation.user_command_id.as_ref() == Some(&p.user)
@@ -204,28 +269,41 @@ fn spawn_in(
                         // Its atomic frontier guard still lets new input win.
                     }
                     let new_completion = previous.is_some_and(|old| old != completed) && completed.is_some();
-                    if new_completion && eligible(&view) && (environment.allowed)(&id) {
+                    if new_completion && check_eligible(&view) && (environment.allowed)(&id) {
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
                         let session = id.clone();
                         let snapshot = view.snapshot.as_ref().expect("eligible snapshot").clone();
                         let diagnostic = environment.log.as_ref().map(|log| log.start(&id, "continuation",
-                            "Does already-requested work remain that can proceed without new user input?",
+                            "Is the turn blocked by subscription quota, or does authorized unfinished work remain?",
                             "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
                         let request_diagnostic = diagnostic.clone();
                         let classify = classifier.clone();
                         let abort = jobs.spawn(async move {
                             let result = async {
                                 let evidence = tokio::task::spawn_blocking(move || {
+                                    let quota_message = quota::message(&snapshot.materialized);
                                     let materialized = snapshot.materialized;
-                                    if snapshot.window.omitted_items > 0 {
-                                        return crate::database::load_continuation_evidence(
+                                    let ordinary = if snapshot.window.omitted_items > 0 {
+                                        crate::database::load_continuation_evidence(
                                             &materialized.session_id,
                                             materialized.applied_event_ordinal,
                                             &materialized.applied_event_digest,
-                                        );
+                                        )
+                                    } else { crate::continuation::evidence(&materialized) };
+                                    let mut evidence = ordinary.unwrap_or_else(|error| {
+                                        tracing::debug!(%error, "ordinary continuation evidence unavailable; checking only current quota message");
+                                        mj_core::continuation::ContinuationEvidence {
+                                            messages: Vec::new(), assistant_history_omitted: true, quota_message: None,
+                                        }
+                                    });
+                                    evidence.quota_message = quota_message;
+                                    if evidence.validate().is_err() && evidence.quota_message.is_some() {
+                                        evidence.messages.clear();
+                                        evidence.assistant_history_omitted = true;
                                     }
-                                    crate::continuation::evidence(&materialized)
+                                    evidence.validate()?;
+                                    Ok::<_, anyhow::Error>(evidence)
                                 })
                                 .await
                                 .context("collect continuation evidence")??;
@@ -266,9 +344,27 @@ fn spawn_in(
                             }
                             let p = pending.remove(&id).expect("current request");
                             let result = match result {
+                                Outcome::QuotaPrepared(result) => {
+                                    match result {
+                                        Ok(recovery) if (environment.allowed)(&id) && quota_eligible(&p.view) => {
+                                            let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
+                                            let abort = jobs.spawn(async move {
+                                                let result = quota::schedule(&env, &session, view, recovery).await;
+                                                (session, epoch, Outcome::Submitted(result))
+                                            });
+                                            pending.insert(id, Pending { abort, submitting: true, ..p });
+                                        }
+                                        result => {
+                                            tracing::warn!(session=%id, ?result, "quota recovery could not be scheduled");
+                                            publish(&tx, &environment, id, p.view, false);
+                                        }
+                                    }
+                                    continue;
+                                }
                                 Outcome::Submitted(result) => {
                                     match result {
                                         Ok(view) => {
+                                            latest.insert(id.clone(), (*view).clone());
                                             tx.send(SessionManagerUpdate {
                                                 session_id: id,
                                                 view: *view,
@@ -289,11 +385,26 @@ fn spawn_in(
                             };
                             if let Some(diagnostic) = &p.diagnostic {
                                 match &result {
-                                    Ok(verdict) => diagnostic.update(Some(if verdict.should_continue() {
+                                    Ok(verdict) => diagnostic.update(Some(if verdict.is_quota_limit() { "Jev identified a current subscription quota limit." } else if verdict.should_continue() {
                                         "Jev assessed that already-requested work remains and needs no new input."
-                                    } else { "Jev did not confidently establish both unfinished work and no need for user input." }), serde_json::json!({"result":{"unfinished":verdict.unfinished,"no_input_needed":verdict.no_input_needed}})),
+                                    } else { "Jev did not confidently establish both unfinished work and no need for user input." }), serde_json::json!({"result":{"quota_limit":verdict.quota_limit,"unfinished":verdict.unfinished,"no_input_needed":verdict.no_input_needed}})),
                                     Err(error) => diagnostic.update(Some("No usable Jev answer."), serde_json::json!({"error":format!("{error:#}")})),
                                 }
+                            }
+                            if result.as_ref().is_ok_and(|v| v.is_quota_limit())
+                                && quota_eligible(&p.view) && (environment.allowed)(&id) {
+                                let env = environment.clone();
+                                let session = id.clone();
+                                let view = p.view.clone();
+                                let abort = jobs.spawn(async move {
+                                    let result = (env.quota)(session.clone(), view).await;
+                                    (session, epoch, Outcome::QuotaPrepared(result))
+                                });
+                                if let Some(diagnostic) = &p.diagnostic {
+                                    diagnostic.finish("applied", "Quota exhaustion identified; resolving the reset deadline without an LLM.");
+                                }
+                                pending.insert(id, Pending { abort, submitting: false, ..p });
+                                continue;
                             }
                             let continuing = result.as_ref().is_ok_and(|v| v.should_continue())
                                 && eligible(&p.view)
@@ -414,8 +525,28 @@ fn spawn_in(
                         }
                         publish(&tx, &environment, id, p.view, false);
                     }
+                    for (id, view) in &latest {
+                        if pending.contains_key(id) || retry_after.get(id).is_some_and(|t| *t > std::time::Instant::now()) { continue; }
+                        let Some(snapshot) = &view.snapshot else { continue; };
+                        let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
+                        let clear = !(environment.allowed)(id) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
+                        if !clear && (!quota_eligible(view) || recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis())) { continue; }
+                        if !view.connected { continue; }
+                        generation = generation.wrapping_add(1);
+                        let epoch = generation;
+                        let env = environment.clone(); let session = id.clone(); let current = view.clone();
+                        let abort = jobs.spawn(async move {
+                            let result = quota::resume(&env, &session, &current, clear).await;
+                            (session, epoch, Outcome::Submitted(result))
+                        });
+                        retry_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
+                        pending.insert(id.clone(), Pending { diagnostic: None, submitting: true, generation: epoch, abort,
+                            view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
+                    }
                     let live = (environment.live)();
                     seen.retain(|id, _| live.contains(id));
+                    latest.retain(|id, _| live.contains(id));
+                    retry_after.retain(|id, _| live.contains(id));
                 }
             }
         }
@@ -428,3 +559,5 @@ fn spawn_in(
 
 #[cfg(test)]
 mod tests;
+
+mod quota;

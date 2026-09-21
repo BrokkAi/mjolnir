@@ -382,6 +382,8 @@ pub struct WaitResponse {
     /// must not submit its own prompt: it would collide with the retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<WaitCapacityRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     /// The health of the daemon's live view of this session. Absent when no
     /// live actor holds the session, because there is then no view to report
     /// on and inventing one would be worse than saying nothing.

@@ -1,0 +1,311 @@
+use super::*;
+use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
+use mj_core::continuation::QuotaRecovery;
+
+pub(super) type Resolver = Arc<
+    dyn Fn(String, ManagedSessionView) -> futures::future::BoxFuture<'static, Result<QuotaRecovery>>
+        + Send
+        + Sync,
+>;
+type Lane = Arc<tokio::sync::Mutex<Option<(std::time::Instant, ProfileQuota)>>>;
+
+#[derive(Default)]
+pub(super) struct Service {
+    lanes: Mutex<BTreeMap<String, Lane>>,
+}
+
+impl Service {
+    async fn refresh(&self, request: QuotaRefreshRequest) -> Result<ProfileQuota> {
+        let identity = request.cache_identity();
+        let lane = self
+            .lanes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(identity)
+            .or_default()
+            .clone();
+        let mut cached = lane.lock().await;
+        if let Some((at, report)) = &*cached
+            && at.elapsed() < Duration::from_secs(30)
+        {
+            return Ok(report.clone());
+        }
+        let id = request.profile_id.clone();
+        let mut manager = QuotaManager::default();
+        manager.refresh_profiles(vec![request], |_| async {}).await;
+        let report = manager.reports().get(&id).cloned();
+        manager.shutdown().await;
+        let report = report.context("quota refresh produced no report")?;
+        *cached = Some((std::time::Instant::now(), report.clone()));
+        Ok(report)
+    }
+}
+
+pub(super) fn message(materialized: &mj_core::state::MaterializedSession) -> Option<String> {
+    use mj_core::transcript::{TranscriptBody, materialized_chunks_text};
+    let turn = materialized.last_turn_outcome.as_ref()?;
+    let reply = materialized
+        .transcript
+        .iter()
+        .rev()
+        .filter(|item| item.position < turn.completed_ordinal)
+        .take_while(|item| {
+            turn.turn_start_position
+                .is_none_or(|start| item.position >= start)
+        })
+        .find_map(|item| match &item.body {
+            TranscriptBody::Agent {
+                chunks,
+                streaming: false,
+            } => Some(materialized_chunks_text(chunks)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let text = match &turn.diagnostic {
+        Some(diagnostic) => format!("{reply}\nProvider error: {}", diagnostic.message),
+        None => reply,
+    };
+    // Preserve the whole current message; clipping could turn a quotation into
+    // an apparent provider failure.
+    (!text.trim().is_empty() && text.len() <= mj_core::continuation::ASSISTANT_BYTES)
+        .then_some(text)
+}
+
+pub(super) async fn prepare(
+    state: &Arc<RuntimeState>,
+    service: &Service,
+    id: &str,
+    view: &ManagedSessionView,
+) -> Result<QuotaRecovery> {
+    let snapshot = view.snapshot.as_ref().context("missing quota snapshot")?;
+    let turn = snapshot
+        .materialized
+        .last_turn_outcome
+        .as_ref()
+        .context("missing quota completion")?;
+    let (profile_id, profile) = {
+        let controller = state
+            .controller
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let session = controller
+            .state
+            .sessions
+            .get(id)
+            .context("session was removed")?;
+        (
+            session.last_profile.clone(),
+            controller
+                .config
+                .profiles
+                .get(&session.last_profile)
+                .context("profile was removed")?
+                .clone(),
+        )
+    };
+    let profile_name = profile_id.clone();
+    let request = tokio::task::spawn_blocking(move || {
+        QuotaRefreshRequest::for_profile(
+            &profile_name,
+            &profile,
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        )
+    })
+    .await
+    .context("prepare quota request")?;
+    let identity = request.cache_identity();
+    let refreshed = service.refresh(request).await;
+    let cached = tokio::task::spawn_blocking(move || crate::database::load_quota_cache(&identity))
+        .await
+        .context("read cached quota resets")?;
+    let fresh = match refreshed {
+        Ok(report) if report.error.is_none() => Some(report),
+        Ok(report) => {
+            tracing::warn!(session=id, error=?report.error, "quota refresh unavailable; consulting last known resets");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(session=id, %error, "quota refresh failed; consulting last known resets");
+            None
+        }
+    };
+    let cached = match cached {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(session=id, %error, "quota reset cache unavailable");
+            None
+        }
+    };
+    let mut windows = fresh
+        .as_ref()
+        .map(|r| r.windows.clone())
+        .unwrap_or_default();
+    let mut used_cache = false;
+    if !fresh.as_ref().is_some_and(ProfileQuota::is_usage_priced)
+        && let Some(cached) = cached
+    {
+        used_cache = crate::quota::merge_reset_windows(&mut windows, &cached.windows);
+    }
+    let now = chrono::DateTime::from_timestamp_millis(turn.completed_at_ms)
+        .context("invalid completion timestamp")?
+        .with_timezone(&chrono::Local)
+        .fixed_offset();
+    let explicit = turn
+        .diagnostic
+        .as_ref()
+        .and_then(|d| d.reset_at.as_deref())
+        .and_then(|text| crate::quota::normalize_reset_at(text, now))
+        .map(|t| t.timestamp())
+        .or_else(|| {
+            message(&snapshot.materialized)
+                .and_then(|text| crate::quota::message_reset(&text, turn.completed_at_ms))
+        });
+    let c = &snapshot.operational.continuation;
+    let consumed = c
+        .quota_recovery
+        .as_ref()
+        .filter(|r| r.submitted)
+        .and_then(|r| r.reset_at_ms)
+        .map(|t| t / 1000);
+    let reset = crate::quota::recovery_reset(
+        &windows,
+        explicit,
+        mj_core::clock::epoch_millis() / 1000,
+        consumed,
+    );
+    let reset_at_ms = reset.and_then(|t| t.checked_mul(1000));
+    let retry_at_ms = reset_at_ms.and_then(|t| t.checked_add(60_000));
+    let notice = match retry_at_ms.and_then(chrono::DateTime::from_timestamp_millis) {
+        Some(time) => format!("Subscription quota reached. Automatically continuing at {} (one minute after reset){}.",
+            time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z (%:z)"),
+            if used_cache { "; using last-known quota reset times because fresh reset data is unavailable" } else { "" }),
+        None => "Subscription quota reached. No reliable reset time is available from the provider, saved quota data, or this message; automatic continuation was not scheduled.".into(),
+    };
+    Ok(QuotaRecovery {
+        user_command_id: c.user_command_id.clone().context("missing user request")?,
+        completed_command_id: turn.command_id.clone(),
+        profile_id,
+        reset_at_ms,
+        retry_at_ms,
+        notice,
+        submitted: false,
+    })
+}
+
+fn cursor(view: &ManagedSessionView) -> Result<RelayCursor> {
+    let s = view.snapshot.as_ref().context("missing relay snapshot")?;
+    Ok(RelayCursor {
+        ordinal: s.operational.latest_ordinal,
+        digest: s.operational.latest_digest.clone(),
+    })
+}
+
+pub(super) async fn schedule(
+    env: &Environment,
+    id: &str,
+    view: ManagedSessionView,
+    recovery: QuotaRecovery,
+) -> Result<Box<ManagedSessionView>> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let handle = env
+            .control
+            .wait_for_session(id, Duration::from_secs(5))
+            .await?;
+        let current = handle.view();
+        ensure!(
+            (env.allowed)(id)
+                && quota_eligible(&current)
+                && (env.profile)(id).as_deref() == Some(&recovery.profile_id)
+                && evidence_ordinal(&current) == evidence_ordinal(&view),
+            "quota evidence changed during refresh"
+        );
+        let command_id = format!(
+            "quota-schedule-{}",
+            view.snapshot
+                .as_ref()
+                .unwrap()
+                .materialized
+                .last_turn_outcome
+                .as_ref()
+                .unwrap()
+                .completed_ordinal
+        );
+        handle
+            .submit(
+                command_id,
+                RelayCommand::SetQuotaRecovery {
+                    expected: cursor(&current)?,
+                    recovery: Some(Box::new(recovery)),
+                },
+            )
+            .await?;
+        handle.sync_now().await?;
+        Ok(Box::new(handle.view()))
+    })
+    .await
+    .context("quota recovery scheduling timed out")?
+}
+
+pub(super) async fn resume(
+    env: &Environment,
+    id: &str,
+    view: &ManagedSessionView,
+    clear: bool,
+) -> Result<Box<ManagedSessionView>> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let handle = env
+            .control
+            .wait_for_session(id, Duration::from_secs(5))
+            .await?;
+        let current = handle.view();
+        let recovery = current
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
+            .context("quota recovery was cancelled")?;
+        ensure!(
+            view.snapshot
+                .as_ref()
+                .and_then(|s| s.operational.continuation.quota_recovery.as_ref())
+                == Some(recovery),
+            "quota recovery changed"
+        );
+        let ordinal = current
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .materialized
+            .last_turn_outcome
+            .as_ref()
+            .context("missing blocked turn")?
+            .completed_ordinal;
+        let (command_id, command) = if clear {
+            (
+                format!("quota-cancel-{ordinal}"),
+                RelayCommand::SetQuotaRecovery {
+                    expected: cursor(&current)?,
+                    recovery: None,
+                },
+            )
+        } else {
+            ensure!(
+                (env.allowed)(id)
+                    && quota_eligible(&current)
+                    && (env.profile)(id).as_deref() == Some(&recovery.profile_id),
+                "quota recovery no longer allowed"
+            );
+            (
+                format!("quota-retry-{ordinal}"),
+                RelayCommand::ResumeAfterQuota {
+                    expected: cursor(&current)?,
+                    completed_command_id: recovery.completed_command_id.clone(),
+                },
+            )
+        };
+        handle.submit(command_id, command).await?;
+        handle.sync_now().await?;
+        Ok(Box::new(handle.view()))
+    })
+    .await
+    .context("quota recovery submission timed out")?
+}

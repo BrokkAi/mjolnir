@@ -57,6 +57,14 @@ pub enum RelayCommand {
         completed_command_id: String,
         attempt: u8,
     },
+    SetQuotaRecovery {
+        expected: RelayCursor,
+        recovery: Option<Box<crate::continuation::QuotaRecovery>>,
+    },
+    ResumeAfterQuota {
+        expected: RelayCursor,
+        completed_command_id: String,
+    },
     RunUserShell {
         command: String,
     },
@@ -132,7 +140,7 @@ impl RelayCommand {
     pub fn prompt_blocks(&self) -> Option<std::borrow::Cow<'_, [ContentBlock]>> {
         match self {
             Self::Prompt { prompt } => Some(std::borrow::Cow::Borrowed(prompt)),
-            Self::ContinueAuthorizedWork { .. } => {
+            Self::ContinueAuthorizedWork { .. } | Self::ResumeAfterQuota { .. } => {
                 Some(std::borrow::Cow::Owned(crate::continuation::prompt_blocks()))
             }
             _ => None,
@@ -141,6 +149,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
             Self::ContinueAuthorizedWork { .. } => 18,
             Self::Steer { .. } | Self::CancelTurnFor { .. } | Self::ResolveSteering { .. } => 17,
             Self::ClearContext => 15,
@@ -164,7 +173,10 @@ impl RelayCommand {
     pub fn is_queue_entry(&self) -> bool {
         matches!(
             self,
-            Self::Prompt { .. } | Self::ContinueAuthorizedWork { .. } | Self::SetConfig { .. }
+            Self::Prompt { .. }
+                | Self::ContinueAuthorizedWork { .. }
+                | Self::ResumeAfterQuota { .. }
+                | Self::SetConfig { .. }
         )
     }
 
@@ -178,6 +190,7 @@ impl RelayCommand {
                 | Self::ReleaseCheckpoint { .. }
                 | Self::AdvanceRecoveryFloor { .. }
                 | Self::RecordNotice { .. }
+                | Self::SetQuotaRecovery { .. }
         )
     }
 
@@ -187,6 +200,7 @@ impl RelayCommand {
             Self::ClearContext
                 | Self::Prompt { .. }
                 | Self::ContinueAuthorizedWork { .. }
+                | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
@@ -208,7 +222,9 @@ impl RelayCommand {
     pub const fn kind(&self) -> RelayCommandKind {
         match self {
             Self::ClearContext => RelayCommandKind::ClearContext,
-            Self::Prompt { .. } | Self::ContinueAuthorizedWork { .. } => RelayCommandKind::Prompt,
+            Self::Prompt { .. }
+            | Self::ContinueAuthorizedWork { .. }
+            | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
             Self::CancelUserShell { .. } => RelayCommandKind::CancelUserShell,
             Self::RemoveQueuedPrompt { .. } => RelayCommandKind::RemoveQueuedPrompt,
@@ -226,7 +242,9 @@ impl RelayCommand {
             Self::CompleteCheckpoint { .. } => RelayCommandKind::CompleteCheckpoint,
             Self::ReleaseCheckpoint { .. } => RelayCommandKind::ReleaseCheckpoint,
             Self::AdvanceRecoveryFloor { .. } => RelayCommandKind::AdvanceRecoveryFloor,
-            Self::RecordNotice { .. } => RelayCommandKind::RecordNotice,
+            Self::RecordNotice { .. } | Self::SetQuotaRecovery { .. } => {
+                RelayCommandKind::RecordNotice
+            }
         }
     }
 }

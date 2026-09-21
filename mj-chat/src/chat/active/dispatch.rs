@@ -202,7 +202,8 @@ impl ActiveChat {
                         intent,
                         command,
                         cancel_agent: self.state.prompt_in_flight()
-                            || self.state.session_activity.capacity_retry.is_some(),
+                            || (self.state.session_activity.capacity_retry.is_some()
+                                || self.state.session_activity.quota_recovery.is_some()),
                         shell_command_ids: self.state.active_user_shell_ids(),
                     },
                     &mut self.state,

@@ -868,7 +868,9 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
     let request_id = claimed.command_id.clone();
     match &claimed.command {
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
-        command @ (RelayCommand::Prompt { .. } | RelayCommand::ContinueAuthorizedWork { .. }) => {
+        command @ (RelayCommand::Prompt { .. }
+        | RelayCommand::ContinueAuthorizedWork { .. }
+        | RelayCommand::ResumeAfterQuota { .. }) => {
             let mut prompt = command
                 .prompt_blocks()
                 .expect("prompt command")
@@ -929,6 +931,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::ReleaseCheckpoint { .. }
         | RelayCommand::AdvanceRecoveryFloor { .. }
         | RelayCommand::RecordNotice { .. }
+        | RelayCommand::SetQuotaRecovery { .. }
         | RelayCommand::ResolveSteering { .. } => None,
     }
 }

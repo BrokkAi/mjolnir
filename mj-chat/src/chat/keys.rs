@@ -202,7 +202,8 @@ impl ChatState {
                     self.session_activity.state().last_known(),
                     mj_core::activity::ActivityState::CheckingContinuation
                 )
-                || self.session_activity.capacity_retry.is_some()
+                || (self.session_activity.capacity_retry.is_some()
+                    || self.session_activity.quota_recovery.is_some())
                 || !self.active_user_shells.is_empty()
             {
                 ChatAction::Cancel

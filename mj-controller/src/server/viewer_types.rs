@@ -93,6 +93,7 @@ impl ViewerSnapshot {
                     active_prompt_id: None,
                     cancelling_prompt_id: None,
                     capacity_retry: None,
+                    quota_recovery: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
                     title: session.display_title().to_owned(),
@@ -285,6 +286,8 @@ pub struct ViewerSession {
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub workspace_id: String,
