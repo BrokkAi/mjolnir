@@ -123,11 +123,10 @@ pub async fn run_server(
     )?;
     options.set_background_task_stop_tx(background_task_stop_tx);
     options.shutdown = termination.clone();
-    // Session cookies are stateless, so a per-process key would sign every
-    // phone out on every restart. Delete the key file to sign them out on
-    // purpose.
+    // Keep signed-in phones and logged-out identities consistent across
+    // restarts. Loading the signing key and revocations runs off this loop.
     let cookie_key_path = crate::server::cookie_key_path();
-    options.set_cookie_key(crate::server::load_or_create_cookie_key(&cookie_key_path)?)?;
+    options.load_cookie_credentials(cookie_key_path).await?;
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
     options.set_api_token(crate::server::load_or_create_api_token(

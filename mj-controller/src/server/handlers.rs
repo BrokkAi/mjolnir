@@ -53,13 +53,25 @@ pub(super) fn issue_session_cookie(
 ) -> Result<Response<Body>, ApiError> {
     let viewer = generate_viewer_id()
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "cookie creation failed"))?;
-    let cookie = viewer_session_cookie(state, &viewer, now_unix())?;
+    let policy = if state.session_ttl.is_zero() {
+        "session"
+    } else {
+        "phone"
+    };
+    let cookie = viewer_session_cookie(state, &format!("{policy}:{viewer}"), now_unix())?;
     let mut response = status.into_response();
     response.headers_mut().insert(SET_COOKIE, cookie);
     Ok(response)
 }
 
-pub(super) async fn clear_session(State(state): State<ServerState>) -> Response<Body> {
+pub(super) async fn clear_session(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(error) = revoke_viewer(&state, &headers).await {
+        // Keep the cookie so retrying logout can persist the same revocation.
+        return error.into_response();
+    }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()

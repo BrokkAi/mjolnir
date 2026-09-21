@@ -13,7 +13,9 @@ Issue #1030 asks for a bookmarkable QR login URL that survives daemon restarts, 
 - [x] (2026-09-21) Shared cookie validation, renewal, and rejection reasons between viewer and versioned API authentication.
 - [x] (2026-09-21) Documented credential lifetime and revocation; all 166 focused server tests passed.
 - [x] (2026-09-21) Full dev-profile tests, Clippy, formatting, and diff checks passed; reviewed credential derivation, identity preservation, and both authentication paths.
-- [ ] Open and self-review the PR, then stop for user discussion before merging.
+- [x] (2026-09-21) Opened PR #1116 and reproduced two review findings: renewal after logout and promotion of desktop cookies to persistent credentials.
+- [x] (2026-09-21) Fixed both findings with durable viewer revocation and explicit phone-cookie renewal eligibility; all 173 focused server tests and Clippy passed.
+- [ ] Confirm CI on the review fixes. At the user's request, push without waiting for the full local suite and leave remote validation to CI.
 
 ## Surprises & Discoveries
 
@@ -24,6 +26,8 @@ Issue #1030 asks for a bookmarkable QR login URL that survives daemon restarts, 
 On 2026-09-21, choose HMAC-SHA256 with a fixed, separate login-token purpose string and the existing persisted cookie key. HMAC is the existing keyed signature implementation; using a separate purpose prevents treating a cookie signature as a login token. This avoids another credential file and couples revocation to the existing key rotation. Anyone holding the URL retains access until key rotation; document this explicitly and discuss it at the PR checkpoint.
 
 Renew accepted cookies using the server's configured lifetime and the same viewer identity. Keep the existing cookie format and old-cookie acceptance. Authentication middleware (the checks that run before protected HTTP handlers) will attach renewal headers without replacing a handler's own Set-Cookie response. Bearer-token requests do not mint cookies. Diagnostics contain fixed reason labels only, never credential values or URLs.
+
+Review revision on 2026-09-21: renew only newly issued phone cookies carrying a signed viewer prefix (colon is outside the old random viewer-id alphabet). Desktop and legacy cookies remain accepted with their original fixed expiry and are never promoted. Logout must revoke the viewer identity, not only clear browser storage. Keep a memory cache of revoked identities and their maximum possible cookie expiry, persisted atomically beside the signing key as `phone-cookie-revocations.json`. Check the cache at authentication and before renewal. A revocation survives a restart, so even a response delivered out of order cannot restore usable access. Serialize writes in background work without holding the cache lock during disk I/O, report persistence failures, and prune expired entries on load/write. A missing ledger means first use; corrupt or unreadable existing data must fail closed. No SQLite migration is involved.
 
 ## Context and Orientation
 
@@ -36,6 +40,8 @@ First replace random login-token generation with deterministic derivation from t
 Next centralize cookie validation in auth.rs with explicit absent, malformed, expired, and bad-signature results. Use the same parser for viewer identity. Add a renewal helper used by both authentication layers, with a testable supplied clock for parsing. Verify an old near-expiry cookie returns a later signed expiry with the same viewer and expected HTTP attributes; invalid cookies remain unauthorized with no renewal. Cover browser-session configuration and bearer-only requests.
 
 Finally update the security documentation and review the complete diff for secret exposure, lifetime changes, and response-header handling. No new database schema or dependencies are needed.
+
+For the review fixes, add `server/auth/revocations.rs` for the cached revocation ledger and background persistence. Load the key and ledger together off the async runtime in server startup. Change middleware to authenticate first, then conditionally renew after its handler; logout records revocation before returning success. Prove that a blocked request released after logout cannot renew, that already issued cookies for that viewer fail after logout and after restart, and that another viewer remains signed in. Test a real desktop bootstrap cookie and an old unmarked cookie on both HTTP surfaces, plus persistence failures and expiry pruning.
 
 ## Concrete Steps
 
@@ -68,3 +74,7 @@ Revision 2026-09-21: Recorded implementation and passing focused tests; retained
 Revision 2026-09-21: Recorded passing full local validation and pre-PR review. PR #1115 is still awaiting green CI after two distinct failures that passed local focused reproduction.
 
 Revision 2026-09-21: Confirmed #1115 merged with all checks green and verified the authentication-only diff against master before opening this PR at the user's request.
+
+Revision 2026-09-21: Added the user-authorized review fixes. Preserving desktop/legacy expiry requires explicit renewal eligibility; preventing late responses from undoing logout requires durable revocation, including across restarts.
+
+Revision 2026-09-21: Review fixes are implemented and focused validation passed. Regression coverage includes delayed responses, previously renewed cookies, restart persistence, independent viewers, desktop/legacy expiry, persistence failure and retry, concurrent logouts, pruning, and corrupt storage. Clippy and diff checks passed. The full local suite was still running when the user explicitly requested committing and pushing immediately and letting CI finish validation. No merge is authorized for this revision yet.

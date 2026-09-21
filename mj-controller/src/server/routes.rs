@@ -18,6 +18,7 @@ pub(super) struct ServerState {
     pub(super) viewer_code: Arc<str>,
     pub(super) login_token: Arc<str>,
     pub(super) cookie_key: Arc<[u8]>,
+    pub(super) viewer_revocations: Arc<ViewerRevocations>,
     pub(super) session_ttl: Duration,
     pub(super) secure_cookie: bool,
     pub(super) code_guard: Arc<Mutex<CodeGuard>>,
@@ -94,6 +95,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         viewer_code: options.viewer_code.into(),
         login_token: options.login_token.into(),
         cookie_key: options.cookie_key.into(),
+        viewer_revocations: options.viewer_revocations,
         session_ttl: options.session_ttl,
         secure_cookie: options.secure_cookie,
         code_guard: Arc::new(Mutex::new(CodeGuard::default())),
@@ -174,8 +176,8 @@ pub(super) async fn require_session(
     request: Request,
     next: Next,
 ) -> Result<Response<Body>, ApiError> {
-    let cookie = renewed_session_cookie(&state, request.headers())?;
+    let cookie = authenticated_viewer(&state, request.headers())?;
     let mut response = next.run(request).await;
-    response.headers_mut().entry(SET_COOKIE).or_insert(cookie);
+    renew_viewer_response(&state, &cookie, &mut response)?;
     Ok(response)
 }

@@ -1,5 +1,8 @@
 use super::*;
 
+mod revocations;
+pub(super) use revocations::ViewerRevocations;
+
 pub(super) fn code_locked(state: &ServerState) -> bool {
     state
         .code_guard
@@ -97,10 +100,22 @@ pub fn mint_desktop_session_cookie(key: &[u8]) -> AnyResult<String> {
 
 /// The viewer a cookie names, or `None` when the cookie is not valid.
 pub(super) fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<String> {
-    validate_cookie(key, Some(value), now).ok()
+    validate_cookie(key, Some(value), now)
+        .ok()
+        .map(|cookie| cookie.viewer)
 }
 
-fn validate_cookie(key: &[u8], value: Option<&str>, now: u64) -> Result<String, &'static str> {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ViewerCookie {
+    viewer: String,
+    expiry: u64,
+}
+
+fn validate_cookie(
+    key: &[u8],
+    value: Option<&str>,
+    now: u64,
+) -> Result<ViewerCookie, &'static str> {
     let value = value.ok_or("absent")?;
     let [viewer, expiry, _] = value.split('.').collect::<Vec<_>>()[..] else {
         return Err("malformed");
@@ -113,24 +128,70 @@ fn validate_cookie(key: &[u8], value: Option<&str>, now: u64) -> Result<String, 
     if now >= expiry {
         return Err("expired");
     }
-    Ok(viewer.to_owned())
+    Ok(ViewerCookie {
+        viewer: viewer.to_owned(),
+        expiry,
+    })
 }
 
-/// Validate once and renew without changing the identity that owns drafts.
-pub(super) fn renewed_session_cookie(
-    state: &ServerState,
-    headers: &HeaderMap,
-) -> Result<HeaderValue, ApiError> {
-    let cookie = headers
+fn request_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(COOKIE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|header| cookie_value(header, COOKIE_NAME));
+        .and_then(|header| cookie_value(header, COOKIE_NAME))
+}
+
+pub(super) fn authenticated_viewer(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<ViewerCookie, ApiError> {
     let now = now_unix();
-    let viewer = validate_cookie(&state.cookie_key, cookie, now).map_err(|reason| {
-        tracing::debug!(reason, "viewer session cookie rejected");
-        ApiError::unauthorized()
-    })?;
-    viewer_session_cookie(state, &viewer, now)
+    let cookie = validate_cookie(&state.cookie_key, request_cookie(headers), now)
+        .and_then(|cookie| {
+            if state.viewer_revocations.contains(&cookie.viewer, now) {
+                Err("revoked")
+            } else {
+                Ok(cookie)
+            }
+        })
+        .map_err(|reason| {
+            tracing::debug!(reason, "viewer session cookie rejected");
+            ApiError::unauthorized()
+        })?;
+    Ok(cookie)
+}
+
+/// Only phone logins explicitly opt into sliding expiry. Legacy and desktop
+/// cookies have no signed policy marker, so retain their original expiry.
+fn renewal_policy(state: &ServerState, viewer: &str) -> Option<(Duration, bool)> {
+    if viewer.starts_with("session:") {
+        Some((EPHEMERAL_SESSION_TTL, false))
+    } else if viewer.starts_with("phone:") {
+        Some(if state.session_ttl.is_zero() {
+            (EPHEMERAL_SESSION_TTL, false)
+        } else {
+            (state.session_ttl, true)
+        })
+    } else {
+        None
+    }
+}
+
+pub(super) fn renew_viewer_response(
+    state: &ServerState,
+    cookie: &ViewerCookie,
+    response: &mut Response<Body>,
+) -> Result<(), ApiError> {
+    let now = now_unix();
+    if state.viewer_revocations.contains(&cookie.viewer, now)
+        || cookie.expiry <= now
+        || renewal_policy(state, &cookie.viewer).is_none()
+    {
+        return Ok(());
+    }
+    let renewed = viewer_session_cookie(state, &cookie.viewer, now)?;
+    response.headers_mut().entry(SET_COOKIE).or_insert(renewed);
+    Ok(())
 }
 
 pub(super) fn viewer_session_cookie(
@@ -138,12 +199,8 @@ pub(super) fn viewer_session_cookie(
     viewer: &str,
     now: u64,
 ) -> Result<HeaderValue, ApiError> {
-    let ephemeral = state.session_ttl.is_zero();
-    let validity = if ephemeral {
-        EPHEMERAL_SESSION_TTL
-    } else {
-        state.session_ttl
-    };
+    let (validity, persistent) =
+        renewal_policy(state, viewer).expect("new phone cookies carry a renewal policy");
     let value = signed_cookie_value(
         &state.cookie_key,
         viewer,
@@ -151,9 +208,45 @@ pub(super) fn viewer_session_cookie(
     );
     session_cookie_header(
         &value,
-        (!ephemeral).then_some(validity.as_secs()),
+        persistent.then_some(validity.as_secs()),
         state.secure_cookie,
     )
+}
+
+pub(super) async fn revoke_viewer(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let now = now_unix();
+    let Ok(cookie) = validate_cookie(&state.cookie_key, request_cookie(headers), now) else {
+        return Ok(());
+    };
+    // Include any renewed response that was generated before this logout but
+    // has not reached the browser yet, even if it used a newer cookie expiry.
+    let renewal_ttl = renewal_policy(state, &cookie.viewer).map_or(Duration::ZERO, |(ttl, _)| ttl);
+    let revocations = state.viewer_revocations.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = revocations.revoke(cookie.viewer, cookie.expiry, renewal_ttl);
+        if let Err(error) = &result {
+            // Report even if the HTTP caller disconnected while disk I/O ran.
+            tracing::error!(%error, "could not persist viewer logout");
+        }
+        result
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "viewer logout task failed");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not persist logout; retry",
+        )
+    })?
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not persist logout; retry",
+        )
+    })
 }
 
 pub(super) fn session_cookie_header(
@@ -237,6 +330,12 @@ mod tests {
             Err("bad_signature")
         );
         let valid = signed_cookie_value(key, "viewer", 200);
-        assert_eq!(validate_cookie(key, Some(&valid), 100), Ok("viewer".into()));
+        assert_eq!(
+            validate_cookie(key, Some(&valid), 100),
+            Ok(ViewerCookie {
+                viewer: "viewer".into(),
+                expiry: 200
+            })
+        );
     }
 }

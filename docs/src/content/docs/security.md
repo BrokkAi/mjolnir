@@ -172,7 +172,9 @@ URL and a six-digit login code. The code is exchanged for a signed session
 cookie; protected snapshot, transcript, draft, and action APIs all require a
 valid cookie. Cookies are HTTP-only and same-site, are marked secure under
 HTTPS, and expire after 30 days without authenticated requests by default.
-Authenticated requests renew the cookie while preserving the viewer identity.
+Authenticated requests renew new phone-login cookies while preserving the viewer
+identity. Desktop bootstrap cookies and cookies issued by older builds retain
+their original expiry; sign in again to opt an older phone cookie into renewal.
 A zero configured cookie lifetime still produces a browser-session cookie.
 
 The six-digit code is intentionally convenient rather than high entropy. Five
@@ -187,13 +189,20 @@ again after the browser clears its cookies; the redirected `/` URL does not
 contain that credential. The six-digit code still changes at restart.
 
 Anyone who captures the QR or its login URL can sign in until the key is
-rotated. Signing out of one browser clears its cookie but does not revoke that
-URL. To revoke all cookies and saved login URLs, stop the daemon, remove
+rotated. Signing out revokes that viewer identity and clears its cookie, but
+does not revoke the QR URL or sign other viewers out. Revocations persist in
+`phone-cookie-revocations.json` beside the signing key, preventing delayed
+responses from restoring access even after a daemon restart. If saving logout
+fails, the server reports an error; retry logout once storage is writable.
+Keep this file with the signing key; an unreadable or corrupt file prevents
+viewer startup rather than accepting revoked cookies.
+
+To revoke all cookies and saved login URLs, stop the daemon, remove
 `phone-cookie-key` from its instance data directory, then start it again.
 Keep the same durable data directory across restarts to preserve access.
 
 Cookie rejection diagnostics at debug level distinguish an absent, malformed,
-expired, or incorrectly signed cookie without recording credentials. An absent
+expired, revoked, or incorrectly signed cookie without recording credentials. An absent
 cookie may mean the browser evicted it; a bad signature may indicate key rotation.
 Mjolnir has one personal viewer trust domain; it does not provide per-user roles
 or session-level authorization.

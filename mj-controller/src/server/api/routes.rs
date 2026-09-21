@@ -86,7 +86,7 @@ pub(super) async fn require_api_auth(
         return Ok(next.run(request).await);
     }
     let cookie =
-        super::super::renewed_session_cookie(&state, request.headers()).map_err(|error| {
+        super::super::authenticated_viewer(&state, request.headers()).map_err(|error| {
             if error.status == StatusCode::UNAUTHORIZED {
                 ApiFailure::new(
                     StatusCode::UNAUTHORIZED,
@@ -97,10 +97,7 @@ pub(super) async fn require_api_auth(
             }
         })?;
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .entry(axum::http::header::SET_COOKIE)
-        .or_insert(cookie);
+    super::super::renew_viewer_response(&state, &cookie, &mut response)?;
     Ok(response)
 }
 
