@@ -938,7 +938,17 @@ fn render_elicitation_at(
             theme::title(focused),
             true,
         );
-        let block = theme::panel(focused).title(title_line);
+        let mut block = theme::panel(focused).title(title_line);
+        // Compact panes reserve their content rows for the labeled control
+        // and actions; keep validation failures visible in the bottom border.
+        if area.height < 6
+            && let Some(error) = dialog.error.as_deref()
+        {
+            block = block.title_bottom(Line::styled(
+                error,
+                Style::default().fg(theme::palette().error),
+            ));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
         inner
@@ -971,7 +981,9 @@ fn render_elicitation_body(
     )
     .unwrap_or(u16::MAX)
     .max(1);
-    let footer_height = inner.height.min(1);
+    // Keep a field's title, control, and action row before spending a row on
+    // keyboard hints. A five-row bordered pane has only three content rows.
+    let footer_height = u16::from(inner.height >= 4);
     // In a compact question pane one button row is enough: the second row is
     // more valuable to the message and focused control, which can each scroll
     // their content independently.
