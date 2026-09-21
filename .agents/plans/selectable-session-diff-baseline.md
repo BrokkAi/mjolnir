@@ -16,7 +16,7 @@ Issue #1109 concerns a session launched at commit B but intentionally moved to o
 - [x] (2026-09-21) Connected HTTP query options and CLI flags and documented the interface.
 - [x] (2026-09-21) Added and passed isolated Git, HTTP, CLI query, and worker argument tests; Clippy, formatting and diff checks pass.
 - [x] (2026-09-21) Full dev-profile `cargo test`, Clippy, formatting, and diff checks passed; reviewed default compatibility, revision validation, and metadata propagation.
-- [ ] Open and review the PR, wait for green CI, and merge.
+- [x] (2026-09-21 09:20Z) Opened and self-reviewed PR #1114; all 18 GitHub checks passed and the PR merged as `1aef031c`, closing #1109.
 
 ## Surprises & Discoveries
 
@@ -70,10 +70,12 @@ Use existing Serde, Axum Query/Json, Reqwest query encoding, GitCommandRunner, a
 ## Outcomes & Retrospective
 
 
-Implementation and local validation are complete. The Git test verifies exact resolved IDs, explicit versus default comparisons, all four categories of work, unchanged index/recorded baseline, and invalid revision refusal. HTTP/CLI tests verify metadata and revision query encoding. Full Rust tests, Clippy, formatting, and diff checks pass; logs are in `target/issue-1109-tests.log` and `target/issue-1109-clippy.log`. Remote PR validation and merge remain pending. The preceding issue #1075 was merged as PR #1113 after all 18 CI checks passed; this branch starts from that merge.
+Implementation and validation are complete. The Git test verifies exact resolved IDs, explicit versus default comparisons, all four categories of work, unchanged index/recorded baseline, and invalid revision refusal. HTTP/CLI tests verify metadata and revision query encoding. Full Rust tests, Clippy, formatting, and diff checks pass; logs are in `target/issue-1109-tests.log` and `target/issue-1109-clippy.log`. PR #1114 passed all 18 GitHub checks and merged as `1aef031c`, closing #1109. The preceding issue #1075 was merged as PR #1113 after all 18 CI checks passed; this branch starts from that merge.
 
 Revision 2026-09-21: Created the plan before implementing the cross-layer interface change, emphasizing default response compatibility and unchanged lifecycle baselines.
 
 Revision 2026-09-21: Recorded implementation and focused validation; kept full-suite and PR completion pending. Explicit base arguments use `--base=value` so option-looking input reaches Git validation as data.
 
 Revision 2026-09-21: Recorded passing full local validation and pre-PR review. No dependency or database changes were needed.
+
+Revision 2026-09-21 09:20Z: Recorded successful CI and merge during the next issue-workflow checkpoint.
