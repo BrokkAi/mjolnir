@@ -51,7 +51,7 @@ There is no migration and no live key rotation. Temporary test keys can be disca
 
 ## Artifacts and Notes
 
-PR #1115 is approved and awaiting a macOS CI rerun; this branch begins from its unchanged head. Do not publish this PR as independent until #1115 merges. Its isolated PTY failure passed locally; no authentication work changes that PR.
+PR #1115 merged as `bf68b34a` on 2026-09-21 after all 18 checks passed. This branch begins from its approved head, so the PR against master contains only the authentication changes.
 
 ## Interfaces and Dependencies
 
@@ -66,3 +66,5 @@ Revision 2026-09-21: Created before implementation, including the requested stop
 Revision 2026-09-21: Recorded implementation and passing focused tests; retained full validation and PR discussion as pending.
 
 Revision 2026-09-21: Recorded passing full local validation and pre-PR review. PR #1115 is still awaiting green CI after two distinct failures that passed local focused reproduction.
+
+Revision 2026-09-21: Confirmed #1115 merged with all checks green and verified the authentication-only diff against master before opening this PR at the user's request.
