@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, HeaderValue,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue,
 };
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::middleware::Next;
@@ -40,10 +40,9 @@ use mj_core::relay::{CapacityRetry, is_capacity_stop_reason};
 use mj_client::session::{BoxFuture, SessionHandle};
 
 use super::{
-    ActionOutcome, ApiError, COOKIE_NAME, ControllerAction, ControllerRequest, ServerState,
-    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, cookie_value,
-    create_quick_bundle, now_unix, require_session_record, session_cookie_valid, validate_action,
-    validate_prompt_text,
+    ActionOutcome, ApiError, ControllerAction, ControllerRequest, ServerState,
+    ViewerLifecycleCategory, ViewerSession, ViewerSnapshot, constant_time_eq, create_quick_bundle,
+    require_session_record, validate_action, validate_prompt_text,
 };
 
 /// Response header naming the contract version this server speaks. A client

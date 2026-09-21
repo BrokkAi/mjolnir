@@ -213,6 +213,7 @@ impl ServerOptions {
         conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
         requests: ServerRequests,
     ) -> AnyResult<Self> {
+        let cookie_key = generate_cookie_key()?.to_vec();
         Ok(Self {
             bind,
             snapshot_rx,
@@ -230,8 +231,8 @@ impl ServerOptions {
             secure_cookie: true,
             tls_config: None,
             viewer_code: generate_viewer_code()?,
-            login_token: generate_login_token()?,
-            cookie_key: generate_cookie_key()?.to_vec(),
+            login_token: derive_login_token(&cookie_key),
+            cookie_key,
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
@@ -256,12 +257,13 @@ impl ServerOptions {
     }
 
     /// Install a persisted signing key. Rotating this value signs every phone
-    /// out without maintaining a server-side session database.
+    /// out and revokes QR login URLs without a server-side session database.
     pub fn set_cookie_key(&mut self, key: Vec<u8>) -> AnyResult<()> {
         anyhow::ensure!(
             key.len() >= COOKIE_KEY_BYTES,
             "cookie signing key must be at least {COOKIE_KEY_BYTES} bytes"
         );
+        self.login_token = derive_login_token(&key);
         self.cookie_key = key;
         Ok(())
     }

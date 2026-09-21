@@ -171,17 +171,32 @@ The personal web viewer is enabled by default. `mj daemon status` prints its
 URL and a six-digit login code. The code is exchanged for a signed session
 cookie; protected snapshot, transcript, draft, and action APIs all require a
 valid cookie. Cookies are HTTP-only and same-site, are marked secure under
-HTTPS, and expire after 30 days by default.
+HTTPS, and expire after 30 days without authenticated requests by default.
+Authenticated requests renew the cookie while preserving the viewer identity.
+A zero configured cookie lifetime still produces a browser-session cookie.
 
 The six-digit code is intentionally convenient rather than high entropy. Five
 wrong codes lock the login endpoint. Repeated lockouts back off from 30 seconds
 to a maximum of one hour, and a correct code clears the failure history. Do not
 publish the code or an authenticated browser session.
 
-The cookie-signing key is stored in Mjolnir's private data directory, so signed
-in viewers survive daemon restarts. Removing or replacing that key signs every
-viewer out. Mjolnir has one personal viewer trust domain; it does not provide
-per-user roles or session-level authorization.
+The QR login URL contains a strong secret derived from the cookie-signing key
+in Mjolnir's private data directory. It stays valid across daemon restarts.
+Save the original QR login URL as a private bookmark if you want to sign in
+again after the browser clears its cookies; the redirected `/` URL does not
+contain that credential. The six-digit code still changes at restart.
+
+Anyone who captures the QR or its login URL can sign in until the key is
+rotated. Signing out of one browser clears its cookie but does not revoke that
+URL. To revoke all cookies and saved login URLs, stop the daemon, remove
+`phone-cookie-key` from its instance data directory, then start it again.
+Keep the same durable data directory across restarts to preserve access.
+
+Cookie rejection diagnostics at debug level distinguish an absent, malformed,
+expired, or incorrectly signed cookie without recording credentials. An absent
+cookie may mean the browser evicted it; a bad signature may indicate key rotation.
+Mjolnir has one personal viewer trust domain; it does not provide per-user roles
+or session-level authorization.
 
 Without trusted TLS, the server remains on loopback. With automatic Tailscale
 detection, Mjolnir exposes the viewer on the tailnet only after it obtains a

@@ -174,14 +174,8 @@ pub(super) async fn require_session(
     request: Request,
     next: Next,
 ) -> Result<Response<Body>, ApiError> {
-    let cookie = request
-        .headers()
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|header| cookie_value(header, COOKIE_NAME));
-    if cookie.is_some_and(|value| session_cookie_valid(&state.cookie_key, value, now_unix())) {
-        Ok(next.run(request).await)
-    } else {
-        Err(ApiError::unauthorized())
-    }
+    let cookie = renewed_session_cookie(&state, request.headers())?;
+    let mut response = next.run(request).await;
+    response.headers_mut().entry(SET_COOKIE).or_insert(cookie);
+    Ok(response)
 }

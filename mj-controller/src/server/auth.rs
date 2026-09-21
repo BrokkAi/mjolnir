@@ -36,11 +36,11 @@ pub(super) fn generate_viewer_code() -> AnyResult<String> {
     }
 }
 
-pub(super) fn generate_login_token() -> AnyResult<String> {
-    let mut token = [0_u8; 32];
-    getrandom::fill(&mut token)
-        .map_err(|error| anyhow::anyhow!("generate Mjolnir viewer login token: {error}"))?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token))
+/// A stable credential with a signing purpose separate from session cookies.
+pub(super) fn derive_login_token(key: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts arbitrary key lengths");
+    mac.update(b"mjolnir:viewer-login-token:v1");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
 pub(super) fn generate_cookie_key() -> AnyResult<[u8; COOKIE_KEY_BYTES]> {
@@ -75,6 +75,7 @@ pub(super) fn signed_cookie_value(key: &[u8], viewer: &str, expiry: u64) -> Stri
     format!("{viewer}.{expiry}.{signature}")
 }
 
+#[cfg(test)]
 pub(super) fn session_cookie_valid(key: &[u8], value: &str, now: u64) -> bool {
     cookie_viewer(key, value, now).is_some()
 }
@@ -96,15 +97,63 @@ pub fn mint_desktop_session_cookie(key: &[u8]) -> AnyResult<String> {
 
 /// The viewer a cookie names, or `None` when the cookie is not valid.
 pub(super) fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<String> {
+    validate_cookie(key, Some(value), now).ok()
+}
+
+fn validate_cookie(key: &[u8], value: Option<&str>, now: u64) -> Result<String, &'static str> {
+    let value = value.ok_or("absent")?;
     let [viewer, expiry, _] = value.split('.').collect::<Vec<_>>()[..] else {
-        return None;
+        return Err("malformed");
     };
-    let expiry = expiry.parse::<u64>().ok()?;
-    if now >= expiry {
-        return None;
-    }
+    let expiry = expiry.parse::<u64>().map_err(|_| "malformed")?;
     let expected = signed_cookie_value(key, viewer, expiry);
-    constant_time_eq(expected.as_bytes(), value.as_bytes()).then(|| viewer.to_owned())
+    if !constant_time_eq(expected.as_bytes(), value.as_bytes()) {
+        return Err("bad_signature");
+    }
+    if now >= expiry {
+        return Err("expired");
+    }
+    Ok(viewer.to_owned())
+}
+
+/// Validate once and renew without changing the identity that owns drafts.
+pub(super) fn renewed_session_cookie(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<HeaderValue, ApiError> {
+    let cookie = headers
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|header| cookie_value(header, COOKIE_NAME));
+    let now = now_unix();
+    let viewer = validate_cookie(&state.cookie_key, cookie, now).map_err(|reason| {
+        tracing::debug!(reason, "viewer session cookie rejected");
+        ApiError::unauthorized()
+    })?;
+    viewer_session_cookie(state, &viewer, now)
+}
+
+pub(super) fn viewer_session_cookie(
+    state: &ServerState,
+    viewer: &str,
+    now: u64,
+) -> Result<HeaderValue, ApiError> {
+    let ephemeral = state.session_ttl.is_zero();
+    let validity = if ephemeral {
+        EPHEMERAL_SESSION_TTL
+    } else {
+        state.session_ttl
+    };
+    let value = signed_cookie_value(
+        &state.cookie_key,
+        viewer,
+        now.saturating_add(validity.as_secs()),
+    );
+    session_cookie_header(
+        &value,
+        (!ephemeral).then_some(validity.as_secs()),
+        state.secure_cookie,
+    )
 }
 
 pub(super) fn session_cookie_header(
@@ -165,4 +214,29 @@ pub(super) fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cookie_rejection_reasons_distinguish_eviction_expiry_and_tampering() {
+        let key = b"a test key";
+        assert_eq!(validate_cookie(key, None, 100), Err("absent"));
+        assert_eq!(validate_cookie(key, Some("bad"), 100), Err("malformed"));
+        assert_eq!(
+            validate_cookie(key, Some("viewer.bad.signature"), 100),
+            Err("malformed")
+        );
+        let expired = signed_cookie_value(key, "viewer", 100);
+        assert_eq!(validate_cookie(key, Some(&expired), 100), Err("expired"));
+        let wrong = signed_cookie_value(b"other key", "viewer", 200);
+        assert_eq!(
+            validate_cookie(key, Some(&wrong), 100),
+            Err("bad_signature")
+        );
+        let valid = signed_cookie_value(key, "viewer", 200);
+        assert_eq!(validate_cookie(key, Some(&valid), 100), Ok("viewer".into()));
+    }
 }

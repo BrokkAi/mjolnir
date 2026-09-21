@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::Request;
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, SET_COOKIE};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
