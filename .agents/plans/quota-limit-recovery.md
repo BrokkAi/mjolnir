@@ -26,7 +26,7 @@ The implementation retains existing exclusions for subagents, active goals, plan
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The full default Cargo suite passed with no failures (26 ignored opt-in/platform tests across its result blocks). `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, proxy tests, TypeScript checking, and the Wrangler deployment dry run passed. All runtime tests used isolated storage under `/mnt/optane/mj-quota-recovery-validation/`; no production instance or live store was upgraded. Hosted v2 publication remains a separate step before distributing this build to hosted users.
+Implementation and validation are complete. The full default Cargo suite passed with no failures (26 ignored opt-in/platform tests across its result blocks). `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, proxy tests, TypeScript checking, and the Wrangler deployment dry run passed. All runtime tests used isolated storage under `/mnt/optane/mj-quota-recovery-validation/`; no production instance or live store was upgraded. The user subsequently authorized hosted proxy deployment; version `82f5f640-5ac7-4588-902c-99154fb2fa98` is deployed and synthetic smoke checks passed for all six routes.
 
 The initial test runs exposed short command IDs in new fixtures and existing migration fixtures tied to revision 43. The corrected fixtures now exercise protocol 20, snapshot 11, and the breaking database revision 44. Explicit-turn wait behavior remains unchanged during ordinary classification. Cached-window merging is shared between persistence and recovery so fresh usage values always win while missing reset timestamps survive provider failures.
 
@@ -69,3 +69,5 @@ Revision note (2026-09-21): Created from the accepted conversation plan before i
 Revision note (2026-09-21): Recorded implemented milestones and initial validation. The optional desktop crate requires unavailable GTK development libraries; required validation uses the repository default members.
 
 Revision note (2026-09-21): Completed validation, recorded the fixture fixes and shared cache merge, and prepared the required commit. Logs are in `/mnt/optane/mj-quota-recovery-validation/cargo-test.log`, `clippy.log`, and `wrangler.log`. The deployment dry run used an explicit writable log path and did not publish.
+
+Revision note (2026-09-21): The subsequent explicit request to deploy the hosted proxy superseded the original no-publication scope. Deployed commit `72dbefee` and verified quota-positive and quoted-example-negative controls, backward-compatible routes, and malformed-request rejection. Deployment details are recorded in `.agents/docs/jev-proxy.md`; no live store upgrade or Git push was performed.
