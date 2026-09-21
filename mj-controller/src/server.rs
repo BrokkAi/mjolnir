@@ -132,8 +132,8 @@ pub fn cookie_key_path() -> PathBuf {
 
 /// Load the phone cookie signing key, creating it on first use.
 ///
-/// Session cookies are stateless, so this file is the only thing that keeps a
-/// signed-in phone signed in across daemon restarts. Deleting it is
+/// This signing key keeps a signed-in phone signed in across daemon restarts.
+/// Logged-out identities are tracked separately. Deleting the key is
 /// therefore the explicit sign-everyone-out gesture: the next start writes a
 /// new key and every outstanding cookie stops validating. A missing file is
 /// ordinary first use; an unreadable or too-short one is replaced loudly,
@@ -163,8 +163,8 @@ pub fn load_or_create_cookie_key(path: &std::path::Path) -> AnyResult<Vec<u8>> {
 ///
 /// `ServerOptions::new` generates both the six-digit viewer code and an
 /// ephemeral cookie key. A caller that wants cookies to survive server
-/// restarts installs a persisted key with `set_cookie_key`, which
-/// `load_or_create_cookie_key` reads from its private Hel data directory. The
+/// restarts loads its key and logout records with `load_cookie_credentials`.
+/// `set_cookie_key` installs a key for callers managing storage themselves. The
 /// key and viewer code are intentionally omitted from `Debug` output.
 #[derive(Clone)]
 pub struct ServerOptions {
@@ -191,6 +191,7 @@ pub struct ServerOptions {
     viewer_code: String,
     login_token: String,
     cookie_key: Vec<u8>,
+    viewer_revocations: Arc<ViewerRevocations>,
     api_token: String,
     subagent: Option<Arc<dyn api::SubagentBackend>>,
 }
@@ -213,6 +214,7 @@ impl ServerOptions {
         conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
         requests: ServerRequests,
     ) -> AnyResult<Self> {
+        let cookie_key = generate_cookie_key()?.to_vec();
         Ok(Self {
             bind,
             snapshot_rx,
@@ -230,8 +232,9 @@ impl ServerOptions {
             secure_cookie: true,
             tls_config: None,
             viewer_code: generate_viewer_code()?,
-            login_token: generate_login_token()?,
-            cookie_key: generate_cookie_key()?.to_vec(),
+            login_token: derive_login_token(&cookie_key),
+            cookie_key,
+            viewer_revocations: Arc::new(ViewerRevocations::default()),
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
@@ -256,13 +259,30 @@ impl ServerOptions {
     }
 
     /// Install a persisted signing key. Rotating this value signs every phone
-    /// out without maintaining a server-side session database.
+    /// out and revokes QR login URLs. This does not load durable logout records;
+    /// use `load_cookie_credentials` for the daemon's persisted credentials.
     pub fn set_cookie_key(&mut self, key: Vec<u8>) -> AnyResult<()> {
         anyhow::ensure!(
             key.len() >= COOKIE_KEY_BYTES,
             "cookie signing key must be at least {COOKIE_KEY_BYTES} bytes"
         );
+        self.login_token = derive_login_token(&key);
         self.cookie_key = key;
+        Ok(())
+    }
+
+    /// Load the signing key and durable logout records off the async runtime.
+    pub async fn load_cookie_credentials(&mut self, path: PathBuf) -> AnyResult<()> {
+        let (key, revocations) = tokio::task::spawn_blocking(move || {
+            let key = load_or_create_cookie_key(&path)?;
+            let revocations =
+                ViewerRevocations::load(path.with_file_name("phone-cookie-revocations.json"))?;
+            Ok::<_, anyhow::Error>((key, revocations))
+        })
+        .await
+        .context("load viewer credentials task")??;
+        self.set_cookie_key(key)?;
+        self.viewer_revocations = Arc::new(revocations);
         Ok(())
     }
 

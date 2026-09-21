@@ -85,18 +85,20 @@ pub(super) async fn require_api_auth(
     }) {
         return Ok(next.run(request).await);
     }
-    let cookie = request
-        .headers()
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|header| cookie_value(header, COOKIE_NAME));
-    if cookie.is_some_and(|value| session_cookie_valid(&state.cookie_key, value, now_unix())) {
-        return Ok(next.run(request).await);
-    }
-    Err(ApiFailure::new(
-        StatusCode::UNAUTHORIZED,
-        "supply the API token from the api-token file as a bearer token",
-    ))
+    let cookie =
+        super::super::authenticated_viewer(&state, request.headers()).map_err(|error| {
+            if error.status == StatusCode::UNAUTHORIZED {
+                ApiFailure::new(
+                    StatusCode::UNAUTHORIZED,
+                    "supply the API token from the api-token file as a bearer token",
+                )
+            } else {
+                ApiFailure::from(error)
+            }
+        })?;
+    let mut response = next.run(request).await;
+    super::super::renew_viewer_response(&state, &cookie, &mut response)?;
+    Ok(response)
 }
 
 /// Stamp the contract version and forbid caching on every API response,

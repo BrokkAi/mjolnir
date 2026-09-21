@@ -4011,3 +4011,402 @@ fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
     assert_eq!(std::fs::read(&path).unwrap(), key);
     assert_eq!(load_or_create_cookie_key(&path).unwrap(), key);
 }
+
+#[tokio::test]
+async fn bookmarked_qr_login_survives_restart_and_is_revoked_with_the_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    for _ in 0..2 {
+        let mut restarted = detached_options();
+        restarted
+            .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+            .unwrap();
+        let app = router(restarted);
+        let response = app
+            .clone()
+            .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[LOCATION], "/");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let cookie = response.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let snapshot = app
+            .oneshot(
+                Request::get("/api/snapshot")
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+    }
+    std::fs::remove_file(&path).unwrap();
+    let mut rotated = detached_options();
+    rotated
+        .set_cookie_key(load_or_create_cookie_key(&path).unwrap())
+        .unwrap();
+    let response = router(rotated)
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn authenticated_requests_renew_cookies_without_changing_viewer_identity() {
+    for ttl in [Duration::from_secs(3600), Duration::ZERO] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let mut options = detached_options();
+            options.session_ttl = ttl;
+            let key = options.cookie_key.clone();
+            let now = now_unix();
+            let old_expiry = now + 60;
+            let viewer = if ttl.is_zero() {
+                "session:existing-viewer"
+            } else {
+                "phone:existing-viewer"
+            };
+            let old_cookie = signed_cookie_value(&key, viewer, old_expiry);
+            let response = router(options)
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={old_cookie}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            let header = response.headers()[SET_COOKIE].to_str().unwrap();
+            let renewed = cookie_value(header, COOKIE_NAME).unwrap();
+            assert_eq!(
+                cookie_viewer(&key, renewed, old_expiry).as_deref(),
+                Some(viewer)
+            );
+            let expiry = renewed.split('.').nth(1).unwrap().parse::<u64>().unwrap();
+            let validity = if ttl.is_zero() {
+                EPHEMERAL_SESSION_TTL
+            } else {
+                ttl
+            };
+            assert!(expiry >= now + validity.as_secs());
+            assert!(expiry <= now_unix() + validity.as_secs());
+            assert!(header.contains("HttpOnly"));
+            assert!(header.contains("SameSite=Strict"));
+            assert!(header.contains("Secure"));
+            assert_eq!(header.contains("Max-Age="), !ttl.is_zero());
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejected_cookies_are_not_renewed_and_bearer_auth_does_not_mint_a_cookie() {
+    let mut options = detached_options();
+    let key = options.cookie_key.clone();
+    options.set_api_token("test-bearer".into());
+    let app = router(options);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for value in [
+            None,
+            Some("malformed".to_owned()),
+            Some(signed_cookie_value(&key, "expired-viewer", now_unix())),
+            Some(signed_cookie_value(
+                b"wrong-key",
+                "wrong-viewer",
+                now_unix() + 3600,
+            )),
+        ] {
+            let mut request = Request::get(route);
+            if let Some(value) = value {
+                request = request.header(COOKIE, format!("{COOKIE_NAME}={value}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/sessions")
+                .header(axum::http::header::AUTHORIZATION, "Bearer test-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+}
+
+#[tokio::test]
+async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() {
+    let (app, mut bundles) = app_with_bundle_receiver();
+    let cookie = login_cookie(&app).await;
+    let other_viewer = login_cookie(&app).await;
+    let early = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let early_cookie = early.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let pending = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/api/bundles")
+                .header(COOKIE, &cookie)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"source":"owner/repo"}"#))
+                .unwrap(),
+        ),
+    );
+    let bundle = bundles.recv().await.unwrap();
+    let logout = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert!(
+        logout.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    bundle
+        .reply
+        .send(Err(BundleFailure::InvalidSource))
+        .unwrap();
+    let late = pending.await.unwrap().unwrap();
+    assert!(
+        !late.headers().contains_key(SET_COOKIE),
+        "a delayed response must not renew after logout"
+    );
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        for revoked in [&cookie, &early_cookie] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, revoked)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, &other_viewer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
+    let options = detached_options();
+    let key = options.cookie_key.clone();
+    let desktop = mint_desktop_session_cookie(&key).unwrap();
+    let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
+    let app = router(options);
+    for value in [desktop, legacy] {
+        for route in ["/api/snapshot", "/api/v1/sessions"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(route)
+                        .header(COOKIE, format!("{COOKIE_NAME}={value}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(SET_COOKIE));
+        }
+    }
+}
+
+#[tokio::test]
+async fn logout_survives_restart_without_revoking_the_bookmarked_login_url() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut original = detached_options();
+    original
+        .load_cookie_credentials(path.clone())
+        .await
+        .unwrap();
+    let url = format!("/auth/login?token={}", original.login_token());
+    let app = router(original);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let logout = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted.load_cookie_credentials(path).await.unwrap();
+    let restarted = router(restarted);
+    for route in ["/api/snapshot", "/api/v1/sessions"] {
+        let denied = restarted
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header(COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    let fresh = restarted
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::SEE_OTHER);
+    let new_cookie = fresh.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let accepted = restarted
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, new_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_reports_persistence_failure_and_revokes_in_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("phone-cookie-key");
+    let mut options = detached_options();
+    options.load_cookie_credentials(path).await.unwrap();
+    let url = format!("/auth/login?token={}", options.login_token());
+    // A directory at the ledger path deterministically refuses the atomic write.
+    std::fs::create_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let app = router(options);
+    let login = app
+        .clone()
+        .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = login.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.headers().contains_key(SET_COOKIE));
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    std::fs::remove_dir(directory.path().join("phone-cookie-revocations.json")).unwrap();
+    let retried = app
+        .oneshot(
+            Request::delete("/auth/session")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+    let mut restarted = detached_options();
+    restarted
+        .load_cookie_credentials(directory.path().join("phone-cookie-key"))
+        .await
+        .unwrap();
+    let denied = router(restarted)
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}
