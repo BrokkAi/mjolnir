@@ -65,8 +65,8 @@ async fn completed_turn_response(
             return;
         }
         let body = serde_json::json!({"answers": {
-            "waiting_on": {"choice":choice, "confidence":confidence},
-            "asked_question": {"type":"noul", "noul":0.01}
+            "work_state": {"type":"choice", "choice":if choice == "user" { "background_work" } else { choice }, "confidence":confidence},
+            "needs_user_input": {"type":"noul", "noul":if choice == "user" { confidence } else { 0.01 }}
         }})
         .to_string();
         stream

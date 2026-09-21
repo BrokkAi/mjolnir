@@ -2,7 +2,7 @@
 
 The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict`, `/v2/turn-verdict`, `/v1/help-search`, and `/v1/continuation-verdict`. All four routes are deployed. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
 
-The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json` (v2) or the frozen `verdict_questions_v1.json` (v1), calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
+The turn-verdict route accepts POST JSON turn evidence. It supplies the fixed model and questions from `mj-core/src/activity/verdict_questions.json` (v3), frozen `verdict_questions_v2.json` (v2), or frozen `verdict_questions_v1.json` (v1), calls TypeSafe, and returns the two typed answers consumed by mj. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoints without credentials. Changing a shared question resource affects both implementations and requires deploying the Worker as well as releasing mj.
 
 ## Help search
 
@@ -69,3 +69,9 @@ The 0+1 policy selection and authorized fifty-request strict pilot plus one-hund
 `CONTINUATION_RATE_LIMITER` has its own 120/minute per-IP budget. Missing bindings fail closed. The endpoint shares existing transport deadlines, sanitized errors, and no-payload-logging behavior. Deploy the route before releasing clients that use it; smoke-test only synthetic scenarios. Rollback leaves clients abstaining without automatic continuation.
 
 Continuation and v2 support were deployed on 2026-09-20 UTC as version `abf42692-4729-42f5-98d1-26041fbe95c6`. Synthetic smoke checks returned HTTP 200 for all four routes. The continuation example scored unfinished=0.96 and no_input_needed=0.94. Requests without User-Agent, matching mj's Rust client, succeeded; the edge rejected the generic Python urllib User-Agent with 403. No private session content was used for deployment smoke tests.
+
+## V3 input and work assessments (not yet deployed)
+
+The additive `/v3/turn-verdict` route accepts the same bounded evidence as v2. It asks `needs_user_input` (Noul probability) independently of `work_state` (choice and confidence). Background work can coexist with a current request for approval. The new worker uses v3; v1/v2 retain their previous question files and response validators. Deploy the additive proxy before distributing the new worker. Endpoint failures preserve activity and never fall back to v2.
+
+Run `npm test`, `npm run check`, and `npm run deploy:dry-run` in `services/jev-proxy` before publication. This implementation task does not deploy. Synthetic-only observations are recorded in `jev-turn-verdict-v3-synthetic.json`; the initial wording experiment is retained separately. These observations are not a comparative evaluation of history selection or private sessions.

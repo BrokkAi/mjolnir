@@ -1136,6 +1136,8 @@ impl DurableRelay {
             }
             self.capacity_response = CapacityResponse::default();
         }
+        let awaiting_input = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
+            if stop_reason == mj_core::acp::AWAITING_INPUT_STOP_REASON);
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         let classify_reply = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
             if mj_core::state::classify_prompt_completion(stop_reason) == mj_core::state::PromptCompletion::Finished);
@@ -1170,7 +1172,16 @@ impl DurableRelay {
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
-        self.replied_verdict_pending |= classify_reply;
+        if awaiting_input {
+            // The running classifier already established the handoff. Keep independently
+            // tracked children and their controls while making the parent ready for input.
+            self.apply_replied_decision(
+                self.turn_context.generation(),
+                mj_core::activity::verdict::Decision::InferIdle,
+                mj_core::clock::epoch_millis(),
+            )?;
+        }
+        self.replied_verdict_pending |= classify_reply && !awaiting_input;
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }

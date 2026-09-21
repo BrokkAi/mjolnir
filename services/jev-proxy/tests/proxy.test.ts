@@ -185,12 +185,13 @@ test("the deadline also covers a stalled response body", async t => {
 
 
 test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", async t => {
+  const { default: questionsV2 } = await import("../../../mj-core/src/activity/verdict_questions_v2.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, transcript_summary: '<tool cargo test [completed]>full results</tool>' };
   const calls = upstream(t, async (_url, options) => {
     const forwarded = JSON.parse(options!.body as string);
     assert.deepEqual(forwarded.state, state);
-    assert.match(forwarded.questions.waiting_on.instructions, /transcript_summary/);
+    assert.deepEqual(forwarded.questions, questionsV2);
     return Response.json(answer);
   });
   function v2(body: unknown) {
@@ -201,4 +202,34 @@ test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", a
     await expectError(await proxy.fetch(v2(bad), environment()),400,"invalid_evidence");
   }
   assert.equal(calls.callCount(),1);
+});
+
+test("v3 assesses input and work independently using the direct client's shared questions", async t => {
+  const { default: questionsV3 } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { recent_tools: _old, ...rest } = base;
+  const state = { ...rest, transcript_summary: "Assistant: Approve deployment? The independent heap task continues.", background_commands: 1 };
+  const result = { answers: {
+    needs_user_input: { type: "noul", noul: 0.98 },
+    work_state: { type: "choice", choice: "background_work", confidence: 0.99 },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: questionsV3 });
+    return Response.json({ ...result, debug: "private-test-key" });
+  });
+  const v3 = () => new Request("https://proxy.example/v3/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  });
+  const response = await proxy.fetch(v3(), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+  assert.equal(calls.callCount(), 1);
+  calls.restore();
+  for (const malformed of [answer, {}, { answers: { ...result.answers, needs_user_input: { type: "noul", noul: -0.01 } } },
+    { answers: { ...result.answers, work_state: { type: "choice", choice: "finished", confidence: 1.01 } } },
+    { answers: { ...result.answers, needs_user_input: 0.98 } }]) {
+    const bad = upstream(t, async () => Response.json(malformed));
+    await expectError(await proxy.fetch(v3(), environment()), 502, "invalid_upstream_response");
+    assert.equal(bad.callCount(), 1);
+    bad.restore();
+  }
 });

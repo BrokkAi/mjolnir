@@ -2611,7 +2611,8 @@ async fn silent_after_prompt_bridge(
     observed: mpsc::UnboundedSender<String>,
     open_a_tool_call: bool,
 ) {
-    silent_after_prompt_bridge_with_late_reply(stream, observed, open_a_tool_call, false).await;
+    silent_after_prompt_bridge_with_late_reply(stream, observed, open_a_tool_call, false, false)
+        .await;
 }
 
 async fn silent_after_prompt_bridge_with_late_reply(
@@ -2619,13 +2620,33 @@ async fn silent_after_prompt_bridge_with_late_reply(
     observed: mpsc::UnboundedSender<String>,
     open_a_tool_call: bool,
     late_reply: bool,
+    child_traffic: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut prior_prompt = None;
-    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+    let mut traffic = tokio::time::interval(Duration::from_millis(100));
+    let mut child_started = false;
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => match line.expect("read bridge input") {
+                Some(line) => line,
+                None => break,
+            },
+            _ = traffic.tick(), if child_started => {
+                for (session, update) in [
+                    ("scripted", serde_json::json!({"sessionUpdate":"subagent_state_update", "subagentSessionId":"heap", "state":"running"})),
+                    ("heap", serde_json::json!({"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Heap analysis continues."}})),
+                    ("heap", serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"heap-tool", "title":"inspect heap", "status":"in_progress"})),
+                ] {
+                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":session, "update":update}});
+                    if write.write_all(format!("{update}\n").as_bytes()).await.is_err() { return; }
+                }
+                continue;
+            }
+        };
         let request: serde_json::Value =
             serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
         let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
@@ -2642,12 +2663,25 @@ async fn silent_after_prompt_bridge_with_late_reply(
                 "id": id,
                 "result": {"protocolVersion": 1},
             }),
+            "session/new" | "session/load" if child_traffic => serde_json::json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"sessionId":"scripted", "modes":{"currentModeId":"auto", "availableModes":[{"id":"auto", "name":"Auto"}]}},
+            }),
+            "session/set_mode" => serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{}}),
             "session/new" | "session/load" => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {"sessionId": "scripted"},
             }),
             "session/prompt" => {
+                if child_traffic && !child_started {
+                    let spawn = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"subagent_spawned", "subagentSessionId":"heap", "name":"heap", "task":"Independent heap analysis", "capabilities":{}}}});
+                    write
+                        .write_all(format!("{spawn}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    child_started = true;
+                }
                 if late_reply && let Some(prior) = prior_prompt.replace(id) {
                     let reply = serde_json::json!({"jsonrpc":"2.0", "id":prior, "result":{"stopReason":"end_turn"}});
                     if write
@@ -5774,7 +5808,7 @@ async fn a_used_codex_thread_codex_cannot_find_fails_instead_of_starting_over() 
 
 /// Exercise the real session select loop and the production 60-second cadence.
 #[tokio::test(flavor = "current_thread")]
-async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_session() {
+async fn classifier_marks_silent_parent_awaiting_input_despite_continuous_native_child_traffic() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/", listener.local_addr().unwrap());
@@ -5797,8 +5831,8 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         let evidence: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(evidence["state"]["phase"], "running");
         let answer = serde_json::json!({"answers": {
-            "waiting_on":{"type":"choice","choice":"user","confidence":0.95},
-            "asked_question":{"type":"noul","noul":0.95}
+            "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
+            "needs_user_input":{"type":"noul","noul":0.95}
         }})
         .to_string();
         socket
@@ -5819,6 +5853,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         observed_tx,
         false,
         true,
+        true,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
@@ -5828,6 +5863,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
         silence: None,
         tool_call: None,
     });
+    spec.harness = HarnessKind::Claude;
     spec.verdict = Some(VerdictSource::Direct {
         key: "test-key".into(),
         endpoint,
@@ -5854,6 +5890,7 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
     wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
     let (noticed, diagnostic) = tokio::time::timeout(Duration::from_secs(75), async {
         let mut noticed = false;
+        let mut child_updates = 0;
         loop {
             match event_rx.recv().await.unwrap() {
                 RuntimeEvent::Notice { message } => {
@@ -5866,8 +5903,10 @@ async fn classifier_marks_a_quiet_prompt_as_awaiting_input_without_closing_the_s
                     ..
                 } => {
                     assert_eq!(stop_reason, mj_core::acp::AWAITING_INPUT_STOP_REASON);
+                    assert!(child_updates > 100, "continuous native child traffic was routed");
                     break (noticed, diagnostic.unwrap());
                 }
+                RuntimeEvent::NativeAgent { .. } => child_updates += 1,
                 _ => {}
             }
         }

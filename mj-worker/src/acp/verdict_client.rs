@@ -4,7 +4,7 @@ use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
 const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v2/turn-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v3/turn-verdict";
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -100,7 +100,7 @@ impl VerdictAttempt {
                 ),
                 ("unchanged", "keep_current") if self.uncertain => (
                     "uncertain",
-                    "Confidence was below 85%; mj kept the runtime status.".into(),
+                    "The independent assessments did not meet the action thresholds; mj kept the runtime status.".into(),
                 ),
                 ("unchanged", "keep_current") => (
                     "unchanged",
@@ -115,6 +115,10 @@ impl VerdictAttempt {
                     format!("Mj kept the runtime status: {}.", reason.replace('_', " ")),
                 ),
             };
+            diagnostic.update(None, serde_json::json!({
+                "outcome": outcome, "reason": reason,
+                "applied_decision": if outcome == "applied" { self.decision.map(|d| format!("{d:?}")) } else { None }
+            }));
             diagnostic.finish(status, &action);
         }
         self.finished = true;
@@ -197,7 +201,7 @@ impl VerdictClient {
             "Does the session need user input, expect more agent work, or appear finished?",
             "Current delivered user request and assistant conversation, plus live runtime facts. Transcript tool history is excluded; bounded summaries may omit older text."));
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v2", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "asked_question_affects_decision":false, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v3", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -226,26 +230,13 @@ impl VerdictClient {
                 Ok(answer) => {
                     attempt.decision =
                         Some(mj_core::activity::verdict::decide(evidence.phase, answer));
-                    attempt.uncertain =
-                        answer.confidence < mj_core::activity::verdict::ACT_CONFIDENCE;
-                    let assessment = match answer.waiting_on {
-                        mj_core::activity::verdict::WaitingOn::User => {
-                            "Jev assessed that the agent is waiting for the user."
-                        }
-                        mj_core::activity::verdict::WaitingOn::BackgroundWork => {
-                            "Jev assessed that background work still needs a follow-up."
-                        }
-                        mj_core::activity::verdict::WaitingOn::StillWorking => {
-                            "Jev assessed that the agent is still working."
-                        }
-                        mj_core::activity::verdict::WaitingOn::Finished => {
-                            "Jev assessed that the work is finished."
-                        }
-                        mj_core::activity::verdict::WaitingOn::Unclear => {
-                            "Jev could not determine what should happen next."
-                        }
-                    };
-                    diagnostic.update(Some(assessment), serde_json::json!({"result": {"waiting_on":format!("{:?}", answer.waiting_on), "confidence":answer.confidence, "asked_question":answer.asked_question}}));
+                    attempt.uncertain = answer.needs_user_input
+                        < mj_core::activity::verdict::ACT_CONFIDENCE
+                        && (answer.needs_user_input
+                            > mj_core::activity::verdict::NO_INPUT_CONFIDENCE
+                            || answer.work_state_confidence
+                                < mj_core::activity::verdict::ACT_CONFIDENCE);
+                    diagnostic.update(Some("Jev assessed user input need and remaining work independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
                 }
                 Err(error) => diagnostic.update(
                     Some("No usable Jev answer."),
@@ -255,8 +246,8 @@ impl VerdictClient {
         }
         match &result {
             Ok(answer) => tracing::info!(target: "mj_jev", request_id = attempt.id, session,
-                generation, phase = ?evidence.phase, verdict = ?answer.waiting_on,
-                confidence = %answer.confidence, asked_question = %answer.asked_question,
+                generation, phase = ?evidence.phase, verdict = ?answer.work_state,
+                confidence = %answer.work_state_confidence, needs_user_input = %answer.needs_user_input,
                 decision = ?mj_core::activity::verdict::decide(evidence.phase, answer),
                 elapsed_ms = attempt.started.elapsed().as_millis() as u64, "Jev classification received"),
             Err(error) => tracing::warn!(target: "mj_jev", request_id = attempt.id, session,
@@ -325,31 +316,31 @@ async fn await_input_verdict_with_cadence(
     first: Duration,
 ) -> VerdictAttempt {
     use mj_core::activity::verdict::{Decision, TurnPhase, decide};
-    let mut observed = spec.acp_activity.last_at_ms();
+    let mut observed = spec.turn_context.parent_activity();
     let mut gap = first;
     let mut next_silence = first;
     loop {
         let facts = super::turn_stall_facts(spec);
-        if observed != facts.last_acp_activity_at_ms {
-            observed = facts.last_acp_activity_at_ms;
+        if observed != spec.turn_context.parent_activity() {
+            observed = spec.turn_context.parent_activity();
             gap = first;
             next_silence = first;
         }
         let now = mj_core::clock::epoch_millis();
-        let silent =
-            Duration::from_millis(now.saturating_sub(observed.unwrap_or(now)).max(0) as u64);
+        let silent = observed.map_or(Duration::ZERO, |at| at.elapsed());
         if silent < next_silence {
             tokio::time::sleep((next_silence - silent).min(Duration::from_secs(1))).await;
             continue;
         }
         let generation = spec.turn_context.generation();
-        let evidence = spec
-            .turn_context
-            .evidence(spec.harness, TurnPhase::Running, &facts, now);
+        let mut evidence =
+            spec.turn_context
+                .evidence(spec.harness, TurnPhase::Running, &facts, now);
+        evidence.silent_for_s = silent.as_secs();
         let (mut attempt, answer) = client
             .ask_logged(&spec.turn_context.session_id(), generation, &evidence)
             .await;
-        if observed != spec.acp_activity.last_at_ms()
+        if observed != spec.turn_context.parent_activity()
             || generation != spec.turn_context.generation()
         {
             attempt.finish("discarded", "activity_or_generation_changed");
@@ -370,7 +361,7 @@ async fn await_input_verdict_with_cadence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::activity::verdict::{TurnPhase, WaitingOn};
+    use mj_core::activity::verdict::{TurnPhase, WorkState};
     use mj_transcript::turn_context::TurnContext;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -458,6 +449,10 @@ mod tests {
             submitted
         );
         assert_eq!(page.decisions[0].status, "stale");
+        let technical = page.decisions[0].technical.as_ref().unwrap();
+        assert_eq!(technical["applied_decision"], serde_json::Value::Null);
+        assert_eq!(technical["outcome"], "discarded");
+        assert_eq!(technical["reason"], "activity_or_generation_changed");
         let text = serde_json::to_string(&page).unwrap();
         assert!(!text.contains("Bearer"));
         assert!(!text.contains("authorization"));
@@ -468,6 +463,105 @@ mod tests {
                 .technical
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn applied_log_records_both_assessments_thresholds_and_actual_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = mj_core::jev::DecisionLog::open(directory.path().into()).unwrap();
+        let (client, server) = server(response("user")).await;
+        let client = client.with_log(Some(log));
+        let (mut attempt, result) = client.ask_logged("synthetic", 7, &evidence()).await;
+        assert_eq!(
+            mj_core::activity::verdict::decide(TurnPhase::Running, &result.unwrap()),
+            mj_core::activity::verdict::Decision::AwaitingInput
+        );
+        let id = attempt.diagnostic.as_ref().unwrap().id();
+        attempt.finish("applied", "awaiting_input");
+        server.await.unwrap();
+        let page = mj_core::jev::read(directory.path(), "synthetic", Some(&id)).unwrap();
+        let record = &page.decisions[0];
+        assert_eq!(record.status, "applied");
+        let technical = record.technical.as_ref().unwrap();
+        assert_eq!(technical["contract"], "turn-verdict-v3");
+        assert_eq!(
+            technical["confidence_threshold"],
+            serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)
+        );
+        assert_eq!(
+            technical["no_input_threshold"],
+            serde_json::json!(mj_core::activity::verdict::NO_INPUT_CONFIDENCE)
+        );
+        let scores = technical["result"].as_object().unwrap();
+        assert_eq!(scores.len(), 3);
+        assert_eq!(scores["work_state"], "BackgroundWork");
+        assert_eq!(
+            scores["work_state_confidence"].as_f64().unwrap() as f32,
+            0.95
+        );
+        assert_eq!(scores["needs_user_input"].as_f64().unwrap() as f32, 0.96);
+        assert_eq!(technical["proposed_decision"], "AwaitingInput");
+        assert_eq!(technical["applied_decision"], "AwaitingInput");
+        assert_eq!(technical["outcome"], "applied");
+        assert_eq!(technical["reason"], "awaiting_input");
+    }
+
+    #[tokio::test]
+    async fn continuous_overall_activity_does_not_postpone_or_invalidate_parent_check() {
+        let (client, server) = delayed_server(response("user"), Duration::from_millis(80)).await;
+        let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.turn_context
+            .reset("Prepare a deployment while the heap task continues independently.");
+        spec.turn_context.set_counts(1, 0);
+        let activity = spec.acp_activity.clone();
+        let updates = tokio::spawn(async move {
+            for _ in 0..50 {
+                activity.mark();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut attempt = tokio::time::timeout(
+            Duration::from_millis(200),
+            await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(30)),
+        )
+        .await
+        .unwrap();
+        attempt.finish("applied", "awaiting_input");
+        let request = server.await.unwrap();
+        assert_eq!(request["state"]["background_commands"], 1);
+        updates.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn changed_inventory_discards_pending_verdict_without_resetting_parent_clock() {
+        let (client, server) = delayed_server(response("user"), Duration::from_millis(100)).await;
+        let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.turn_context.reset("Approve deployment?");
+        spec.turn_context
+            .set_background_inventory(vec![], vec!["heap".into()]);
+        let context = spec.turn_context.clone();
+        let before = context.parent_activity();
+        let update = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            context.set_background_inventory(vec![], vec!["replacement".into()]);
+            assert_eq!(context.parent_activity(), before);
+        });
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(5))
+            )
+            .await
+            .is_err()
+        );
+        update.await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]
@@ -489,7 +583,7 @@ mod tests {
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v2/turn-verdict", listener.local_addr().unwrap());
+            let endpoint = format!("http://{}/v3/turn-verdict", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);
@@ -516,7 +610,7 @@ mod tests {
             let result = client.ask(&evidence()).await;
             assert_eq!(result.is_ok(), status == 200);
             if let Ok(verdict) = result {
-                assert_eq!(verdict.waiting_on, WaitingOn::BackgroundWork);
+                assert_eq!(verdict.work_state, WorkState::BackgroundWork);
             }
             server.await.unwrap();
         }
@@ -526,18 +620,18 @@ mod tests {
     async fn classifier_sends_bounded_evidence_and_parses_typed_answers() {
         let (client, server) = server(
             serde_json::json!({"answers": {
-                "waiting_on":{"type":"choice","choice":"user","confidence":0.95},
-                "asked_question":{"type":"noul","noul":0.96}
+                "work_state":{"type":"choice","choice":"background_work","confidence":0.95},
+                "needs_user_input":{"type":"noul","noul":0.96}
             }})
             .to_string(),
         )
         .await;
         let answer = client.ask(&evidence()).await.unwrap();
-        assert_eq!(answer.waiting_on, WaitingOn::User);
+        assert_eq!(answer.work_state, WorkState::BackgroundWork);
         let request = server.await.unwrap();
         assert_eq!(request["model"], "jev-latest");
         assert_eq!(request["state"]["phase"], "running");
-        assert_eq!(request["questions"]["asked_question"]["type"], "noul");
+        assert_eq!(request["questions"]["needs_user_input"]["type"], "noul");
     }
 
     #[tokio::test]
@@ -563,8 +657,8 @@ mod tests {
 
     fn response(choice: &str) -> String {
         serde_json::json!({"answers": {
-            "waiting_on":{"type":"choice","choice":choice,"confidence":0.95},
-            "asked_question":{"type":"noul","noul":0.96}
+            "work_state":{"type":"choice","choice":if choice == "user" { "background_work" } else { choice },"confidence":0.95},
+            "needs_user_input":{"type":"noul","noul":if choice == "user" { 0.96 } else { 0.01 }}
         }})
         .to_string()
     }
@@ -577,7 +671,7 @@ mod tests {
                 silence: None,
                 tool_call: None,
             });
-            spec.acp_activity.mark();
+            spec.turn_context.mark_parent_activity();
             let result = tokio::time::timeout(
                 Duration::from_millis(150),
                 await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(5)),
@@ -595,11 +689,11 @@ mod tests {
             silence: None,
             tool_call: None,
         });
-        spec.acp_activity.mark();
-        let activity = spec.acp_activity.clone();
+        spec.turn_context.mark_parent_activity();
+        let activity = spec.turn_context.clone();
         let update = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            activity.mark();
+            activity.mark_parent_activity();
         });
         assert!(
             tokio::time::timeout(

@@ -6,6 +6,81 @@ use super::background::{
 use super::*;
 
 #[test]
+fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
+    use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent, NativeAgentState};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    relay.set_background_work_policy(BackgroundWorkPolicy::ClaudeTasks);
+    submit_relay(
+        &mut relay,
+        "approval",
+        prompt("Prepare deployment while analyzing the heap independently."),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::Spawned {
+                session_id: "heap".into(),
+                parent_session_id: None,
+                name: "heap".into(),
+                task: "Independent heap analysis".into(),
+                capabilities: NativeAgentCapabilities {
+                    cancel: true,
+                    close: false,
+                },
+            },
+        })
+        .unwrap();
+    relay
+        .record_observation(RelayObservation::NativeAgent {
+            event: NativeAgentEvent::State {
+                session_id: "heap".into(),
+                state: NativeAgentState::Running,
+            },
+        })
+        .unwrap();
+    relay
+        .claude_background_tasks_changed(vec![claude_task("build", "Independent build")])
+        .unwrap();
+    relay
+        .claude_async_task_control_changed("build".into(), true)
+        .unwrap();
+    let before = relay.operational_state();
+    assert_eq!(before.native_agent_count, 1);
+    relay
+        .record_command_completed(
+            "approval",
+            RelayCommandOutcome::Prompt {
+                stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let after = relay.operational_state();
+    assert!(after.activity_state().is_idle(), "{after:?}");
+    assert_eq!(after.native_agents, before.native_agents);
+    assert_eq!(after.native_agent_count, 1);
+    assert_eq!(after.background_commands, before.background_commands);
+    assert!(
+        relay
+            .background_task_stop_target("native-agent:heap")
+            .is_ok()
+    );
+    assert!(relay.background_task_stop_target("claude:build").is_ok());
+    assert!(!after.is_quiet());
+    assert!(relay.pending_replied_verdict().is_none());
+    // Repeated child output must not undo the accepted parent handoff.
+    relay.record_observation(RelayObservation::NativeAgent { event: NativeAgentEvent::Update {
+        session_id: "heap".into(), update: Box::new(serde_json::from_value(serde_json::json!({
+            "sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Still analyzing."}
+        })).unwrap()),
+    }}).unwrap();
+    assert!(relay.operational_state().activity_state().is_idle());
+}
+
+#[test]
 fn native_replay_does_not_publish_provisional_work_or_lose_retained_agents() {
     use mj_core::native_agent::{NativeAgentEvent, NativeAgentState};
     let temp = tempfile::tempdir().unwrap();

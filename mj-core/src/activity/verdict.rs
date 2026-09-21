@@ -13,6 +13,7 @@ pub const TOOL_TITLE_BYTES: usize = 128;
 pub const IN_FLIGHT_TOOLS: usize = 16;
 /// Jev recommends high confidence for automation; weaker answers preserve current behavior.
 pub const ACT_CONFIDENCE: f32 = 0.85;
+pub const NO_INPUT_CONFIDENCE: f32 = 0.15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,8 +47,7 @@ pub fn questions() -> Value {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitingOn {
-    User,
+pub enum WorkState {
     BackgroundWork,
     StillWorking,
     Finished,
@@ -56,30 +56,34 @@ pub enum WaitingOn {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TurnVerdict {
-    pub waiting_on: WaitingOn,
-    pub confidence: f32,
-    pub asked_question: f32,
+    pub work_state: WorkState,
+    pub work_state_confidence: f32,
+    pub needs_user_input: f32,
 }
 
 impl TurnVerdict {
     /// Parse the HTTP response shape documented by TypeSafe, including Noul's object wrapper.
     pub fn parse(response: &Value) -> Result<Self> {
         let answers = response.get("answers").context("missing verdict answers")?;
-        let choice = &answers["waiting_on"];
-        let waiting_on = match choice["choice"]
+        let choice = &answers["work_state"];
+        ensure!(
+            choice["type"] == "choice" && answers["needs_user_input"]["type"] == "noul",
+            "invalid verdict answer types"
+        );
+        let choice_text = choice["choice"]
             .as_str()
-            .context("missing waiting_on choice")?
-        {
-            "user" => WaitingOn::User,
-            "background_work" => WaitingOn::BackgroundWork,
-            "still_working" => WaitingOn::StillWorking,
-            "finished" => WaitingOn::Finished,
-            _ => WaitingOn::Unclear,
+            .context("missing work_state choice")?;
+        ensure!(choice_text.len() <= 64, "invalid work_state choice");
+        let work_state = match choice_text {
+            "background_work" => WorkState::BackgroundWork,
+            "still_working" => WorkState::StillWorking,
+            "finished" => WorkState::Finished,
+            _ => WorkState::Unclear,
         };
         Ok(Self {
-            waiting_on,
-            confidence: probability(&choice["confidence"])?,
-            asked_question: probability(&answers["asked_question"]["noul"])?,
+            work_state,
+            work_state_confidence: probability(&choice["confidence"])?,
+            needs_user_input: probability(&answers["needs_user_input"]["noul"])?,
         })
     }
 }
@@ -102,13 +106,24 @@ pub enum Decision {
 }
 
 pub fn decide(phase: TurnPhase, verdict: &TurnVerdict) -> Decision {
-    if !verdict.confidence.is_finite() || !(ACT_CONFIDENCE..=1.0).contains(&verdict.confidence) {
+    if !(0.0..=1.0).contains(&verdict.needs_user_input) {
         return Decision::KeepCurrent;
     }
-    match (phase, verdict.waiting_on) {
-        (TurnPhase::Running, WaitingOn::User) => Decision::AwaitingInput,
-        (TurnPhase::Replied, WaitingOn::BackgroundWork) => Decision::ExpectContinuation,
-        (TurnPhase::Replied, WaitingOn::Finished | WaitingOn::User) => Decision::InferIdle,
+    if verdict.needs_user_input >= ACT_CONFIDENCE {
+        return match phase {
+            TurnPhase::Running => Decision::AwaitingInput,
+            TurnPhase::Replied => Decision::InferIdle,
+        };
+    }
+    if phase == TurnPhase::Running
+        || verdict.needs_user_input > NO_INPUT_CONFIDENCE
+        || !(ACT_CONFIDENCE..=1.0).contains(&verdict.work_state_confidence)
+    {
+        return Decision::KeepCurrent;
+    }
+    match verdict.work_state {
+        WorkState::BackgroundWork => Decision::ExpectContinuation,
+        WorkState::Finished => Decision::InferIdle,
         _ => Decision::KeepCurrent,
     }
 }
@@ -139,61 +154,65 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn decisions_require_the_right_phase_choice_and_confidence() {
+    fn independent_input_need_takes_precedence_over_background_work() {
         for phase in [TurnPhase::Running, TurnPhase::Replied] {
-            for waiting_on in [
-                WaitingOn::User,
-                WaitingOn::BackgroundWork,
-                WaitingOn::StillWorking,
-                WaitingOn::Finished,
-                WaitingOn::Unclear,
+            for work_state in [
+                WorkState::BackgroundWork,
+                WorkState::StillWorking,
+                WorkState::Finished,
+                WorkState::Unclear,
             ] {
-                for confidence in [0.0, 0.849, 0.85, 0.99, 1.0, 1.01, f32::NAN] {
-                    let verdict = TurnVerdict {
-                        waiting_on,
-                        confidence,
-                        asked_question: 0.0,
-                    };
-                    let expected = match (phase, waiting_on) {
-                        (TurnPhase::Running, WaitingOn::User)
-                            if (ACT_CONFIDENCE..=1.0).contains(&confidence) =>
+                for needs_user_input in [0.0, 0.15, 0.151, 0.849, 0.85, 1.0, -0.1, 1.1, f32::NAN] {
+                    for work_state_confidence in [0.0, 0.849, 0.85, 1.0, 1.1, f32::NAN] {
+                        let verdict = TurnVerdict {
+                            work_state,
+                            work_state_confidence,
+                            needs_user_input,
+                        };
+                        let expected = if !(0.0..=1.0).contains(&needs_user_input) {
+                            Decision::KeepCurrent
+                        } else if needs_user_input >= 0.85 {
+                            if phase == TurnPhase::Running {
+                                Decision::AwaitingInput
+                            } else {
+                                Decision::InferIdle
+                            }
+                        } else if phase == TurnPhase::Replied
+                            && needs_user_input <= 0.15
+                            && (0.85..=1.0).contains(&work_state_confidence)
                         {
-                            Decision::AwaitingInput
-                        }
-                        (TurnPhase::Replied, WaitingOn::BackgroundWork)
-                            if (ACT_CONFIDENCE..=1.0).contains(&confidence) =>
-                        {
-                            Decision::ExpectContinuation
-                        }
-                        (TurnPhase::Replied, WaitingOn::Finished | WaitingOn::User)
-                            if (ACT_CONFIDENCE..=1.0).contains(&confidence) =>
-                        {
-                            Decision::InferIdle
-                        }
-                        _ => Decision::KeepCurrent,
-                    };
-                    assert_eq!(decide(phase, &verdict), expected);
+                            match work_state {
+                                WorkState::BackgroundWork => Decision::ExpectContinuation,
+                                WorkState::Finished => Decision::InferIdle,
+                                _ => Decision::KeepCurrent,
+                            }
+                        } else {
+                            Decision::KeepCurrent
+                        };
+                        assert_eq!(decide(phase, &verdict), expected, "{phase:?}: {verdict:?}");
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn documented_response_parses_and_invalid_probabilities_fail_closed() {
-        let mut response = json!({"answers":{"waiting_on":{"type":"choice","choice":"user","confidence":0.95,"probabilities":{"user":0.99}},"asked_question":{"type":"noul","noul":0.97}}});
+    fn documented_response_parses_and_malformed_responses_fail_closed() {
+        let response = json!({"answers":{"work_state":{"type":"choice","choice":"background_work","confidence":0.95},"needs_user_input":{"type":"noul","noul":0.97}}});
         let verdict = TurnVerdict::parse(&response).unwrap();
-        assert_eq!(verdict.waiting_on, WaitingOn::User);
-        assert_eq!(verdict.asked_question, 0.97);
-        response["answers"]["waiting_on"]["choice"] = json!("future_choice");
+        assert_eq!(verdict.work_state, WorkState::BackgroundWork);
+        assert_eq!(verdict.needs_user_input, 0.97);
         assert_eq!(
-            TurnVerdict::parse(&response).unwrap().waiting_on,
-            WaitingOn::Unclear
+            decide(TurnPhase::Running, &verdict),
+            Decision::AwaitingInput
         );
-        response["answers"]["waiting_on"]["confidence"] = json!(1.01);
-        assert!(TurnVerdict::parse(&response).is_err());
-        response["answers"]["waiting_on"]["confidence"] = json!(0.95);
-        response["answers"]["asked_question"]["noul"] = json!(-0.1);
-        assert!(TurnVerdict::parse(&response).is_err());
+        for value in [json!(-0.1), json!(1.01), json!(null), json!("0.95")] {
+            for (field, score) in [("work_state", "confidence"), ("needs_user_input", "noul")] {
+                let mut malformed = response.clone();
+                malformed["answers"][field][score] = value.clone();
+                assert!(TurnVerdict::parse(&malformed).is_err());
+            }
+        }
         assert!(TurnVerdict::parse(&json!({})).is_err());
     }
 

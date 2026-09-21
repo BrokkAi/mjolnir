@@ -36,6 +36,7 @@ where
     let grok_notification_harness = spec.harness;
     let grok_notification_output_count = agent_output_count.clone();
     let notification_events = events.clone();
+    let notification_parent_context = spec.turn_context.clone();
     let notification_activity = spec.acp_activity.clone();
     let notification_step_clock = spec.step_clock.clone();
     let notification_agent_output_count = agent_output_count.clone();
@@ -66,10 +67,12 @@ where
     let claude_sdk_events = events.clone();
     let claude_sdk_harness = spec.harness;
     let permission_events = events.clone();
+    let permission_parent_context = spec.turn_context.clone();
     let permission_activity = spec.acp_activity.clone();
     let permission_output_count = agent_output_count.clone();
     let permission_step_clock = spec.step_clock.clone();
     let ext_events = events.clone();
+    let ext_parent_context = spec.turn_context.clone();
     let ext_activity = spec.acp_activity.clone();
     let ext_output_count = agent_output_count.clone();
     let ext_step_clock = spec.step_clock.clone();
@@ -93,15 +96,20 @@ where
     let kill_terminals = terminals.clone();
     let release_terminals = terminals.clone();
     let create_events = events.clone();
+    let create_parent_context = spec.turn_context.clone();
     let create_activity = spec.acp_activity.clone();
     let create_output_count = agent_output_count.clone();
     let create_step_clock = spec.step_clock.clone();
+    let output_parent_context = spec.turn_context.clone();
     let output_activity = spec.acp_activity.clone();
     let output_output_count = agent_output_count.clone();
+    let wait_parent_context = spec.turn_context.clone();
     let wait_activity = spec.acp_activity.clone();
     let wait_output_count = agent_output_count.clone();
+    let kill_parent_context = spec.turn_context.clone();
     let kill_activity = spec.acp_activity.clone();
     let kill_output_count = agent_output_count.clone();
+    let release_parent_context = spec.turn_context.clone();
     let release_activity = spec.acp_activity.clone();
     let release_output_count = agent_output_count.clone();
     // A terminal runs where the session runs unless the agent names a
@@ -113,6 +121,13 @@ where
     let native_agents = Arc::new(Mutex::new(native_agents::NativeAgentRouter::default()));
     let permission_native_agents = native_agents.clone();
     let elicitation_native_agents = native_agents.clone();
+    let permission_parent_router = native_agents.clone();
+    let create_parent_router = native_agents.clone();
+    let output_parent_router = native_agents.clone();
+    let wait_parent_router = native_agents.clone();
+    let kill_parent_router = native_agents.clone();
+    let release_parent_router = native_agents.clone();
+    let ext_parent_router = native_agents.clone();
     Client
         .builder()
         .on_receive_notification(
@@ -163,6 +178,7 @@ where
                         }
                     }
                 }
+                notification_parent_context.mark_parent_activity();
                 // A single tool card carrying a status or shape outside the
                 // ACP v1 vocabulary must not discard the whole notification and
                 // strand the tracked tool item in_progress forever. Coerce an
@@ -289,6 +305,9 @@ where
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 permission_activity.mark();
+                if !permission_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    permission_parent_context.mark_parent_activity();
+                }
                 permission_output_count.mark();
                 permission_step_clock.begin_client_work();
                 if permission_harness == HarnessKind::Muse
@@ -523,6 +542,9 @@ where
         .on_receive_request(
             async move |request: CreateTerminalRequest, responder, _cx| {
                 create_activity.mark();
+                if !create_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    create_parent_context.mark_parent_activity();
+                }
                 create_output_count.mark();
                 create_step_clock.begin_client_work();
                 let started_at_ms = mj_core::clock::epoch_millis();
@@ -575,6 +597,9 @@ where
         .on_receive_request(
             async move |request: TerminalOutputRequest, responder, _cx| {
                 output_activity.mark();
+                if !output_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    output_parent_context.mark_parent_activity();
+                }
                 output_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(snapshot) = output_terminals.output(&terminal_id) else {
@@ -591,6 +616,9 @@ where
         .on_receive_request(
             async move |request: WaitForTerminalExitRequest, responder, _cx| {
                 wait_activity.mark();
+                if !wait_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    wait_parent_context.mark_parent_activity();
+                }
                 wait_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(exit) = wait_terminals.exit_receiver(&terminal_id) else {
@@ -620,6 +648,9 @@ where
         .on_receive_request(
             async move |request: KillTerminalRequest, responder, _cx| {
                 kill_activity.mark();
+                if !kill_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    kill_parent_context.mark_parent_activity();
+                }
                 kill_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 // The terminal stays valid: output and wait_for_exit still
@@ -634,6 +665,9 @@ where
         .on_receive_request(
             async move |request: ReleaseTerminalRequest, responder, _cx| {
                 release_activity.mark();
+                if !release_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                    release_parent_context.mark_parent_activity();
+                }
                 release_output_count.mark();
                 let terminal_id = request.terminal_id.to_string();
                 let Some(supervisor) = release_terminals.release(&terminal_id) else {
@@ -663,6 +697,9 @@ where
         .on_receive_request(
             async move |request: agent_client_protocol::UntypedMessage, responder, _cx| {
                 ext_activity.mark();
+                if !request.params().get("sessionId").and_then(serde_json::Value::as_str).is_some_and(|id| ext_parent_router.lock().expect("native agent router poisoned").is_child(id)) {
+                    ext_parent_context.mark_parent_activity();
+                }
                 ext_output_count.mark();
                 ext_step_clock.begin_client_work();
                 let method = request.method().to_owned();

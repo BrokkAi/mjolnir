@@ -1,5 +1,6 @@
 import { continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
 import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
+import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
@@ -87,6 +88,19 @@ function answers(value: unknown): Record<string, unknown> | undefined {
   };
 }
 
+function answersV3(value: unknown): Record<string, unknown> | undefined {
+  if (!object(value) || !object(value.answers)) return;
+  const work = value.answers.work_state;
+  const input = value.answers.needs_user_input;
+  if (!object(work) || !object(input)
+    || work.type !== "choice" || !text(work.choice, 64)
+    || !probability(work.confidence) || input.type !== "noul" || !probability(input.noul)) return;
+  return {
+    work_state: { type: "choice", choice: work.choice, confidence: work.confidence },
+    needs_user_input: { type: "noul", noul: input.noul },
+  };
+}
+
 function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -131,7 +145,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest | ContinuationEvidence, key: string): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest | ContinuationEvidence, key: string, v3 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -149,14 +163,14 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | HelpSearchRequest
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? continuationQuestions : "transcript_summary" in state ? questions : questionsV1 }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? continuationQuestions : v3 ? questions : "transcript_summary" in state ? questionsV2 : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? continuationAnswers(body) : answers(body);
+        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? continuationAnswers(body) : v3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -174,7 +188,7 @@ export default {
     const url = new URL(request.url);
     const search = url.pathname === "/v1/help-search";
     const continuation = url.pathname === "/v1/continuation-verdict";
-    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -199,8 +213,8 @@ export default {
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
     }
-    if (url.pathname === "/v2/turn-verdict") {
-      return evidenceV2(state) ? classify(state, key) : error("invalid_evidence", 400);
+    if (url.pathname === "/v2/turn-verdict" || url.pathname === "/v3/turn-verdict") {
+      return evidenceV2(state) ? classify(state, key, url.pathname === "/v3/turn-verdict") : error("invalid_evidence", 400);
     }
     return evidence(state) ? classify(state, key) : error("invalid_evidence", 400);
   },

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 struct TurnContextState {
     generation: u64,
+    parent_activity: Option<std::time::Instant>,
     decision_log: Option<mj_core::jev::DecisionLog>,
     user_prompt_tail: String,
     message_id: Option<String>,
@@ -40,6 +41,21 @@ pub fn delivered_prompt_command_id(observation: &mj_core::relay::RelayObservatio
 pub struct TurnContext(Arc<Mutex<TurnContextState>>);
 
 impl TurnContext {
+    /// Process-local parent clock; child traffic and inventory updates never mark it.
+    pub fn mark_parent_activity(&self) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .parent_activity = Some(std::time::Instant::now());
+    }
+
+    pub fn parent_activity(&self) -> Option<std::time::Instant> {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .parent_activity
+    }
+
     pub fn set_decision_log(&self, log: mj_core::jev::DecisionLog) {
         self.0
             .lock()
@@ -58,6 +74,7 @@ impl TurnContext {
         let generation = state.generation.wrapping_add(1);
         *state = TurnContextState {
             generation,
+            parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
             user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
             background_commands: state.background_commands,
@@ -178,6 +195,7 @@ impl TurnContext {
 
     pub fn observe(&self, update: &SessionUpdate) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
+        state.parent_activity = Some(std::time::Instant::now());
         if matches!(
             update,
             SessionUpdate::AgentMessageChunk(_)
