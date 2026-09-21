@@ -168,7 +168,11 @@ pub trait SubagentBackend: Send + Sync {
     }
 
     /// A unified diff of the session's work.
-    fn diff(&self, session_id: String) -> BoxFuture<'_, Result<String, ExportError>>;
+    fn diff(
+        &self,
+        session_id: String,
+        options: DiffOptions,
+    ) -> BoxFuture<'_, Result<String, ExportError>>;
 
     /// One file from the session's workspace.
     fn read_file(

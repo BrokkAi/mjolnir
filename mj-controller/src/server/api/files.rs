@@ -4,9 +4,16 @@ use super::*;
 pub(super) async fn diff(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
+    Query(options): Query<DiffOptions>,
 ) -> Result<Response, ApiFailure> {
     let backend = backend(&state)?.clone();
-    let diff = backend.diff(session_id).await?;
+    let json = options.json;
+    let diff = backend.diff(session_id, options).await?;
+    if json {
+        let details: mj_checkpoint::archive::SessionDiff =
+            serde_json::from_str(&diff).context("decode session diff metadata")?;
+        return Ok(Json(details).into_response());
+    }
     Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
 }
 
@@ -130,7 +137,7 @@ pub(super) async fn export(
     let backend = backend(&state)?.clone();
     match request.kind {
         ExportKind::Patch => {
-            let diff = backend.diff(session_id).await?;
+            let diff = backend.diff(session_id, DiffOptions::default()).await?;
             Ok(([(CONTENT_TYPE, "text/x-diff; charset=utf-8")], diff).into_response())
         }
         ExportKind::Branch => {

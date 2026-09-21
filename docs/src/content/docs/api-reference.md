@@ -479,6 +479,15 @@ POST /api/v1/sessions/{session_id}/export
 against the commit it started from, committed and uncommitted work alike,
 including files the agent never told git about.
 
+Add `?base=<revision>` to choose an explicit comparison commit without changing
+the recorded launch baseline. Git revisions such as `HEAD~2` are accepted;
+unknown revisions return `409`. Add `json=true` to receive `application/json`
+with `diff`, `base`, and `head` fields. `base` and `head` are resolved commit IDs;
+the patch still includes uncommitted and untracked files. For example,
+`GET /api/v1/sessions/{session_id}/diff?base=HEAD~2&json=true` reports both the
+chosen baseline and the current checked-out commit. JSON metadata requires an
+updated session worker; older workers return an explicit upgrade refusal.
+
 `files` answers `application/octet-stream`. The path is relative to the
 directory the session's agent runs in — the primary repository's directory,
 whatever the target kind — so a path the agent would use means the same here.

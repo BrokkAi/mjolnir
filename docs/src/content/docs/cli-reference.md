@@ -166,7 +166,7 @@ mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--json]
-mj diff --session <id> [--json]
+mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
 mj sessions [--session <id>] [--json]
@@ -178,6 +178,14 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
 mj interrupt-turn --session <id>
 mj api-info [--json]
 ```
+
+`mj diff` compares against the recorded launch base by default. Use `--base`
+to compare against an explicit Git commit or revision, for example after
+checking out an older task base. This does not change the session's recorded
+baseline. `--json` returns `diff`, `base`, and `head`; the latter two are resolved
+commit IDs. The patch includes committed, staged, unstaged, and untracked work.
+An unknown base is refused. JSON metadata requires a worker supporting this
+option; an older worker reports that the session needs upgrading.
 
 A session belongs to a workspace, and a fresh instance has none. `mj new` no
 longer needs one to exist: with no `--workspace-id` and no global `--workspace`,
