@@ -4410,6 +4410,65 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     (parent, child)
 }
 
+thread_local! {
+    static AFTER_STATE_SESSIONS_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
+
+pub(super) fn after_state_sessions_read() {
+    let hook = AFTER_STATE_SESSIONS_READ.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[test]
+fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_changes() {
+    for creating_child in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let (_parent, child) = subagent_pair(&path);
+        let mut with_child = load_state_from(&path).unwrap();
+        with_child
+            .mount_history
+            .insert("host".into(), vec![directory.path().join("with-child")]);
+        let mut without_child = with_child.clone();
+        without_child.sessions.remove(&child.id);
+        without_child.subagents.remove(&child.id);
+        without_child
+            .mount_history
+            .insert("host".into(), vec![directory.path().join("without-child")]);
+        let (before, after) = if creating_child {
+            (without_child, with_child)
+        } else {
+            (with_child, without_child)
+        };
+        save_state_to(&path, &before).unwrap();
+        let writer_path = path.clone();
+        let committed = after.clone();
+        AFTER_STATE_SESSIONS_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // Commit a real creation/deletion between the reader's queries.
+                // WAL permits this while a read transaction remains open.
+                save_state_to(&writer_path, &committed).unwrap();
+                let writer = open(&writer_path).unwrap();
+                let violations: i64 = writer
+                    .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(violations, 0);
+            }));
+        });
+        let observed = load_state_from(&path).unwrap();
+        assert!(AFTER_STATE_SESSIONS_READ.with(|hook| hook.borrow().is_none()));
+        assert_eq!(
+            observed, before,
+            "mixed state while creating_child={creating_child}"
+        );
+        assert_eq!(load_state_from(&path).unwrap(), after);
+    }
+}
+
 /// Deleting a child takes its sub-agent relation with it, so this is not how
 /// a relation is left behind. Kept as the control for the test below.
 #[test]

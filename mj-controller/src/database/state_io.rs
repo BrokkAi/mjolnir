@@ -5,7 +5,10 @@ pub fn load_state() -> Result<State> {
 }
 
 pub fn load_state_from(path: &Path) -> Result<State> {
-    let connection = open_reader(path)?;
+    let mut reader = open_reader(path)?;
+    // Sessions and their relationships must come from the same WAL snapshot.
+    // Otherwise a concurrent spawn can look orphaned despite intact foreign keys.
+    let connection = reader.transaction()?;
     let mut state = State::default();
     let mut statement = connection.prepare(
         "SELECT s.session_id, s.title, s.harness_kind, s.last_profile, c.bundle_id,
@@ -103,6 +106,8 @@ pub fn load_state_from(path: &Path) -> Result<State> {
             state.sessions.insert(session.id.clone(), session);
         }
     }
+    #[cfg(test)]
+    super::tests::after_state_sessions_read();
     let mut statement = connection.prepare(
         "SELECT child_session_id, record_json FROM subagent_sessions ORDER BY child_session_id",
     )?;
