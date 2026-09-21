@@ -256,6 +256,28 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     }
 }
 
+fn pin_session_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.pin_id(&session.id).is_some() {
+        Availability::Blocked("this session is already pinned")
+    } else {
+        Availability::Ready
+    }
+}
+
+fn unpin_session_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.pin_id(&session.id).is_some() {
+        Availability::Ready
+    } else {
+        Availability::Blocked("this session is not pinned")
+    }
+}
+
 /// The gate the session commands share: there must be a selected session, and
 /// it must not be in the middle of a launch or a stop.
 fn session_idle(dashboard: &DashboardState) -> Availability {
@@ -451,7 +473,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: selected_session_ready,
+        available: pin_session_available,
     },
     CommandSpec {
         id: CommandId::UnpinSession,
@@ -463,7 +485,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: selected_session_ready,
+        available: unpin_session_available,
     },
     CommandSpec {
         id: CommandId::OpenSessionSplitRight,
@@ -1935,6 +1957,30 @@ mod tests {
         assert!(
             available(&dashboard, None).contains(&CommandId::DestroySession),
             "force destruction exists to preempt a wedged operation"
+        );
+    }
+
+    #[test]
+    fn pin_and_unpin_availability_follow_the_current_layout() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        assert_eq!(
+            (spec(CommandId::PinSession).available)(&dashboard),
+            Availability::Ready
+        );
+        assert_eq!(
+            (spec(CommandId::UnpinSession).available)(&dashboard),
+            Availability::Blocked("this session is not pinned")
+        );
+
+        dashboard.pin_ids.insert("session-1".into(), 1);
+        assert_eq!(
+            (spec(CommandId::PinSession).available)(&dashboard),
+            Availability::Blocked("this session is already pinned")
+        );
+        assert_eq!(
+            (spec(CommandId::UnpinSession).available)(&dashboard),
+            Availability::Ready
         );
     }
 

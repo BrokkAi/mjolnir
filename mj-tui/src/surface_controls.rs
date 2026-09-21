@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(dashboard.selected_session_id(), Some(expected.as_str()));
         assert!(matches!(dashboard.mode, Mode::Palette(_)));
         let lines = draw(&mut dashboard, (120, 40));
-        click(&mut dashboard, point(&lines, "Rename session"));
+        click(&mut dashboard, point(&lines, "Rename…"));
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
     }
 

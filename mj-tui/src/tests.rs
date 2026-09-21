@@ -2640,8 +2640,8 @@ fn the_session_menu_offers_pin_controls() {
 
     let lines = drawn(&mut dashboard, 120, 60);
     let joined = lines.join("\n");
-    assert!(joined.contains("Pin session"), "{joined}");
-    assert!(joined.contains("Unpin session"), "{joined}");
+    assert!(joined.contains("Pin…"), "{joined}");
+    assert!(joined.contains("Unpin"), "{joined}");
 }
 
 /// The pane commands belong where a conversation is: at the composer, and in

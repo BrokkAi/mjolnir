@@ -60,6 +60,7 @@ pub(crate) struct CommandPalette {
     pub(crate) form: RefCell<Dialog<PaletteControl>>,
     session_only: bool,
     session_id: Option<String>,
+    session_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,9 @@ impl CommandPalette {
     fn prepare(&self) {
         let mut form = self.form.borrow_mut();
         form.begin_update();
-        form.declare_with_enabled(PaletteControl::Query, ControlKind::TextField, true);
+        if !self.session_only {
+            form.declare_with_enabled(PaletteControl::Query, ControlKind::TextField, true);
+        }
         form.declare_with_enabled(
             PaletteControl::Commands,
             ControlKind::ChoiceList {
@@ -82,19 +85,71 @@ impl CommandPalette {
             },
             !self.entries.is_empty(),
         );
-        form.declare_with_enabled(
-            PaletteControl::Run,
-            ControlKind::Button,
-            self.entries
-                .get(self.selected)
-                .is_some_and(|entry| entry.availability == Availability::Ready),
-        );
+        if !self.session_only {
+            form.declare_with_enabled(
+                PaletteControl::Run,
+                ControlKind::Button,
+                self.entries
+                    .get(self.selected)
+                    .is_some_and(|entry| entry.availability == Availability::Ready),
+            );
+        }
         form.set_menu(true);
         form.set_list_activation(
             PaletteControl::Commands,
             mj_chat::components::ListActivation::SingleClick,
         );
-        form.end_frame(PaletteControl::Query);
+        form.end_frame(if self.session_only {
+            PaletteControl::Commands
+        } else {
+            PaletteControl::Query
+        });
+    }
+}
+
+const SESSION_MENU_COMMANDS: &[CommandId] = &[
+    CommandId::ChangedFiles,
+    CommandId::RenameSession,
+    CommandId::PinSession,
+    CommandId::UnpinSession,
+    CommandId::ContainerSettings,
+    CommandId::MoveSession,
+    CommandId::SuspendSession,
+    CommandId::RestartSession,
+    CommandId::DestroySession,
+];
+
+fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
+    SESSION_MENU_COMMANDS
+        .iter()
+        .filter_map(|id| {
+            let availability = (spec(*id).available)(dashboard);
+            (availability != Availability::Hidden).then_some(PaletteEntry {
+                id: *id,
+                availability,
+                recent: false,
+            })
+        })
+        .collect()
+}
+
+fn first_ready(entries: &[PaletteEntry]) -> usize {
+    entries
+        .iter()
+        .position(|entry| entry.availability == Availability::Ready)
+        .unwrap_or(0)
+}
+
+fn session_menu_label(id: CommandId) -> &'static str {
+    match id {
+        CommandId::RenameSession => "Rename…",
+        CommandId::PinSession => "Pin…",
+        CommandId::UnpinSession => "Unpin",
+        CommandId::MoveSession => "Move…",
+        CommandId::SuspendSession => "Suspend…",
+        CommandId::RestartSession => "Restart",
+        CommandId::DestroySession => "Destroy…",
+        _ => spec(id).label,
     }
 }
 
@@ -281,20 +336,34 @@ impl DashboardState {
             form: RefCell::new(Dialog::default()),
             session_only: false,
             session_id: self.command_session_id().map(str::to_owned),
+            session_title: None,
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
     }
 
     pub(crate) fn begin_session_palette(&mut self) {
-        self.begin_palette();
-        if let Mode::Palette(palette) = &mut self.mode {
-            palette.session_only = true;
-            palette
-                .entries
-                .retain(|entry| spec(entry.id).scope == Scope::Session);
-            palette.prepare();
-        }
+        let session_id = self.command_session_id().map(str::to_owned);
+        let session_title = self.command_session().map(|session| {
+            if self.go.is_some() {
+                self.go_conversation_title(&session.id)
+            } else {
+                session.display_title().to_owned()
+            }
+        });
+        let entries = session_menu_entries(self);
+        let palette = CommandPalette {
+            query: TextInput::new(),
+            selected: first_ready(&entries),
+            entries,
+            ranked_for: String::new(),
+            form: RefCell::new(Dialog::default()),
+            session_only: true,
+            session_id,
+            session_title,
+        };
+        palette.prepare();
+        self.mode = Mode::Palette(palette);
     }
 
     /// Refreshes query matches and availability.
@@ -309,10 +378,20 @@ impl DashboardState {
             return;
         };
         let query = palette.query.value().to_owned();
-        let mut entries = palette_entries(self, &query);
-        if palette.session_only {
-            entries.retain(|entry| spec(entry.id).scope == Scope::Session);
+        let session_only = palette.session_only;
+        let session_id = palette.session_id.clone();
+        let old_selected = palette.selected;
+        let old_id = palette.entries.get(old_selected).map(|entry| entry.id);
+        let saved_override = self.command_session_override.clone();
+        if session_only {
+            self.command_session_override = session_id;
         }
+        let entries = if session_only {
+            session_menu_entries(self)
+        } else {
+            palette_entries(self, &query)
+        };
+        self.command_session_override = saved_override;
         let Mode::Palette(palette) = &mut self.mode else {
             return;
         };
@@ -320,7 +399,34 @@ impl DashboardState {
         if same_query && palette.entries == entries {
             return;
         }
-        palette.selected = if same_query {
+        palette.selected = if session_only {
+            let anchor = old_id
+                .and_then(|id| entries.iter().position(|entry| entry.id == id))
+                .unwrap_or_else(|| old_selected.min(entries.len().saturating_sub(1)));
+            if entries
+                .get(anchor)
+                .is_some_and(|entry| entry.availability == Availability::Ready)
+            {
+                anchor
+            } else {
+                entries
+                    .iter()
+                    .enumerate()
+                    .skip(anchor.saturating_add(1))
+                    .find(|(_, entry)| entry.availability == Availability::Ready)
+                    .map(|(index, _)| index)
+                    .or_else(|| {
+                        entries
+                            .iter()
+                            .enumerate()
+                            .take(anchor)
+                            .rev()
+                            .find(|(_, entry)| entry.availability == Availability::Ready)
+                            .map(|(index, _)| index)
+                    })
+                    .unwrap_or(0)
+            }
+        } else if same_query {
             palette
                 .entries
                 .get(palette.selected)
@@ -436,12 +542,40 @@ impl DashboardState {
 /// One drawn row: either a group heading or a command.
 enum PaletteLine {
     Heading(String),
+    Separator,
     /// The entry's index into `entries`, so the highlight can be placed.
     Command(usize),
 }
 
 /// The rows the palette draws, with a heading wherever the group changes.
 fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<PaletteLine> {
+    if palette.session_only {
+        let mut lines = Vec::new();
+        let mut section = None;
+        for (index, entry) in palette.entries.iter().enumerate() {
+            let next = match entry.id {
+                CommandId::ChangedFiles => 0,
+                CommandId::RenameSession | CommandId::PinSession | CommandId::UnpinSession => 1,
+                CommandId::ContainerSettings
+                | CommandId::MoveSession
+                | CommandId::SuspendSession
+                | CommandId::RestartSession => 2,
+                CommandId::DestroySession => 3,
+                _ => continue,
+            };
+            if section != Some(next) {
+                match next {
+                    1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
+                    2 => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
+                    3 => lines.push(PaletteLine::Separator),
+                    _ => {}
+                }
+                section = Some(next);
+            }
+            lines.push(PaletteLine::Command(index));
+        }
+        return lines;
+    }
     let mut lines = Vec::new();
     // `None` is the Recent group, which has no scope of its own.
     let mut previous: Option<Option<Scope>> = None;
@@ -469,18 +603,37 @@ pub(crate) fn render_palette(
     let lines = palette_lines(dashboard, palette);
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let popup_height = u16::try_from(lines.len().saturating_add(5).max(6)).unwrap_or(u16::MAX);
+    let extra_height = if palette.session_only { 3 } else { 5 };
+    let popup_height =
+        u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
     let inner = theme::modal().inner(popup);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
+    let rows = if palette.session_only {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner)
+    };
+    let list_row = if palette.session_only {
+        rows[0]
+    } else {
+        rows[1]
+    };
+    let description_row = if palette.session_only {
+        rows[1]
+    } else {
+        rows[2]
+    };
 
     let mut form = palette.form.borrow_mut();
     form.begin_frame();
@@ -488,52 +641,58 @@ pub(crate) fn render_palette(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        format!("{} Commands", theme::glyphs().spark),
+        palette
+            .session_title
+            .clone()
+            .unwrap_or_else(|| format!("{} Commands", theme::glyphs().spark)),
         theme::title(true),
         true,
     );
-    let outer = theme::modal()
-        .title(title)
-        .title(
+    let mut outer = theme::modal().title(title);
+    if !palette.session_only {
+        outer = outer.title(
             Line::styled(
                 format!(" {} commands ", palette.entries.len()),
                 theme::muted(),
             )
             .right_aligned(),
-        )
-        .title_bottom(mj_chat::components::DialogShell::hints(true));
-    frame.render_widget(outer, popup);
-    TextField::render(
-        frame,
-        rows[0],
-        &palette.query,
-        &mut form,
-        PaletteControl::Query,
-    );
-    if palette.query.is_empty() {
-        frame.render_widget(
-            Line::styled(
-                format!("Search commands{}", theme::glyphs().ellipsis),
-                theme::muted().add_modifier(Modifier::ITALIC),
-            ),
-            rows[0],
         );
+    }
+    let outer = outer.title_bottom(mj_chat::components::DialogShell::hints(true));
+    frame.render_widget(outer, popup);
+    if !palette.session_only {
+        TextField::render(
+            frame,
+            rows[0],
+            &palette.query,
+            &mut form,
+            PaletteControl::Query,
+        );
+        if palette.query.is_empty() {
+            frame.render_widget(
+                Line::styled(
+                    format!("Search commands{}", theme::glyphs().ellipsis),
+                    theme::muted().add_modifier(Modifier::ITALIC),
+                ),
+                rows[0],
+            );
+        }
     }
 
     // Keep the rail outside the list's registered area. Besides leaving the
     // command text untouched, this means clicking the scrollbar cannot be
     // interpreted as clicking a command row.
     let list_area = Rect::new(
-        rows[1].x,
-        rows[1].y,
-        rows[1].width.saturating_sub(1),
-        rows[1].height,
+        list_row.x,
+        list_row.y,
+        list_row.width.saturating_sub(1),
+        list_row.height,
     );
     let scrollbar_area = Rect::new(
-        rows[1].x.saturating_add(list_area.width),
-        rows[1].y,
-        rows[1].width.saturating_sub(list_area.width),
-        rows[1].height,
+        list_row.x.saturating_add(list_area.width),
+        list_row.y,
+        list_row.width.saturating_sub(list_area.width),
+        list_row.height,
     );
     let width = usize::from(list_area.width).saturating_sub(1);
     let mut row_map = Vec::new();
@@ -543,7 +702,7 @@ pub(crate) fn render_palette(
         .map(|line| match line {
             PaletteLine::Heading(heading) => {
                 row_map.push(None);
-                enabled.push(true);
+                enabled.push(false);
                 let heading = truncate_to_cells(heading, width.saturating_sub(4), Truncate::PLAIN);
                 let rule_width = width.saturating_sub(heading.chars().count() + 4);
                 Line::from(vec![
@@ -553,6 +712,14 @@ pub(crate) fn render_palette(
                         theme::border(false),
                     ),
                 ])
+            }
+            PaletteLine::Separator => {
+                row_map.push(None);
+                enabled.push(false);
+                Line::styled(
+                    format!("  {}", theme::glyphs().rule.repeat(width.saturating_sub(2))),
+                    theme::border(false),
+                )
             }
             PaletteLine::Command(index) => {
                 row_map.push(Some(*index));
@@ -571,11 +738,13 @@ pub(crate) fn render_palette(
                 let keys = truncate_to_cells(&keys, width.saturating_sub(4) / 2, Truncate::PLAIN);
                 let key_width = Line::raw(keys.as_str()).width();
                 let label_width = width.saturating_sub(key_width + 4);
-                let text = truncate_to_cells(
-                    &format!("{}{reason}", spec.label),
-                    label_width,
-                    Truncate::PLAIN,
-                );
+                let label = if palette.session_only {
+                    session_menu_label(entry.id)
+                } else {
+                    spec.label
+                };
+                let text =
+                    truncate_to_cells(&format!("{label}{reason}"), label_width, Truncate::PLAIN);
                 let style = if !ready {
                     theme::muted()
                 } else if selected {
@@ -639,26 +808,35 @@ pub(crate) fn render_palette(
         form.list_offset(PaletteControl::Commands),
         usize::from(list_area.height).max(1),
     );
-    Dialog::render_actions(
-        frame,
-        rows[3],
-        &[(
-            PaletteControl::Run,
-            "Run",
-            palette
-                .entries
-                .get(palette.selected)
-                .is_some_and(|entry| entry.availability == Availability::Ready),
-        )],
-        &mut form,
-    );
-    form.end_frame(PaletteControl::Query);
+    if !palette.session_only {
+        Dialog::render_actions(
+            frame,
+            rows[3],
+            &[(
+                PaletteControl::Run,
+                "Run",
+                palette
+                    .entries
+                    .get(palette.selected)
+                    .is_some_and(|entry| entry.availability == Availability::Ready),
+            )],
+            &mut form,
+        );
+    }
+    form.end_frame(if palette.session_only {
+        PaletteControl::Commands
+    } else {
+        PaletteControl::Query
+    });
 
     let description = palette.entries.get(palette.selected).map_or(
         "Try a command name or a word from its description.",
         |entry| spec(entry.id).description,
     );
-    frame.render_widget(Paragraph::new(description).style(theme::muted()), rows[2]);
+    frame.render_widget(
+        Paragraph::new(description).style(theme::muted()),
+        description_row,
+    );
 }
 
 #[cfg(test)]
@@ -667,9 +845,10 @@ mod tests {
     use crate::SessionOperationKind;
     use crate::render::render;
     use crate::test_support::{
-        buffer_lines, dashboard_with_session, drawn, key, open_palette, operation, running_session,
-        stopped_session,
+        buffer_lines, dashboard_with_session, drawn, key, mouse_at, open_palette, operation, point,
+        running_session, stopped_session,
     };
+    use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -682,6 +861,13 @@ mod tests {
     /// The row of a drawn palette, or `None` when the text is not on screen.
     fn row_of(lines: &[String], needle: &str) -> Option<usize> {
         lines.iter().position(|line| line.contains(needle))
+    }
+
+    fn selected_command(dashboard: &DashboardState) -> Option<CommandId> {
+        let Mode::Palette(palette) = &dashboard.mode else {
+            return None;
+        };
+        palette.entries.get(palette.selected).map(|entry| entry.id)
     }
 
     /// The query is a text field, so readline's Ctrl-U and Ctrl-D keep editing
@@ -735,16 +921,89 @@ mod tests {
             None,
         );
         dashboard.begin_session_palette();
-        for character in "rename".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
         drawn(&mut dashboard, 120, 30);
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(matches!(dashboard.mode, Mode::Palette(_)));
+        assert_eq!(selected_command(&dashboard), Some(CommandId::PinSession));
         dashboard.finish_session_operation("session-1");
         drawn(&mut dashboard, 120, 30);
+        dashboard.handle_key(key(KeyCode::Up));
+        assert_eq!(selected_command(&dashboard), Some(CommandId::RenameSession));
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
+    }
+
+    #[test]
+    fn session_menu_is_compact_grouped_and_uses_the_session_title() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+
+        let Mode::Palette(palette) = &dashboard.mode else {
+            panic!("the session menu opens");
+        };
+        assert_eq!(
+            palette
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            SESSION_MENU_COMMANDS
+        );
+        let lines = drawn(&mut dashboard, 120, 40);
+        let joined = lines.join("\n");
+        assert!(joined.contains("╭ × ACP pretty name"), "{joined}");
+        assert!(!joined.contains("Search commands"), "{joined}");
+        assert!(!joined.contains(" Recent "), "{joined}");
+        assert!(!joined.contains(" Run "), "{joined}");
+
+        let changed = row_of(&lines, "Changed files").expect("Changed files");
+        let organize = row_of(&lines, "Organize").expect("Organize");
+        let rename = row_of(&lines, "Rename…").expect("Rename");
+        let lifecycle = row_of(&lines, "Lifecycle").expect("Lifecycle");
+        let suspend = row_of(&lines, "Suspend…").expect("Suspend");
+        let destroy = row_of(&lines, "Destroy…").expect("Destroy");
+        assert!(changed < organize && organize < rename, "{lines:#?}");
+        assert!(rename < lifecycle && lifecycle < suspend, "{lines:#?}");
+        assert!(suspend < destroy, "{lines:#?}");
+    }
+
+    #[test]
+    fn session_menu_skips_actions_that_do_not_apply() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Unpin") && line.contains("not pinned")),
+            "{lines:#?}"
+        );
+
+        assert_eq!(selected_command(&dashboard), Some(CommandId::RenameSession));
+        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(selected_command(&dashboard), Some(CommandId::PinSession));
+        dashboard.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::ContainerSettings),
+            "keyboard navigation skips disabled Unpin"
+        );
+
+        let unpin = point(&lines, "Unpin");
+        assert_eq!(
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), unpin)),
+            DashboardAction::None
+        );
+        assert_eq!(
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), unpin)),
+            DashboardAction::None
+        );
+        assert!(matches!(dashboard.mode, Mode::Palette(_)));
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::ContainerSettings),
+            "clicking disabled Unpin neither selects nor activates it"
+        );
     }
 
     /// The palette's whole point: the commands for the session you are looking
