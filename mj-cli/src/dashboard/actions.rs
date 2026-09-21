@@ -66,6 +66,9 @@ pub(crate) async fn apply_dashboard_action(
     context.cancel_stale_path_input();
     match action {
         DashboardAction::None => {}
+        DashboardAction::CopyNativeSessionId { native_session_id } => {
+            context.copy_text(&native_session_id, "Copied session ID")?;
+        }
         DashboardAction::ToggleTranscriptRendering => {
             let (dashboard, chat) = context.dashboard_and_visible_chat();
             apply_chat_toggle(dashboard, chat, ChatToggle::TranscriptRendering);

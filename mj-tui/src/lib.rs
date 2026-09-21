@@ -410,6 +410,9 @@ pub enum DashboardAction {
     /// Read the system clipboard on a worker before applying its contents.
     /// Clipboard providers may perform IPC and must never run on the TUI loop.
     PasteFromClipboard,
+    CopyNativeSessionId {
+        native_session_id: String,
+    },
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },

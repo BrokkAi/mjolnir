@@ -233,9 +233,17 @@ impl DashboardContext {
             tracing::debug!(?surface, ?range, "selection covered no text");
             return Ok(());
         };
+        let lines = text.lines().count().max(1);
+        self.copy_text(
+            &text,
+            &format!("Copied {lines} line{}", if lines == 1 { "" } else { "s" }),
+        )
+    }
+
+    pub(crate) fn copy_text(&mut self, text: &str, notice: &str) -> Result<()> {
         let updates = self.dashboard_io_tx.clone();
         if let Err(error) = copy_selected_text(
-            &text,
+            text,
             running_over_ssh(|name| std::env::var_os(name)),
             |text| {
                 // Opening the desktop clipboard can block, so keep it off
@@ -248,11 +256,7 @@ impl DashboardContext {
                 .set_failure_notice(format!("Copy to the terminal clipboard failed: {error:#}"));
             return Ok(());
         }
-        let lines = text.lines().count().max(1);
-        self.dashboard.set_notice(format!(
-            "Copied {lines} line{}",
-            if lines == 1 { "" } else { "s" }
-        ));
+        self.dashboard.set_notice(notice);
         Ok(())
     }
 

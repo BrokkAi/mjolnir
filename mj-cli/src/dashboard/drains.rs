@@ -626,8 +626,9 @@ impl DashboardContext {
                         }
                         Err(error) => {
                             self.dashboard.finish_import();
+                            tracing::error!(error = %format!("{error:#}"), "Session import failed");
                             self.dashboard
-                                .set_notice(format!("Import failed: {error:#}"));
+                                .set_failure_notice(format!("Import failed: {error:#}"));
                         }
                     }
                 }

@@ -1176,7 +1176,11 @@ impl DashboardContext {
                         self.resolve_aws_resource_options(target_template_ids);
                     }
                 }
-                Err(error) => self.dashboard.set_notice(format!("Import failed: {error}")),
+                Err(error) => {
+                    tracing::error!(%error, "Saving imported session failed");
+                    self.dashboard
+                        .set_failure_notice(format!("Import failed: {error}"));
+                }
             },
             DashboardIoUpdate::LifecycleReloaded(reloaded) => {
                 self.apply_lifecycle_reloaded(*reloaded)

@@ -35,6 +35,99 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
     }
 }
 
+#[test]
+fn unavailable_import_explains_why_and_copies_its_id_without_closing() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    for width in [120, 60] {
+        for reason in [
+            "missing Git repo",
+            "Legacy Codex history cannot be imported",
+        ] {
+            let mut dashboard =
+                DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+            let mut session = native(
+                "native-unavailable",
+                "Unavailable",
+                NEWER_THAN_THE_CHECKPOINT,
+            );
+            session.unavailable_reason = Some(reason.into());
+            dashboard.show_resume_dialog(
+                1,
+                vec![codex_profile(vec![
+                    session,
+                    native("native-ready", "Ready", 1),
+                ])],
+            );
+            switch_to_import(&mut dashboard);
+            let lines = drawn(&mut dashboard, width, 34);
+            let rendered = lines.join("\n");
+            let label = if reason == "missing Git repo" {
+                "Cannot import: missing Git repo"
+            } else {
+                "Cannot import"
+            };
+            assert!(rendered.contains(label), "{rendered}");
+            assert!(!rendered.contains("native-unavailable"), "{rendered}");
+            assert!(!rendered.contains("Enter imports"), "{rendered}");
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::None
+            );
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                assert_eq!(
+                    dashboard.handle_mouse(mouse_at(kind, point(&lines, label))),
+                    DashboardAction::None
+                );
+            }
+            assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+            let copy = point(&lines, "Copy session ID");
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
+            assert_eq!(
+                dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy)),
+                DashboardAction::CopyNativeSessionId {
+                    native_session_id: "native-unavailable".into()
+                }
+            );
+            assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+
+            // Tab navigation must reach the same copy action.
+            if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+                dialog.form.get_mut().focus(ResumeFocus::Sessions);
+            }
+            dashboard.handle_key(key(KeyCode::Tab));
+            dashboard.handle_key(key(KeyCode::Tab));
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::CopyNativeSessionId {
+                    native_session_id: "native-unavailable".into()
+                }
+            );
+
+            if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
+                dialog.form.get_mut().focus(ResumeFocus::Sessions);
+            }
+            dashboard.handle_key(key(KeyCode::Down));
+            dashboard.clear_notice();
+            let ready = drawn(&mut dashboard, width, 34).join("\n");
+            assert!(!ready.contains("Copy session ID"), "{ready}");
+            assert!(!ready.contains("Cannot import"), "{ready}");
+            assert_eq!(
+                dashboard.handle_key(key(KeyCode::Enter)),
+                DashboardAction::ImportSession {
+                    profile_id: "codex-1".into(),
+                    native_session_id: "native-ready".into(),
+                    display_title: "Ready".into()
+                }
+            );
+        }
+    }
+}
+
 fn state_with(sessions: Vec<SessionRecord>) -> State {
     State {
         subagents: Default::default(),
