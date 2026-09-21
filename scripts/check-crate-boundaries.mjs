@@ -12,7 +12,7 @@ const allowed = {
   'brokk-mj-transcript': ['brokk-mj-core'],
   'brokk-mj-checkpoint': ['brokk-mj-core'],
   'brokk-mj-client': ['brokk-mj-transcript', 'brokk-mj-core'],
-  'brokk-mj-worker': ['brokk-mj-review', 'brokk-mj-checkpoint', 'brokk-mj-core'],
+  'brokk-mj-worker': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core'],
   'brokk-mj-controller': ['brokk-mj-review', 'brokk-mj-transcript', 'brokk-mj-checkpoint', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-chat': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client'],
   'brokk-mj-tui': ['brokk-mj-transcript', 'brokk-mj-core', 'brokk-mj-client', 'brokk-mj-chat'],

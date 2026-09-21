@@ -725,7 +725,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Rename', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Jev decisions', 'Rename', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
@@ -742,7 +742,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   state.snapshot.sessions.find(item => item.id === 'openable').capabilities.rename = false;
   await refresh(page, state);
   await expect(openMenu.getByRole('menuitem', { name: 'Rename' })).toHaveCount(0);
-  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
+  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('jev-decisions');
   await page.keyboard.press('Escape');
   await expect(openMenu).toBeHidden();
   expect(await page.evaluate(() => document.activeElement?.dataset.sessionMenu)).toBe('openable');
@@ -969,6 +969,10 @@ for (const queued of [0, 1]) {
     parent.chat_phase = 'running';
     const state = await mount(page, [parent]);
     await card(page, 'old-worker').click();
+    // Opening the card hands focus to the conversation screen. Until that
+    // screen renders, the composer is not the key target and Escape would
+    // reach the page body instead of the turn control.
+    await expect(page.locator('#cancel-turn')).toBeVisible();
     await expect(page.locator('#cancel-turn')).toHaveText('Interrupt turn');
     await page.locator('#prompt-text').press('Escape');
     await expect.poll(() => state.actions.length).toBe(1);
