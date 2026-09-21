@@ -862,7 +862,7 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
     assert_eq!(dialog.focus_index(), 1);
 
     let width = 78;
-    for height in [dialog.natural_height(width), 10, 8, 6] {
+    for height in [dialog.natural_height(width), 10, 8, 6, 5] {
         let text = buffer_text(&rendered_in_pane(&dialog, width, height));
         assert!(
             text.contains("Enabled"),
@@ -872,11 +872,34 @@ fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
             text.contains("☐ No"),
             "boolean control missing at height {height}:\n{text}"
         );
+        assert!(text.contains("Submit"), "actions missing:\n{text}");
     }
+}
 
-    // A pane with a single field row keeps the control it cannot label.
-    let text = buffer_text(&rendered_in_pane(&dialog, width, 5));
-    assert!(text.contains("☐ No"), "boolean control missing:\n{text}");
+#[test]
+fn compact_question_keeps_validation_errors_and_the_labeled_control_visible() {
+    let mut dialog = ElicitationDialog::new(request(
+        ElicitationFieldKind::Text {
+            default: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            format: None,
+        },
+        true,
+    ));
+    dialog.focus_control(1);
+    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
+    let text = buffer_text(&rendered_in_pane(&dialog, 78, 5));
+    assert!(
+        text.contains("1/1  Architecture"),
+        "field title missing:\n{text}"
+    );
+    assert!(
+        text.contains("Architecture is required"),
+        "error missing:\n{text}"
+    );
+    assert!(text.contains("Submit"), "actions missing:\n{text}");
 }
 
 #[test]
