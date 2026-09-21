@@ -188,6 +188,7 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::ChangedFiles(dialog) => {
             render_changed_files(frame, area, dashboard, dialog, &mut surfaces)
         }
+        Mode::JevDecisions(dialog) => crate::jev::render(frame, area, dialog, &mut surfaces),
         Mode::NoticeLog(dialog) => render_notice_log(frame, area, dashboard, dialog, &mut surfaces),
         Mode::EditContainer(editor) => render_container_editor(frame, area, editor, &mut surfaces),
         Mode::Importing(progress) => render_import_progress(frame, area, progress, &mut surfaces),

@@ -86,7 +86,9 @@ pub(super) fn project_observation(
                     push_system(
                         mutation,
                         event,
-                        format!("Continuing requested work automatically · {attempt} of 3"),
+                        format!(
+                            "Mj continued automatically · {attempt} of 3. Jev assessed that already-requested work remains."
+                        ),
                     );
                 }
                 let content = prompt

@@ -20,6 +20,7 @@ pub mod harness_runtime;
 pub mod help_search;
 pub mod hex;
 pub mod history;
+pub mod jev;
 pub mod local_git;
 pub mod local_sockets;
 pub mod login_environment;

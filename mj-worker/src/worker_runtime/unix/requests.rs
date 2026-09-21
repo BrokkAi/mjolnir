@@ -16,6 +16,34 @@ pub(crate) async fn handle_request(
     relay: &Arc<Mutex<DurableRelay>>,
     envelope: RelayRequestEnvelope,
 ) -> Result<RelayResponseEnvelope> {
+    if let RelayRequest::JevDecisions { decision_id } = &envelope.request {
+        if !envelope.request.supported_at(envelope.protocol_version) {
+            return Ok(relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .handle(envelope));
+        }
+        let (directory, session) = {
+            let relay = relay.lock().expect("relay state lock poisoned");
+            (
+                relay.root().join("jev-decisions"),
+                relay.session_id().to_owned(),
+            )
+        };
+        let decision_id = decision_id.clone();
+        let page = tokio::task::spawn_blocking(move || {
+            mj_core::jev::read(&directory, &session, decision_id.as_deref())
+        })
+        .await
+        .context("read worker Jev diagnostics")??;
+        return Ok(RelayResponseEnvelope {
+            request_id: envelope.request_id,
+            protocol_version: envelope.protocol_version,
+            body: RelayResponseBody::Ok {
+                payload: RelayResponsePayload::JevDecisions(page),
+            },
+        });
+    }
     // Sealing and garbage collection can move the segments a plan named
     // while it is being read. That is not the controller's fault and not
     // its problem: plan again against the journal as it now stands. The
@@ -641,4 +669,59 @@ pub(crate) async fn write_logged_response(
         );
     }
     write_response(writer, response).await
+}
+
+#[cfg(test)]
+mod jev_tests {
+    use super::*;
+    #[tokio::test]
+    async fn decision_reads_are_capability_gated_and_do_not_advance_the_relay() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = Arc::new(Mutex::new(
+            DurableRelay::open(directory.path(), "jev-test", "test").unwrap(),
+        ));
+        let log = mj_core::jev::DecisionLog::open(directory.path().join("jev-decisions")).unwrap();
+        let attempt = log.start("jev-test", "activity", "Work finished?", "Current request");
+        attempt.update(
+            Some("Finished"),
+            serde_json::json!({"request":{"text":"Exact evidence"}}),
+        );
+        attempt.finish("applied", "Marked ready");
+        let before = relay.lock().unwrap().operational_state();
+        for (version, id) in [
+            (18, None),
+            (19, None),
+            (19, Some(attempt.id())),
+            (19, Some("rotated".into())),
+        ] {
+            let response = handle_request(
+                &relay,
+                RelayRequestEnvelope {
+                    request_id: "read-only".into(),
+                    protocol_version: version,
+                    request: RelayRequest::JevDecisions {
+                        decision_id: id.clone(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            if version == 18 {
+                assert!(matches!(response.body, RelayResponseBody::Error { .. }));
+                continue;
+            }
+            let RelayResponseBody::Ok {
+                payload: RelayResponsePayload::JevDecisions(page),
+            } = response.body
+            else {
+                panic!("expected diagnostic page")
+            };
+            if id.as_deref() == Some("rotated") {
+                assert!(page.decisions.is_empty());
+            } else {
+                assert_eq!(page.decisions[0].technical.is_some(), id.is_some());
+            }
+        }
+        assert_eq!(relay.lock().unwrap().operational_state(), before);
+    }
 }

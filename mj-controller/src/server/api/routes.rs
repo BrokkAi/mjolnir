@@ -2,6 +2,11 @@ use super::*;
 
 pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
     Router::new()
+        .route("/sessions/{session_id}/jev-decisions", get(jev_decisions))
+        .route(
+            "/sessions/{session_id}/jev-decisions/{decision_id}",
+            get(jev_decision),
+        )
         .route(
             "/sessions/{session_id}/native-agents/{child_id}/history",
             get(native_agent_history),

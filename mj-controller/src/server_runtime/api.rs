@@ -47,6 +47,14 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one, the same reason the follow-up reads session
 /// state through a function.
 pub trait ExportRuntime: Send + Sync {
+    fn jev_decisions(
+        self: Arc<Self>,
+        _session: String,
+        _decision_id: Option<String>,
+    ) -> BoxFuture<'static, Result<mj_core::jev::DecisionPage>> {
+        Box::pin(async { bail!("Jev diagnostics unavailable") })
+    }
+
     /// The in-memory record for a session, or `None` when the daemon holds
     /// none.
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord>;
@@ -132,6 +140,14 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn jev_decisions(
+        self: Arc<Self>,
+        session: String,
+        decision_id: Option<String>,
+    ) -> BoxFuture<'static, Result<mj_core::jev::DecisionPage>> {
+        Box::pin(RuntimeState::jev_decisions(self, session, decision_id))
+    }
+
     fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
         RuntimeState::session_record(self, session_id)
     }
@@ -1351,6 +1367,14 @@ fn refusal_reason(stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn jev_decisions(
+        &self,
+        session: String,
+        decision_id: Option<String>,
+    ) -> BoxFuture<'_, Result<mj_core::jev::DecisionPage>> {
+        self.exports.clone().jev_decisions(session, decision_id)
+    }
+
     /// Create the workspace, then republish the list so the terminal tabs and
     /// the viewer see it without waiting for the next daemon action.
     fn create_workspace(

@@ -52,6 +52,7 @@ pub enum CommandId {
     ResumeDialog,
     RenameSession,
     ChangedFiles,
+    JevDecisions,
     ContainerSettings,
     MoveSession,
     DestroySession,
@@ -845,6 +846,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: session_idle,
     },
     CommandSpec {
+        id: CommandId::JevDecisions,
+        label: "Jev decisions",
+        description: "Inspect what Jev checked, its assessment, and what mj actually did.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: selected_session_ready,
+    },
+    CommandSpec {
         id: CommandId::ChangedFiles,
         label: "Changed files",
         description: "List the files the selected session's checkout has changed, with the branch and its distance from upstream.",
@@ -1519,6 +1532,10 @@ impl DashboardState {
             }
             CommandId::ContainerSettings => {
                 self.begin_container_edit();
+                DashboardAction::None
+            }
+            CommandId::JevDecisions => {
+                self.begin_jev_decisions(None);
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),

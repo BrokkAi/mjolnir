@@ -65,6 +65,9 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     Status,
+    JevDecisions {
+        decision_id: Option<String>,
+    },
     AttachmentPresent {
         reference: crate::attachment::AttachmentRef,
     },
@@ -287,6 +290,7 @@ impl RelayRequest {
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
             Self::Status => "status",
+            Self::JevDecisions { .. } => "jev_decisions",
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
@@ -328,6 +332,7 @@ impl RelayRequest {
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
+            Self::JevDecisions { .. } => 19,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
@@ -398,6 +403,7 @@ pub enum RelayResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayResponsePayload {
+    JevDecisions(crate::jev::DecisionPage),
     Hello {
         negotiated: u32,
         relay_version: String,

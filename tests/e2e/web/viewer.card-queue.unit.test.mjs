@@ -114,7 +114,7 @@ test('session cards are focusable, have no Open button, and retain nested action
   assert.equal(card.attributes['aria-label'], 'Open session Build');
   assert.deepEqual(
     buttons.map(button => button.textContent),
-    ['⋯', 'Rename', 'Cancel operation', 'Suspend session…', 'Resume'],
+    ['⋯', 'Jev decisions', 'Rename', 'Cancel operation', 'Suspend session…', 'Resume'],
   );
   assert.ok(!buttons.some(button => button.textContent === 'Open'));
 

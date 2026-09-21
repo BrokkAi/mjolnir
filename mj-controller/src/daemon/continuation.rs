@@ -15,6 +15,8 @@ enum Outcome {
 }
 
 struct Pending {
+    diagnostic: Option<mj_core::jev::Attempt>,
+    submitting: bool,
     generation: u64,
     abort: AbortHandle,
     view: ManagedSessionView,
@@ -76,6 +78,7 @@ fn allowed(state: &RuntimeState, session: &str) -> bool {
 
 #[derive(Clone)]
 struct Environment {
+    log: Option<mj_core::jev::DecisionLog>,
     control: SessionManagerControl,
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
@@ -85,6 +88,7 @@ type ReviewObserver = Arc<dyn Fn(&str, &ManagedSessionView) + Send + Sync>;
 type Classifier = Arc<
     dyn Fn(
             mj_core::continuation::ContinuationEvidence,
+            Option<mj_core::jev::Attempt>,
         ) -> futures::future::BoxFuture<
             'static,
             Result<mj_core::continuation::ContinuationVerdict>,
@@ -102,6 +106,7 @@ fn publish(
     if checking {
         if let Some(snapshot) = &mut view.snapshot {
             snapshot.operational.activity = Some(ActivityState::CheckingContinuation);
+            snapshot.operational.jev_decision_id = None;
         }
     } else {
         (environment.review)(&session_id, &view);
@@ -115,6 +120,13 @@ pub(super) fn spawn(
     cancellation: CancellationToken,
 ) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
     let environment = Environment {
+        log: match mj_core::jev::DecisionLog::open(mj_core::jev::controller_log_dir()) {
+            Ok(log) => Some(log),
+            Err(error) => {
+                tracing::warn!(%error, "Jev diagnostic log unavailable");
+                None
+            }
+        },
         control: state.session_manager.clone(),
         allowed: {
             let state = state.clone();
@@ -130,8 +142,10 @@ pub(super) fn spawn(
         environment,
         input,
         cancellation,
-        Arc::new(|evidence| {
-            Box::pin(async move { crate::continuation::classify(&evidence).await })
+        Arc::new(|evidence, diagnostic| {
+            Box::pin(
+                async move { crate::continuation::classify(&evidence, diagnostic.as_ref()).await },
+            )
         }),
     )
 }
@@ -179,7 +193,16 @@ fn spawn_in(
                             publish(&tx, &environment, id, view, true);
                             continue;
                         }
-                        pending.remove(&id).expect("pending request").abort.abort();
+                        let previous = pending.remove(&id).expect("pending request");
+                        if !previous.submitting {
+                            if let Some(diagnostic) = &previous.diagnostic {
+                                diagnostic.finish("stale", "Session evidence or runtime state changed before this check completed; no action was taken.");
+                            }
+                            previous.abort.abort();
+                        }
+                        // An already-dispatched submission retains its bounded task
+                        // to record the worker's actual acceptance or rejection.
+                        // Its atomic frontier guard still lets new input win.
                     }
                     let new_completion = previous.is_some_and(|old| old != completed) && completed.is_some();
                     if new_completion && eligible(&view) && (environment.allowed)(&id) {
@@ -187,6 +210,10 @@ fn spawn_in(
                         let epoch = generation;
                         let session = id.clone();
                         let snapshot = view.snapshot.as_ref().expect("eligible snapshot").clone();
+                        let diagnostic = environment.log.as_ref().map(|log| log.start(&id, "continuation",
+                            "Does already-requested work remain that can proceed without new user input?",
+                            "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
+                        let request_diagnostic = diagnostic.clone();
                         let classify = classifier.clone();
                         let abort = jobs.spawn(async move {
                             let result = async {
@@ -203,7 +230,7 @@ fn spawn_in(
                                 })
                                 .await
                                 .context("collect continuation evidence")??;
-                                classify(evidence).await
+                                classify(evidence, request_diagnostic).await
                             }
                             .await;
                             (session, epoch, Outcome::Classified(result))
@@ -217,6 +244,8 @@ fn spawn_in(
                         pending.insert(
                             id.clone(),
                             Pending {
+                                diagnostic,
+                                submitting: false,
                                 generation: epoch,
                                 abort,
                                 view: view.clone(),
@@ -247,6 +276,10 @@ fn spawn_in(
                                             });
                                         }
                                         Err(error) => {
+                                            if let Some(diagnostic) = &p.diagnostic {
+                                                diagnostic.update(None, serde_json::json!({"submission_error":format!("{error:#}")}));
+                                                diagnostic.finish("failed", "Automatic continuation could not be confirmed. No further continuation was submitted by this check.");
+                                            }
                                             tracing::warn!(session=%id,%error,"automatic continuation not submitted");
                                             publish(&tx, &environment, id, p.view, false);
                                         }
@@ -255,6 +288,14 @@ fn spawn_in(
                                 }
                                 Outcome::Classified(result) => result,
                             };
+                            if let Some(diagnostic) = &p.diagnostic {
+                                match &result {
+                                    Ok(verdict) => diagnostic.update(Some(if verdict.should_continue() {
+                                        "Jev assessed that already-requested work remains and needs no new input."
+                                    } else { "Jev did not confidently establish both unfinished work and no need for user input." }), serde_json::json!({"result":{"unfinished":verdict.unfinished,"no_input_needed":verdict.no_input_needed}})),
+                                    Err(error) => diagnostic.update(Some("No usable Jev answer."), serde_json::json!({"error":format!("{error:#}")})),
+                                }
+                            }
                             let continuing = result.as_ref().is_ok_and(|v| v.should_continue())
                                 && eligible(&p.view)
                                 && (environment.allowed)(&id);
@@ -266,6 +307,7 @@ fn spawn_in(
                                 let user = p.user.clone();
                                 let completed = p.completed.clone();
                                 let evidence_frontier = p.evidence_ordinal;
+                                let diagnostic = p.diagnostic.clone();
                                 let abort = jobs.spawn(async move {
                                     let outcome = tokio::time::timeout(Duration::from_secs(15), async {
                                         let handle = control
@@ -295,6 +337,9 @@ fn spawn_in(
                                                 .completed_ordinal,
                                             c.attempts + 1
                                         );
+                                        if let Some(diagnostic) = &diagnostic {
+                                            diagnostic.update(None, serde_json::json!({"command_id":command_id, "attempt":c.attempts + 1, "expected_ordinal":snapshot.operational.latest_ordinal}));
+                                        }
                                         handle
                                             .submit(
                                                 command_id,
@@ -309,16 +354,34 @@ fn spawn_in(
                                                 },
                                             )
                                             .await?;
+                                        if let Some(diagnostic) = &diagnostic {
+                                            diagnostic.finish("applied", "The worker accepted mj's automatic continuation of already-requested work.");
+                                        }
                                         handle.sync_now().await?;
                                         Ok::<_, anyhow::Error>(Box::new(handle.view()))
                                     })
                                     .await
                                     .context("continuation submission timed out")
                                     .and_then(|result| result);
+                                    if let Err(error) = &outcome {
+                                        tracing::warn!(session=%submit_id, %error, "automatic continuation submission or refresh failed");
+                                        if let Some(diagnostic) = &diagnostic {
+                                            diagnostic.update(None, serde_json::json!({"submission_error":format!("{error:#}")}));
+                                            diagnostic.finish("failed", "Mj could not confirm automatic continuation. The submission failed or the worker rejected its guard.");
+                                        }
+                                    }
                                     (submit_id, epoch, Outcome::Submitted(outcome))
                                 });
-                                pending.insert(id, Pending { abort, ..p });
+                                pending.insert(id, Pending { abort, submitting: true, ..p });
                             } else {
+                                if let Some(diagnostic) = &p.diagnostic {
+                                    let (status, action) = match &result {
+                                        Err(_) => ("failed", "Mj left the session ready for operator input because the check failed."),
+                                        Ok(v) if !v.should_continue() => ("uncertain", "Both scores must reach 90%. Mj left the session ready for operator input."),
+                                        _ => ("stale", "The session is no longer eligible; mj did not continue it."),
+                                    };
+                                    diagnostic.finish(status, action);
+                                }
                                 publish(&tx, &environment, id, p.view, false);
                             }
                         }
@@ -344,7 +407,12 @@ fn spawn_in(
                         .collect();
                     for id in invalid {
                         let p = pending.remove(&id).unwrap();
-                        p.abort.abort();
+                        if !p.submitting {
+                            if let Some(diagnostic) = &p.diagnostic {
+                                diagnostic.finish("cancelled", "Continuation was disabled or a session lifecycle operation took ownership.");
+                            }
+                            p.abort.abort();
+                        }
                         publish(&tx, &environment, id, p.view, false);
                     }
                     let live = (environment.live)();

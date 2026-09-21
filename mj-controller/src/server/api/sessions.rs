@@ -417,3 +417,24 @@ pub(super) async fn wiki_restore(
         }),
     ))
 }
+
+pub(super) async fn jev_decisions(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<mj_core::jev::DecisionPage>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    Ok(Json(
+        backend(&state)?.jev_decisions(session_id, None).await?,
+    ))
+}
+pub(super) async fn jev_decision(
+    State(state): State<ServerState>,
+    Path((session_id, decision_id)): Path<(String, String)>,
+) -> Result<Json<mj_core::jev::DecisionPage>, ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    Ok(Json(
+        backend(&state)?
+            .jev_decisions(session_id, Some(decision_id))
+            .await?,
+    ))
+}

@@ -549,6 +549,17 @@ impl DurableRelay {
         state.expected_continuation = facts.expected_continuation;
         state.inferred_idle_since_ms = facts.inferred_idle_since_ms;
         state.activity = Some(mj_core::activity::classify(&facts));
+        if matches!(
+            state.activity,
+            Some(mj_core::activity::ActivityState::Expecting { .. })
+        ) || (facts.inferred_idle_since_ms.is_some()
+            && matches!(
+                state.activity,
+                Some(mj_core::activity::ActivityState::Idle { .. })
+            ))
+        {
+            state.jev_decision_id = self.turn_context.decision();
+        }
         state
     }
 
@@ -693,6 +704,12 @@ impl DurableRelay {
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
         self.verdict_harness = Some(harness);
+        if self.turn_context.decision_log().is_none() {
+            match mj_core::jev::DecisionLog::open(self.root.join("jev-decisions")) {
+                Ok(log) => self.turn_context.set_decision_log(log),
+                Err(error) => tracing::warn!(%error, "Jev diagnostic log unavailable"),
+            }
+        }
         self.turn_context.set_session_id(&self.snapshot.session_id);
     }
 
@@ -715,6 +732,10 @@ impl DurableRelay {
     }
 
     /// The directory holding this relay's durable state.
+    pub fn session_id(&self) -> &str {
+        &self.snapshot.session_id
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

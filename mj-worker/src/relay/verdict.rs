@@ -268,6 +268,13 @@ mod tests {
         relay
             .apply_replied_decision(generation, Decision::InferIdle, 200)
             .unwrap();
+        relay
+            .turn_context
+            .set_decision(generation, "test-decision".into());
+        assert_eq!(
+            relay.operational_state().jev_decision_id.as_deref(),
+            Some("test-decision")
+        );
         let mut unchanged = tasks();
         unchanged.reverse();
         relay.claude_background_tasks_changed(unchanged).unwrap();
@@ -287,6 +294,7 @@ mod tests {
         let mut replaced = tasks();
         replaced[0].task_id = "replacement".into();
         relay.claude_background_tasks_changed(replaced).unwrap();
+        assert!(relay.operational_state().jev_decision_id.is_none());
         assert!(matches!(
             relay.operational_state().activity_state(),
             ActivityState::Background { .. }

@@ -1,6 +1,21 @@
 use super::*;
 
 impl RelayClient {
+    pub async fn jev_decisions(
+        &mut self,
+        decision_id: Option<String>,
+    ) -> Result<mj_core::jev::DecisionPage> {
+        let request = RelayRequest::JevDecisions { decision_id };
+        anyhow::ensure!(
+            request.supported_at(self.protocol_version),
+            "This worker does not support Jev decision details; restart it with a newer mj build."
+        );
+        match self.call(request).await? {
+            RelayResponsePayload::JevDecisions(page) => Ok(page),
+            other => bail!("unexpected Jev diagnostics response: {other:?}"),
+        }
+    }
+
     pub async fn history_requests(&mut self) -> Result<Vec<mj_core::history::HistoryRequest>> {
         if !RelayRequest::HistoryRequests.supported_at(self.protocol_version) {
             return Ok(Vec::new());

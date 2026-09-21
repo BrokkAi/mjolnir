@@ -770,6 +770,62 @@ async function openNativeHistory(owner, agent) {
   await load();
 }
 
+// Exact inputs are fetched only when a decision is expanded.
+async function openJevDecisions(session, decisionId = null) {
+  const modal = el('dialog', 'jev-decisions');
+  const close = button('Close'); close.onclick = () => modal.close();
+  const refresh = button('Refresh');
+  const content = el('div');
+  modal.append(el('h2', '', 'Jev decisions'), close, refresh,
+    el('p', '', 'Exact submitted conversation text is retained locally in rotating logs (4 × 8 MiB per owner).'), content);
+  document.body.append(modal);
+  let pending = new AbortController();
+  modal.addEventListener('close', () => { pending.abort(); modal.remove(); });
+  modal.showModal();
+  const base = `/api/v1/sessions/${encodeURIComponent(session)}/jev-decisions`;
+  async function detail(id, target, signal) {
+    target.replaceChildren(el('p', '', 'Loading details…'));
+    try {
+      const page = await request(`${base}/${encodeURIComponent(id)}`, { signal });
+      if (signal.aborted || !modal.open) return;
+      target.replaceChildren(...page.warnings.map(w => el('p', 'error', w)));
+      const record = page.decisions[0];
+      if (!record) { target.append(el('p', '', 'Details no longer available.')); return; }
+      target.append(el('p', '', `Checked: ${record.checked}`), el('p', '', `Answer: ${record.answer}`),
+        el('p', '', `Action: ${record.action}`), el('p', '', `Evidence: ${record.scope}`));
+      const technical = el('details');
+      technical.append(el('summary', '', 'Technical details and exact input'),
+        el('pre', '', JSON.stringify({ elapsed_ms: Math.max(0, record.updated_at_ms - record.started_at_ms), details: record.technical }, null, 2)));
+      target.append(technical);
+    } catch (error) { if (!signal.aborted && modal.open) target.replaceChildren(el('p', 'error', error.message)); }
+  }
+  async function load() {
+    pending.abort(); pending = new AbortController();
+    const { signal } = pending;
+    content.replaceChildren(el('p', '', 'Loading…'));
+    if (decisionId) { await detail(decisionId, content, signal); return; }
+    try {
+      const page = await request(base, { signal });
+      if (signal.aborted || !modal.open) return;
+      content.replaceChildren(...page.warnings.map(w => el('p', 'error', w)));
+      if (!page.decisions.length) content.append(el('p', '', 'No retained Jev checks for this session.'));
+      for (const record of page.decisions) {
+        const row = el('details');
+        const summary = el('summary', '', `${record.kind} · ${record.status} · ${new Date(record.started_at_ms).toLocaleString()}`);
+        const body = el('div');
+        row.append(summary, el('p', '', record.action), body);
+        let loaded = false;
+        row.addEventListener('toggle', () => {
+          if (row.open && !loaded) { loaded = true; void detail(record.id, body, signal); }
+        });
+        content.append(row);
+      }
+    } catch (error) { if (!signal.aborted && modal.open) content.replaceChildren(el('p', 'error', error.message)); }
+  }
+  refresh.onclick = load;
+  await load();
+}
+
 /// One session row.
 ///
 /// Every control here appears because a capability the daemon published says
@@ -819,7 +875,7 @@ function attentionParts(session) {
 
 function sessionMenuActions(session) {
   const can = session.capabilities || {};
-  const actions = [];
+  const actions = [['Jev decisions', 'secondary', 'jev-decisions']];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
@@ -980,6 +1036,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
     return `Model at capacity · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
   }
   const details = session.activity_details || {};
+  if (session.jev_decision_id && details.label) return details.label;
   const kind = details.kind;
   const turnStarted = epochMs(details.turn_started_at_ms);
   const stepStarted = epochMs(details.step_started_at_ms);
@@ -1021,7 +1078,14 @@ function sessionActivityLabel(session, now = serverClockMs()) {
 
 function updateSessionActivity(card, session) {
   card._activity.textContent = sessionActivityLabel(session);
-  card._activity.title = card._activity.textContent;
+  const id = session.jev_decision_id;
+  card._activity.title = id ? 'Inspect Jev assessment' : card._activity.textContent;
+  card._activity.setAttribute('role', id ? 'button' : 'status');
+  card._activity.tabIndex = id ? 0 : -1;
+  card._activity.onclick = id ? () => openJevDecisions(session.id, id) : null;
+  card._activity.onkeydown = id ? event => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openJevDecisions(session.id, id); }
+  } : null;
 }
 
 function updateSessionClocks() {
@@ -5226,6 +5290,12 @@ function entryBody(entry) {
   } else {
     body.append(renderToolOutput(entry.lines.join('\n')));
   }
+  if (entry.jev_notice) {
+    const inspect = button('Jev decisions', 'secondary');
+    const session = currentSession;
+    inspect.onclick = () => openJevDecisions(session);
+    body.append(inspect);
+  }
   if (entry.diffstats?.length) {
     body.append(renderDiffStats(entry.diffstats));
   }
@@ -5876,6 +5946,7 @@ conversationSide.onclick = async event => {
 /// The pending set is checked at entry and released in a `finally`, so a
 /// double tap cannot send twice and a failure cannot leave the control dead.
 async function runSessionAction(dataset, errorNode, extra) {
+  if (dataset.action === 'jev-decisions') { closeSessionMenu(); await openJevDecisions(dataset.id); return true; }
   const key = `${dataset.action}:${dataset.id}`;
   if (pendingActions.has(key)) return false;
   const actionExtra = { ...(extra || {}) };

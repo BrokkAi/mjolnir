@@ -32,6 +32,7 @@ pub fn format_turn_clock(now_epoch_seconds: u64, current_turn_started_at: Option
 /// activity facts from this, so they agree on what "idle" means.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionActivity {
+    pub jev_decision_id: Option<String>,
     pub pursuing_goal: bool,
     pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
     /// Durable turn start retained through the background work it launched.
@@ -64,9 +65,21 @@ pub struct SessionActivity {
 }
 
 impl SessionActivity {
+    pub fn jev_label(&self) -> Option<&'static str> {
+        self.jev_decision_id.as_ref()?;
+        match self.state {
+            Some(mj_core::activity::ActivityState::Idle { .. }) => Some("Ready · Jev assessment"),
+            Some(mj_core::activity::ActivityState::Expecting { .. }) => {
+                Some("Expecting follow-up · Jev assessment")
+            }
+            _ => None,
+        }
+    }
+
     /// Read the activity out of what a session's relay last reported.
     pub fn of(operational: &mj_core::relay::RelayOperationalState) -> Self {
         Self {
+            jev_decision_id: operational.jev_decision_id.clone(),
             pursuing_goal: operational.goal.active(),
             capacity_retry: operational.capacity_retry.clone(),
             activity_turn_started_at_ms: operational
@@ -139,6 +152,9 @@ impl SessionActivity {
         if let Some(retry) = &self.capacity_retry {
             return retry
                 .status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
+        }
+        if let Some(label) = self.jev_label() {
+            return label.into();
         }
         let kind = self.kind(current_turn_started_at);
         if kind == SessionActivityKind::CheckingContinuation {
@@ -258,14 +274,15 @@ impl SessionActivity {
                     .min()
             })
             .flatten();
-        let label = match kind {
+        let label = self.jev_label().map(str::to_owned).or_else(|| match kind {
             SessionActivityKind::Lifecycle => Some(self.lifecycle_label().to_owned()),
             SessionActivityKind::Goal => Some("Pursuing goal".into()),
             SessionActivityKind::CheckingContinuation => Some("Checking continuation".into()),
             SessionActivityKind::Expecting => Some("expecting the agent to continue".into()),
             _ => None,
-        };
+        });
         SessionActivityDetails {
+            jev_decision_id: self.jev_decision_id.clone(),
             kind,
             turn_started_at_ms,
             step_started_at_ms,
@@ -419,6 +436,7 @@ pub enum SessionActivityKind {
 /// Structured activity facts shared by the terminal and web projections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionActivityDetails {
+    pub jev_decision_id: Option<String>,
     pub kind: SessionActivityKind,
     pub turn_started_at_ms: Option<i64>,
     pub step_started_at_ms: Option<i64>,
@@ -459,6 +477,9 @@ pub fn format_activity_columns(
     current_step_started_at_ms: Option<u64>,
     activity: &SessionActivity,
 ) -> Vec<String> {
+    if let Some(label) = activity.jev_label() {
+        return vec![label.into()];
+    }
     if let Some(retry) = &activity.capacity_retry {
         return vec![
             retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64),
@@ -518,6 +539,9 @@ pub fn format_activity_clock(
     current_turn_started_at: Option<u64>,
     activity: &SessionActivity,
 ) -> String {
+    if let Some(label) = activity.jev_label() {
+        return label.into();
+    }
     if let Some(retry) = &activity.capacity_retry {
         return retry.status(now_epoch_seconds.saturating_mul(1000).min(i64::MAX as u64) as i64);
     }
@@ -677,6 +701,7 @@ mod tests {
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
         SessionActivity {
+            jev_decision_id: None,
             pursuing_goal: false,
             capacity_retry: None,
             execution: None,

@@ -449,6 +449,13 @@ impl PartialEq for TranscriptSource {
 impl Eq for TranscriptSource {}
 
 impl ChatEntry {
+    pub fn is_jev_notice(&self) -> bool {
+        let text = self.text.strip_prefix("warning: ").unwrap_or(&self.text);
+        self.role == ChatRole::System
+            && (text.starts_with("Mj continued automatically ·")
+                || text.starts_with("Mj marked this turn as waiting for you · Jev assessment."))
+    }
+
     /// Whether this entry is the durable marker emitted when a session's
     /// control plane restarts. The source identity is authoritative for
     /// materialized entries; the role/text check also covers entries built

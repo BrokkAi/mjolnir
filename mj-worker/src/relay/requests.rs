@@ -112,7 +112,8 @@ impl DurableRelay {
                 self.install_prompt_context(text.clone())?;
                 RelayResponsePayload::PromptContextInstalled
             }
-            RelayRequest::AttachmentPresent { .. }
+            RelayRequest::JevDecisions { .. }
+            | RelayRequest::AttachmentPresent { .. }
             | RelayRequest::InstallAttachment { .. }
             | RelayRequest::ReadAttachment { .. }
             | RelayRequest::CredentialState

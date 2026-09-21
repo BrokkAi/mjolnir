@@ -45,6 +45,10 @@ use crate::short_id;
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
+    JevDecisions {
+        generation: u64,
+        result: std::result::Result<mj_core::jev::DecisionPage, String>,
+    },
     HelpSearchFinished {
         generation: u64,
         result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
@@ -417,6 +421,9 @@ impl DashboardContext {
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
         match update {
+            DashboardIoUpdate::JevDecisions { generation, result } => {
+                self.dashboard.apply_jev_result(generation, result)
+            }
             DashboardIoUpdate::HelpSearchFinished { generation, result } => {
                 self.dashboard.apply_help_search_result(generation, result);
             }

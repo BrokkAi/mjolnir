@@ -3533,6 +3533,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
         reset: false,
         entries: vec![
             BrowserTranscriptEntry {
+                jev_notice: false,
                 command_id: None,
                 id: 3,
                 updated_seq: 3,
@@ -3546,6 +3547,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 diffstats: Vec::new(),
             },
             BrowserTranscriptEntry {
+                jev_notice: false,
                 command_id: None,
                 id: 7,
                 updated_seq: 8,
@@ -3606,6 +3608,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
         window_start_seq: 1,
         reset: false,
         entries: vec![BrowserTranscriptEntry {
+            jev_notice: false,
             command_id: None,
             id: 1,
             updated_seq: 1,

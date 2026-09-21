@@ -91,6 +91,12 @@ impl DashboardContext {
             mj_chat::chat::ChatEventOutcome::CycleFocus { reverse } => {
                 self.dashboard.cycle_focus(reverse);
             }
+            mj_chat::chat::ChatEventOutcome::OpenJevDecisions => {
+                if let Some(session) = self.focused_chat().map(|chat| chat.session_id().to_owned())
+                {
+                    self.dashboard.open_jev_decisions(session, None);
+                }
+            }
             mj_chat::chat::ChatEventOutcome::OpenSubagents => {
                 let Some(parent_id) = self.focused_chat().map(|chat| chat.session_id().to_owned())
                 else {

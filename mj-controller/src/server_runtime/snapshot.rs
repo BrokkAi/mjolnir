@@ -622,6 +622,7 @@ pub(super) fn viewer_snapshot(
             let activity = mj_client::usage_format::SessionActivity::of(state);
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
+            session.jev_decision_id = activity_details.jev_decision_id.clone();
             session.activity_details = Some(viewer_activity_details(&activity_details));
             session.activity = mj_client::usage_format::format_activity_columns(
                 now,

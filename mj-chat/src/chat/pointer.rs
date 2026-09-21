@@ -332,6 +332,14 @@ impl ChatState {
         if self.handle_transcript_scrollbar_mouse(mouse) {
             return ChatAction::None;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .jev_click_targets
+                .iter()
+                .any(|rect| rect.contains(Position::new(mouse.column, mouse.row)))
+        {
+            return ChatAction::OpenJevDecisions;
+        }
         // A plain transcript click reaches here only after the selection
         // router has confirmed that the press never became a drag. Keeping
         // this after scrollbar hit testing prevents a thumb click from

@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default)]
 struct TurnContextState {
     generation: u64,
+    decision_log: Option<mj_core::jev::DecisionLog>,
+    decision: Option<(u64, String)>,
     user_prompt_tail: String,
     message_id: Option<String>,
     assistant_text_tail: String,
@@ -39,11 +41,36 @@ pub fn delivered_prompt_command_id(observation: &mj_core::relay::RelayObservatio
 pub struct TurnContext(Arc<Mutex<TurnContextState>>);
 
 impl TurnContext {
+    pub fn set_decision_log(&self, log: mj_core::jev::DecisionLog) {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .decision_log = Some(log);
+    }
+    pub fn decision_log(&self) -> Option<mj_core::jev::DecisionLog> {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .decision_log
+            .clone()
+    }
+    pub fn set_decision(&self, generation: u64, id: String) {
+        self.0.lock().expect("turn context lock poisoned").decision = Some((generation, id));
+    }
+    pub fn decision(&self) -> Option<String> {
+        let state = self.0.lock().expect("turn context lock poisoned");
+        state
+            .decision
+            .as_ref()
+            .filter(|(generation, _)| *generation == state.generation)
+            .map(|(_, id)| id.clone())
+    }
     pub fn reset(&self, prompt: &str) {
         let mut state = self.0.lock().expect("turn context lock poisoned");
         let generation = state.generation.wrapping_add(1);
         *state = TurnContextState {
             generation,
+            decision_log: state.decision_log.clone(),
             user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
@@ -304,6 +331,41 @@ mod tests {
 
     fn tool(title: &str) -> SessionUpdate {
         serde_json::from_value(json!({"sessionUpdate":"tool_call","toolCallId":title,"title":title,"status":"in_progress"})).unwrap()
+    }
+
+    #[test]
+    fn diagnostic_updates_do_not_change_evidence_or_generation_and_new_input_clears_attribution() {
+        let context = TurnContext::default();
+        context.reset("Implement the parser");
+        let generation = context.generation();
+        let before = serde_json::to_value(context.evidence(
+            HarnessKind::Codex,
+            TurnPhase::Running,
+            &Default::default(),
+            0,
+        ))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let log = mj_core::jev::DecisionLog::open(dir.path().into()).unwrap();
+        context.set_decision_log(log.clone());
+        let attempt = log.start("s", "activity", "Who acts?", "Current request");
+        context.set_decision(generation, attempt.id());
+        attempt.finish("unchanged", "Kept runtime facts");
+        assert_eq!(context.generation(), generation);
+        assert_eq!(
+            serde_json::to_value(context.evidence(
+                HarnessKind::Codex,
+                TurnPhase::Running,
+                &Default::default(),
+                0
+            ))
+            .unwrap(),
+            before
+        );
+        assert!(context.decision().is_some());
+        context.reset("New work");
+        assert!(context.decision().is_none());
+        assert!(context.decision_log().is_some());
     }
 
     #[test]

@@ -523,6 +523,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         entry.text.lines().map(str::to_owned).collect()
     };
     BrowserTranscriptEntry {
+        jev_notice: entry.is_jev_notice(),
         command_id: entry.source.0.as_ref().and_then(|item| {
             item.stable_id
                 .strip_prefix("user:")

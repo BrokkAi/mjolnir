@@ -7,6 +7,12 @@ pub(super) async fn handle_action(
     cancellation: &CancellationToken,
 ) -> Result<DaemonReply> {
     match action {
+        DaemonAction::JevDecisions {
+            session_id,
+            decision_id,
+        } => Ok(DaemonReply::JevDecisions(
+            state.clone().jev_decisions(session_id, decision_id).await?,
+        )),
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         DaemonAction::Status => {
             state.prune_dead_clients();

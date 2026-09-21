@@ -49,10 +49,14 @@ impl std::fmt::Debug for VerdictSource {
 pub(crate) struct VerdictClient {
     source: VerdictSource,
     client: reqwest::Client,
+    log: Option<mj_core::jev::DecisionLog>,
 }
 
 /// Kept alive through application so cancellation has a terminal log event too.
 pub(crate) struct VerdictAttempt {
+    pub(crate) diagnostic: Option<mj_core::jev::Attempt>,
+    decision: Option<mj_core::activity::verdict::Decision>,
+    uncertain: bool,
     id: u64,
     session: String,
     generation: u64,
@@ -70,6 +74,49 @@ impl VerdictAttempt {
                 elapsed_ms = self.started.elapsed().as_millis() as u64, outcome, reason,
                 "Jev decision outcome");
         });
+        if let Some(diagnostic) = &self.diagnostic {
+            let (status, action) = match (outcome, reason) {
+                (_, "request_failed") => (
+                    "failed",
+                    "Jev request failed; mj kept the runtime status.".to_owned(),
+                ),
+                ("discarded", _) => (
+                    "stale",
+                    "New activity superseded this assessment; mj kept the runtime status."
+                        .to_owned(),
+                ),
+                ("applied", _) => (
+                    "applied",
+                    match self.decision {
+                        Some(mj_core::activity::verdict::Decision::InferIdle) => {
+                            "Mj marked the session ready."
+                        }
+                        Some(mj_core::activity::verdict::Decision::ExpectContinuation) => {
+                            "Mj is expecting the agent to follow up."
+                        }
+                        _ => "Mj marked the session as awaiting input.",
+                    }
+                    .to_owned(),
+                ),
+                ("unchanged", "keep_current") if self.uncertain => (
+                    "uncertain",
+                    "Confidence was below 85%; mj kept the runtime status.".into(),
+                ),
+                ("unchanged", "keep_current") => (
+                    "unchanged",
+                    "This answer does not change the status in this phase.".into(),
+                ),
+                ("cancelled", _) => (
+                    "cancelled",
+                    "Check cancelled before an assessment was applied.".into(),
+                ),
+                _ => (
+                    outcome,
+                    format!("Mj kept the runtime status: {}.", reason.replace('_', " ")),
+                ),
+            };
+            diagnostic.finish(status, &action);
+        }
         self.finished = true;
     }
 }
@@ -117,7 +164,25 @@ impl VerdictClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("create turn classifier HTTP client")?;
-        Ok(Self { source, client })
+        Ok(Self {
+            source,
+            client,
+            log: None,
+        })
+    }
+
+    pub(crate) fn with_log(mut self, log: Option<mj_core::jev::DecisionLog>) -> Self {
+        self.log = log;
+        self
+    }
+
+    fn request_body(&self, evidence: &TurnEvidence) -> serde_json::Value {
+        match self.source {
+            VerdictSource::Direct { .. } => {
+                serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()})
+            }
+            VerdictSource::Hosted { .. } => serde_json::json!(evidence),
+        }
     }
 
     pub(crate) async fn ask_logged(
@@ -128,7 +193,16 @@ impl VerdictClient {
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
-        let attempt = VerdictAttempt {
+        let diagnostic = self.log.as_ref().map(|log| log.start(session, "activity",
+            "Does the session need user input, expect more agent work, or appear finished?",
+            "Current delivered user request and assistant conversation, plus live runtime facts. Transcript tool history is excluded; bounded summaries may omit older text."));
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v2", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "asked_question_affects_decision":false, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+        }
+        let mut attempt = VerdictAttempt {
+            diagnostic,
+            decision: None,
+            uncertain: false,
             id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
             session: session.into(),
             generation,
@@ -147,6 +221,38 @@ impl VerdictClient {
             active_tools = evidence.tools_in_flight.len(),
             "Jev classification requested");
         let result = self.ask(evidence).await;
+        if let Some(diagnostic) = &attempt.diagnostic {
+            match &result {
+                Ok(answer) => {
+                    attempt.decision =
+                        Some(mj_core::activity::verdict::decide(evidence.phase, answer));
+                    attempt.uncertain =
+                        answer.confidence < mj_core::activity::verdict::ACT_CONFIDENCE;
+                    let assessment = match answer.waiting_on {
+                        mj_core::activity::verdict::WaitingOn::User => {
+                            "Jev assessed that the agent is waiting for the user."
+                        }
+                        mj_core::activity::verdict::WaitingOn::BackgroundWork => {
+                            "Jev assessed that background work still needs a follow-up."
+                        }
+                        mj_core::activity::verdict::WaitingOn::StillWorking => {
+                            "Jev assessed that the agent is still working."
+                        }
+                        mj_core::activity::verdict::WaitingOn::Finished => {
+                            "Jev assessed that the work is finished."
+                        }
+                        mj_core::activity::verdict::WaitingOn::Unclear => {
+                            "Jev could not determine what should happen next."
+                        }
+                    };
+                    diagnostic.update(Some(assessment), serde_json::json!({"result": {"waiting_on":format!("{:?}", answer.waiting_on), "confidence":answer.confidence, "asked_question":answer.asked_question}}));
+                }
+                Err(error) => diagnostic.update(
+                    Some("No usable Jev answer."),
+                    serde_json::json!({"error":format!("{error:#}")}),
+                ),
+            }
+        }
         match &result {
             Ok(answer) => tracing::info!(target: "mj_jev", request_id = attempt.id, session,
                 generation, phase = ?evidence.phase, verdict = ?answer.waiting_on,
@@ -170,10 +276,15 @@ impl VerdictClient {
             "turn evidence exceeds request byte limit"
         );
         let request = match &self.source {
-            VerdictSource::Direct { key, endpoint } => self.client.post(endpoint)
+            VerdictSource::Direct { key, endpoint } => self
+                .client
+                .post(endpoint)
                 .bearer_auth(key)
-                .json(&serde_json::json!({"model":"jev-latest", "state":evidence, "questions":questions()})),
-            VerdictSource::Hosted { endpoint } => self.client.post(endpoint).json(evidence),
+                .json(&self.request_body(evidence)),
+            VerdictSource::Hosted { endpoint } => self
+                .client
+                .post(endpoint)
+                .json(&self.request_body(evidence)),
         };
         let mut response = request
             .send()
@@ -201,16 +312,18 @@ impl VerdictClient {
 
 /// Lives beside the prompt future, so cancellation and shutdown can always win
 /// while HTTP is pending. Dropping the turn drops the request and its schedule.
-pub(super) async fn await_input_verdict(spec: &super::LaunchSpec, client: &VerdictClient) {
-    await_input_verdict_with_cadence(spec, client, mj_core::activity::SILENCE_WORTH_REPORTING)
-        .await;
+pub(super) async fn await_input_verdict(
+    spec: &super::LaunchSpec,
+    client: &VerdictClient,
+) -> VerdictAttempt {
+    await_input_verdict_with_cadence(spec, client, mj_core::activity::SILENCE_WORTH_REPORTING).await
 }
 
 async fn await_input_verdict_with_cadence(
     spec: &super::LaunchSpec,
     client: &VerdictClient,
     first: Duration,
-) {
+) -> VerdictAttempt {
     use mj_core::activity::verdict::{Decision, TurnPhase, decide};
     let mut observed = spec.acp_activity.last_at_ms();
     let mut gap = first;
@@ -244,8 +357,7 @@ async fn await_input_verdict_with_cadence(
         }
         match answer {
             Ok(verdict) if decide(TurnPhase::Running, &verdict) == Decision::AwaitingInput => {
-                attempt.finish("applied", "awaiting_input");
-                return;
+                return attempt;
             }
             Ok(_) => attempt.finish("unchanged", "keep_current"),
             Err(_) => attempt.finish("unchanged", "request_failed"),
@@ -323,6 +435,39 @@ mod tests {
             &Default::default(),
             0,
         )
+    }
+
+    #[tokio::test]
+    async fn decision_log_records_submitted_body_and_application_without_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = mj_core::jev::DecisionLog::open(directory.path().into()).unwrap();
+        let (client, server) = server(response("user")).await;
+        let client = client.with_log(Some(log));
+        let mut evidence = evidence();
+        evidence.transcript_summary =
+            "User: résumé 🛠\nAssistant: tests remain [earlier history omitted]".into();
+        evidence.background_commands = 2;
+        let (mut attempt, answer) = client.ask_logged("isolated", 42, &evidence).await;
+        assert!(answer.is_ok());
+        let submitted = server.await.unwrap();
+        let id = attempt.diagnostic.as_ref().unwrap().id();
+        attempt.finish("discarded", "activity_or_generation_changed");
+        let page = mj_core::jev::read(directory.path(), "isolated", Some(&id)).unwrap();
+        assert_eq!(
+            page.decisions[0].technical.as_ref().unwrap()["request"],
+            submitted
+        );
+        assert_eq!(page.decisions[0].status, "stale");
+        let text = serde_json::to_string(&page).unwrap();
+        assert!(!text.contains("Bearer"));
+        assert!(!text.contains("authorization"));
+        assert!(
+            mj_core::jev::read(directory.path(), "isolated", None)
+                .unwrap()
+                .decisions[0]
+                .technical
+                .is_none()
+        );
     }
 
     #[test]

@@ -31,6 +31,15 @@ async fn run_relay_coordinator_with_verdict(
     mut kimi_tasks: Option<KimiTaskMonitor>,
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
 ) -> Result<()> {
+    let verdict = verdict.map(|client| {
+        client.with_log(
+            relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .turn_context()
+                .decision_log(),
+        )
+    });
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
     let mut verdict_tasks = tokio::task::JoinSet::new();
@@ -210,6 +219,9 @@ async fn run_relay_coordinator_with_verdict(
                                         return Err(error);
                                     }
                                 };
+                                if reason == "applied" && let Some(diagnostic) = &attempt.diagnostic {
+                                    relay.turn_context().set_decision(generation, diagnostic.id());
+                                }
                                 attempt.finish(if reason == "applied" { "applied" } else { "unchanged" }, reason);
                                 if decision == Decision::KeepCurrent {
                                     relay.retry_replied_verdict(generation);

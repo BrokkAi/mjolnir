@@ -49,6 +49,7 @@ mod dialogs;
 mod go;
 mod help;
 mod ingest;
+mod jev;
 mod keybinds;
 mod modal_surface;
 mod notify;
@@ -681,6 +682,7 @@ pub(crate) enum Mode {
     ChangedFiles(ChangedFilesDialog),
     /// The last notices the footer showed, newest first.
     NoticeLog(NoticeLogDialog),
+    JevDecisions(jev::JevDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),

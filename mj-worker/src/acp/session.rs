@@ -512,7 +512,9 @@ pub(super) async fn serve_session(
         config_recovery.is_some(),
     )
     .await?;
-    let verdict_client = verdict_client::VerdictClient::resolve(spec.verdict.as_ref()).await;
+    let verdict_client = verdict_client::VerdictClient::resolve(spec.verdict.as_ref())
+        .await
+        .map(|client| client.with_log(spec.turn_context.decision_log()));
     let mut goal_controls = goal::PendingControls::default();
     loop {
         let request = tokio::select! {
@@ -687,9 +689,9 @@ pub(super) async fn serve_session(
                 let mut steering_deadline = None;
                 let input_verdict = async {
                     if let Some(client) = &verdict_client {
-                        verdict_client::await_input_verdict(spec, client).await;
+                        verdict_client::await_input_verdict(spec, client).await
                     } else {
-                        std::future::pending::<()>().await;
+                        std::future::pending::<verdict_client::VerdictAttempt>().await
                     }
                 };
                 tokio::pin!(input_verdict);
@@ -838,8 +840,8 @@ pub(super) async fn serve_session(
                             // place; the next prompt goes to the same session.
                             break;
                         }
-                        _ = &mut input_verdict, if prompt_running && cancel_deadline.is_none() => {
-                            let message = "mj marked this turn as waiting for you; the harness may still be running".to_owned();
+                        mut attempt = &mut input_verdict, if prompt_running && cancel_deadline.is_none() => {
+                            let message = "Mj marked this turn as waiting for you · Jev assessment. The harness may still be running. Open Jev decisions for details.".to_owned();
                             emit_runtime_event(events, RuntimeEvent::Warning { message: message.clone() }).await?;
                             emit_runtime_event(events, RuntimeEvent::PromptFinished {
                                 request_id,
@@ -850,6 +852,7 @@ pub(super) async fn serve_session(
                                     http_status: None, reset_at: None,
                                 }),
                             }).await?;
+                            attempt.finish("applied", "awaiting_input");
                             break;
                         }
                         verdict = async {

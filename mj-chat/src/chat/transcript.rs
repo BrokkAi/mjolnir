@@ -1166,6 +1166,7 @@ impl ChatState {
         visible_rows: usize,
     ) {
         self.transcript_tool_click_targets.clear();
+        self.jev_click_targets.clear();
         if self.render_mode != TranscriptRenderMode::Rich
             || visible_rows == 0
             || inner.width == 0
@@ -1194,6 +1195,14 @@ impl ChatState {
             if visible_line_count == 0 {
                 skip = 0;
                 continue;
+            }
+            if entries[index].is_jev_notice() {
+                self.jev_click_targets.push(Rect::new(
+                    inner.x,
+                    inner.y.saturating_add(screen_offset as u16),
+                    inner.width,
+                    visible_line_count as u16,
+                ));
             }
             match collapse {
                 EntryCollapse::Expanded => {

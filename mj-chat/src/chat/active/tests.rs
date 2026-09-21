@@ -277,6 +277,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_requests: Vec::new(),
             subagent_results: Vec::new(),
             operational: mj_core::relay::RelayOperationalState {
+                jev_decision_id: None,
                 continuation: Default::default(),
                 relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
                 native_agents: Vec::new(),
@@ -1878,6 +1879,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(prompt_title(&chat).is_empty());
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        jev_decision_id: None,
         pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -1899,6 +1901,7 @@ fn composer_title_names_the_work_the_agent_left_running() {
     assert!(!prompt_title(&chat).contains("Background"));
 
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        jev_decision_id: None,
         pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
@@ -2033,6 +2036,7 @@ fn subagents_are_blue_highlighted_as_clickable_on_prompt_border() {
 fn running_tasks_are_blue_highlighted_as_clickable_on_prompt_border() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        jev_decision_id: None,
         pursuing_goal: Default::default(),
         capacity_retry: None,
         activity_turn_started_at_ms: None,
