@@ -1,5 +1,14 @@
 use super::*;
 
+/// Comparison and representation requested for a session's working-tree diff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiffOptions {
+    pub base: Option<String>,
+    #[serde(default)]
+    pub json: bool,
+}
+
 /// Observed provider-owned background work; absent when no live snapshot is available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiBackgroundWork {

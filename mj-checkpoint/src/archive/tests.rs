@@ -2184,6 +2184,62 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
 }
 
 #[test]
+fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_base() {
+    let repository = tempfile::tempdir().unwrap();
+    let root = repository.path();
+    initialize_repository(root);
+    commit_file(root, "task.txt", b"original\n", "A");
+    let task_base = git_line(root, &["rev-parse", "HEAD"]);
+    commit_file(root, "unrelated.txt", b"unrelated history\n", "B");
+    let launch_base = git_line(root, &["rev-parse", "HEAD"]);
+    git(root, &["config", "mj.remoteWorkspace", "true"]);
+    git(root, &["config", "mj.baseCommit", &launch_base]);
+    git(root, &["checkout", "--detach", &task_base]);
+    commit_file(root, "task.txt", b"committed task\n", "C");
+    let head = git_line(root, &["rev-parse", "HEAD"]);
+    fs::write(root.join("staged.txt"), b"staged work\n").unwrap();
+    git(root, &["add", "staged.txt"]);
+    fs::write(root.join("task.txt"), b"committed task\nunstaged work\n").unwrap();
+    fs::write(root.join("untracked.txt"), b"untracked work\n").unwrap();
+
+    // A symbolic revision is resolved, not merely echoed into metadata.
+    let chosen = session_diff_details(&SystemGit, root, Some("HEAD^"), None).unwrap();
+    assert_eq!(chosen.base, task_base);
+    assert_eq!(chosen.head, head);
+    for line in [
+        "+committed task",
+        "+unstaged work",
+        "+staged work",
+        "+untracked work",
+    ] {
+        assert!(
+            chosen.diff.contains(line),
+            "{line} missing: {}",
+            chosen.diff
+        );
+    }
+    assert!(!chosen.diff.contains("unrelated.txt"), "{}", chosen.diff);
+    let default = session_diff_details(&SystemGit, root, None, None).unwrap();
+    assert_eq!(default.base, launch_base);
+    assert_eq!(default.head, head);
+    assert!(
+        default.diff.contains("-unrelated history"),
+        "{}",
+        default.diff
+    );
+    assert_eq!(git_line(root, &["config", "mj.baseCommit"]), launch_base);
+    assert_eq!(
+        git_line(root, &["diff", "--cached", "--name-only"]),
+        "staged.txt"
+    );
+
+    for invalid in ["missing-base", "--all", "", "HEAD^{tree}"] {
+        let error = session_diff_details(&SystemGit, root, Some(invalid), None).unwrap_err();
+        assert!(matches!(error, SessionExportError::Refused(_)), "{error:?}");
+    }
+}
+
+#[test]
 fn a_session_diff_falls_back_to_the_commit_its_branch_was_created_at() {
     let repository = tempfile::tempdir().unwrap();
     initialize_repository(repository.path());

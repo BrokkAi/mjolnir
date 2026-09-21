@@ -277,6 +277,9 @@ pub(crate) async fn respond(args: RespondArgs) -> Result<()> {
 pub(crate) struct DiffArgs {
     #[arg(long)]
     session: String,
+    /// Compare against this Git commit or revision instead of the launch base.
+    #[arg(long)]
+    base: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -660,9 +663,14 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
 
 pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let diff = client.diff(&args.session).await?;
+    let diff = client
+        .diff(&args.session, args.base.as_deref(), args.json)
+        .await?;
     match args.json {
-        true => print_json(&serde_json::json!({ "diff": diff })),
+        true => print_json(
+            &serde_json::from_str::<mj_checkpoint::archive::SessionDiff>(&diff)
+                .context("decode session diff metadata")?,
+        ),
         false => {
             print!("{diff}");
             std::io::stdout().flush().context("write the session diff")
@@ -1436,6 +1444,22 @@ mod tests {
         assert_eq!(args.profile.as_deref(), Some("deepseek"));
         assert_eq!(args.target.as_deref(), Some("localhost"));
         assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
+        assert!(args.json);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "diff",
+            "--session",
+            "s1",
+            "--base",
+            "HEAD~2",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Diff(args)) = cli.command else {
+            panic!("expected the diff subcommand");
+        };
+        assert_eq!(args.base.as_deref(), Some("HEAD~2"));
         assert!(args.json);
 
         for (argv, matched) in [

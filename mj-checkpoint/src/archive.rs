@@ -1755,10 +1755,10 @@ pub use git::{
     CaptureBase, EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner,
     GitHistoryMode, GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV,
     NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
-    SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
+    SessionDiff, SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
     diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
-    remote_workspace_base, restore_git_snapshot, session_diff,
+    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

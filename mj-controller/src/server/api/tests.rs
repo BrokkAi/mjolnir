@@ -423,6 +423,7 @@ struct FakeBackend {
     /// Export answers. `None` stands for a refusal, which is what an
     /// export that cannot be produced looks like to a handler.
     diff: Option<String>,
+    diff_options: Mutex<Vec<DiffOptions>>,
     file: Option<Vec<u8>>,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
@@ -602,8 +603,13 @@ impl SubagentBackend for FakeBackend {
             Ok(self.transcript.lock().unwrap().clone())
         })
     }
-    fn diff(&self, _session_id: String) -> BoxFuture<'_, Result<String, ExportError>> {
-        Box::pin(async {
+    fn diff(
+        &self,
+        _session_id: String,
+        options: DiffOptions,
+    ) -> BoxFuture<'_, Result<String, ExportError>> {
+        Box::pin(async move {
+            self.diff_options.lock().unwrap().push(options);
             if self.diff_fails {
                 return Err(ExportError::Failed(anyhow::anyhow!("git exploded")));
             }
@@ -2221,6 +2227,44 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
             }
         );
     }
+}
+
+#[tokio::test]
+async fn the_diff_route_forwards_the_base_and_returns_resolved_metadata() {
+    let details = mj_checkpoint::archive::SessionDiff {
+        diff: "--- a/task\n+++ b/task\n".into(),
+        base: "a".repeat(40),
+        head: "c".repeat(40),
+    };
+    let backend = Arc::new(FakeBackend {
+        diff: Some(serde_json::to_string(&details).unwrap()),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<mj_checkpoint::archive::SessionDiff>(&body).unwrap(),
+        details
+    );
+    assert_eq!(
+        *backend.diff_options.lock().unwrap(),
+        vec![DiffOptions {
+            base: Some("HEAD^".into()),
+            json: true
+        }]
+    );
 }
 
 #[tokio::test]
