@@ -1398,7 +1398,7 @@ fn default_bridges_pin_command_capable_adapter_versions() {
     );
     assert_eq!(claude_command, "sh");
     assert_eq!(claude_arguments[0], "-c");
-    assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.79.0"));
+    assert!(claude_arguments[1].contains("@agentclientprotocol/claude-agent-acp@0.81.0"));
 }
 
 #[test]
