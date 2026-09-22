@@ -39,8 +39,11 @@ omitted profile, target, or bundle falls back to the same saved default that
       role, found the agent-side handler pattern and the v1 stop reasons, and
       confirmed the routes the adapter must drive.
 - [x] (2026-09-22T16:10Z) Wrote this plan.
-- [ ] Milestone A: `mj acp` exists, speaks ACP over stdio, and answers
-      `initialize` without touching the daemon.
+- [x] (2026-09-22T15:56Z) Milestone A: `mj acp` exists, speaks ACP over stdio,
+      and answers `initialize` without touching the daemon. Verified by an
+      integration test that drives the real binary as an ACP client, by
+      `cargo fmt --all -- --check`, and by
+      `cargo clippy --workspace --all-targets -- -D warnings`.
 - [ ] Milestone B: `session/new` creates a Mjolnir session; `session/prompt`
       runs a turn and maps its outcome to a stop reason.
 - [ ] Milestone C: cancellation, structured input, and failure paths.
@@ -297,3 +300,25 @@ irrecoverably and a person can resume a session the adapter abandoned.
 ## Outcomes & Retrospective
 
 Written at completion of each milestone.
+
+### Milestone A
+
+Reached 2026-09-22. `mj acp` is a hidden subcommand that serves the Agent role
+on standard input and output and answers `initialize` with the one protocol
+version it implements and no optional capabilities. The whole surface is three
+files: the module, its wiring in `main.rs`, and one integration test.
+
+The test drives the real binary, not a stand-in: it builds an `AcpAgent` from
+`CARGO_BIN_EXE_mj`, connects the SDK's client role to it over pipes, and asserts
+the handshake. It also asserts that no `daemon.json` appeared in the temporary
+data directory it passed, which is the milestone's other claim — a consumer can
+launch the agent before anything is configured, so the handshake must not drag
+the daemon up with it.
+
+Two things worth carrying forward. First, the SDK's server-only mode is
+`connect_to`, which returns when the client closes the pipe; Milestone B's
+prompt handling will need `connect_with` or a handler that owns state, because
+answering a prompt means making several HTTP calls and emitting notifications
+while the request is in flight. Second, the format check earned its place
+immediately: rustfmt orders module declarations, so `mod acp;` had to move above
+`mod api_client;`, which clippy would never have caught.
