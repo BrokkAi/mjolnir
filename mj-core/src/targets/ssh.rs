@@ -730,26 +730,30 @@ pub const MAX_CONCURRENT_SSH_ENV: &str = "MJ_SSH_MAX_CONCURRENT";
 
 fn max_concurrent_ssh() -> usize {
     static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        let Some(raw) = std::env::var_os(MAX_CONCURRENT_SSH_ENV) else {
-            return DEFAULT_MAX_CONCURRENT_SSH;
-        };
-        match raw
-            .to_str()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-        {
-            Some(limit) if limit > 0 => limit,
-            _ => {
-                tracing::warn!(
-                    variable = MAX_CONCURRENT_SSH_ENV,
-                    value = %raw.to_string_lossy(),
-                    default = DEFAULT_MAX_CONCURRENT_SSH,
-                    "ignoring invalid SSH concurrency limit"
-                );
-                DEFAULT_MAX_CONCURRENT_SSH
-            }
+    *LIMIT.get_or_init(|| positive_env_limit(MAX_CONCURRENT_SSH_ENV, DEFAULT_MAX_CONCURRENT_SSH))
+}
+
+/// A positive whole number from the environment variable `name`, or
+/// `default` when it is unset or invalid.
+fn positive_env_limit(name: &str, default: usize) -> usize {
+    let Some(raw) = std::env::var_os(name) else {
+        return default;
+    };
+    match raw
+        .to_str()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        Some(limit) if limit > 0 => limit,
+        _ => {
+            tracing::warn!(
+                variable = name,
+                value = %raw.to_string_lossy(),
+                default,
+                "ignoring invalid SSH limit"
+            );
+            default
         }
-    })
+    }
 }
 
 /// A counting semaphore per SSH destination.
@@ -836,6 +840,362 @@ impl SshAdmission {
                 .entry(destination.to_owned())
                 .or_insert_with(|| DestinationGate::new(max_concurrent_ssh())),
         )
+    }
+}
+
+/// Default number of sessions the daemon places on one shared connection.
+///
+/// A stock `sshd` refuses the eleventh session on one connection
+/// (`MaxSessions 10`). Two are left free for `ssh` commands from other
+/// Mjolnir processes on this machine, such as `mj doctor` and Tab completion,
+/// which join a master without being counted here.
+const DEFAULT_SESSIONS_PER_CONNECTION: usize = 8;
+
+/// Environment override for [`DEFAULT_SESSIONS_PER_CONNECTION`].
+pub const SESSIONS_PER_CONNECTION_ENV: &str = "MJ_SSH_SESSIONS_PER_CONNECTION";
+
+/// How long a successful `ssh -O check` of a master is trusted before the
+/// next lease on that shard checks again.
+#[cfg(unix)]
+const MASTER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Per-command deadline for checking or opening a master from code that has
+/// no executor of its own, such as the relay and the resource pollers.
+pub const SSH_MASTER_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[cfg(unix)]
+fn sessions_per_connection() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        positive_env_limit(SESSIONS_PER_CONNECTION_ENV, DEFAULT_SESSIONS_PER_CONNECTION)
+    })
+}
+
+/// One master connection and the sessions the daemon has placed on it.
+#[cfg(unix)]
+struct Shard {
+    leased: usize,
+    /// When `ssh -O check` last found this shard's master running.
+    verified_at: Option<Instant>,
+    /// Serializes checking and opening this shard's master, so concurrent
+    /// leases never start two openers for one socket.
+    opening: Arc<Mutex<()>>,
+}
+
+/// The daemon's count of sessions per shard, keyed by connection.
+#[cfg(unix)]
+struct SessionLedger {
+    per_connection: usize,
+    connections: Mutex<BTreeMap<String, Vec<Shard>>>,
+}
+
+#[cfg(unix)]
+impl SessionLedger {
+    fn new(per_connection: usize) -> Arc<Self> {
+        Arc::new(Self {
+            per_connection: per_connection.max(1),
+            connections: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn global() -> Arc<Self> {
+        static LEDGER: OnceLock<Arc<SessionLedger>> = OnceLock::new();
+        Arc::clone(LEDGER.get_or_init(|| Self::new(sessions_per_connection())))
+    }
+
+    fn connections(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<Shard>>> {
+        self.connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Lease a session on the lowest shard with room, opening that shard's
+    /// master first when it is not known to be running.
+    fn lease(
+        self: &Arc<Self>,
+        ssh: &SshTarget,
+        dir: &Path,
+        executor: &dyn CommandExecutor,
+    ) -> Result<SshSessionLease> {
+        let key = connection_key(ssh);
+        let (shard, opening) = {
+            let mut connections = self.connections();
+            let shards = connections.entry(key.clone()).or_default();
+            let index = match shards
+                .iter()
+                .position(|shard| shard.leased < self.per_connection)
+            {
+                Some(index) => index,
+                None => {
+                    shards.push(Shard {
+                        leased: 0,
+                        verified_at: None,
+                        opening: Arc::new(Mutex::new(())),
+                    });
+                    shards.len() - 1
+                }
+            };
+            shards[index].leased += 1;
+            (index, Arc::clone(&shards[index].opening))
+        };
+        // From here on the slot is released on drop, including on error.
+        let slot = LeasedSlot {
+            ledger: Arc::clone(self),
+            key,
+            shard,
+            socket: dir.join(control_socket_name(ssh, shard)),
+        };
+        if slot.needs_check() {
+            let _opening = opening
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another lease may have checked or opened the master while this
+            // one waited for the lock.
+            if slot.needs_check() {
+                ensure_master(ssh, &slot.socket, executor)?;
+                slot.set_verified(Some(Instant::now()));
+            }
+        }
+        Ok(SshSessionLease { slot: Some(slot) })
+    }
+}
+
+/// Make sure a master is listening on `socket`, opening one if needed.
+///
+/// The master is opened explicitly, with `ControlMaster=yes`, and then
+/// checked again. Nothing else is attempted when that fails: the caller gets
+/// an error naming the destination instead of a direct connection.
+#[cfg(unix)]
+fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor) -> Result<()> {
+    if master_running(ssh, socket, executor)? {
+        return Ok(());
+    }
+    // A master that died without cleaning up leaves its socket behind, and
+    // `ssh` will not bind over it: the opener would print "already exists,
+    // disabling multiplexing" and hold a plain connection instead.
+    match fs::remove_file(socket) {
+        Ok(()) => tracing::debug!(
+            socket = %socket.display(),
+            "removed a stale SSH control socket"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("remove stale SSH control socket {}", socket.display())
+            });
+        }
+    }
+    let opened = executor.execute(&master_open_command(ssh, socket))?;
+    if master_running(ssh, socket, executor)? {
+        tracing::info!(
+            destination = ssh.destination.as_str(),
+            socket = %socket.display(),
+            "opened a shared SSH connection"
+        );
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&opened.stderr);
+    let detail = match stderr.trim() {
+        "" => format!("ssh exited with status {}", opened.status),
+        stderr => stderr.to_owned(),
+    };
+    bail!(
+        "could not open a shared SSH connection to {}: {detail}",
+        ssh.destination
+    )
+}
+
+#[cfg(unix)]
+fn master_running(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor) -> Result<bool> {
+    Ok(executor.execute(&master_check_command(ssh, socket))?.status == 0)
+}
+
+/// `ssh -O check` asks the master on `socket` whether it is alive. It opens
+/// no network connection, so it is not admitted like one.
+#[cfg(unix)]
+fn master_check_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
+    let mut args = ssh.ssh_args.clone();
+    args.extend([
+        "-o".to_owned(),
+        format!("ControlPath={}", socket.display()),
+        "-O".to_owned(),
+        "check".to_owned(),
+        ssh.destination.clone(),
+    ]);
+    CommandSpec::new("ssh", args).purpose("check a shared SSH connection")
+}
+
+/// Open a master on `socket` and return once it is authenticated.
+///
+/// `-f -N` backgrounds the master after authentication without keeping the
+/// caller's output pipes open, and `ControlPersist` stops it on its own once
+/// its last session has been gone that long. `BatchMode=yes` keeps the daemon
+/// from ever waiting on a password prompt. This is a real connection, so it
+/// is admitted and retried like one.
+#[cfg(unix)]
+fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
+    let mut args = ssh.ssh_args.clone();
+    args.extend([
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-f".to_owned(),
+        "-N".to_owned(),
+        "-o".to_owned(),
+        "ControlMaster=yes".to_owned(),
+        "-o".to_owned(),
+        format!("ControlPath={}", socket.display()),
+        "-o".to_owned(),
+        format!("ControlPersist={CONTROL_PERSIST}"),
+        ssh.destination.clone(),
+    ]);
+    CommandSpec::new("ssh", args)
+        .ssh_destination(ssh.destination.clone())
+        .purpose("open a shared SSH connection")
+}
+
+/// The ledger entry a lease holds; dropping it frees the slot.
+#[cfg(unix)]
+struct LeasedSlot {
+    ledger: Arc<SessionLedger>,
+    key: String,
+    shard: usize,
+    socket: PathBuf,
+}
+
+#[cfg(unix)]
+impl LeasedSlot {
+    fn needs_check(&self) -> bool {
+        let connections = self.ledger.connections();
+        connections
+            .get(&self.key)
+            .and_then(|shards| shards.get(self.shard))
+            .is_none_or(|shard| {
+                shard
+                    .verified_at
+                    .is_none_or(|verified| verified.elapsed() >= MASTER_CHECK_INTERVAL)
+            })
+    }
+
+    fn set_verified(&self, verified_at: Option<Instant>) {
+        let mut connections = self.ledger.connections();
+        if let Some(shard) = connections
+            .get_mut(&self.key)
+            .and_then(|shards| shards.get_mut(self.shard))
+        {
+            shard.verified_at = verified_at;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LeasedSlot {
+    fn drop(&mut self) {
+        let mut connections = self.ledger.connections();
+        if let Some(shard) = connections
+            .get_mut(&self.key)
+            .and_then(|shards| shards.get_mut(self.shard))
+        {
+            shard.leased = shard.leased.saturating_sub(1);
+        }
+    }
+}
+
+/// A leased session slot on one shard of a shared connection. Dropping it
+/// frees the slot.
+///
+/// A lease without a socket stands for a command that runs on its own
+/// connection: sharing is switched off with `MJ_SSH_CONTROL_MASTER`, the
+/// user's `ssh_args` configure sharing themselves, or the platform has no
+/// connection sharing.
+pub struct SshSessionLease {
+    #[cfg(unix)]
+    slot: Option<LeasedSlot>,
+}
+
+impl std::fmt::Debug for SshSessionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SshSessionLease")
+            .field("control_path", &self.control_path())
+            .finish()
+    }
+}
+
+impl SshSessionLease {
+    fn unshared() -> Self {
+        Self {
+            #[cfg(unix)]
+            slot: None,
+        }
+    }
+
+    /// The control socket this session must use, or `None` when the command
+    /// runs on its own connection.
+    pub fn control_path(&self) -> Option<&Path> {
+        #[cfg(unix)]
+        return self.slot.as_ref().map(|slot| slot.socket.as_path());
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// Forget that this lease's master was verified, so the next lease on the
+    /// shard checks it and reopens it if needed. Call this when a session
+    /// failed in a way that suggests the master is gone.
+    pub fn invalidate(&self) {
+        #[cfg(unix)]
+        if let Some(slot) = &self.slot {
+            slot.set_verified(None);
+        }
+    }
+}
+
+/// Process-wide placement of `ssh` sessions on shared connections.
+///
+/// A stock `sshd` allows ten sessions per connection. The daemon therefore
+/// spreads its sessions for one connection across several masters (shards),
+/// each opened explicitly, and every other command joins one of them with
+/// options that make a direct connection impossible.
+pub struct SshSessions;
+
+impl SshSessions {
+    /// Reserve a session on a shard for `ssh`, opening that shard's master if
+    /// it is not running. Blocks like [`SshAdmission::acquire`], so it is
+    /// callable from plain threads and `spawn_blocking`. Returns an error only
+    /// when a master could not be opened or verified.
+    pub fn lease(ssh: &SshTarget, executor: &dyn CommandExecutor) -> Result<SshSessionLease> {
+        #[cfg(unix)]
+        {
+            if user_configures_sharing(&ssh.ssh_args) {
+                return Ok(SshSessionLease::unshared());
+            }
+            let Some(dir) = control_socket_dir() else {
+                return Ok(SshSessionLease::unshared());
+            };
+            SessionLedger::global().lease(ssh, &dir, executor)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (ssh, executor);
+            Ok(SshSessionLease::unshared())
+        }
+    }
+}
+
+/// Options for a command that runs as one session on an already open
+/// master. `ProxyCommand=false` makes it impossible for `ssh` to open a
+/// direct connection: a multiplexed client never runs the proxy command, and
+/// a client that fails to reach the master exits 255 instead of connecting on
+/// its own. Appends nothing for a lease without a socket.
+pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
+    if let Some(socket) = lease.control_path() {
+        args.extend([
+            "-o".to_owned(),
+            "ControlMaster=no".to_owned(),
+            "-o".to_owned(),
+            format!("ControlPath={}", socket.display()),
+            "-o".to_owned(),
+            "ProxyCommand=false".to_owned(),
+        ]);
     }
 }
 
@@ -1414,6 +1774,306 @@ mod tests {
             assert_eq!(command.program, "scp");
             assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
         }
+    }
+
+    /// A hand-written stand-in for `ssh` that models masters: `-O check`
+    /// succeeds only for a socket whose master it opened, and an opener
+    /// starts one unless told to refuse. It records every command.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct FakeMasters {
+        running: std::cell::RefCell<BTreeSet<String>>,
+        refuse_open: std::cell::Cell<Option<&'static str>>,
+        socket_existed_at_open: std::cell::RefCell<Vec<bool>>,
+        seen: std::cell::RefCell<Vec<CommandSpec>>,
+    }
+
+    #[cfg(unix)]
+    impl FakeMasters {
+        fn socket(command: &CommandSpec) -> String {
+            command
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("ControlPath="))
+                .expect("every master command names its socket")
+                .to_owned()
+        }
+
+        fn kill(&self, socket: &Path) {
+            self.running
+                .borrow_mut()
+                .remove(&socket.display().to_string());
+        }
+
+        fn commands(&self) -> usize {
+            self.seen.borrow().len()
+        }
+
+        fn openers(&self) -> usize {
+            self.seen
+                .borrow()
+                .iter()
+                .filter(|command| command.args.contains(&"ControlMaster=yes".to_owned()))
+                .count()
+        }
+    }
+
+    #[cfg(unix)]
+    impl CommandExecutor for FakeMasters {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.seen.borrow_mut().push(command.clone());
+            assert_eq!(command.program, "ssh");
+            let socket = Self::socket(command);
+            let (status, stderr) = if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
+                if self.running.borrow().contains(&socket) {
+                    (0, "")
+                } else {
+                    (255, "Control socket connect: No such file or directory")
+                }
+            } else if command.args.contains(&"ControlMaster=yes".to_owned()) {
+                self.socket_existed_at_open
+                    .borrow_mut()
+                    .push(Path::new(&socket).exists());
+                match self.refuse_open.get() {
+                    Some(stderr) => (255, stderr),
+                    None => {
+                        self.running.borrow_mut().insert(socket);
+                        (0, "")
+                    }
+                }
+            } else {
+                panic!("the ledger ran an unexpected command: {command:?}");
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn shard_of(lease: &SshSessionLease) -> String {
+        let path = lease.control_path().expect("a shared lease has a socket");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        name.rsplit('-').next().unwrap().to_owned()
+    }
+
+    #[cfg(unix)]
+    fn plain_target(destination: &str) -> SshTarget {
+        SshTarget {
+            destination: destination.to_owned(),
+            ssh_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn leases_fill_the_lowest_shard_and_open_another_at_the_cap() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(2);
+        let ssh = plain_target("host");
+        let masters = FakeMasters::default();
+
+        let first = ledger.lease(&ssh, dir.path(), &masters).expect("first");
+        // Check, open, check again.
+        assert_eq!(masters.commands(), 3);
+        let second = ledger.lease(&ssh, dir.path(), &masters).expect("second");
+        assert_eq!(
+            masters.commands(),
+            3,
+            "a master verified moments ago is not checked again"
+        );
+        let third = ledger.lease(&ssh, dir.path(), &masters).expect("third");
+        assert_eq!(
+            [&first, &second, &third].map(shard_of),
+            ["0", "0", "1"].map(str::to_owned)
+        );
+        assert_eq!(masters.openers(), 2, "one master per shard");
+        assert_eq!(
+            third.control_path().unwrap(),
+            dir.path().join(control_socket_name(&ssh, 1))
+        );
+
+        drop(first);
+        let fourth = ledger.lease(&ssh, dir.path(), &masters).expect("fourth");
+        assert_eq!(shard_of(&fourth), "0", "a freed slot is reused first");
+        assert_eq!(masters.openers(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn separate_connections_are_counted_separately() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(1);
+        let masters = FakeMasters::default();
+        let first = ledger
+            .lease(&plain_target("one"), dir.path(), &masters)
+            .expect("one");
+        let second = ledger
+            .lease(&plain_target("two"), dir.path(), &masters)
+            .expect("two");
+        assert_eq!([&first, &second].map(shard_of), ["0", "0"].map(str::to_owned));
+        assert_ne!(first.control_path(), second.control_path());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_invalidated_lease_makes_the_next_lease_reopen_a_dead_master() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(8);
+        let ssh = plain_target("host");
+        let masters = FakeMasters::default();
+        let first = ledger.lease(&ssh, dir.path(), &masters).expect("first");
+        masters.kill(first.control_path().unwrap());
+
+        // Without a failure report the recent check is still trusted.
+        drop(ledger.lease(&ssh, dir.path(), &masters).expect("trusted"));
+        assert_eq!(masters.openers(), 1);
+
+        first.invalidate();
+        let second = ledger.lease(&ssh, dir.path(), &masters).expect("reopened");
+        assert_eq!(masters.openers(), 2);
+        assert_eq!(first.control_path(), second.control_path());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_master_that_cannot_be_opened_is_an_error_naming_the_destination() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(1);
+        let ssh = plain_target("build@10.0.0.1");
+        let masters = FakeMasters::default();
+        masters
+            .refuse_open
+            .set(Some("Permission denied (publickey)."));
+
+        let error = ledger
+            .lease(&ssh, dir.path(), &masters)
+            .expect_err("no master means no session");
+        let message = format!("{error:#}");
+        assert!(message.contains("build@10.0.0.1"), "{message}");
+        assert!(message.contains("Permission denied"), "{message}");
+        assert_eq!(masters.openers(), 1, "the opener is not retried by the ledger");
+
+        // The failed lease gave its slot back: with a cap of one, the next
+        // lease still lands on the first shard.
+        masters.refuse_open.set(None);
+        let lease = ledger.lease(&ssh, dir.path(), &masters).expect("opens");
+        assert_eq!(shard_of(&lease), "0");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_stale_socket_is_removed_before_the_master_is_opened() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(8);
+        let ssh = plain_target("host");
+        let socket = dir.path().join(control_socket_name(&ssh, 0));
+        fs::write(&socket, b"").expect("stale socket stand-in");
+        let masters = FakeMasters::default();
+
+        ledger.lease(&ssh, dir.path(), &masters).expect("opens");
+
+        assert_eq!(*masters.socket_existed_at_open.borrow(), [false]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_opener_is_an_admitted_batch_master_and_the_check_is_local() {
+        let ssh = SshTarget {
+            destination: "host".to_owned(),
+            ssh_args: vec!["-J".to_owned(), "jump".to_owned()],
+        };
+        let socket = Path::new("/run/mj/abc-0");
+        let open = master_open_command(&ssh, socket);
+        assert_eq!(
+            open.args,
+            [
+                "-J",
+                "jump",
+                "-o",
+                "BatchMode=yes",
+                "-f",
+                "-N",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                "ControlPath=/run/mj/abc-0",
+                "-o",
+                &format!("ControlPersist={CONTROL_PERSIST}"),
+                "host",
+            ]
+        );
+        assert_eq!(open.ssh_destination.as_deref(), Some("host"));
+
+        let check = master_check_command(&ssh, socket);
+        assert_eq!(
+            check.args,
+            ["-J", "jump", "-o", "ControlPath=/run/mj/abc-0", "-O", "check", "host"]
+        );
+        assert_eq!(
+            check.ssh_destination, None,
+            "a check opens no connection and takes no admission permit"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn session_args_forbid_a_direct_connection() {
+        let dir = sharing_socket_dir();
+        let ledger = SessionLedger::new(8);
+        let masters = FakeMasters::default();
+        let lease = ledger
+            .lease(&plain_target("host"), dir.path(), &masters)
+            .expect("lease");
+        let mut args = Vec::new();
+        push_session_args(&mut args, &lease);
+        assert_eq!(
+            args,
+            [
+                "-o".to_owned(),
+                "ControlMaster=no".to_owned(),
+                "-o".to_owned(),
+                format!("ControlPath={}", lease.control_path().unwrap().display()),
+                "-o".to_owned(),
+                "ProxyCommand=false".to_owned(),
+            ]
+        );
+    }
+
+    /// With sharing switched off, or configured by the user, a lease binds
+    /// nothing and runs nothing.
+    #[test]
+    #[cfg(unix)]
+    fn unshared_connections_lease_without_a_socket() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let masters = FakeMasters::default();
+        let dir = sharing_socket_dir();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            dir.path().to_path_buf(),
+        )));
+        let user_owned = SshSessions::lease(
+            &SshTarget {
+                destination: "unshared-user-host".to_owned(),
+                ssh_args: vec!["-S".to_owned(), "/tmp/mine".to_owned()],
+            },
+            &masters,
+        );
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let disabled = SshSessions::lease(&plain_target("unshared-disabled-host"), &masters);
+        set_ssh_connection_sharing_for_test(None);
+
+        for lease in [user_owned, disabled] {
+            let lease = lease.expect("an unshared lease never fails");
+            assert_eq!(lease.control_path(), None);
+            let mut args = Vec::new();
+            push_session_args(&mut args, &lease);
+            assert!(args.is_empty());
+        }
+        assert_eq!(masters.commands(), 0);
     }
 
     #[test]

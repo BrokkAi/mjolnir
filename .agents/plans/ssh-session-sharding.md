@@ -11,7 +11,7 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
 ## Progress
 
 - [x] (2026-09-22) Milestone 1: per-instance socket directory and shard-aware control paths. Sockets now live in `$XDG_RUNTIME_DIR/mjolnir/<instance>` (or `<data dir>/ssh`) and are named `<hash>-<shard>`; every command still uses shard 0 with `ControlMaster=auto` until Milestone 3. User `ssh_args` that configure sharing now suppress Mjolnir's options entirely.
-- [ ] Milestone 2: session ledger with explicit master opening and the no-fallback guard.
+- [x] (2026-09-22) Milestone 2: session ledger with explicit master opening and the no-fallback guard. `SshSessions::lease`, `SshSessionLease` (`control_path`, `invalidate`), `push_session_args`, `SESSIONS_PER_CONNECTION_ENV` and `SSH_MASTER_OPEN_TIMEOUT` exist in `mj-core/src/targets/ssh.rs`, tested with the hand-written `FakeMasters` executor. Nothing calls them yet. Validated with `cargo test -p mj-core` and `cargo clippy --all-targets -- -D warnings`; `mj-controller` does not use the new code yet, so its suite runs with Milestone 3.
 - [ ] Milestone 3: route every `ssh`/`scp` spawn through the ledger, including the relay.
 - [ ] Milestone 4: validation against a real host with stock `sshd`, then commit.
 
@@ -52,6 +52,12 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
   Date/Author: 2026-09-22, Claude (implementation).
 - Decision: `push_connection_reuse_args` (and the internal sharing helpers) take the `SshTarget`, and the doctor probe names its socket after the target as configured rather than after its probe-only overrides.
   Rationale: the socket name depends on the target's `ssh_args`; the probe adds `BatchMode=yes` and `StrictHostKeyChecking=yes`, and hashing those would point it at a socket no daemon uses.
+  Date/Author: 2026-09-22, Claude (implementation).
+
+- Decision: `SshSessionLease::control_path` returns `Option<&Path>` rather than `PathBuf`, and the lease has an `invalidate` method.
+  Rationale: a lease for an unshared connection (escape hatch set, user-configured sharing, or no Unix sockets) has no socket. `invalidate` lets a caller that saw a session fail with a transport error make the next lease on that shard check the master again at once instead of trusting a check up to 5 seconds old; without it a retry within 5 seconds of a master's death would reuse the dead socket.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: The ledger does not retry a failed opener itself. The opener runs through the executor, which already admits it and retries a transport rejection up to three times; after that `lease` returns the error.
   Date/Author: 2026-09-22, Claude (implementation).
 
 ## Outcomes & Retrospective
