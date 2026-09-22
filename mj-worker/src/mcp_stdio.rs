@@ -252,6 +252,11 @@ where
 {
     let mut stream = connect_with_timeout(socket)
         .with_context(|| format!("connect to the {what} socket {}", socket.display()))?;
+    // Configure the socket before the request lets the peer reply and close:
+    // macOS can reject socket options after the peer disconnects.
+    stream
+        .set_read_timeout(Some(reply_timeout))
+        .with_context(|| format!("bound the {what} reply wait"))?;
     let mut body = serde_json::to_vec(request)?;
     body.push(b'\n');
     stream
@@ -260,9 +265,6 @@ where
     stream
         .flush()
         .with_context(|| format!("flush the {what} request"))?;
-    stream
-        .set_read_timeout(Some(reply_timeout))
-        .with_context(|| format!("bound the {what} reply wait"))?;
     let mut reader = std::io::BufReader::new(stream);
     let mut line = String::new();
     match reader.read_line(&mut line) {
