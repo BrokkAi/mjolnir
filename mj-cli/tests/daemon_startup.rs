@@ -10,6 +10,293 @@ mod common;
 
 use std::{fs, process::Command};
 
+fn upgrade_storage() -> common::DaemonStorage {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let config = root.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "version = 1\n[phone]\nenabled = false\n",
+    )
+    .unwrap();
+    common::DaemonStorage::new(root, config, data)
+}
+
+fn upgrade_command(storage: &common::DaemonStorage) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
+    common::own_test_daemons(&mut command)
+        .args(["--instance", "upgrade-test"])
+        .env("MJ_DATA_DIR", storage.path().join("data"))
+        .env("MJ_CONFIG_DIR", storage.path().join("config"))
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1");
+    command
+}
+
+fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
+    let path = current_store(storage);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    // 2.15.0's actual shape, not only a changed PRAGMA: migration 44 must
+    // create the missing cache and advance the compatibility floor.
+    connection
+        .execute_batch(
+            "DROP TABLE quota_reset_cache;
+         DELETE FROM schema_migrations WHERE version > 43;
+         UPDATE schema_compatibility SET minimum_compatible_version = 43;
+         PRAGMA user_version = 43;",
+        )
+        .unwrap();
+    path
+}
+
+fn current_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
+    let path = storage.path().join("data/mj.sqlite3");
+    mj_controller::database::save_state_to(&path, &Default::default()).unwrap();
+    mj_controller::database::create_workspace_at(&path, "Keep my workspace").unwrap();
+    path
+}
+
+struct OldDaemon(std::process::Child);
+
+impl Drop for OldDaemon {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            if let Err(error) = self.0.kill() {
+                eprintln!("stop old fixture daemon: {error}");
+            }
+            if let Err(error) = self.0.wait() {
+                eprintln!("reap old fixture daemon: {error}");
+            }
+        }
+    }
+}
+
+fn assert_upgraded(path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let revision: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert!(revision >= 44);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM quota_reset_cache", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM workspaces WHERE name = 'Keep my workspace'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn ordinary_startup_migrates_an_old_store_without_a_daemon() {
+    let storage = upgrade_storage();
+    let path = old_store(&storage);
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_upgraded(&path);
+}
+
+/// A real process holding the old writer lock, speaking only the frozen
+/// management protocol. It deliberately cannot migrate its store. Running
+/// the new CLI must retire it before opening a current reader.
+#[test]
+fn old_daemon_fixture() {
+    use mj_client::daemon::*;
+    let Ok(version) = std::env::var("MJ_TEST_OLD_DAEMON_VERSION") else {
+        return;
+    };
+    let _guard = mj_controller::controller::ControllerStoreGuard::acquire().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: std::env::var("MJ_TEST_OLD_PROTOCOL").unwrap().parse().unwrap(),
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "isolated-upgrade-fixture".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            build_version: version,
+        };
+        fs::write(metadata_path(), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                Some(result) = connections.join_next(), if !connections.is_empty() => result.unwrap(),
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let stop = stop.clone();
+                    connections.spawn(async move {
+                        while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
+                            let stopping = matches!(request.action, DaemonAction::Stop);
+                            let reply = match request.action {
+                                DaemonAction::Ping => DaemonReply::Pong,
+                                DaemonAction::Stop => DaemonReply::Done,
+                                other => panic!("new client reused the old daemon: {other:?}"),
+                            };
+                            write_frame(&mut stream, &ResponseEnvelope {
+                                protocol_version: request.protocol_version,
+                                request_id: request.request_id,
+                                result: Ok(reply),
+                            }).await.unwrap();
+                            if stopping { stop.cancel(); break; }
+                        }
+                    });
+                }
+            }
+        }
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result { assert!(error.is_cancelled(), "{error}"); }
+        }
+        fs::remove_file(metadata_path()).unwrap();
+    });
+}
+
+#[test]
+fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
+    use std::time::{Duration, Instant};
+    // Same protocol, changed protocol, and a development build whose version
+    // did not change: all must converge without a restart command or stdin.
+    for (version, protocol, needs_migration) in [
+        ("2.15.0", mj_client::daemon::PROTOCOL_VERSION, true),
+        ("2.15.0", mj_client::daemon::PROTOCOL_VERSION - 1, true),
+        (
+            env!("CARGO_PKG_VERSION"),
+            mj_client::daemon::PROTOCOL_VERSION,
+            true,
+        ),
+        ("2.9.0", mj_client::daemon::PROTOCOL_VERSION, false),
+    ] {
+        let storage = upgrade_storage();
+        let path = if needs_migration {
+            old_store(&storage)
+        } else {
+            current_store(&storage)
+        };
+        let mut old = OldDaemon(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "old_daemon_fixture", "--nocapture"])
+                .env("MJ_TEST_OLD_DAEMON_VERSION", version)
+                .env("MJ_TEST_OLD_PROTOCOL", protocol.to_string())
+                .env("MJ_INSTANCE", "upgrade-test")
+                .env("MJ_DATA_DIR", storage.path().join("data"))
+                .env("MJ_CONFIG_DIR", storage.path().join("config"))
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let metadata_path = storage.path().join("data/daemon.json");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !metadata_path.exists() {
+            assert!(old.0.try_wait().unwrap().is_none(), "fixture exited");
+            assert!(Instant::now() < deadline, "fixture did not become ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let outputs = std::thread::scope(|scope| {
+            let clients: Vec<_> = (0..3)
+                .map(|_| {
+                    let mut command = upgrade_command(&storage);
+                    scope.spawn(move || {
+                        mj_core::subprocess::run_with_input(&mut command, &[]).unwrap()
+                    })
+                })
+                .collect();
+            clients
+                .into_iter()
+                .map(|client| client.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for output in outputs {
+            assert!(
+                output.status.success(),
+                "{version}/{protocol}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(old.0.wait().unwrap().success());
+        assert_upgraded(&path);
+        let metadata: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_ne!(metadata.pid, old.0.id());
+        assert_eq!(metadata.build_version, env!("CARGO_PKG_VERSION"));
+        let output =
+            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+        assert!(output.status.success());
+        let reused: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(metadata_path).unwrap()).unwrap();
+        assert_eq!(reused.pid, metadata.pid, "a ready daemon must be reused");
+    }
+}
+
+#[test]
+fn a_newer_compatible_daemon_and_store_are_reused_without_downgrading() {
+    let storage = upgrade_storage();
+    let path = current_store(&storage);
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(output.status.success());
+    let metadata_path = storage.path().join("data/daemon.json");
+    let mut metadata: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    metadata.build_version = "999.0.0".into();
+    mj_core::config::atomic_write(&metadata_path, &serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let revision: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    connection
+        .execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+        CREATE TABLE future_feature(value TEXT);
+        INSERT INTO future_feature VALUES ('preserved');
+        INSERT INTO schema_migrations VALUES ({}, 'test');
+        PRAGMA user_version = {};
+        COMMIT;",
+            revision + 1,
+            revision + 1
+        ))
+        .unwrap();
+    let output = mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reused: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_eq!(reused.pid, metadata.pid);
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM future_feature", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        revision + 1
+    );
+}
+
 #[test]
 fn client_reports_the_daemon_startup_failure_instead_of_a_missing_endpoint() {
     let root = tempfile::tempdir().unwrap();

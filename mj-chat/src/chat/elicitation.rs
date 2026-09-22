@@ -36,12 +36,27 @@ use unicode_segmentation::UnicodeSegmentation;
 /// allowed to allocate an unbounded buffer.
 const MAXIMUM_OFFSCREEN_ROWS: usize = 4_096;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum FieldValue {
-    Text(TextInput),
+    Text(#[serde(with = "draft_text")] TextInput),
     Single(Option<usize>),
     Multi(BTreeSet<usize>),
     Boolean(bool),
+}
+
+/// Carry user-authored form text across a binary upgrade without coupling the
+/// handoff format to readline's internal history, undo, and cursor state.
+mod draft_text {
+    use super::TextInput;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(input: &TextInput, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(input.value())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<TextInput, D::Error> {
+        String::deserialize(deserializer).map(TextInput::from_value)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +77,7 @@ enum ElicitationControl {
 /// A process-local copy of an unanswered form. The request is retained in the
 /// snapshot deliberately: an id can be reused by a harness for a different
 /// form, and local answers must never be applied to that new form.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElicitationDraft {
     request: ElicitationRequest,
     values: Vec<FieldValue>,

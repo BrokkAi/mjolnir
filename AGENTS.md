@@ -96,6 +96,16 @@ requires it.
 Fix the source of a problem. Do not add a narrow fallback that hides a failure
 in the primary design.
 
+Upgrades must complete without user intervention after installation or initial
+upgrade consent. Ordinary startup must coordinate daemon replacement, database
+migration, and service readiness before serving the upgraded client, including
+when the wire protocol is unchanged. Retain forward migrations for every shipped
+database revision; never require an intermediate release, manual daemon restart,
+or data reset. Preserve active workers and terminal drafts across handoff, and
+never automatically downgrade a newer daemon or incompatible store. Changes to
+startup, schema, protocol, or release installation must preserve the isolated
+upgrade regressions. Keep terminal upgrade handoff formats backward compatible.
+
 Keep file and path handling independent of the operating system. Use `Path` and
 `PathBuf`; normalize path text only at protocol or rendering boundaries.
 

@@ -21,7 +21,7 @@ use mj_controller::server::api_token_path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::daemon::{self, WebViewerStatus};
+use crate::daemon;
 
 /// How long an ordinary request may take. Every route but `wait` and the
 /// exports answers from memory or from SQLite, so this only has to outlast a
@@ -46,20 +46,7 @@ impl ApiClient {
     /// daemon if it is not running.
     pub(crate) async fn connect() -> Result<Self> {
         let mut client = daemon::connect_or_start().await?;
-        let status = client.status().await?;
-        let viewer_url = match status.phone_status {
-            WebViewerStatus::Ready { viewer_url, .. } => viewer_url,
-            WebViewerStatus::Disabled => bail!(
-                "the web viewer is disabled, so the API is not served; enable [phone] in config.toml and run `mj daemon restart`"
-            ),
-            WebViewerStatus::Starting => bail!(
-                "the web viewer is still starting; retry in a moment or check `mj daemon status`"
-            ),
-            WebViewerStatus::Stopped => bail!("the web viewer is stopped; run `mj daemon restart`"),
-            WebViewerStatus::Error { message } => {
-                bail!("the web viewer failed to start: {message}; run `mj daemon restart`")
-            }
-        };
+        let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
         probe_api(&viewer_url).await?;
         let token_path = api_token_path();
         let token = std::fs::read_to_string(&token_path)

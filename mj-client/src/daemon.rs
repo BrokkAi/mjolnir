@@ -854,8 +854,10 @@ pub fn process_is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        let process_id = sysinfo::Pid::from_u32(pid);
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[process_id]), true);
+        system.process(process_id).is_some()
     }
 }
 

@@ -195,11 +195,15 @@ const SELECTION_AUTOSCROLL_TICK: Duration = Duration::from_millis(80);
 pub(crate) const QUOTA_REFRESH_NOTICE: &str = "Refreshing targets and quotas…";
 pub(crate) const QUOTA_REFRESHED_NOTICE: &str = "Targets and quotas refreshed.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum DashboardExit {
     Normal,
     Detached,
     Interrupted,
+    Restart {
+        target: crate::daemon::UpgradeTarget,
+        resume: Box<UpgradeResume>,
+    },
 }
 
 pub(crate) use mj_client::operations::CriticalOperationTracker;
@@ -223,7 +227,7 @@ pub(crate) struct ActiveDashboardImport {
 /// A local form snapshot together with the relay frontier at which it was
 /// captured. A projection older than that frontier must not invalidate a
 /// freshly saved draft while an attachment is still settling.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CachedQuestionDraft {
     draft: ChatElicitationDraft,
     captured_event_ordinal: u64,
@@ -455,6 +459,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     open_workspace_manager: bool,
     go: Option<(mj_tui::GoMode, bool)>,
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
+    resume: Option<UpgradeResume>,
 ) -> Result<DashboardExit> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -473,6 +478,10 @@ pub(crate) async fn run_dashboard_for_workspace(
     else {
         return Ok(DashboardExit::Normal);
     };
+    if let Some(resume) = resume {
+        context.restore_upgrade(resume).await;
+    }
+    let mut restart_executable = None;
     if let Some((mode, setup)) = go {
         let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
             .await
@@ -726,6 +735,12 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if changed.is_ok() {
                     let presence = context.daemon_presence.borrow_and_update().clone();
                     match presence {
+                        crate::daemon::DaemonPresence::Upgraded(executable) => {
+                            if !context.shutdown_requested {
+                                restart_executable = Some(executable);
+                                context.request_shutdown();
+                            }
+                        }
                         crate::daemon::DaemonPresence::Attached => context
                             .dashboard
                             .set_notice("Mjolnir daemon is running again."),
@@ -734,7 +749,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                         crate::daemon::DaemonPresence::Missing(reason) => {
                             tracing::warn!(%reason, "the Mjolnir daemon is not running");
                             context.dashboard.set_failure_notice(
-                                "Mjolnir daemon is not running. Press F2 and run \"Restart the Mjolnir daemon\".",
+                                "Mjolnir daemon is unavailable; waiting to reconnect.",
                             );
                         }
                     }
@@ -806,6 +821,9 @@ pub(crate) async fn run_dashboard_for_workspace(
     // Hand the terminal back before saying anything on it; the warm chat and
     // the background feeds are torn down after, as the rest of the context
     // drops.
+    let resume = restart_executable
+        .as_ref()
+        .map(|_| context.capture_upgrade());
     drop(context.terminal);
     for error in context.draft_save_failures.values() {
         eprintln!("{error}");
@@ -822,21 +840,37 @@ pub(crate) async fn run_dashboard_for_workspace(
         eprintln!("{error:#}");
     }
     if let Some(shutdown) = context.worker_shutdown.take() {
-        shutdown
+        let result = shutdown
             .shutdown()
             .await
-            .context("shut down dashboard session manager")?;
+            .context("shut down dashboard session manager");
+        if restart_executable.is_some() {
+            if let Err(error) = result {
+                tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
+            }
+        } else {
+            result?;
+        }
     }
-    Ok(if quit_detached {
-        DashboardExit::Detached
-    } else if context.shutdown_requested {
-        DashboardExit::Interrupted
-    } else {
-        DashboardExit::Normal
-    })
+    Ok(
+        if let Some((target, resume)) = restart_executable.zip(resume) {
+            DashboardExit::Restart {
+                target,
+                resume: Box::new(resume),
+            }
+        } else if quit_detached {
+            DashboardExit::Detached
+        } else if context.shutdown_requested {
+            DashboardExit::Interrupted
+        } else {
+            DashboardExit::Normal
+        },
+    )
 }
 
 mod chat_tasks;
+mod upgrade;
+pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
 mod session_state;
