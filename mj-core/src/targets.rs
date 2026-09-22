@@ -977,12 +977,9 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        with_ssh_admission(
-            command,
-            self,
-            &|| self.is_cancelled(),
-            |command| self.run_once(command),
-        )
+        with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
+            self.run_once(command)
+        })
     }
 
     fn execute_with_stdin(
@@ -2039,7 +2036,11 @@ mod executor_tests {
                 .to_owned();
             if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
                 return Ok(reply(
-                    if self.running.borrow().contains(&socket) { 0 } else { 255 },
+                    if self.running.borrow().contains(&socket) {
+                        0
+                    } else {
+                        255
+                    },
                     "",
                 ));
             }
