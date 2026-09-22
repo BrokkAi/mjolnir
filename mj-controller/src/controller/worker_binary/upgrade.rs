@@ -401,59 +401,22 @@ pub(super) fn worker_launch_refresh_plan(
     })
 }
 
-/// Prepare a local refresh without hashing the controller binary. Digesting
-/// happens only after recovery has proved that the worker needs a restart.
+/// Plan a refresh without resolving or hashing a worker binary. Both happen
+/// only after recovery has proved that the worker needs a restart.
 pub(super) fn worker_binary_refresh_plan(
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<Option<WorkerBinaryRefresh>> {
     let worker_root = targets::worker_root(locator, session_id)?;
     let installed = format!("{worker_root}/hel");
-    // Remote targets defer source selection to the recovery task: choosing the
-    // binary needs the target's architecture, and probing it (plus hashing the
-    // remote binary) is blocking ssh work that must not run on this UI/event
-    // path. Building the refresh here stays cheap.
-    if matches!(
-        locator,
-        targets::TargetLocator::AwsEc2 { .. }
-            | targets::TargetLocator::SshBare { .. }
-            | targets::TargetLocator::SshPodman { .. }
-            | targets::TargetLocator::SshDocker { .. }
-    ) {
-        return Ok(Some(WorkerBinaryRefresh::Remote(
-            RemoteWorkerBinaryRefresh {
-                locator: locator.clone(),
-                session_id: session_id.to_owned(),
-                installed_digest: installed_file_digest_command(
-                    locator,
-                    &installed,
-                    "identify installed Mjolnir worker binary",
-                ),
-            },
-        )));
-    }
-    // Local: resolve the source now. Resolving a deleted running executable
-    // materializes /proc/self/exe and can copy hundreds of megabytes; target
-    // lists are assembled on UI/event loops, so leave refresh disabled until
-    // the next controller start rather than doing that work here.
-    if PINNED_WORKER_BINARY_SOURCES.get().is_none()
-        && !std::env::current_exe().is_ok_and(|path| path.is_file())
-    {
-        return Ok(None);
-    }
-    let requirement = if matches!(locator, targets::TargetLocator::LocalBare { .. }) {
-        WorkerBinaryRequirement::LocalHost
-    } else {
-        WorkerBinaryRequirement::PortableLinux
-    };
-    let source = match worker_binary_for_arch(std::env::consts::ARCH, requirement) {
-        Ok(WorkerBinaryAvailability::Local { path, .. }) => path,
-        Ok(WorkerBinaryAvailability::Remote { .. }) | Err(_) => return Ok(None),
-    };
-    Ok(Some(WorkerBinaryRefresh::Prepared(
-        WorkerBinaryRefreshPlan {
-            replace: installed_worker_binary_replacement_plan(locator, session_id, &source)?,
-            source,
+    // Planning runs on controller event loops. Resolve and hash only in the
+    // recovery task, for every target: even a local container can run a foreign
+    // architecture, and an unavailable source must never silently disable the
+    // binary refresh while installing a newer launch configuration.
+    Ok(Some(WorkerBinaryRefresh::Deferred(
+        DeferredWorkerBinaryRefresh {
+            locator: locator.clone(),
+            session_id: session_id.to_owned(),
             installed_digest: installed_file_digest_command(
                 locator,
                 &installed,
@@ -463,21 +426,21 @@ pub(super) fn worker_binary_refresh_plan(
     )))
 }
 
-/// Refresh a remote worker binary during recovery: pick the worker binary for
+/// Refresh a worker binary during recovery: pick the worker binary for
 /// the target's own architecture, and copy it over the installed one only when
 /// their digests differ. This runs inside the recovery task, where blocking
-/// ssh work is allowed; it must never be called from a UI/event loop.
+/// target I/O is allowed; it must never be called from a UI/event loop.
 ///
 /// The digest gate is what stops a redeploy loop: once the right binary is
 /// installed, its digest matches the source and nothing is copied again, even
 /// though recovery may still restart the worker.
-pub(crate) fn refresh_remote_worker_binary_if_stale(
+pub(crate) fn refresh_target_worker_binary_if_stale(
     executor: &impl CommandExecutor,
-    refresh: &RemoteWorkerBinaryRefresh,
+    refresh: &DeferredWorkerBinaryRefresh,
 ) -> Result<()> {
     let source = worker_binary_for(&refresh.locator, executor)
         .context("resolve the worker binary for the recovering target")?;
-    replace_remote_worker_binary_if_stale(
+    replace_target_worker_binary_if_stale(
         executor,
         &refresh.locator,
         &refresh.session_id,
@@ -487,11 +450,11 @@ pub(crate) fn refresh_remote_worker_binary_if_stale(
     .map(|_| ())
 }
 
-/// Copy `source` over the installed remote worker only when the installed
+/// Copy `source` over the installed worker only when the installed
 /// digest differs from `source`'s. Returns whether a copy ran. Split from the
 /// resolver above so the digest gate is testable without resolving a real
 /// worker binary for a target architecture.
-pub(super) fn replace_remote_worker_binary_if_stale(
+pub(super) fn replace_target_worker_binary_if_stale(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -501,7 +464,7 @@ pub(super) fn replace_remote_worker_binary_if_stale(
     let expected = mj_core::worker_launch::worker_executable_digest(source)?;
     let installed = executor
         .execute(installed_digest)
-        .context("read the installed remote worker digest")?;
+        .context("read the installed worker digest")?;
     let matches = installed.status == 0
         && String::from_utf8_lossy(&installed.stdout)
             .split_whitespace()
@@ -512,6 +475,6 @@ pub(super) fn replace_remote_worker_binary_if_stale(
     }
     installed_worker_binary_replacement_plan(locator, session_id, source)?
         .execute(executor)
-        .context("replace stale remote relay worker binary")?;
+        .context("replace stale relay worker binary")?;
     Ok(true)
 }

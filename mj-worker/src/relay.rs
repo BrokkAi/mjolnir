@@ -19,6 +19,7 @@ pub use mj_core::relay::*;
 mod background;
 mod commands;
 mod journal;
+mod native_history;
 mod replay;
 mod requests;
 mod serving;
@@ -339,6 +340,9 @@ impl DurableRelay {
         let retained_through = snapshot.retained_through();
         let retained_digest = snapshot.retained_digest().to_owned();
         let snapshot_ordinal = snapshot.latest_ordinal;
+        let missing_native_history = snapshot.native_session_id.is_some()
+            && snapshot.native_session_opened_ordinal.is_none()
+            && !snapshot.native_session_used;
         let (journal_spans, hot_events) = open_relay_journal(
             &root.join(RELAY_JOURNAL_DIR),
             retained_through,
@@ -391,6 +395,8 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
+        let recovered_native_history =
+            missing_native_history && !checkpoint_only && relay.recover_native_history_evidence();
         // Startup already reads the active journal into the bounded hot window.
         // Reuse it: old sealed history must not make worker startup slow or fail.
         if !checkpoint_only {
@@ -451,7 +457,7 @@ impl DurableRelay {
         if idle {
             relay.snapshot.activity_turn_started_at_ms = None;
         }
-        if !state_path.exists() || replayed || assigned_store_id {
+        if !state_path.exists() || replayed || assigned_store_id || recovered_native_history {
             relay.persist_snapshot()?;
         }
         relay.adopt_unqueued_queue_commands()?;
@@ -777,13 +783,10 @@ impl DurableRelay {
         }
         // A prompt that only waits in the durable queue never reached the
         // agent. Anything past admission may have.
-        self.snapshot.dispatches.values().any(|dispatch| {
-            dispatch.command.prompt_blocks().is_some()
-                && !matches!(
-                    dispatch.state,
-                    RelayDispatchState::Queued | RelayDispatchState::Pending
-                )
-        })
+        self.snapshot
+            .dispatches
+            .values()
+            .any(native_history::prompt_may_have_reached_agent)
     }
 
     /// Record that the native thread has been used and can never be replaced.

@@ -41,10 +41,10 @@ pub(super) fn refresh_worker_binary_if_stale(
                 .context("replace stale relay worker binary")?;
             Ok(())
         }
-        // Remote: pick the binary for the target's architecture and copy only
+        // Pick the binary for the target's architecture and copy only
         // if it differs. Runs here in the recovery task, never on the UI path.
-        Some(WorkerBinaryRefresh::Remote(refresh)) => {
-            crate::controller::refresh_remote_worker_binary_if_stale(executor, refresh)
+        Some(WorkerBinaryRefresh::Deferred(refresh)) => {
+            crate::controller::refresh_target_worker_binary_if_stale(executor, refresh)
         }
     }
 }

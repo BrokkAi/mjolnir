@@ -5700,6 +5700,28 @@ fn missing_native_session_spec(
 async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_error: &str) {
     let temp = tempfile::tempdir().unwrap();
     let script = missing_native_session_script(temp.path(), reload_error);
+    // An installed worker upgrades a snapshot whose original opening is
+    // already behind its saved frontier, before ACP attempts native resume.
+    let root = temp.path().join("legacy-relay");
+    let mut relay = crate::relay::DurableRelay::open(&root, "upgrade-test", "old").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "missing-thread".into(),
+            resumed: false,
+            native_continuity_lost: false,
+        })
+        .unwrap();
+    drop(relay);
+    let state = root.join(mj_core::relay::RELAY_STATE_FILE);
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("native_session_used");
+    saved
+        .as_object_mut()
+        .unwrap()
+        .remove("native_session_opened_ordinal");
+    std::fs::write(state, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let relay = crate::relay::DurableRelay::open(&root, "upgrade-test", "new").unwrap();
     let (request_tx, request_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
     // Work the worker queued before the session opened must survive the
@@ -5712,7 +5734,12 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
         .await
         .unwrap();
     let runtime = tokio::spawn(run(
-        missing_native_session_spec(temp.path(), &script, harness, false),
+        missing_native_session_spec(
+            temp.path(),
+            &script,
+            harness,
+            relay.native_session_may_have_history(),
+        ),
         request_rx,
         event_tx,
     ));
@@ -5759,13 +5786,13 @@ async fn assert_unused_native_session_is_replaced(harness: HarnessKind, reload_e
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_unused_codex_thread_codex_cannot_find_is_replaced_in_the_same_session() {
+async fn an_unused_codex_thread_is_replaced_in_the_same_session_after_upgrade() {
     assert_unused_native_session_is_replaced(HarnessKind::Codex, MISSING_CODEX_THREAD_ERROR).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_unused_claude_session_claude_cannot_find_is_replaced_in_the_same_session() {
+async fn an_unused_claude_session_is_replaced_in_the_same_session_after_upgrade() {
     assert_unused_native_session_is_replaced(HarnessKind::Claude, MISSING_CLAUDE_SESSION_ERROR)
         .await;
 }

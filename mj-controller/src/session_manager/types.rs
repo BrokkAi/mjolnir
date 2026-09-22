@@ -71,16 +71,13 @@ pub struct WorkerRecoveryPlan {
 
 /// How recovery refreshes a stale installed worker binary before restarting.
 ///
-/// Local targets resolve the source and the copy at plan-build time, which is
-/// cheap. Remote targets cannot: choosing the binary needs the target's
-/// architecture, and that probe plus hashing the remote binary are blocking
-/// ssh round-trips that must not run on the plan-build/UI path. So a remote
-/// refresh carries only what is cheap to compute and resolves the rest inside
-/// the recovery task.
+/// A caller with a known source can supply a prepared copy plan. Controller
+/// target planning always defers resolution: selecting the right architecture,
+/// downloading and hashing binaries belong in the background recovery task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerBinaryRefresh {
     Prepared(WorkerBinaryRefreshPlan),
-    Remote(RemoteWorkerBinaryRefresh),
+    Deferred(DeferredWorkerBinaryRefresh),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,11 +87,11 @@ pub struct WorkerBinaryRefreshPlan {
     pub replace: CommandPlan,
 }
 
-/// A remote worker refresh resolved at recovery time: select the worker binary
+/// A worker refresh resolved at recovery time: select the worker binary
 /// for the target's own architecture, compare it to the installed one, and
 /// copy only when they differ.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteWorkerBinaryRefresh {
+pub struct DeferredWorkerBinaryRefresh {
     pub locator: TargetLocator,
     pub session_id: String,
     pub installed_digest: CommandSpec,
