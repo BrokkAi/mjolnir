@@ -57,8 +57,13 @@ repository.
       four new contract tests, by the full workspace suite, by
       `cargo clippy --workspace --all-targets -- -D warnings`, and by a live
       `mj new` on an isolated instance.
-- [ ] Milestone 3: state in the API documentation which artifact routes are part
-      of the stable contract.
+- [x] (2026-09-22T15:19Z) Milestone 3: the API module documentation now names
+      the four artifact routes as contract, with their media types, response
+      bodies, and the 409-versus-5xx distinction. The only genuine gap in their
+      coverage was the transcript's paging cursor, which the route test now
+      pins. Verified in a worktree by `cargo fmt --all -- --check`, by
+      `cargo clippy --workspace --all-targets -- -D warnings`, and by the
+      controller suite (1565 passed).
 - [ ] Milestone 4 (deferred): ship an mj-owned ACP adapter so new capabilities
       reach a consumer without a consumer release.
 
@@ -524,3 +529,26 @@ saved profile the user has since deleted.
 
 The remaining gap before a consumer can adopt this is Milestone 3, which names
 the artifact routes as contract, and then Milestone 4, the ACP adapter.
+
+### Milestone 3
+
+Reached 2026-09-22, on the `docs/artifact-route-contract` branch. The four
+artifact routes turned out to be almost fully pinned already: the diff patch and
+its JSON metadata, all three export kinds including the branch's remote and the
+bundle's attachment filename, file read and injection with their unsafe-path
+refusals, and the transcript's text flattening and limit clamping each had a
+test asserting the response. Manufacturing more tests would have duplicated
+those, so the work is the guarantee itself, stated where a consumer will look
+for it: the module documentation in `mj-controller/src/server/api.rs` now names
+the routes, their media types, their bodies, and the rule that an impossible
+artifact is a 409 a person can act on while a failed one is a 5xx.
+
+One real gap surfaced while checking: the transcript response's paging cursor
+was unpinned. `session_id` and `next_after_seq` are the two fields a caller
+needs to keep reading, and nothing asserted them, so the existing route test now
+does. The change was verified in a worktree with a fresh target directory:
+format clean, clippy clean workspace-wide, and 1565 controller tests passing.
+
+What remains is Milestone 4, the ACP adapter, which is the piece that lets a
+consumer whose bots speak ACP reach any of this without new code in the
+consumer.
