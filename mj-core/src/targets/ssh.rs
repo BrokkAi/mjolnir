@@ -87,8 +87,7 @@ pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
 /// The connection's `ssh` arguments rewritten for `scp`, which spells the port
 /// option `-P`; to `scp`, `-p` means "preserve file times".
 fn scp_args(ssh: &SshTarget) -> Vec<String> {
-    ssh
-        .ssh_args
+    ssh.ssh_args
         .iter()
         .map(|argument| {
             if argument == "-p" {
@@ -963,9 +962,8 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("remove stale SSH control socket {}", socket.display())
-            });
+            return Err(error)
+                .with_context(|| format!("remove stale SSH control socket {}", socket.display()));
         }
     }
     let opened = executor.execute(&master_open_command(ssh, socket))?;
@@ -1369,7 +1367,6 @@ mod tests {
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-
     /// Records the commands it is handed and reports an empty success.
     #[cfg(unix)]
     #[derive(Default)]
@@ -1518,7 +1515,13 @@ mod tests {
         );
         assert_eq!(
             upload[6..],
-            ["-J", "bastion", "-Jother", "/tmp/file", "jump-rewrite-host:file"]
+            [
+                "-J",
+                "bastion",
+                "-Jother",
+                "/tmp/file",
+                "jump-rewrite-host:file"
+            ]
         );
     }
 
@@ -1808,7 +1811,13 @@ mod tests {
             .execute(&master_check_command(&ssh, &socket))
             .expect("ssh -O check must run");
         let exit = std::process::Command::new("ssh")
-            .args(["-O", "exit", "-o", &format!("ControlPath={}", socket.display()), &host])
+            .args([
+                "-O",
+                "exit",
+                "-o",
+                &format!("ControlPath={}", socket.display()),
+                &host,
+            ])
             .output();
         let output = output.expect("ssh must run");
         assert_eq!(
@@ -1824,6 +1833,132 @@ mod tests {
             String::from_utf8_lossy(&check.stderr)
         );
         drop(exit);
+    }
+
+    /// Against a real host: with three sessions per connection, seven
+    /// concurrent sessions open three masters, every session runs through
+    /// its master, and a guarded session with no master fails instead of
+    /// connecting on its own. Set `MJ_E2E_SSH_HOST` to run it.
+    #[test]
+    #[cfg(unix)]
+    fn sessions_shard_across_masters_on_a_real_host() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(host) = std::env::var_os("MJ_E2E_SSH_HOST") else {
+            return;
+        };
+        let host = host.to_string_lossy().into_owned();
+        let socket_dir = sharing_socket_dir();
+        let ssh = SshTarget {
+            destination: host.clone(),
+            ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
+        };
+        let ledger = SessionLedger::new(3);
+        let leases: Vec<SshSessionLease> = (0..7)
+            .map(|_| {
+                ledger
+                    .lease(&ssh, socket_dir.path(), &ProcessExecutor)
+                    .expect("lease a session on a real host")
+            })
+            .collect();
+        let sockets: Vec<PathBuf> = (0..4)
+            .map(|shard| socket_dir.path().join(control_socket_name(&ssh, shard)))
+            .collect();
+        let exit_all = || {
+            for socket in &sockets {
+                let _ = std::process::Command::new("ssh")
+                    .args([
+                        "-O",
+                        "exit",
+                        "-o",
+                        &format!("ControlPath={}", socket.display()),
+                        &host,
+                    ])
+                    .output();
+            }
+        };
+
+        // Run all seven at once so they really share their masters.
+        let base = ssh_command(&ssh, ["sleep", "2"]);
+        let children: Vec<std::io::Result<std::process::Output>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = leases
+                .iter()
+                .map(|lease| {
+                    let args = session_command_args(&base.program, &base.args, &ssh, lease);
+                    scope.spawn(move || {
+                        std::process::Command::new("ssh")
+                            .args(args)
+                            .stdin(std::process::Stdio::null())
+                            .output()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("session thread"))
+                .collect()
+        });
+        let running: Vec<bool> = sockets
+            .iter()
+            .map(|socket| {
+                ProcessExecutor
+                    .execute(&master_check_command(&ssh, socket))
+                    .map(|output| output.status == 0)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let orphan = std::process::Command::new("ssh")
+            .args(session_command_args(
+                &base.program,
+                &base.args,
+                &ssh,
+                &SshSessionLease {
+                    slot: Some(LeasedSlot {
+                        ledger: Arc::clone(&ledger),
+                        key: connection_key(&ssh),
+                        shard: 9,
+                        socket: socket_dir.path().join(control_socket_name(&ssh, 9)),
+                    }),
+                },
+            ))
+            .stdin(std::process::Stdio::null())
+            .output();
+        drop(leases);
+        exit_all();
+
+        let shards: Vec<usize> = leases_per_shard(&ledger, &ssh);
+        assert_eq!(shards, [0, 0, 0], "every slot is freed on drop");
+        for (index, output) in children.iter().enumerate() {
+            let output = output.as_ref().expect("ssh must run");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "session {index} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            running,
+            [true, true, true, false],
+            "seven sessions at three per master"
+        );
+        let orphan = orphan.expect("ssh must run");
+        assert_eq!(
+            orphan.status.code(),
+            Some(255),
+            "a guarded session with no master must not connect: {}",
+            String::from_utf8_lossy(&orphan.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    fn leases_per_shard(ledger: &SessionLedger, ssh: &SshTarget) -> Vec<usize> {
+        ledger
+            .connections()
+            .get(&connection_key(ssh))
+            .map(|shards| shards.iter().map(|shard| shard.leased).collect())
+            .unwrap_or_default()
     }
 
     /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
@@ -2007,7 +2142,10 @@ mod tests {
         let second = ledger
             .lease(&plain_target("two"), dir.path(), &masters)
             .expect("two");
-        assert_eq!([&first, &second].map(shard_of), ["0", "0"].map(str::to_owned));
+        assert_eq!(
+            [&first, &second].map(shard_of),
+            ["0", "0"].map(str::to_owned)
+        );
         assert_ne!(first.control_path(), second.control_path());
     }
 
@@ -2048,7 +2186,11 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("build@10.0.0.1"), "{message}");
         assert!(message.contains("Permission denied"), "{message}");
-        assert_eq!(masters.openers(), 1, "the opener is not retried by the ledger");
+        assert_eq!(
+            masters.openers(),
+            1,
+            "the opener is not retried by the ledger"
+        );
 
         // The failed lease gave its slot back: with a cap of one, the next
         // lease still lands on the first shard.
@@ -2104,7 +2246,15 @@ mod tests {
         let check = master_check_command(&ssh, socket);
         assert_eq!(
             check.args,
-            ["-J", "jump", "-o", "ControlPath=/run/mj/abc-0", "-O", "check", "host"]
+            [
+                "-J",
+                "jump",
+                "-o",
+                "ControlPath=/run/mj/abc-0",
+                "-O",
+                "check",
+                "host"
+            ]
         );
         assert_eq!(
             check.ssh_destination, None,
