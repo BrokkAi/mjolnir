@@ -11,7 +11,7 @@ pub const CODEX_ACP_VERSION: &str = "1.11.5";
 pub const CODEX_CLI_VERSION: &str = "0.155.1";
 pub const CLAUDE_ACP_VERSION: &str = "0.79.0";
 pub const KIMI_VERSION: &str = "2.0.2";
-pub const GROK_VERSION: &str = "1.0.34";
+pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.4.5";
 pub const MUSE_VERSION: &str = "1.3.0-R3401.1";
 
@@ -45,8 +45,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
-            install_id: "grok-1.0.34",
-            display_version: "Grok 1.0.34",
+            install_id: "grok-1.0.40",
+            display_version: "Grok 1.0.40",
             entrypoint: "bin/grok",
         },
     }
