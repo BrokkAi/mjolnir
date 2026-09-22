@@ -77,6 +77,8 @@ mod routes;
 pub use routes::*;
 mod config;
 pub(crate) use config::*;
+mod options;
+use options::*;
 mod sessions;
 use sessions::*;
 mod subagents;

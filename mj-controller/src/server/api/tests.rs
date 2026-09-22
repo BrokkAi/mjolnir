@@ -791,6 +791,34 @@ fn api_app(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    api_app_with_preferences(backend, adjust, absent_preferences_path())
+}
+
+/// A path that cannot hold fast-start preferences, so a test that does not
+/// name one never reads the developer's real `go.json`. The directory does not
+/// exist, which is the ordinary "nothing saved yet" case.
+fn absent_preferences_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir()
+        .join(format!(
+            "mjolnir-api-options-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+        .join("go.json")
+}
+
+fn api_app_with_preferences(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -824,6 +852,7 @@ fn api_app(
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.shutdown = backend.shutdown.clone();
     options.set_subagent_backend(backend);
+    options.set_preferences_path(preferences_path);
     (router(options), action_rx, snapshot_tx, bundle_rx)
 }
 
@@ -2949,4 +2978,164 @@ fn quota_recovery_keeps_wait_pending_and_unknown_reset_reports_quota() {
             .outcome,
         WaitOutcome::QuotaLimit
     );
+}
+
+/// Every secret the sample fixture holds: a profile home and environment, a
+/// container image and environment, a local repository source, and a native
+/// session id. The options route narrows the public projection to a launch
+/// decision, so none of them may appear in its body.
+const SAMPLE_SECRETS: [&str; 6] = [
+    "/highly/secret/codex",
+    "secret-token",
+    "secret.registry/image",
+    "secret-target",
+    "/private/source/hel",
+    "native-secret-id",
+];
+
+#[tokio::test]
+async fn options_list_what_a_caller_may_launch_without_leaking_configuration() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(API_VERSION_HEADER).unwrap(),
+        API_VERSION
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    for secret in SAMPLE_SECRETS {
+        assert!(
+            !text.contains(secret),
+            "the launch options published {secret}"
+        );
+    }
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(body["revision"].as_u64(), Some(1));
+    assert_eq!(body["profiles"][0]["id"], "codex-1");
+    assert_eq!(body["profiles"][0]["harness"], "codex");
+    assert_eq!(body["bundles"][0]["id"], "hel");
+    assert_eq!(body["bundles"][0]["repositories"][0]["github"], "owner/hel");
+
+    let targets = body["targets"].as_array().unwrap();
+    let raw = targets
+        .iter()
+        .find(|target| target["id"] == "raw")
+        .unwrap();
+    assert_eq!(raw["kind"], "local-bare");
+    assert_eq!(raw["requires_project_directory"].as_bool(), Some(true));
+    // No host reading covers this target in this test. An unchecked target is
+    // unknown, not unavailable: nothing has said it is broken.
+    assert_eq!(raw["availability"], "unknown");
+    assert!(raw["host"].is_null());
+    assert!(raw["unavailable_reason"].is_null());
+
+    // Nothing has been saved as this instance's default.
+    assert!(body["default"].is_null());
+}
+
+#[tokio::test]
+async fn options_explain_a_failed_host_without_repeating_its_probe() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+            id: "host-1".into(),
+            label: "builder".into(),
+            target_ids: vec!["podman".into()],
+            cpu_percent: Some(20),
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            logical_cores: None,
+            disk_total_bytes: None,
+            virtual_machines: None,
+            sampled_at_epoch_seconds: Some(1),
+            refreshing: false,
+            stale: false,
+            has_error: true,
+        }];
+    });
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+
+    let targets = body["targets"].as_array().unwrap();
+    let podman = targets
+        .iter()
+        .find(|target| target["id"] == "podman")
+        .unwrap();
+    assert_eq!(podman["availability"], "unavailable");
+    assert_eq!(podman["host"], "builder");
+    let reason = podman["unavailable_reason"].as_str().unwrap();
+    assert!(
+        reason.contains("builder"),
+        "the reason names the host a person knows: {reason}"
+    );
+
+    // A target the reading does not cover stays unknown while its neighbour
+    // is unavailable.
+    let raw = targets
+        .iter()
+        .find(|target| target["id"] == "raw")
+        .unwrap();
+    assert_eq!(raw["availability"], "unknown");
+
+    assert_eq!(body["hosts"][0]["label"], "builder");
+    assert_eq!(body["hosts"][0]["has_error"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn options_report_the_saved_default_and_publish_only_its_two_identifiers() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    mj_core::go::GoPreferences::save_recipe(
+        &path,
+        PathBuf::from("/private/project"),
+        mj_core::go::GoRecipe {
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            bundle_id: Some("hel".into()),
+            project_directory: Some(PathBuf::from("/private/project")),
+            create_managed_worktree: None,
+            mjolnir_subagents: None,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        },
+        true,
+    )
+    .unwrap();
+
+    let (app, _, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+
+    assert_eq!(body["default"]["profile_id"], "codex-1");
+    assert_eq!(body["default"]["target_id"], "podman");
+    // A saved recipe also carries a bundle and a project directory. Those are
+    // per-project choices and must not travel as part of the default.
+    assert_eq!(body["default"].as_object().unwrap().len(), 2);
+    assert!(!body.to_string().contains("/private/project"));
 }

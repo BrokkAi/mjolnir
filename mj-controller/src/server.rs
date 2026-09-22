@@ -194,6 +194,11 @@ pub struct ServerOptions {
     viewer_revocations: Arc<ViewerRevocations>,
     api_token: String,
     subagent: Option<Arc<dyn api::SubagentBackend>>,
+    /// Where the remembered fast-start preferences live. Injected rather than
+    /// resolved from the process environment inside a handler, so the
+    /// documented API answers from its own state and tests never read the
+    /// developer's real configuration.
+    preferences_path: PathBuf,
 }
 
 /// Typed request channels served by the authenticated HTTP surface.
@@ -239,6 +244,7 @@ impl ServerOptions {
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
             subagent: None,
+            preferences_path: mj_core::go::GoPreferences::path(),
         })
     }
 
@@ -301,6 +307,12 @@ impl ServerOptions {
     /// through. Without it those routes answer 503.
     pub fn set_subagent_backend(&mut self, backend: Arc<dyn api::SubagentBackend>) {
         self.subagent = Some(backend);
+    }
+
+    /// Read the remembered default from a specific preferences file instead
+    /// of the user's own. Tests point this at a temporary path.
+    pub fn set_preferences_path(&mut self, path: PathBuf) {
+        self.preferences_path = path;
     }
 
     #[cfg(test)]

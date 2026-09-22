@@ -588,3 +588,130 @@ pub struct WikiRestoreBody {
     #[serde(default)]
     pub effort: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Launch options
+// ---------------------------------------------------------------------------
+
+/// What a caller may choose when it starts a session, and which pair to use
+/// when it chooses nothing.
+///
+/// Served by `GET /api/v1/options` so a caller that has never read
+/// `config.toml` can enumerate the profiles and targets this daemon knows,
+/// learn whether each host answered its last check, and read the remembered
+/// default. It is the public projection in `server/viewer_types.rs`, narrowed
+/// to what a launch decision needs: no harness home, no SSH host or key, no
+/// container environment, no AWS detail, and no controller-side path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchOptions {
+    /// The projection revision these lists came from. Two reads carrying the
+    /// same revision describe the same configuration, so a caller can build a
+    /// form without mixing halves of two different worlds.
+    pub revision: u64,
+    pub profiles: Vec<LaunchProfile>,
+    pub targets: Vec<LaunchTarget>,
+    pub bundles: Vec<LaunchBundle>,
+    /// One entry per host that has published a capacity reading. The label is
+    /// how a person names the host; it is never a locator or an address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<LaunchHost>,
+    /// The pair the user last saved as their default, which the first setup
+    /// also becomes. Absent when nothing has ever been saved, and never an
+    /// error: a caller that cannot read a preference still has the lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<LaunchDefault>,
+}
+
+/// One account this daemon can run work under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchProfile {
+    pub id: String,
+    /// The harness kind, such as `codex` or `claude`. Which account it is, and
+    /// where its credentials live, stay on the controller.
+    pub harness: String,
+}
+
+/// One runtime template a session can run on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchTarget {
+    pub id: String,
+    /// The runtime kind, such as `local-bare` or `ssh-podman`.
+    pub kind: String,
+    /// Whether this target needs an existing Git directory on its machine
+    /// instead of provisioning repositories into a workspace.
+    pub requires_project_directory: bool,
+    pub availability: LaunchAvailability,
+    /// What to tell a person when the host did not answer. This repository
+    /// composes the sentence: a probe's own message names hosts and commands
+    /// and stays on the controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    /// How a person names the host, when a reading covers this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// How much this daemon knows about a target's host.
+///
+/// A reading arrives from a background poll, so it can be absent, old, or
+/// failed. Only `Unavailable` is a statement that the target cannot be used;
+/// `Unknown` means nobody has checked yet, which is the ordinary state
+/// immediately after startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchAvailability {
+    /// A reading covers this target and its last check succeeded.
+    Ready,
+    /// A reading covers this target but is marked stale.
+    Stale,
+    /// A reading covers this target and its last check failed.
+    Unavailable,
+    /// No reading covers this target yet.
+    Unknown,
+}
+
+/// One repository set a managed target can provision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchBundle {
+    pub id: String,
+    pub primary_repository: String,
+    pub repositories: Vec<LaunchRepository>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchRepository {
+    pub id: String,
+    /// The GitHub source, when this repository has one. A repository sourced
+    /// from a local directory publishes nothing here, because that source is a
+    /// path on the controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    pub destination: String,
+}
+
+/// One host or fleet, as much as a caller needs to explain an unavailable
+/// target. The probe's own error text is deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchHost {
+    pub id: String,
+    pub label: String,
+    /// The targets this reading covers.
+    pub targets: Vec<String>,
+    pub stale: bool,
+    pub refreshing: bool,
+    pub has_error: bool,
+}
+
+/// The pair a caller may leave unnamed when it starts a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchDefault {
+    pub profile_id: String,
+    pub target_id: String,
+}
