@@ -93,8 +93,14 @@ Do not create a new workspace crate only to reorganize code. Create one only
 when a clear dependency, compilation, publication, or ownership boundary
 requires it.
 
-Fix the source of a problem. Do not add a narrow fallback that hides a failure
-in the primary design.
+Build for correctness and general use.
+
+A narrow fallback usually indicates a design problem. Find the source of the
+problem and correct the root cause, even when the correction affects a larger
+area. Report the failure; do not paper over it with a second path that hides
+the primary design not working. This includes options in third-party tools
+that quietly degrade, such as OpenSSH's `ControlMaster=auto` opening a direct
+connection when sharing fails: choose the configuration that fails visibly.
 
 Upgrades must complete without user intervention after installation or initial
 upgrade consent. Ordinary startup must coordinate daemon replacement, database
