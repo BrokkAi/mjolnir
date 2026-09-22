@@ -610,7 +610,7 @@ impl Indexer {
     /// expected collision with another writer, not a fault: mark a rerun and
     /// say so only in debug output.
     fn report(&self, error: &anyhow::Error) {
-        if is_busy(error) {
+        if crate::database::is_busy_error(error) {
             self.requested.store(true, Ordering::Release);
             tracing::debug!(%error, "the SessionWiki index was busy; retrying on the next trigger");
         } else {
@@ -866,21 +866,6 @@ pub fn index_state() -> WikiIndexState {
     } else {
         WikiIndexState::Indexing
     }
-}
-
-/// Whether a failure is SQLite reporting another writer, which a later trigger
-/// simply retries.
-fn is_busy(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::SqliteFailure(failure, _))
-                if matches!(
-                    failure.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-        )
-    })
 }
 
 // ---------------------------------------------------------------------------

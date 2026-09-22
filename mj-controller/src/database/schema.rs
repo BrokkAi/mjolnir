@@ -95,7 +95,18 @@ pub fn database_path() -> PathBuf {
     data_dir().join("mj.sqlite3")
 }
 
+/// A writer-capable connection whose transactions take the WAL write lock at
+/// `BEGIN`, where the busy handler applies. A DEFERRED transaction that has
+/// already read cannot wait: SQLite only calls the busy handler when the
+/// connection holds no transaction, so the upgrade to a write returns
+/// `SQLITE_BUSY` at once (issue 1117).
 pub(super) fn open_writer(path: &Path) -> Result<Connection> {
+    let mut connection = open_writable(path)?;
+    connection.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
+    Ok(connection)
+}
+
+fn open_writable(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Mjolnir data directory {}", parent.display()))?;
@@ -128,8 +139,10 @@ pub(super) fn open_reader(path: &Path) -> Result<Connection> {
 pub(super) fn open_reader(path: &Path) -> Result<Connection> {
     // Path-taking database helpers are migration fixtures in unit tests: they
     // intentionally open old or not-yet-created schemas. Production query
-    // entry points compile against the strict reader above.
-    open_writer(path)
+    // entry points compile against the strict reader above. The connection is
+    // writable but keeps SQLite's DEFERRED default, so a fixture read does not
+    // take the write lock.
+    open_writable(path)
 }
 
 #[cfg_attr(test, allow(dead_code))]

@@ -77,3 +77,18 @@ mod tests;
 
 mod quota_cache;
 pub(crate) use quota_cache::*;
+
+/// Whether a failure is SQLite reporting another writer, which a later trigger
+/// simply retries.
+pub(crate) fn is_busy_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}

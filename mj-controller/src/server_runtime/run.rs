@@ -1662,11 +1662,23 @@ pub async fn run_server(
             None => Ok::<(), anyhow::Error>(()),
         }
     };
+    // The recorder runs beside the server, never as an arm of this select:
+    // a recording failure must not end `run_server` and take the API down
+    // with it (issue 1117).
+    let recorder = tokio::spawn(api_activity::record_activity_stream(
+        activity_snapshots,
+        crate::database::record_api_activities,
+    ));
     let result = tokio::select! {
-        result = api_activity::record_activity_stream(activity_snapshots) => result.context("native API activity recorder stopped"),
         result = serve.stopped() => result,
         result = control => result,
     };
+    recorder.abort();
+    if let Err(error) = recorder.await
+        && error.is_panic()
+    {
+        tracing::warn!(%error, "native API activity recorder panicked");
+    }
     // Dropping the handle aborts the server task, which is what dropping the
     // server future used to do when this `select!` owned it directly.
     drop(serve);

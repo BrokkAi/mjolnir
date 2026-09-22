@@ -2,7 +2,7 @@ use super::*;
 use crate::quota::ProfileQuota;
 
 pub(crate) fn load_quota_cache(identity: &str) -> Result<Option<ProfileQuota>> {
-    load(&open(&database_path())?, identity)
+    load(&open_reader(&database_path())?, identity)
 }
 
 fn load(connection: &Connection, identity: &str) -> Result<Option<ProfileQuota>> {
@@ -17,8 +17,14 @@ fn load(connection: &Connection, identity: &str) -> Result<Option<ProfileQuota>>
         .transpose()
 }
 
+/// Called on a blocking task; the writer lane is the only writer, so this
+/// cache must not open a connection of its own and compete for the WAL lock.
 pub(crate) fn save_quota_cache(identity: &str, report: &ProfileQuota) -> Result<()> {
-    save(&mut open(&database_path())?, identity, report)
+    let identity = identity.to_owned();
+    let report = report.clone();
+    submit_database_write("save_quota_cache", move |connection| {
+        save(connection, &identity, &report)
+    })
 }
 
 fn save(connection: &mut Connection, identity: &str, report: &ProfileQuota) -> Result<()> {

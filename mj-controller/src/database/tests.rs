@@ -4828,3 +4828,77 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
         .unwrap();
     assert_eq!(body, "{}");
 }
+
+/// A deferred transaction that has already read cannot wait for the WAL write
+/// lock: SQLite only calls the busy handler when the connection holds no
+/// transaction, so the upgrade returns `SQLITE_BUSY` at once. Writer-capable
+/// connections therefore begin IMMEDIATE (issue 1117).
+#[test]
+fn writer_connections_wait_for_a_concurrent_writer_instead_of_failing() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let mut recorder = open(&database).unwrap();
+    let mut holder = open(&database).unwrap();
+    let (holding_tx, holding) = sync_channel(1);
+    let hold = thread::spawn(move || {
+        let transaction = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        holding_tx.send(()).unwrap();
+        // Well under the writer's five-second busy timeout.
+        thread::sleep(Duration::from_millis(300));
+        transaction.commit().unwrap();
+    });
+    holding.recv().unwrap();
+
+    let activity = ApiActivityState {
+        state: "running".into(),
+        details: None,
+        is_idle: false,
+        waiting_for_input: false,
+        capacity_retry: false,
+    };
+    record_api_activities_with(
+        &mut recorder,
+        vec![("session-1".into(), activity.clone())],
+        1_000,
+    )
+    .unwrap();
+    hold.join().unwrap();
+
+    let body: String = recorder
+        .query_row(
+            "SELECT body FROM api_session_activity WHERE session_id = ?1",
+            ["session-1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ApiActivityState>(&body).unwrap(),
+        activity
+    );
+}
+
+/// The `cfg(test)` `open_reader` alias must stay DEFERRED: fixture reads may
+/// not take the write lock, or a reader would block the writer under test.
+#[test]
+fn test_reader_connections_keep_deferred_transactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let reader = open_reader(&database).unwrap();
+    let snapshot = reader.unchecked_transaction().unwrap();
+    let sessions: i64 = snapshot
+        .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sessions, 1);
+
+    let mut writer = open(&database).unwrap();
+    let write = writer.transaction().unwrap();
+    write
+        .execute("DELETE FROM api_session_activity", [])
+        .unwrap();
+    write.commit().unwrap();
+    drop(snapshot);
+}
