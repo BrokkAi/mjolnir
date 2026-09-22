@@ -704,6 +704,9 @@ where
                 ext_step_clock.begin_client_work();
                 let method = request.method().to_owned();
                 if method == "elicitation/create" {
+                    if let Some(answer) = muse_question_route_answer(ext_harness, request.params()) {
+                        return responder.respond(answer);
+                    }
                     let id = format!(
                         "elicitation-{}",
                         next_elicitation_id.fetch_add(1, Ordering::Relaxed)
@@ -955,6 +958,29 @@ where
         .lock()
         .expect("ACP restart slot lock poisoned")
         .take())
+}
+
+/// muse-acp 0.5.0 asks, before each Muse question that offers choices, whether
+/// to answer it or to explain instead. Mjolnir answers that form itself so the
+/// person sees one form, the question. A route form that no longer offers this
+/// choice reaches the person unchanged.
+fn muse_question_route_answer(
+    harness: HarnessKind,
+    params: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    const ANSWER: &str = "Answer questions";
+    if harness != HarnessKind::Muse {
+        return None;
+    }
+    let properties = params.pointer("/requestedSchema/properties")?.as_object()?;
+    let offers_answer = properties
+        .get("route")?
+        .get("enum")?
+        .as_array()?
+        .iter()
+        .any(|choice| choice.as_str() == Some(ANSWER));
+    (properties.len() == 1 && offers_answer)
+        .then(|| serde_json::json!({"action": "accept", "content": {"route": ANSWER}}))
 }
 
 /// Stop reason reported for a turn the bridge rejected instead of finishing.

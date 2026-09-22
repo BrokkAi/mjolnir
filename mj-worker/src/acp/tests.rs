@@ -1283,10 +1283,60 @@ async fn answer_to_ext_request(
     answer
 }
 
+/// Muse's form asking whether to answer its question or explain instead.
+fn muse_route_form() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "route-1",
+        "method": "elicitation/create",
+        "params": {
+            "sessionId": "scripted",
+            "mode": "form",
+            "message": "Choose how to respond to this question:\nChoose an architecture",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {"route": {"type": "string", "enum": ["Answer questions", "Explain instead"]}},
+                "required": ["route"]
+            }
+        }
+    })
+}
+
+fn architecture_form() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "ask-1",
+        "method": "elicitation/create",
+        "params": {
+            "sessionId": "scripted",
+            "toolCallId": "question-tool",
+            "mode": "form",
+            "message": "Choose an architecture",
+            "requestedSchema": {
+                "type": "object",
+                "required": ["architecture"],
+                "properties": {
+                    "architecture": {
+                        "type": "string",
+                        "title": "Architecture",
+                        "oneOf": [
+                            {"const": "thin", "title": "Thin callers"},
+                            {"const": "dynamic", "title": "Dynamic matrix"}
+                        ]
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Scripts one prompt that asks the architecture question. With `routed`,
+/// the question is preceded by Muse's route form, whose answer is published.
 async fn elicitation_bridge(
     stream: tokio::io::DuplexStream,
     initialized: oneshot::Sender<serde_json::Value>,
     answered: oneshot::Sender<serde_json::Value>,
+    mut routed: Option<oneshot::Sender<serde_json::Value>>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1297,6 +1347,16 @@ async fn elicitation_bridge(
     let mut prompt_id = None;
     while let Some(line) = lines.next_line().await.expect("read bridge input") {
         let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
+        if message.get("id").and_then(serde_json::Value::as_str) == Some("route-1") {
+            if let Some(routed) = routed.take() {
+                let _ = routed.send(message);
+            }
+            write
+                .write_all(format!("{}\n", architecture_form()).as_bytes())
+                .await
+                .expect("ask the question");
+            continue;
+        }
         if message.get("id").and_then(serde_json::Value::as_str) == Some("ask-1") {
             if let Some(answered) = answered.take() {
                 let _ = answered.send(message);
@@ -1341,31 +1401,11 @@ async fn elicitation_bridge(
             "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             "session/prompt" => {
                 prompt_id = Some(id);
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": "ask-1",
-                    "method": "elicitation/create",
-                    "params": {
-                        "sessionId": "scripted",
-                        "toolCallId": "question-tool",
-                        "mode": "form",
-                        "message": "Choose an architecture",
-                        "requestedSchema": {
-                            "type": "object",
-                            "required": ["architecture"],
-                            "properties": {
-                                "architecture": {
-                                    "type": "string",
-                                    "title": "Architecture",
-                                    "oneOf": [
-                                        {"const": "thin", "title": "Thin callers"},
-                                        {"const": "dynamic", "title": "Dynamic matrix"}
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                })
+                if routed.is_some() {
+                    muse_route_form()
+                } else {
+                    architecture_form()
+                }
             }
             _ => continue,
         };
@@ -1381,6 +1421,24 @@ async fn elicitation_bridge(
 
 #[tokio::test]
 async fn form_elicitation_is_advertised_rendered_and_answered() {
+    answer_architecture_form(HarnessKind::Claude, None).await;
+}
+
+#[tokio::test]
+async fn muse_route_form_is_answered_without_asking_the_person() {
+    let (routed_tx, routed_rx) = oneshot::channel();
+    answer_architecture_form(HarnessKind::Muse, Some(routed_tx)).await;
+    let routed = routed_rx.await.expect("bridge receives the route answer");
+    assert_eq!(routed["result"]["action"], "accept");
+    assert_eq!(routed["result"]["content"]["route"], "Answer questions");
+}
+
+/// Drives one prompt whose question the person answers. It fails if any
+/// form other than the architecture question reaches the person first.
+async fn answer_architecture_form(
+    harness: HarnessKind,
+    routed: Option<oneshot::Sender<serde_json::Value>>,
+) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (initialized_tx, initialized_rx) = oneshot::channel();
     let (answered_tx, answered_rx) = oneshot::channel();
@@ -1388,6 +1446,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         bridge_stream,
         initialized_tx,
         answered_tx,
+        routed,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
@@ -1409,7 +1468,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
-        harness: HarnessKind::Claude,
+        harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),

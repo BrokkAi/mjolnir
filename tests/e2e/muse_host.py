@@ -64,7 +64,7 @@ for line in sys.stdin:
             after = "question"
     elif method in ("approval/decide", "userInput/answer", "userInput/cancel"):
         after = "finish"
-    elif method == "turn/cancel":
+    elif method in ("turn/cancel", "turn/interrupt"):
         after = "cancel"
     send({"jsonrpc": "2.0", "id": request["id"], "result": result})
     base = {"sessionId": SESSION, "turnId": f"turn-{turn}"}
