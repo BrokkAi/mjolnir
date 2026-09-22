@@ -37,7 +37,7 @@ impl Drop for DaemonStartGuard {
 }
 
 async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
-    let deadline = Instant::now() + STOP_TIMEOUT + START_TIMEOUT;
+    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
     loop {
         let path = path.clone();
         let guard = tokio::task::spawn_blocking(move || -> Result<Option<DaemonStartGuard>> {
@@ -65,10 +65,10 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
         if let Some(guard) = guard {
             return Ok(guard);
         }
-        ensure!(
-            Instant::now() < deadline,
-            "timed out waiting for another client to finish starting the Mjolnir daemon"
-        );
+        if Instant::now() >= notice_at {
+            eprintln!("Mjolnir is waiting for another client to finish the daemon handoff.");
+            notice_at = Instant::now() + Duration::from_secs(30);
+        }
         tokio::time::sleep(RETRY_DELAY).await;
     }
 }
@@ -89,21 +89,14 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
 /// [`connect_or_start`] again. The guard is taken by reference only so the
 /// requirement is visible at every call site.
 async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonClient> {
-    if let Ok(metadata) = read_metadata_any() {
+    if let Ok(metadata) = tokio::task::spawn_blocking(read_metadata_any)
+        .await
+        .context("read daemon metadata task failed")?
+    {
         ensure_supported_daemon_protocol(&metadata)?;
     }
     maybe_replace_stale_development_daemon().await?;
-    if let Ok(metadata) = read_metadata_any()
-        && metadata.protocol_version != PROTOCOL_VERSION
-    {
-        replace_daemon(&metadata).await?;
-    }
-    if let Ok(mut client) = connect_existing().await
-        && matches!(
-            client.request(DaemonAction::Ping).await,
-            Ok(DaemonReply::Pong)
-        )
-    {
+    if let Some(client) = prepare_existing_daemon().await? {
         return Ok(client);
     }
 
@@ -119,12 +112,7 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
             break;
         }
         // A daemon started outside this client's startup lock may be becoming ready.
-        if let Ok(mut client) = connect_existing().await
-            && matches!(
-                client.request(DaemonAction::Ping).await,
-                Ok(DaemonReply::Pong)
-            )
-        {
+        if let Some(client) = prepare_existing_daemon().await? {
             return Ok(client);
         }
         ensure!(
@@ -150,6 +138,7 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
+            command.env_remove("MJ_UPGRADE_RESUME_FILE");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
             Ok(LaunchedDaemon { pid, log_offset })
         }
@@ -161,10 +150,9 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
         || process_is_alive(launched.pid),
         || async {
             let mut client = connect_existing().await?;
-            match client.request(DaemonAction::Ping).await? {
-                DaemonReply::Pong => Ok(client),
-                reply => Err(anyhow!("unexpected startup reply {reply:?}")),
-            }
+            ping_daemon(&mut client).await?;
+            check_store_readiness().await?;
+            Ok(client)
         },
         |waited| {
             eprintln!(
@@ -191,6 +179,108 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
     };
     let output = launched.output_since_launch(&log_path).await;
     Err(launched.failure(reason, output, &log_path))
+}
+
+async fn check_store_readiness() -> Result<()> {
+    tokio::task::spawn_blocking(mj_controller::database::check_read_compatibility)
+        .await
+        .context("check database readiness task failed")?
+}
+
+async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
+    let reply = tokio::time::timeout(Duration::from_secs(2), client.request(DaemonAction::Ping))
+        .await
+        .context("daemon did not answer its readiness probe")??;
+    ensure!(
+        matches!(reply, DaemonReply::Pong),
+        "unexpected startup reply {reply:?}"
+    );
+    Ok(())
+}
+
+/// Local protocol readiness precedes the asynchronously started HTTP server.
+/// API and desktop callers share this wait instead of asking users to retry.
+pub async fn wait_for_web_viewer(client: &mut DaemonClient) -> Result<String> {
+    wait_for_web_viewer_with_timeout(client, START_TIMEOUT).await
+}
+
+async fn wait_for_web_viewer_with_timeout(
+    client: &mut DaemonClient,
+    timeout: Duration,
+) -> Result<String> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            match client.status().await?.phone_status {
+                WebViewerStatus::Ready { viewer_url, .. } => return Ok(viewer_url),
+                WebViewerStatus::Starting => tokio::time::sleep(RETRY_DELAY).await,
+                WebViewerStatus::Disabled => bail!("the web viewer is disabled in config.toml"),
+                WebViewerStatus::Stopped => bail!("the web viewer stopped during startup"),
+                WebViewerStatus::Error { message } => {
+                    bail!("the web viewer failed to start: {message}")
+                }
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for the web viewer to become ready")?
+}
+
+fn daemon_release_order(metadata: &DaemonMetadata) -> Result<std::cmp::Ordering> {
+    let daemon =
+        semver::Version::parse(&metadata.build_version).context("parse daemon build version")?;
+    let client =
+        semver::Version::parse(env!("CARGO_PKG_VERSION")).context("parse client build version")?;
+    Ok(daemon.cmp_precedence(&client))
+}
+
+/// Called only while holding the startup lock. Wire compatibility alone does
+/// not imply application readiness: an older release may lack migrations or
+/// fixes without changing the protocol. A same-version development build can
+/// also need a migration. Only the replacement daemon may perform that work.
+async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
+    let metadata = tokio::task::spawn_blocking(read_metadata_any)
+        .await
+        .context("read daemon metadata task failed")?;
+    let Ok(metadata) = metadata else {
+        return Ok(None);
+    };
+    ensure_supported_daemon_protocol(&metadata)?;
+    let release_order = daemon_release_order(&metadata)?;
+    if metadata.protocol_version < PROTOCOL_VERSION || release_order.is_lt() {
+        ensure!(
+            !release_order.is_gt(),
+            "refusing to replace newer daemon {} with client {}",
+            metadata.build_version,
+            env!("CARGO_PKG_VERSION")
+        );
+        replace_daemon(&metadata).await?;
+        return Ok(None);
+    }
+    let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
+        return Ok(None);
+    };
+    if ping_daemon(&mut client).await.is_err() {
+        return Ok(None);
+    }
+    if let Err(error) = check_store_readiness().await {
+        let needs_migration = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<mj_core::storage::StoreSchemaMismatch>()
+                .is_some_and(|mismatch| {
+                    mismatch.reason == mj_core::storage::StoreSchemaMismatchReason::NeedsMigration
+                })
+        });
+        if !needs_migration {
+            return Err(error);
+        }
+        ensure!(
+            !release_order.is_gt(),
+            "a newer daemon has not completed database initialization: {error:#}"
+        );
+        replace_daemon(&metadata).await?;
+        return Ok(None);
+    }
+    Ok(Some(client))
 }
 
 /// The daemon a restart produced.
@@ -223,7 +313,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     for attempt in 1..=RESTART_ATTEMPTS {
         if let Ok(metadata) = read_metadata_any() {
-            replace_daemon(&metadata).await?;
+            stop_daemon(&metadata).await?;
         }
         let mut client = connect_or_start_holding(&startup).await?;
         let status = client.status().await?;
@@ -459,10 +549,95 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Clear the way for a different daemon executable. Ask the running daemon to
-/// stop over the frozen management subset first — graceful for every protocol
-/// version — and only signal it when the wire is unreachable.
+/// Automatic upgrades have no authority to cancel work, even when a daemon
+/// is slow or temporarily unreachable. Explicit restart uses `stop_daemon`.
 async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
+    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
+    loop {
+        let previous = metadata.clone();
+        let still_current = tokio::task::spawn_blocking(move || {
+            process_is_alive(previous.pid)
+                && !read_metadata_any().is_ok_and(|current| {
+                    current.pid != previous.pid || current.token != previous.token
+                })
+        })
+        .await
+        .context("inspect daemon handoff owner")?;
+        if !still_current {
+            return Ok(());
+        }
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut client = DaemonClient::connect(metadata.clone()).await?;
+            if metadata.protocol_version >= 33 {
+                match client.request(DaemonAction::PrepareUpgrade).await? {
+                    DaemonReply::Done => Ok(true),
+                    DaemonReply::UpgradePending => Ok(false),
+                    reply => bail!("unexpected upgrade admission reply {reply:?}"),
+                }
+            } else {
+                // Historical daemons cannot provide atomic admission. Inspect
+                // their own activity without opening or migrating their store.
+                let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
+                if !legacy_snapshot_is_idle(&snapshot) {
+                    return Ok(false);
+                }
+                client.stop().await?;
+                Ok(true)
+            }
+        })
+        .await;
+        match ready {
+            Ok(Ok(true)) => {
+                // An acknowledged handoff is not permission to impose a kill
+                // deadline. Keep following this process until it exits.
+                if wait_for_exit(metadata.pid).await.is_ok() {
+                    return Ok(());
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "automatic upgrade cannot establish safe handoff yet")
+            }
+            Err(error) => {
+                tracing::debug!(%error, "automatic upgrade is waiting for the daemon to answer")
+            }
+            Ok(Ok(false)) => {}
+        }
+        if Instant::now() >= notice_at {
+            eprintln!(
+                "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+            );
+            notice_at = Instant::now() + Duration::from_secs(30);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn legacy_snapshot_is_idle(snapshot: &RuntimeSnapshot) -> bool {
+    use mj_core::state::SessionState;
+    snapshot.lifecycles.is_empty()
+        && snapshot.reviews.is_empty()
+        && snapshot.records.iter().all(|record| match record.state {
+            SessionState::Running => snapshot
+                .sessions
+                .iter()
+                .find(|view| view.session_id == record.id)
+                .is_some_and(|view| {
+                    view.connected
+                        && view
+                            .operational
+                            .as_ref()
+                            .is_some_and(|state| state.safe_to_replace(record.harness_kind))
+                }),
+            SessionState::Provisioning
+            | SessionState::Checkpointing
+            | SessionState::Closing
+            | SessionState::Destroying
+            | SessionState::Disconnected => false,
+            _ => true,
+        })
+}
+
+async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
     if let Ok(inner) = DaemonClient::connect(metadata.clone()).await
         && ManagementClient::new(inner).stop_and_wait().await.is_ok()
     {
@@ -535,6 +710,9 @@ pub enum DaemonPresence {
     Attached,
     /// No daemon answered. The string is the reason, for the person reading it.
     Missing(String),
+    /// A newer installed daemon owns the instance. The terminal must preserve
+    /// its local state and re-exec that build before reading the store again.
+    Upgraded(UpgradeTarget),
 }
 
 /// The keep-alive task and what it reports about the daemon.
@@ -565,17 +743,17 @@ pub fn maintain_attachment(
             tokio::select! {
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    let observed = match connect_existing().await {
-                        Ok(mut daemon) => match daemon.attach(client_id.clone(), pid).await {
-                            Ok(()) => DaemonPresence::Attached,
-                            Err(error) => {
-                                tracing::warn!(%error, "could not refresh daemon client presence");
-                                DaemonPresence::Missing(format!("{error:#}"))
+                    let observed = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = tokio::time::timeout(Duration::from_secs(5), observe_attachment(&client_id, pid)) => {
+                            match result {
+                                Ok(Ok(presence)) => presence,
+                                result => {
+                                    let reason = format!("could not refresh daemon attachment: {result:?}");
+                                    tracing::warn!(%reason);
+                                    DaemonPresence::Missing(reason)
+                                }
                             }
-                        },
-                        Err(error) => {
-                            tracing::warn!(%error, "could not reconnect dashboard to Mjolnir daemon");
-                            DaemonPresence::Missing(format!("{error:#}"))
                         }
                     };
                     // `send_if_modified` so a daemon that keeps answering does
@@ -594,10 +772,143 @@ pub fn maintain_attachment(
     Attachment { task, presence }
 }
 
+async fn observe_attachment(client_id: &str, pid: u32) -> Result<DaemonPresence> {
+    if let Some(target) = tokio::task::spawn_blocking(upgraded_daemon_executable)
+        .await
+        .context("inspect upgraded daemon task failed")??
+    {
+        return Ok(DaemonPresence::Upgraded(target));
+    }
+    connect_existing()
+        .await?
+        .attach(client_id.to_owned(), pid)
+        .await?;
+    Ok(DaemonPresence::Attached)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpgradeTarget {
+    pub executable: PathBuf,
+    pub generation: String,
+}
+
+fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+    let Ok(metadata) = read_metadata_any() else {
+        return Ok(None);
+    };
+    let newer = daemon_release_order(&metadata)?.is_gt();
+    if !newer && metadata.protocol_version <= PROTOCOL_VERSION {
+        return Ok(None);
+    }
+    let generation = format!("{}:{}", metadata.pid, metadata.started_at);
+    // Do not loop if another installer replaced the executable again during handoff.
+    if std::env::var("MJ_UPGRADE_DAEMON").ok().as_deref() == Some(&generation) {
+        return Ok(None);
+    }
+    Ok(process_executable_path(metadata.pid)
+        .filter(|path| path.is_file())
+        .map(|executable| UpgradeTarget {
+            executable,
+            generation,
+        }))
+}
+
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    async fn viewer_fixture(
+        statuses: Vec<WebViewerStatus>,
+    ) -> (DaemonClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: 1,
+            address: listener.local_addr().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut statuses = statuses.into_iter();
+            while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
+                assert!(matches!(request.action, DaemonAction::Status));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(DaemonReply::Status(DaemonStatus {
+                            pid: 1,
+                            started_at: "test".into(),
+                            build_version: "test".into(),
+                            attached_clients: 0,
+                            phone_status: statuses.next().unwrap_or(WebViewerStatus::Starting),
+                        })),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        (DaemonClient::connect(metadata).await.unwrap(), task)
+    }
+
+    #[tokio::test]
+    async fn api_and_desktop_wait_for_the_viewer_without_a_retry_command() {
+        let (mut client, task) = viewer_fixture(vec![
+            WebViewerStatus::Starting,
+            WebViewerStatus::Starting,
+            WebViewerStatus::Ready {
+                viewer_url: "http://127.0.0.1:1234".into(),
+                viewer_code: "test".into(),
+                qr_login_url: None,
+                fallback_reason: None,
+            },
+        ])
+        .await;
+        assert_eq!(
+            wait_for_web_viewer(&mut client).await.unwrap(),
+            "http://127.0.0.1:1234"
+        );
+        drop(client);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn viewer_startup_reports_failure_and_bounds_a_stalled_start() {
+        let (mut client, task) = viewer_fixture(vec![
+            WebViewerStatus::Starting,
+            WebViewerStatus::Error {
+                message: "port unavailable".into(),
+            },
+        ])
+        .await;
+        assert!(
+            wait_for_web_viewer(&mut client)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("port unavailable")
+        );
+        drop(client);
+        task.await.unwrap();
+        let (mut client, task) = viewer_fixture(vec![]).await;
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_millis(100);
+        assert!(
+            wait_for_web_viewer_with_timeout(&mut client, timeout)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+        assert!(start.elapsed() >= timeout);
+        drop(client);
+        task.await.unwrap();
+    }
     #[cfg(target_os = "linux")]
     #[test]
     fn detached_daemon_can_launch_after_its_client_binary_is_removed() {

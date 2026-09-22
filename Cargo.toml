@@ -32,6 +32,7 @@ rust-version = "1.96"
 # is repeated here. Keeping every same-release path dependency in this one
 # table lets cargo-release update the version requirements automatically.
 [workspace.dependencies]
+semver = "1"
 mj-review = { path = "mj-review", package = "brokk-mj-review", version = "2.16.0" }
 mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", version = "2.16.0" }
 mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.16.0" }

@@ -36,15 +36,16 @@ const SCHEMA_VERSION: i64 = 44;
 mod session_move;
 pub use session_move::*;
 
+mod legacy_schema;
 mod schema;
 mod usage;
 pub use usage::*;
 mod events;
 pub use events::*;
 
-pub use schema::database_path;
 #[cfg(test)]
 use schema::forget_verified_schema;
+pub use schema::{check_read_compatibility, database_path};
 use schema::{open, open_reader};
 
 mod writer;

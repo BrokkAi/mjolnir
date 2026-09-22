@@ -96,6 +96,7 @@ impl RuntimeState {
                 );
                 active.result.clone()
             } else {
+                let upgrade_work = crate::upgrade::activity("session lifecycle")?;
                 let cancelled = create_control
                     .as_ref()
                     .map(|control| control.cancelled.clone())
@@ -131,6 +132,7 @@ impl RuntimeState {
                 let operation = work.take().expect("new lifecycle operation has work");
                 let completed_channel = result_rx.clone();
                 tokio::spawn(async move {
+                    let _upgrade_work = upgrade_work;
                     let operation_state = state.clone();
                     let operation_id = operation_session_id.clone();
                     let mut result = match tokio::spawn(async move {

@@ -1074,7 +1074,11 @@ async fn supervised_checkpoint(
     exports: Arc<dyn ExportRuntime>,
     session_id: String,
 ) -> Result<mj_core::state::CheckpointMetadata> {
-    let checkpoint = tokio::spawn(async move { exports.checkpoint_now(session_id).await });
+    let upgrade_work = crate::upgrade::activity("API checkpoint")?;
+    let checkpoint = tokio::spawn(async move {
+        let _upgrade_work = upgrade_work;
+        exports.checkpoint_now(session_id).await
+    });
     tokio::spawn(async move {
         let result = match checkpoint.await {
             Ok(result) => result,
@@ -1560,6 +1564,7 @@ impl SubagentBackend for ApiBackend {
                     },
                 );
             let followup_id = session_id.clone();
+            let upgrade_work = crate::upgrade::activity("API startup followup")?;
             let work = tokio::spawn(async move {
                 tokio::select! {
                     result = apply_followup(sessions, states, exports, followup_id, followup) => result,
@@ -1570,6 +1575,7 @@ impl SubagentBackend for ApiBackend {
             // becomes a failure the caller's wait reports, rather than an
             // entry that stays Pending for as long as the daemon runs.
             let task = tokio::spawn(async move {
+                let _upgrade_work = upgrade_work;
                 let status = match work.await {
                     Ok(Ok(Some(turn_id))) => Some(StartStatus::Submitted { turn_id }),
                     // Configuration applied and nothing to submit: there is no

@@ -56,6 +56,7 @@ impl Controller {
                     worker_root: &worker_root,
                     reconnect: &reconnect,
                     launch: Some(&launch),
+                    prepared: false,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
             )
@@ -142,6 +143,7 @@ impl Controller {
                 worker_root,
                 reconnect,
                 launch: None,
+                prepared: false,
                 messages: &RESTART_FOR_CHECKPOINT,
             },
         )

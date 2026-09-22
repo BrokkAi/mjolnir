@@ -391,4 +391,11 @@ impl RelayClient {
             _ => bail!("relay returned an unexpected command response"),
         }
     }
+
+    pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
+        match self.call(RelayRequest::ReserveIdle { command_id }).await? {
+            RelayResponsePayload::IdleReservation { ordinal } => Ok(ordinal.is_some()),
+            _ => bail!("relay returned an unexpected idle reservation response"),
+        }
+    }
 }

@@ -356,8 +356,8 @@ fn run(cli: Cli) -> Result<()> {
     }
     let result = runtime.block_on(run_command(cli.command, cli.workspace));
     if matches!(
-        result,
-        Ok(DashboardExit::Detached | DashboardExit::Interrupted)
+        &result,
+        Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
         // A dashboard has already drained durable mutations and restored its
         // terminal. Do not let disposable blocking reads delay process exit.
@@ -374,7 +374,10 @@ fn run(cli: Cli) -> Result<()> {
             RUNTIME_SHUTDOWN_GRACE,
         );
     }
-    result.map(|_| ())
+    match result? {
+        DashboardExit::Restart { target, resume } => resume.restart(&target),
+        _ => Ok(()),
+    }
 }
 
 fn install_panic_logging() {
@@ -927,11 +930,21 @@ async fn run_workspace_dashboard(
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
 ) -> Result<DashboardExit> {
+    let resume = dashboard::UpgradeResume::load().await?;
+    if resume.is_some() {
+        go = None;
+    }
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some((mode, _)) = &mut go {
+    let selected = if let Some(resume) = &resume
+        && workspaces
+            .iter()
+            .any(|workspace| workspace.workspace.id == resume.workspace_id)
+    {
+        resume.workspace_id.clone()
+    } else if let Some((mode, _)) = &mut go {
         go::resolve_workspace(&mut daemon, mode).await?
-    } else if let Some(requested) = requested_workspace {
+    } else if let Some(requested) = requested_workspace.filter(|_| resume.is_none()) {
         workspaces
             .iter()
             .find(|candidate| {
@@ -950,11 +963,15 @@ async fn run_workspace_dashboard(
     };
     daemon.touch_workspace(selected.clone()).await?;
 
-    let client_id = format!(
-        "tui-{}-{}",
-        std::process::id(),
-        mj_core::workspace::new_workspace_id()?
-    );
+    let client_id = if let Some(resume) = &resume {
+        resume.client_id.clone()
+    } else {
+        format!(
+            "tui-{}-{}",
+            std::process::id(),
+            mj_core::workspace::new_workspace_id()?
+        )
+    };
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment = daemon::maintain_attachment(
@@ -968,6 +985,7 @@ async fn run_workspace_dashboard(
         open_workspace_manager,
         go,
         attachment.presence,
+        resume,
     )
     .await;
     attachment_cancellation.cancel();

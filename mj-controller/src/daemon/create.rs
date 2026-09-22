@@ -14,6 +14,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: crate::controller::RegisterSubagentRequest,
     ) -> Result<mj_core::subagent::SubagentRecord> {
+        let _upgrade_work = crate::upgrade::activity("subagent admission")?;
         let relation = blocking(move || {
             let mut controller = Controller::load()?;
             controller.register_subagent(request)
@@ -61,6 +62,7 @@ impl RuntimeState {
         control: CreateSessionControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<RegisteredSession> {
+        let _upgrade_work = crate::upgrade::activity("session admission")?;
         let path_cancelled = control.cancelled.clone();
         let registered = blocking(move || {
             let mut controller = Controller::load()?;

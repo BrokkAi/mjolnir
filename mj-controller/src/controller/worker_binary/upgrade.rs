@@ -19,6 +19,42 @@ pub(in crate::controller) fn replace_installed_worker_binary(
     Ok(())
 }
 
+/// Upload without changing the executable path used by the running worker or
+/// its sidecars. Promotion happens only while an idle reservation is held.
+pub(in crate::controller) fn stage_worker_binary_for_upgrade(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_binary: &Path,
+) -> Result<()> {
+    worker_binary_replacement_plan(locator, session_id, worker_binary, "hel.prepared")?
+        .execute(executor)?;
+    Ok(())
+}
+
+pub(in crate::controller) fn install_staged_worker_binary(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    session_id: &str,
+) -> Result<()> {
+    let root = targets::worker_root(locator, session_id)?;
+    execute_checked(
+        executor,
+        targets::locator_command(
+            locator,
+            vec![
+                "mv".into(),
+                "-f".into(),
+                "--".into(),
+                format!("{root}/hel.prepared"),
+                format!("{root}/hel"),
+            ],
+        )
+        .purpose("install the prepared Mjolnir worker"),
+    )?;
+    Ok(())
+}
+
 pub(in crate::controller) fn replace_installed_worker_launch_config(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -184,9 +220,18 @@ pub(super) fn installed_worker_binary_replacement_plan(
     session_id: &str,
     worker_binary: &Path,
 ) -> Result<CommandPlan> {
+    worker_binary_replacement_plan(locator, session_id, worker_binary, "hel")
+}
+
+fn worker_binary_replacement_plan(
+    locator: &targets::TargetLocator,
+    session_id: &str,
+    worker_binary: &Path,
+    installed_name: &str,
+) -> Result<CommandPlan> {
     let worker_root = targets::worker_root(locator, session_id)?;
-    let installed = format!("{worker_root}/hel");
-    let staged = format!("{worker_root}/hel.next");
+    let installed = format!("{worker_root}/{installed_name}");
+    let staged = format!("{installed}.next");
     let commands = match locator {
         targets::TargetLocator::LocalBare { .. } => vec![
             CommandSpec::new(

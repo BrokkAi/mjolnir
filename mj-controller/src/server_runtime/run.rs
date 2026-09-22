@@ -315,7 +315,9 @@ pub async fn run_server(
                         continue;
                     };
                     let session_control = worker_commands_tx.clone();
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     background_task_stop_jobs.spawn(async move {
+                        let _upgrade_task = upgrade_task;
                         let result = match session_control.session(&request.session_id).await {
                             Ok(session) => session
                                 .client()
@@ -534,7 +536,9 @@ pub async fn run_server(
                             let backend = api_backend.clone();
                             let runtime = daemon_runtime.clone();
                             let parent_session_id = update.session_id.clone();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             subagent_jobs.spawn(async move {
+                                let _upgrade_task = upgrade_task;
                                 let result = backend
                                     .execute_subagent_tool(parent_session_id.clone(), request)
                                     .await;
@@ -570,7 +574,9 @@ pub async fn run_server(
                             let outcome_name = format!("{:?}", outcome.outcome).to_lowercase();
                             relation.noticed_turn = Some(turn);
                             let backend = api_backend.clone();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             subagent_completion_jobs.spawn(async move {
+                                let _upgrade_task = upgrade_task;
                                 let result = async {
                                     backend
                                         .record_subagent_completion_notice(
@@ -600,7 +606,9 @@ pub async fn run_server(
                         {
                             let profile = session.last_profile.clone();
                             let state = snapshot.operational.clone();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
                                 if let Err(error) = crate::controller::profile_config::observe(profile, build, state).await {
                                     tracing::warn!(%error, "could not cache observed profile choices");
                                 }
@@ -700,7 +708,9 @@ pub async fn run_server(
                     match archive_after_days {
                         Some(days) if archive_jobs.is_empty() => {
                             let runtime = daemon_runtime.clone();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             archive_jobs.spawn(async move {
+                                let _upgrade_task = upgrade_task;
                                 runtime.archive_aged_sessions(days).await
                             });
                         }
@@ -712,8 +722,12 @@ pub async fn run_server(
                     // Only rows whose client id names a phone are considered:
                     // a terminal client's place in a conversation is not the
                     // phone's to expire.
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     tokio::spawn(async move {
+                        let _upgrade_task = upgrade_task;
+                        let upgrade_blocking = _upgrade_task.clone();
                         let pruned = tokio::task::spawn_blocking(move || {
+                            let _upgrade_blocking = upgrade_blocking;
                             crate::database::prune_phone_client_state(client_state_retention)
                         })
                         .await;
@@ -751,9 +765,12 @@ pub async fn run_server(
                     let paths = controller.state.sessions.get(&request.session_id).map(|session| {
                         crate::dictation::auth_paths(&controller.config, &session.last_profile)
                     });
-                    dictation_jobs.spawn(crate::dictation::execute(
-                        request, paths, termination.clone(),
-                    ));
+                    let Ok(work) = crate::upgrade::activity("dictation") else { continue };
+                    let termination = termination.clone();
+                    dictation_jobs.spawn(async move {
+                        let _work = work;
+                        crate::dictation::execute(request, paths, termination).await
+                    });
                 }
                 job = dictation_jobs.join_next(), if !dictation_jobs.is_empty() => {
                     if let Some(Err(error)) = job {
@@ -800,8 +817,12 @@ pub async fn run_server(
                     match stored {
                         crate::server::ClientStateRequest::Read { client_id, session_id, reply } => {
                             let workspace = workspace_of(&session_id);
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
+                                let upgrade_blocking = _upgrade_task.clone();
                                 let answer = tokio::task::spawn_blocking(move || {
+                                    let _upgrade_blocking = upgrade_blocking;
                                     let workspace = workspace.context("unknown session")?;
                                     let state = crate::database::client_session_state(
                                         &client_id, &workspace, &session_id,
@@ -817,8 +838,12 @@ pub async fn run_server(
                         }
                         crate::server::ClientStateRequest::SaveDraft { client_id, session_id, draft, reply } => {
                             let workspace = workspace_of(&session_id);
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
+                                let upgrade_blocking = _upgrade_task.clone();
                                 let answer = tokio::task::spawn_blocking(move || {
+                                    let _upgrade_blocking = upgrade_blocking;
                                     let workspace = workspace.context("unknown session")?;
                                     crate::database::persist_client_draft(
                                         &client_id, &workspace, &session_id, &draft,
@@ -836,8 +861,12 @@ pub async fn run_server(
                                 .filter(|session| session.workspace_id == workspace_id)
                                 .map(|session| (session.id.clone(), session.viewed_through_event_ordinal))
                                 .collect::<Vec<_>>();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
+                                let upgrade_blocking = _upgrade_task.clone();
                                 let answer = tokio::task::spawn_blocking(move || {
+                                    let _upgrade_blocking = upgrade_blocking;
                                     for (session_id, through) in sessions {
                                         // A receipt that would move backwards
                                         // is not an error; it is a session this
@@ -855,8 +884,12 @@ pub async fn run_server(
                         }
                         crate::server::ClientStateRequest::History { session_id, query, scope, reply } => {
                             let bundle = bundle_of(&session_id);
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
+                                let upgrade_blocking = _upgrade_task.clone();
                                 let answer = tokio::task::spawn_blocking(move || {
+                                    let _upgrade_blocking = upgrade_blocking;
                                     let bundle = bundle.context("unknown session")?;
                                     let scope = match scope.as_str() {
                                         "session" => crate::database::HistoryScope::Session,
@@ -896,7 +929,9 @@ pub async fn run_server(
                     // the browser's reply.
                     let done = bundle_done_tx.clone();
                     let daemon_runtime = daemon_runtime.clone();
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     bundle_jobs.spawn(async move {
+                        let _upgrade_task = upgrade_task;
                         let result = daemon_runtime
                             .create_quick_bundle(source)
                             .await;
@@ -1011,7 +1046,9 @@ pub async fn run_server(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     preflight_jobs.spawn(async move {
+                        let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));
                         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
                         let mut blocking = tokio::task::spawn_blocking(move || {
@@ -1081,7 +1118,9 @@ pub async fn run_server(
                     // snapshots while a move form is open.
                     let done = move_prepared_tx.clone();
                     let daemon_runtime = daemon_runtime.clone();
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     move_preparation_jobs.spawn(async move {
+                        let _upgrade_task = upgrade_task;
                         let result = daemon_runtime
                             .prepare_move_session(selection)
                             .await
@@ -1138,8 +1177,12 @@ pub async fn run_server(
                             let workspace_id = session.workspace_id.clone();
                             let done = receipt_done_tx.clone();
                             let persisted_session_id = session_id.clone();
+                            let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                             tokio::spawn(async move {
+                                let _upgrade_task = upgrade_task;
+                                let upgrade_blocking = _upgrade_task.clone();
                                 let joined = tokio::task::spawn_blocking(move || {
+                                    let _upgrade_blocking = upgrade_blocking;
                                     crate::database::persist_read_receipt(
                                         &client_id,
                                         &workspace_id,
@@ -1291,6 +1334,13 @@ pub async fn run_server(
                         }
                     };
                     let ControllerRequest { action, reply } = request;
+                    let upgrade_work = match crate::upgrade::activity("web action") {
+                        Ok(work) => work,
+                        Err(error) => {
+                            let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
+                            continue;
+                        }
+                    };
                     let done = action_done_tx.clone();
                     let session_control = worker_commands_tx.clone();
                     let daemon_runtime = daemon_runtime.clone();
@@ -1332,8 +1382,13 @@ pub async fn run_server(
                         ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
                         _ => None,
                     };
+                    let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                     tokio::spawn(async move {
+                        let _upgrade_task = upgrade_task;
+                        let _upgrade_work = upgrade_work;
+                        let upgrade_blocking = _upgrade_task.clone();
                         let joined = tokio::task::spawn_blocking(move || {
+                            let _upgrade_blocking = upgrade_blocking;
                             let mut suspension_reply = suspension_reply;
                             let result = (|| -> Result<()> {
                                 if let ControllerAction::Suspend { session_id } = &action {
@@ -1513,7 +1568,9 @@ pub async fn run_server(
                     // whatever its last close did, so it stops reporting it.
                     if result.is_ok() && let Some(session_id) = session_id.clone() {
                         let daemon_runtime = daemon_runtime.clone();
+                        let Ok(upgrade_task) = crate::upgrade::activity("web background operation") else { continue };
                         tokio::spawn(async move {
+                            let _upgrade_task = upgrade_task;
                             daemon_runtime.clear_recorded_close_failure(&session_id).await;
                         });
                     }

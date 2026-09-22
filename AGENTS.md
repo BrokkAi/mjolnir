@@ -96,6 +96,29 @@ requires it.
 Fix the source of a problem. Do not add a narrow fallback that hides a failure
 in the primary design.
 
+Upgrades must complete without user intervention after installation or initial
+upgrade consent. Ordinary startup must coordinate daemon replacement, database
+migration, and service readiness before serving the upgraded client, including
+when the wire protocol is unchanged. Retain forward migrations for every shipped
+database revision; never require an intermediate release, manual daemon restart,
+or data reset. Preserve active workers and terminal drafts across handoff, and
+never automatically downgrade a newer daemon or incompatible store. Changes to
+startup, schema, protocol, or release installation must preserve the isolated
+upgrade regressions. Keep terminal upgrade handoff formats backward compatible.
+
+Automatic upgrades must never cancel accepted work or use a timeout as permission
+to stop a busy process. Keep steering, answers, and cancellation addressed to the
+active turn while replacement waits. Reserve workers only after atomic idle
+admission; prepare downloads before taking their control connection. Hold daemon
+upgrade admission through accepted tasks, blocking work, queued completion events,
+and response delivery, including after the originating client disconnects. New
+background operations must participate in this ownership. Close admission and
+verify no outstanding work in one decision. Retry only explicitly unaccepted
+requests, preserving command IDs and steering targets; a lost acknowledgement
+does not authorize replay of an arbitrary mutation. Test these races in isolated
+instances. Legacy daemons without atomic admission can only provide an observed
+idle check; never describe that bootstrap as having the new guarantee.
+
 Keep file and path handling independent of the operating system. Use `Path` and
 `PathBuf`; normalize path text only at protocol or rendering boundaries.
 

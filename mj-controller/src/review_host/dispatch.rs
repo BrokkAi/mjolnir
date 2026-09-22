@@ -6,10 +6,14 @@ impl HostState {
     pub(super) async fn handle(&mut self, event: HostEvent) -> bool {
         match event {
             HostEvent::View {
+                upgrade_work,
                 session_id,
                 snapshot,
                 prompt_driven,
-            } => self.observe(session_id, snapshot, prompt_driven).await,
+            } => {
+                let _upgrade_work = upgrade_work;
+                self.observe(session_id, snapshot, prompt_driven).await;
+            }
             HostEvent::Retain { live } => self.retain_sessions(&live),
             HostEvent::Start {
                 session_id,
@@ -60,6 +64,14 @@ impl HostState {
                 return true;
             }
         }
+        self.upgrade_work.retain(|id, _| {
+            self.preparing.contains(id)
+                || self.pending_open.contains_key(id)
+                || self.reviews.contains_key(id)
+                || self.closing.contains(id)
+                || self.recovery_in_flight.contains(id)
+                || self.awaiting_forward_persistence.contains_key(id)
+        });
         false
     }
 

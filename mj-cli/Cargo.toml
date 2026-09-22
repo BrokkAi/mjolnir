@@ -39,6 +39,7 @@ ratatui.workspace = true
 reqwest = { workspace = true, features = ["json", "query"] }
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 sysinfo.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true

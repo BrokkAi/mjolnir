@@ -974,6 +974,9 @@ pub(crate) enum CheckpointChange {
 }
 
 pub(crate) fn checkpoint_change(request: &RelayRequest) -> Option<CheckpointChange> {
+    if let RelayRequest::ReserveIdle { command_id } = request {
+        return Some(CheckpointChange::Begin(command_id.clone()));
+    }
     let RelayRequest::Submit {
         command_id,
         command,

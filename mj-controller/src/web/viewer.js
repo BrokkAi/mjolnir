@@ -128,8 +128,31 @@ const pendingLifecycleActions = new Map();
 /// the row without losing the inline error that tells the person what failed.
 const backgroundTaskErrors = new Map();
 
+async function upgradeAwareFetch(url, options = {}) {
+  for (;;) {
+    const response = await fetch(url, options);
+    if (response.status !== 503 || response.headers.get('x-mj-upgrade') !== 'pending') {
+      return response;
+    }
+    // The daemon explicitly refused admission. Keep the exact request body,
+    // including command IDs and steering targets, until its replacement is ready.
+    await response.body?.cancel();
+    for (;;) {
+      options.signal?.throwIfAborted();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        const probe = await fetch('/', { signal: options.signal, cache: 'no-store' });
+        await probe.body?.cancel();
+        if (probe.ok && probe.headers.get('x-mj-upgrade') !== 'pending') break;
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+      }
+    }
+  }
+}
+
 async function request(url, options = {}) {
-  const response = await fetch(url, {
+  const response = await upgradeAwareFetch(url, {
     ...options,
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
   });
@@ -156,7 +179,7 @@ async function request(url, options = {}) {
 /// different content type and body limit, so keeping this path separate makes
 /// it impossible to accidentally base64 an image back into the prompt.
 async function uploadAttachment(sessionId, file, signal) {
-  const response = await fetch(
+  const response = await upgradeAwareFetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/attachments`,
     {
       method: 'POST',
@@ -4221,7 +4244,7 @@ async function transcribeVoice(operation, wav) {
     operation.controller.abort();
   }, VOICE_TRANSCRIPTION_TIMEOUT_MS);
   try {
-    const response = await fetch(
+    const response = await upgradeAwareFetch(
       `/api/sessions/${encodeURIComponent(operation.sessionId)}/dictation`,
       {
         method: 'POST',

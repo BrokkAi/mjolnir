@@ -6,7 +6,16 @@ pub(super) async fn handle_action(
     state: &Arc<RuntimeState>,
     cancellation: &CancellationToken,
 ) -> Result<DaemonReply> {
+    let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::PrepareUpgrade => {
+            if crate::upgrade::gate().try_close() {
+                cancellation.cancel();
+                Ok(DaemonReply::Done)
+            } else {
+                Ok(DaemonReply::UpgradePending)
+            }
+        }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         DaemonAction::Status => {
             state.prune_dead_clients();
@@ -571,6 +580,23 @@ pub(super) async fn handle_action(
             cancellation.cancel();
             Ok(DaemonReply::Done)
         }
+    }
+}
+
+pub(super) fn upgrade_request_activity(
+    action: &DaemonAction,
+) -> Result<Option<crate::upgrade::Work>> {
+    if matches!(
+        action,
+        DaemonAction::Ping
+            | DaemonAction::Status
+            | DaemonAction::PrepareUpgrade
+            | DaemonAction::Stop
+            | DaemonAction::RuntimeSnapshot { .. }
+    ) {
+        Ok(None)
+    } else {
+        crate::upgrade::activity("client request").map(Some)
     }
 }
 

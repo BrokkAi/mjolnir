@@ -50,6 +50,10 @@ pub(super) async fn run_session_actor(
     view_tx: watch::Sender<ManagedSessionView>,
     updates: CoalescedUpdateSender,
 ) {
+    let Ok(initial_work) = crate::upgrade::activity("worker activity") else {
+        return;
+    };
+    let mut upgrade_work = Some(initial_work);
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
     let mut last_recovery_probe = None;
@@ -69,7 +73,31 @@ pub(super) async fn run_session_actor(
         Command(Option<ActorCommand>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
     }
+    let mut event_work = None;
     loop {
+        // Reconcile before waiting, including after an early `continue` in a
+        // command handler. A freshly synced connection can be newer than the
+        // published view (notably when an idle lease is refused).
+        let snapshot = connection
+            .as_ref()
+            .map(StandaloneSession::snapshot)
+            .or_else(|| view_tx.borrow().snapshot.clone());
+        let busy = lifecycle.is_leased()
+            || !deferred_submits.is_empty()
+            || !reviewer_tasks.is_empty()
+            || crate::review_host::prompt_refusal(&target.session_id).is_some()
+            || snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.operational.has_work_in_flight()
+                    || !snapshot.materialized.pending_elicitations.is_empty()
+            });
+        if busy {
+            if upgrade_work.is_none() {
+                upgrade_work = event_work.take();
+            }
+        } else {
+            upgrade_work = None;
+        }
+        drop(event_work.take());
         lifecycle.set_retirement_requested(*retirement.borrow_and_update());
         if lifecycle.should_stop() {
             break;
@@ -88,6 +116,15 @@ pub(super) async fn run_session_actor(
                     changed = retirement.changed() => Event::Retirement(changed),
                 }
             } => event,
+        };
+        event_work = match crate::upgrade::activity("worker control") {
+            Ok(work) => Some(work),
+            Err(error) => {
+                if let Event::Command(Some(command)) = event {
+                    command.reject(&target.session_id, &error.to_string());
+                }
+                break;
+            }
         };
         match event {
             Event::Returned(returned) => {
@@ -784,7 +821,23 @@ pub(super) async fn run_session_actor(
                             );
                         }
                     }
-                    ActorCommand::Lease { reply } => {
+                    ActorCommand::Lease {
+                        idle_harness,
+                        reply,
+                    } => {
+                        if idle_harness.is_some()
+                            && (lifecycle.is_leased()
+                                || !reviewer_tasks.is_empty()
+                                || crate::review_host::prompt_refusal(&target.session_id).is_some())
+                        {
+                            if reply
+                                .send(Err(super::handle::SessionNotIdle.into()))
+                                .is_err()
+                            {
+                                tracing::debug!(session_id = %target.session_id, "idle lease requester disconnected");
+                            }
+                            continue;
+                        }
                         if lifecycle.is_leased() {
                             tracing::debug!(
                                 session_id = %target.session_id,
@@ -806,37 +859,43 @@ pub(super) async fn run_session_actor(
                             continue;
                         }
                         let lease_id = next_lease_id;
+                        let synced = sync_actor_connection(&target, &mut connection).await;
+                        if let Err(error) = synced {
+                            connection = None;
+                            tracing::warn!(session_id = %target.session_id, %error, "could not sync before leasing the session");
+                            if reply.send(Err(error)).is_err() {
+                                tracing::debug!(session_id = %target.session_id, "lease requester disconnected");
+                            }
+                            continue;
+                        }
+                        // Decide before taking the control channel or cancelling
+                        // reviewers. A stale idle observation must not hold steering.
+                        if idle_harness.is_some_and(|harness| {
+                            !connection
+                                .as_ref()
+                                .expect("synced connection")
+                                .snapshot()
+                                .operational
+                                .safe_to_replace(harness)
+                        }) {
+                            if reply
+                                .send(Err(super::handle::SessionNotIdle.into()))
+                                .is_err()
+                            {
+                                tracing::debug!(session_id = %target.session_id, "idle lease requester disconnected");
+                            }
+                            continue;
+                        }
                         reviewer_cancellation.cancel();
                         reviewer_cancellation = tokio_util::sync::CancellationToken::new();
                         reviewer_connections.clear();
                         reviewer_tails.clear();
-                        let result =
-                            sync_actor_connection(&target, &mut connection)
-                                .await
-                                .map(|_| {
-                                    next_lease_id = next_lease_id.wrapping_add(1).max(1);
-                                    (
-                                        lease_id,
-                                        connection
-                                            .take()
-                                            .expect("successful sync retained its connection"),
-                                    )
-                                });
-                        if result.is_err() {
-                            connection = None;
-                        }
-                        if let Err(error) = &result {
-                            tracing::warn!(
-                                session_id = %target.session_id,
-                                operation = "lease",
-                                error = %error,
-                                "could not acquire relay session lease"
-                            );
-                        }
-                        let acquired = result.is_ok();
-                        match reply.send(result) {
-                            Ok(()) if acquired => lifecycle.activate_lease(lease_id),
-                            Ok(()) => {}
+                        next_lease_id = next_lease_id.wrapping_add(1).max(1);
+                        match reply.send(Ok((
+                            lease_id,
+                            connection.take().expect("synced connection"),
+                        ))) {
+                            Ok(()) => lifecycle.activate_lease(lease_id),
                             Err(Ok((_lease_id, returned))) => connection = Some(returned),
                             Err(Err(_)) => {}
                         }

@@ -183,7 +183,11 @@ impl HostState {
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
+        let Ok(work) = crate::upgrade::activity("review operation") else {
+            return;
+        };
         tokio::spawn(async move {
+            let _work = work;
             let result = launch_role(
                 &control,
                 &environment,
@@ -259,7 +263,11 @@ impl HostState {
         let control = self.control.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
+        let Ok(work) = crate::upgrade::activity("review operation") else {
+            return;
+        };
         tokio::spawn(async move {
+            let _work = work;
             let submitted = async {
                 let handle = control
                     .session(session_id.clone())
@@ -297,7 +305,11 @@ impl HostState {
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         let role = role.to_owned();
+        let Ok(work) = crate::upgrade::activity("review operation") else {
+            return;
+        };
         tokio::spawn(async move {
+            let _work = work;
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }

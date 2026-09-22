@@ -434,6 +434,112 @@ fn test_runtime_state() -> Arc<RuntimeState> {
     ))
 }
 
+#[tokio::test]
+async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
+    const CHILD: &str = "MJ_UPGRADE_DRAIN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::automatic_upgrade_drains_a_lifecycle_without_cancelling_it",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        crate::controller::test_support::IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let state = test_runtime_state();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = state
+        .start_or_join_lifecycle("upgrade-provisioning".into(), LifecycleKind::Create, {
+            let release = release.clone();
+            move |_, _, cancelled| async move {
+                release.notified().await;
+                ensure!(
+                    !cancelled.load(Ordering::Acquire),
+                    "upgrade cancelled provisioning"
+                );
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::time::pause();
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(60 * 60 * 24)).await;
+        assert!(matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ));
+        assert!(!shutdown.is_cancelled());
+        assert!(matches!(
+            handle_action(DaemonAction::Ping, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::Pong
+        ));
+        assert!(
+            crate::upgrade::activity("another control request").is_ok(),
+            "waiting must leave controls available"
+        );
+    }
+    tokio::time::resume();
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(operation)
+        .await
+        .unwrap();
+    let (updates, mut receiver) = crate::session_manager::coalesced_update_channel();
+    updates.send(crate::session_manager::SessionManagerUpdate {
+        session_id: "completed-turn".into(),
+        view: ManagedSessionView::default(),
+    });
+    assert!(
+        matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ),
+        "a queued completion can still start a review or continuation"
+    );
+    receiver.recv().await.unwrap();
+    assert!(
+        matches!(
+            handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+            DaemonReply::UpgradePending
+        ),
+        "the consumer still owns the completion until it asks for another update"
+    );
+    assert!(receiver.try_recv().is_err());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                handle_action(DaemonAction::PrepareUpgrade, &metadata, &state, &shutdown)
+                    .await
+                    .unwrap(),
+                DaemonReply::Done
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(shutdown.is_cancelled());
+    assert!(crate::upgrade::activity("late operation").is_err());
+}
+
 struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,

@@ -195,7 +195,7 @@ pub struct ChatFooter<'a> {
 /// The local form state saved while the dashboard attaches another session.
 /// The reviewer metadata is part of the identity because reviewer answers are
 /// delivered to a different harness than primary-agent answers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatElicitationDraft {
     form: ElicitationDraft,
     reviewer: bool,
@@ -476,7 +476,7 @@ pub struct ChatSessionContext {
 }
 
 /// A session-local transcript position, retained when its view is replaced.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptPosition(TranscriptAnchor);
 
 pub struct ChatState {

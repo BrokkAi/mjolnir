@@ -631,8 +631,13 @@ impl Indexer {
                 .map(|success| success.epoch_seconds - 60)
         };
         let started = Instant::now();
+        let work = crate::upgrade::activity("SessionWiki sync")?;
         self.in_flight.store(true, Ordering::Release);
-        let ran = tokio::task::spawn_blocking(move || sync_blocking(since)).await;
+        let ran = tokio::task::spawn_blocking(move || {
+            let _work = work;
+            sync_blocking(since)
+        })
+        .await;
         self.in_flight.store(false, Ordering::Release);
         let ran = ran.context("run the SessionWiki sync")??;
         if ran {

@@ -1,5 +1,36 @@
 use super::launch::*;
 use super::*;
+
+#[cfg(unix)]
+#[test]
+fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir(&worker_root).unwrap();
+    let installed = worker_root.join("hel");
+    let source = directory.path().join("new-worker");
+    std::fs::write(&installed, b"running-worker").unwrap();
+    std::fs::write(&source, b"replacement-worker").unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.to_string_lossy().into_owned(),
+    };
+    let executor = targets::ProcessExecutor;
+    assert!(
+        stage_worker_binary_for_upgrade(
+            &executor,
+            &locator,
+            session_id,
+            &directory.path().join("missing")
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
+    stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
+    install_staged_worker_binary(&executor, &locator, session_id).unwrap();
+    assert_eq!(std::fs::read(&installed).unwrap(), b"replacement-worker");
+}
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 use mj_core::targets::ProcessExecutor;
