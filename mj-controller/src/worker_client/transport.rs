@@ -51,9 +51,15 @@ impl Drop for RelayClient {
             return;
         };
         let session_id = self.session_id.clone();
+        // The proxy's SSH session stays leased until the reaper is done with
+        // the child.
+        let ssh_session = self.ssh_session.take();
         if let Err(error) = std::thread::Builder::new()
             .name("hel-relay-reaper".into())
-            .spawn(move || reap_dropped_relay_proxy(child, session_id))
+            .spawn(move || {
+                reap_dropped_relay_proxy(child, session_id);
+                drop(ssh_session);
+            })
         {
             tracing::warn!(
                 session_id = %self.session_id,

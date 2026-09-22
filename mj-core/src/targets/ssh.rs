@@ -50,12 +50,14 @@ pub fn ssh_command(
     )
 }
 
+/// Build an `ssh` command that runs as one session on a shared connection.
+/// The executor leases the session and adds its options just before the
+/// command is spawned; see [`CommandSpec::ssh_session`].
 pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
-    push_connection_sharing_args(&mut args, ssh);
     args.push(ssh.destination.clone());
     args.push(join_remote_command(&remote_args));
-    CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
+    CommandSpec::new("ssh", args).ssh_session(ssh)
 }
 
 /// Home-relative directory on an SSH host where files bound for a remote
@@ -83,10 +85,9 @@ pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
 }
 
 /// The connection's `ssh` arguments rewritten for `scp`, which spells the port
-/// option `-P`; to `scp`, `-p` means "preserve file times". The connection
-/// sharing options follow, as they do for `ssh`.
+/// option `-P`; to `scp`, `-p` means "preserve file times".
 fn scp_args(ssh: &SshTarget) -> Vec<String> {
-    let mut args = ssh
+    ssh
         .ssh_args
         .iter()
         .map(|argument| {
@@ -96,15 +97,13 @@ fn scp_args(ssh: &SshTarget) -> Vec<String> {
                 argument.clone()
             }
         })
-        .collect();
-    push_connection_sharing_args(&mut args, ssh);
-    args
+        .collect()
 }
 
 fn scp_command(ssh: &SshTarget, args: Vec<String>) -> CommandSpec {
-    // `scp` opens its own connection to the same host, so it competes for the
-    // same pre-auth budget and is admitted and retried the same way.
-    CommandSpec::new("scp", args).ssh_destination(ssh.destination.clone())
+    // `scp` runs `ssh` underneath, so it takes a session on a shared
+    // connection and is admitted and retried the same way.
+    CommandSpec::new("scp", args).ssh_session(ssh)
 }
 
 /// How long a shared master connection stays alive after its last channel
@@ -158,6 +157,11 @@ pub enum SshSharingForTest {
 }
 
 static SHARING_OVERRIDE: Mutex<Option<SshSharingForTest>> = Mutex::new(None);
+
+/// The connection-sharing override is process-wide, so the tests that set it
+/// take turns.
+#[cfg(all(test, unix))]
+pub(super) static SHARING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Pin connection sharing for a test, or restore the real resolution with
 /// `None`. Tests must not depend on the developer's `$XDG_RUNTIME_DIR` or home
@@ -301,20 +305,6 @@ fn user_configures_sharing(ssh_args: &[String]) -> bool {
     })
 }
 
-/// Append the options that let this command create and keep a shared master
-/// connection, to a partly built `ssh` or `scp` argument list.
-///
-/// Every Mjolnir invocation against one destination then rides one
-/// authenticated connection instead of paying for its own handshake. Call this
-/// after the caller's own `ssh_args` and before the destination.
-///
-/// Adds nothing on non-unix (Windows OpenSSH has no ControlMaster), when
-/// `MJ_SSH_CONTROL_MASTER` disables it, when the socket directory cannot be
-/// prepared, or when the user's own arguments configure sharing.
-pub fn push_connection_sharing_args(args: &mut Vec<String>, ssh: &SshTarget) {
-    push_control_args(args, ssh, true);
-}
-
 /// Append the options that let this command *reuse* a shared master without
 /// ever becoming one.
 ///
@@ -327,11 +317,12 @@ pub fn push_connection_sharing_args(args: &mut Vec<String>, ssh: &SshTarget) {
 /// on a stall of a couple of seconds. With `ControlMaster=no` the command
 /// joins the connection's first master when one is up and otherwise opens its
 /// own direct connection, keeping its fail-fast options to itself.
+///
+/// These commands run in processes without the daemon's session ledger
+/// (`mj doctor`, completion) or only validate a target, so they are not
+/// counted and are not bound to a master with `ProxyCommand=false`: for a
+/// diagnosis, a direct connection is the stated behaviour.
 pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
-    push_control_args(args, ssh, false);
-}
-
-fn push_control_args(args: &mut Vec<String>, ssh: &SshTarget, may_become_master: bool) {
     #[cfg(unix)]
     if !user_configures_sharing(&ssh.ssh_args)
         && let Some(dir) = control_socket_dir()
@@ -339,21 +330,13 @@ fn push_control_args(args: &mut Vec<String>, ssh: &SshTarget, may_become_master:
         let socket = dir.join(control_socket_name(ssh, 0));
         args.extend([
             "-o".to_owned(),
-            if may_become_master {
-                "ControlMaster=auto".to_owned()
-            } else {
-                "ControlMaster=no".to_owned()
-            },
+            "ControlMaster=no".to_owned(),
             "-o".to_owned(),
             format!("ControlPath={}", socket.display()),
         ]);
-        // Only a command that may open the master decides how long it lingers.
-        if may_become_master {
-            args.extend(["-o".to_owned(), format!("ControlPersist={CONTROL_PERSIST}")]);
-        }
     }
     #[cfg(not(unix))]
-    let _ = (args, ssh, may_become_master);
+    let _ = (args, ssh);
 }
 
 pub fn join_remote_command(args: &[String]) -> String {
@@ -1199,6 +1182,49 @@ pub fn push_session_args(args: &mut Vec<String>, lease: &SshSessionLease) {
     }
 }
 
+/// The argument list for `program` (`ssh` or `scp`) running as one session
+/// on `lease`'s master: the session options first, then the command's own
+/// arguments.
+///
+/// OpenSSH keeps the first value it sees for an option, so leading with the
+/// session options makes them win over the user's `ssh_args` and
+/// `ssh_config`, including any `ProxyCommand` or `ProxyJump`. `ssh` refuses
+/// the `-J` flag after a `ProxyCommand` outright, so a `-J` in the user's own
+/// arguments is rewritten to the equivalent `-o ProxyJump=`, which the
+/// session's `ProxyCommand=false` then overrides; a session never connects
+/// by itself, and the master was opened with the user's jump host. `scp`
+/// already passes its `-J` on as `-oProxyJump=`.
+pub fn session_command_args(
+    program: &str,
+    args: &[String],
+    ssh: &SshTarget,
+    lease: &SshSessionLease,
+) -> Vec<String> {
+    let mut session = Vec::with_capacity(args.len() + 6);
+    push_session_args(&mut session, lease);
+    if session.is_empty() {
+        return args.to_vec();
+    }
+    if program == "ssh" && args.starts_with(&ssh.ssh_args) {
+        let (user, rest) = args.split_at(ssh.ssh_args.len());
+        let mut user = user.iter();
+        while let Some(argument) = user.next() {
+            match argument.strip_prefix("-J") {
+                Some("") => match user.next() {
+                    Some(jump) => session.extend(["-o".to_owned(), format!("ProxyJump={jump}")]),
+                    None => session.push(argument.clone()),
+                },
+                Some(jump) => session.extend(["-o".to_owned(), format!("ProxyJump={jump}")]),
+                None => session.push(argument.clone()),
+            }
+        }
+        session.extend(rest.iter().cloned());
+    } else {
+        session.extend(args.iter().cloned());
+    }
+    session
+}
+
 /// How many times a transport-rejected `ssh` invocation is tried in total.
 pub const SSH_RETRY_ATTEMPTS: usize = 3;
 
@@ -1343,10 +1369,6 @@ mod tests {
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// The connection-sharing override is process-wide, so the tests that set
-    /// it take turns.
-    #[cfg(unix)]
-    static SHARING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Records the commands it is handed and reports an empty success.
     #[cfg(unix)]
@@ -1368,53 +1390,88 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn sharing_args(ssh: &SshTarget) -> Vec<String> {
-        ssh_command(ssh, ["true"]).args
-    }
-
-    #[cfg(unix)]
     fn sharing_socket_dir() -> tempfile::TempDir {
         // macOS's default temporary path leaves too little room for SSH's hash.
         tempfile::tempdir_in("/tmp").expect("short control socket directory")
     }
 
+    /// Lease a session for `command` through the process-wide ledger with
+    /// the sockets pinned to `dir`, and return the arguments it would be
+    /// spawned with.
+    #[cfg(unix)]
+    fn spawned_args(
+        command: &CommandSpec,
+        dir: Option<&Path>,
+        masters: &FakeMasters,
+    ) -> Vec<String> {
+        set_ssh_connection_sharing_for_test(Some(match dir {
+            Some(dir) => SshSharingForTest::Directory(dir.to_path_buf()),
+            None => SshSharingForTest::Disabled,
+        }));
+        let session = command.open_ssh_session(masters);
+        set_ssh_connection_sharing_for_test(None);
+        session.expect("session").command().args.clone()
+    }
+
+    /// A built command carries a session request instead of sharing
+    /// options; at spawn time the session options go in front of everything
+    /// the user configured, so OpenSSH honours them over any proxy setting.
     #[test]
     #[cfg(unix)]
-    fn connection_sharing_follows_user_supplied_ssh_args() {
+    fn session_options_lead_the_spawned_command() {
         let _guard = SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let socket_dir = sharing_socket_dir();
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-            socket_dir.path().to_path_buf(),
-        )));
         let ssh = SshTarget {
-            destination: "host".to_owned(),
-            ssh_args: vec!["-p".to_owned(), "2222".to_owned()],
-        };
-        let args = sharing_args(&ssh);
-        set_ssh_connection_sharing_for_test(None);
-
-        let expected_path = format!(
-            "ControlPath={}/{}",
-            socket_dir.path().display(),
-            control_socket_name(&ssh, 0)
-        );
-        assert_eq!(
-            args,
-            vec![
+            destination: "session-options-host".to_owned(),
+            ssh_args: vec![
                 "-p".to_owned(),
                 "2222".to_owned(),
                 "-o".to_owned(),
-                "ControlMaster=auto".to_owned(),
-                "-o".to_owned(),
-                expected_path,
-                "-o".to_owned(),
-                format!("ControlPersist={CONTROL_PERSIST}"),
-                "host".to_owned(),
-                "'true'".to_owned(),
+                "ProxyCommand=nc %h %p".to_owned(),
             ],
+        };
+        let command = ssh_command(&ssh, ["true"]);
+        assert_eq!(
+            command.args,
+            [
+                "-p",
+                "2222",
+                "-o",
+                "ProxyCommand=nc %h %p",
+                "session-options-host",
+                "'true'"
+            ],
+            "stored arguments never contain sharing options"
         );
+        assert_eq!(command.ssh_session.as_ref(), Some(&ssh));
+        assert_eq!(
+            command.ssh_destination.as_deref(),
+            Some("session-options-host")
+        );
+
+        let masters = FakeMasters::default();
+        let args = spawned_args(&command, Some(socket_dir.path()), &masters);
+        let socket = socket_dir.path().join(control_socket_name(&ssh, 0));
+        assert_eq!(
+            args,
+            [
+                "-o".to_owned(),
+                "ControlMaster=no".to_owned(),
+                "-o".to_owned(),
+                format!("ControlPath={}", socket.display()),
+                "-o".to_owned(),
+                "ProxyCommand=false".to_owned(),
+                "-p".to_owned(),
+                "2222".to_owned(),
+                "-o".to_owned(),
+                "ProxyCommand=nc %h %p".to_owned(),
+                "session-options-host".to_owned(),
+                "'true'".to_owned(),
+            ]
+        );
+        assert_eq!(masters.openers(), 1);
         assert_eq!(
             std::os::unix::fs::MetadataExt::mode(
                 &fs::metadata(socket_dir.path()).expect("socket directory")
@@ -1423,8 +1480,51 @@ mod tests {
         );
     }
 
+    /// `ssh` refuses `-J` after a `ProxyCommand`, so a session rewrites the
+    /// user's `-J` to the `ProxyJump` option the session's guard overrides.
+    /// `scp` already turns its `-J` into that option.
+    #[test]
+    #[cfg(unix)]
+    fn a_jump_host_flag_becomes_an_option_the_session_guard_overrides() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        let ssh = SshTarget {
+            destination: "jump-rewrite-host".to_owned(),
+            ssh_args: vec!["-J".to_owned(), "bastion".to_owned(), "-Jother".to_owned()],
+        };
+        let masters = FakeMasters::default();
+        let args = spawned_args(
+            &ssh_command(&ssh, ["-J"]),
+            Some(socket_dir.path()),
+            &masters,
+        );
+        assert_eq!(
+            args[6..],
+            [
+                "-o",
+                "ProxyJump=bastion",
+                "-o",
+                "ProxyJump=other",
+                "jump-rewrite-host",
+                "'-J'",
+            ]
+        );
+        let upload = spawned_args(
+            &scp_upload(&ssh, Path::new("/tmp/file"), "file", false),
+            Some(socket_dir.path()),
+            &masters,
+        );
+        assert_eq!(
+            upload[6..],
+            ["-J", "bastion", "-Jother", "/tmp/file", "jump-rewrite-host:file"]
+        );
+    }
+
     /// A user who configures sharing in `ssh_args` owns it: Mjolnir adds no
-    /// sharing options of its own, in any spelling OpenSSH accepts.
+    /// sharing options of its own, in any spelling OpenSSH accepts, and opens
+    /// no master.
     #[test]
     #[cfg(unix)]
     fn user_configured_sharing_suppresses_mjolnir_sharing() {
@@ -1432,9 +1532,6 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let socket_dir = sharing_socket_dir();
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-            socket_dir.path().to_path_buf(),
-        )));
         let spellings: [&[&str]; 5] = [
             &["-o", "ControlMaster=no"],
             &["-o", "controlpath /tmp/mine"],
@@ -1442,21 +1539,30 @@ mod tests {
             &["-S", "/tmp/mine"],
             &["-S/tmp/mine"],
         ];
-        let mut outputs = Vec::new();
+        let masters = FakeMasters::default();
         for user in spellings {
             let ssh = SshTarget {
-                destination: "host".to_owned(),
+                destination: "user-sharing-host".to_owned(),
                 ssh_args: user.iter().map(|arg| (*arg).to_owned()).collect(),
             };
-            outputs.push((ssh.ssh_args.clone(), sharing_args(&ssh)));
+            set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+                socket_dir.path().to_path_buf(),
+            )));
+            let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test");
+            let command = ssh_command(&ssh, ["true"]);
+            let args = spawned_args(&command, Some(socket_dir.path()), &masters);
+            assert_eq!(args, command.args, "user args {user:?}");
+            let socket_dir_text = socket_dir.path().display().to_string();
+            assert!(
+                !validation
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains(&socket_dir_text)),
+                "user args {user:?}: {:?}",
+                validation.args
+            );
         }
-        set_ssh_connection_sharing_for_test(None);
-
-        for (user, args) in outputs {
-            let mut expected = user.clone();
-            expected.extend(["host".to_owned(), "'true'".to_owned()]);
-            assert_eq!(args, expected, "user args {user:?}");
-        }
+        assert_eq!(masters.commands(), 0);
     }
 
     /// Each instance keeps its own sockets, because each daemon counts only
@@ -1611,14 +1717,18 @@ mod tests {
         let _guard = SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
         let ssh = SshTarget {
-            destination: "host".to_owned(),
+            destination: "sharing-off-host".to_owned(),
             ssh_args: Vec::new(),
         };
-        let args = sharing_args(&ssh);
+        let masters = FakeMasters::default();
+        let args = spawned_args(&ssh_command(&ssh, ["true"]), None, &masters);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test").args;
         set_ssh_connection_sharing_for_test(None);
-        assert_eq!(args, vec!["host".to_owned(), "'true'".to_owned()]);
+        assert_eq!(args, ["sharing-off-host", "'true'"]);
+        assert!(!validation.iter().any(|arg| arg.starts_with("Control")));
+        assert_eq!(masters.commands(), 0);
     }
 
     #[test]
@@ -1629,14 +1739,14 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().expect("temp dir");
         let long = root.path().join("a".repeat(MAX_CONTROL_PATH));
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(long.clone())));
         let ssh = SshTarget {
-            destination: "host".to_owned(),
+            destination: "long-path-host".to_owned(),
             ssh_args: Vec::new(),
         };
-        let args = sharing_args(&ssh);
-        set_ssh_connection_sharing_for_test(None);
-        assert_eq!(args, vec!["host".to_owned(), "'true'".to_owned()]);
+        let masters = FakeMasters::default();
+        let args = spawned_args(&ssh_command(&ssh, ["true"]), Some(&long), &masters);
+        assert_eq!(args, ["long-path-host", "'true'"]);
+        assert_eq!(masters.commands(), 0);
         assert!(!long.exists(), "an unusable directory must not be created");
     }
 
@@ -1648,7 +1758,7 @@ mod tests {
             destination: "host".to_owned(),
             ssh_args: Vec::new(),
         };
-        push_connection_sharing_args(&mut args, &ssh);
+        push_connection_reuse_args(&mut args, &ssh);
         assert_eq!(args, vec!["-o".to_owned(), "BatchMode=yes".to_owned()]);
     }
 
@@ -1670,12 +1780,12 @@ mod tests {
         assert!(!sharing_disabled(None));
     }
 
-    /// Against a real host: the first invocation must leave a master behind
-    /// that `ssh -O check` finds. Set `MJ_E2E_SSH_HOST` to a reachable
-    /// destination to run it.
+    /// Against a real host: leasing a session opens a master that
+    /// `ssh -O check` finds, and a command runs through it. Set
+    /// `MJ_E2E_SSH_HOST` to a reachable destination to run it.
     #[test]
     #[cfg(unix)]
-    fn sharing_leaves_a_reusable_master_on_a_real_host() {
+    fn a_leased_session_runs_through_an_opened_master_on_a_real_host() {
         let _guard = SHARING_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1684,49 +1794,33 @@ mod tests {
         };
         let host = host.to_string_lossy().into_owned();
         let socket_dir = sharing_socket_dir();
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-            socket_dir.path().to_path_buf(),
-        )));
         let ssh = SshTarget {
             destination: host.clone(),
             ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
         };
-        let spec = ssh_command(&ssh, ["true"]);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
+        let output = ProcessExecutor.execute(&ssh_command(&ssh, ["true"]));
         set_ssh_connection_sharing_for_test(None);
-
-        let first = std::process::Command::new(&spec.program)
-            .args(&spec.args)
-            .status()
-            .expect("ssh must run");
-        assert!(first.success(), "ssh {host} true failed");
-
-        let control_path = format!(
-            "{}/{}",
-            socket_dir.path().display(),
-            control_socket_name(&ssh, 0)
-        );
-        let check = std::process::Command::new("ssh")
-            .args([
-                "-O",
-                "check",
-                "-o",
-                &format!("ControlPath={control_path}"),
-                &host,
-            ])
-            .output()
+        let socket = socket_dir.path().join(control_socket_name(&ssh, 0));
+        let check = ProcessExecutor
+            .execute(&master_check_command(&ssh, &socket))
             .expect("ssh -O check must run");
         let exit = std::process::Command::new("ssh")
-            .args([
-                "-O",
-                "exit",
-                "-o",
-                &format!("ControlPath={control_path}"),
-                &host,
-            ])
+            .args(["-O", "exit", "-o", &format!("ControlPath={}", socket.display()), &host])
             .output();
-        assert!(
-            check.status.success(),
-            "no master survived the first connection: {}",
+        let output = output.expect("ssh must run");
+        assert_eq!(
+            output.status,
+            0,
+            "ssh {host} true failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            check.status,
+            0,
+            "no master is running: {}",
             String::from_utf8_lossy(&check.stderr)
         );
         drop(exit);

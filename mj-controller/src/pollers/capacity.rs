@@ -274,6 +274,23 @@ pub(super) async fn collect_local_capacity_with(
 }
 
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
+    // A remote probe runs as one session on a shared SSH connection; the
+    // lease is held until the probe has exited.
+    let (command, _ssh_session) = if command.ssh_session.is_some() {
+        let requested = command.clone();
+        tokio::task::spawn_blocking(move || {
+            requested
+                .open_ssh_session(&crate::targets::BoundedProcessExecutor::new(
+                    crate::targets::SSH_MASTER_OPEN_TIMEOUT,
+                ))
+                .map(crate::targets::SessionCommand::into_parts)
+        })
+        .await
+        .context("join the SSH session lease for a resource probe")??
+    } else {
+        (command.clone(), None)
+    };
+    let command = &command;
     let mut process = tokio::process::Command::new(&command.program);
     process
         .args(&command.args)

@@ -72,36 +72,60 @@ impl RelayClient {
 
     /// One proxy launch and handshake.
     ///
-    /// An admission permit is taken before the proxy is spawned and released
-    /// once hello completes: `sshd` counts only unauthenticated connections
-    /// against `MaxStartups`, so the long-lived relay stops occupying a slot
-    /// as soon as it is authenticated and talking.
+    /// When the proxy runs over a shared SSH connection, a session is leased
+    /// first (opening a master if needed) and kept for the life of the
+    /// proxy. An admission permit is then taken before the proxy is spawned
+    /// and released once hello completes: `sshd` counts only unauthenticated
+    /// connections against `MaxStartups`, so the long-lived relay stops
+    /// occupying a slot as soon as it is authenticated and talking.
     pub(super) async fn connect_attempt(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
     ) -> std::result::Result<Self, ConnectFailure> {
-        let permit = match spec.ssh_destination.clone() {
-            Some(destination) => {
-                match tokio::task::spawn_blocking(move || SshAdmission::acquire(&destination)).await
-                {
-                    Ok(permit) => Some(permit),
-                    Err(error) => {
-                        return Err(ConnectFailure::plain(anyhow!(
-                            "SSH admission for the relay proxy was cancelled: {error}"
-                        )));
-                    }
-                }
+        let Some(destination) = spec.ssh_destination.clone() else {
+            return Self::spawn_and_handshake(
+                spec,
+                expected_session_id,
+                request_timeout,
+                handshake_timeout,
+                None,
+                None,
+            )
+            .await;
+        };
+        let requested = spec.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            // Lease before taking the permit: opening a master takes a
+            // permit of its own.
+            let (spec, lease) = requested
+                .open_ssh_session(&BoundedProcessExecutor::new(SSH_MASTER_OPEN_TIMEOUT))?
+                .into_parts();
+            let permit = SshAdmission::acquire(&destination);
+            Ok::<_, anyhow::Error>((spec, lease, permit))
+        })
+        .await;
+        let (spec, lease, permit) = match prepared {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                return Err(ConnectFailure::plain(
+                    error.context("open the SSH session for the relay proxy"),
+                ));
             }
-            None => None,
+            Err(error) => {
+                return Err(ConnectFailure::plain(anyhow!(
+                    "SSH admission for the relay proxy was cancelled: {error}"
+                )));
+            }
         };
         Self::spawn_and_handshake(
-            spec,
+            &spec,
             expected_session_id,
             request_timeout,
             handshake_timeout,
-            permit,
+            Some(permit),
+            lease,
         )
         .await
     }
@@ -112,6 +136,7 @@ impl RelayClient {
         request_timeout: Duration,
         handshake_timeout: Duration,
         permit: Option<SshPermit>,
+        ssh_session: Option<SshSessionLease>,
     ) -> std::result::Result<Self, ConnectFailure> {
         let mut child = Command::new(&spec.program)
             .args(&spec.args)
@@ -198,6 +223,7 @@ impl RelayClient {
             worker_build: None,
             latest_ordinal: 0,
             latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
+            ssh_session,
         };
         match client
             .complete_handshake(expected_session_id, handshake_timeout)
@@ -237,6 +263,11 @@ impl RelayClient {
                     && status
                         .is_some_and(|status| is_transport_rejection(status, &tail.join("\n")));
                 drop(permit);
+                // A session turned away by the transport usually means its
+                // master died; make the retry check and reopen it.
+                if transport_rejected && let Some(lease) = &client.ssh_session {
+                    lease.invalidate();
+                }
                 Err(ConnectFailure {
                     error: Self::attach_proxy_stderr(error, tail),
                     transport_rejected,

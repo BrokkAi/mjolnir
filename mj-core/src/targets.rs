@@ -117,6 +117,14 @@ pub struct CommandSpec {
     /// rejection is retried rather than reported as a command failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_destination: Option<String>,
+    /// The shared SSH connection this command runs on as one session, when it
+    /// does. Just before spawning, the executor leases a session on one of the
+    /// connection's masters with [`SshSessions::lease`] and puts the options
+    /// that bind the command to that master in front of its arguments (see
+    /// [`CommandSpec::open_ssh_session`]). The arguments stored here never
+    /// contain them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_session: Option<SshTarget>,
     /// Input that must reach the child without becoming part of its arguments,
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
@@ -139,6 +147,7 @@ impl CommandSpec {
             parallel_group: None,
             creates_target: false,
             ssh_destination: None,
+            ssh_session: None,
             sensitive_stdin: None,
         }
     }
@@ -167,6 +176,37 @@ impl CommandSpec {
         self
     }
 
+    /// Record that this command is an `ssh` or `scp` invocation that runs as
+    /// one session on `ssh`'s shared connection. It also opens a connection
+    /// to that destination, for admission, when sharing is off.
+    pub fn ssh_session(mut self, ssh: &SshTarget) -> Self {
+        self.ssh_destination = Some(ssh.destination.clone());
+        self.ssh_session = Some(ssh.clone());
+        self
+    }
+
+    /// Lease the SSH session this command asks for and return the command as
+    /// it must be spawned, with the lease that must outlive the child.
+    ///
+    /// A command without a session request is returned unchanged. `executor`
+    /// runs the master check and, when needed, the opener.
+    pub fn open_ssh_session(&self, executor: &dyn CommandExecutor) -> Result<SessionCommand<'_>> {
+        let Some(ssh) = &self.ssh_session else {
+            return Ok(SessionCommand {
+                command: std::borrow::Cow::Borrowed(self),
+                lease: None,
+            });
+        };
+        let lease = SshSessions::lease(ssh, executor)?;
+        let mut command = self.clone();
+        command.ssh_session = None;
+        command.args = session_command_args(&self.program, &self.args, ssh, &lease);
+        Ok(SessionCommand {
+            command: std::borrow::Cow::Owned(command),
+            lease: Some(lease),
+        })
+    }
+
     /// Mark this command as the one that creates the session's target.
     pub fn creates_target(mut self) -> Self {
         self.creates_target = true;
@@ -178,6 +218,29 @@ impl CommandSpec {
     pub fn with_sensitive_stdin(mut self, input: Vec<u8>) -> Self {
         self.sensitive_stdin = Some(SensitiveCommandInput(input));
         self
+    }
+}
+
+/// A command ready to spawn, together with the SSH session lease it runs on.
+/// Keep this value alive until the child has exited: dropping it frees the
+/// session slot.
+#[derive(Debug)]
+pub struct SessionCommand<'a> {
+    command: std::borrow::Cow<'a, CommandSpec>,
+    lease: Option<SshSessionLease>,
+}
+
+impl SessionCommand<'_> {
+    pub fn command(&self) -> &CommandSpec {
+        &self.command
+    }
+
+    pub fn lease(&self) -> Option<&SshSessionLease> {
+        self.lease.as_ref()
+    }
+
+    pub fn into_parts(self) -> (CommandSpec, Option<SshSessionLease>) {
+        (self.command.into_owned(), self.lease)
     }
 }
 
@@ -489,23 +552,35 @@ pub struct ProcessExecutor;
 /// transport rejection means the remote command never started, so re-running
 /// the whole invocation cannot repeat a side effect.
 ///
+/// A command that asks for a shared-connection session leases it on each
+/// attempt, before taking its permit: opening a master takes a permit of its
+/// own, and waiting for that while holding one could exhaust the gate. A
+/// session turned away by the transport usually means its master died, so
+/// the lease is invalidated and the retry checks and reopens the master.
+///
 /// Commands that are not tagged with a destination run untouched.
 fn with_ssh_admission(
     command: &CommandSpec,
+    executor: &dyn CommandExecutor,
     is_cancelled: &dyn Fn() -> bool,
-    mut run: impl FnMut() -> Result<CommandOutput>,
+    mut run: impl FnMut(&CommandSpec) -> Result<CommandOutput>,
 ) -> Result<CommandOutput> {
     let Some(destination) = command.ssh_destination.as_deref() else {
-        return run();
+        return run(command);
     };
     for attempt in 1..=SSH_RETRY_ATTEMPTS {
+        let session = command.open_ssh_session(executor)?;
         let output = {
             let _permit = SshAdmission::acquire(destination);
-            run()?
+            run(session.command())?
         };
-        if attempt == SSH_RETRY_ATTEMPTS
-            || !is_transport_rejection(output.status, &String::from_utf8_lossy(&output.stderr))
-        {
+        let rejected =
+            is_transport_rejection(output.status, &String::from_utf8_lossy(&output.stderr));
+        if rejected && let Some(lease) = session.lease() {
+            lease.invalidate();
+        }
+        drop(session);
+        if attempt == SSH_RETRY_ATTEMPTS || !rejected {
             return Ok(output);
         }
         let delay = ssh_retry_delay(attempt);
@@ -583,7 +658,7 @@ impl ProcessExecutor {
 
 impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        with_ssh_admission(command, &|| false, || self.run_once(command))
+        with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
     }
 
     fn execute_with_stdin(
@@ -591,12 +666,14 @@ impl CommandExecutor for ProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        // A caller's stream cannot be replayed, so this path takes a permit
-        // but never retries.
+        // A caller's stream cannot be replayed, so this path takes a session
+        // and a permit but never retries.
+        let session = command.open_ssh_session(self)?;
         let _permit = command
             .ssh_destination
             .as_deref()
             .map(SshAdmission::acquire);
+        let command = session.command();
         let process = configured_command(command);
         // Plain process execution is not cancellable, so the transfer only
         // ends when the child does.
@@ -900,7 +977,12 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        with_ssh_admission(command, &|| self.is_cancelled(), || self.run_once(command))
+        with_ssh_admission(
+            command,
+            self,
+            &|| self.is_cancelled(),
+            |command| self.run_once(command),
+        )
     }
 
     fn execute_with_stdin(
@@ -908,12 +990,14 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        // A caller's stream cannot be replayed, so this path takes a permit
-        // but never retries.
+        // A caller's stream cannot be replayed, so this path takes a session
+        // and a permit but never retries.
+        let session = command.open_ssh_session(self)?;
         let _permit = command
             .ssh_destination
             .as_deref()
             .map(SshAdmission::acquire);
+        let command = session.command();
         // The child runs in its own process group so cancellation can kill the
         // whole group, which is what releases a writer blocked on a full pipe.
         stream_command_with_stdin(cancellable_command(command), command, input, &|| {
@@ -1916,6 +2000,86 @@ mod executor_tests {
             .trim()
             .parse()
             .expect("attempt count is a number")
+    }
+
+    /// An executor that models `ssh` masters and the sessions on them. The
+    /// first session finds its master dead (it was killed after the ledger
+    /// last checked it), which `ssh` reports the way a session guarded with
+    /// `ProxyCommand=false` does.
+    #[derive(Default)]
+    struct MasterKilledOnce {
+        running: std::cell::RefCell<BTreeSet<String>>,
+        openers: std::cell::Cell<usize>,
+        sessions: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl CommandExecutor for MasterKilledOnce {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let reply = |status: i32, stderr: &str| CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            };
+            if command.ssh_session.is_some() {
+                // A session. The first one arrives just after its master died.
+                return with_ssh_admission(command, self, &|| false, |spawned| {
+                    self.sessions.borrow_mut().push(spawned.args.clone());
+                    if self.sessions.borrow().len() == 1 {
+                        self.running.borrow_mut().clear();
+                        return Ok(reply(255, "Connection closed by UNKNOWN port 65535"));
+                    }
+                    Ok(reply(0, ""))
+                });
+            }
+            let socket = command
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("ControlPath="))
+                .expect("a master command names its socket")
+                .to_owned();
+            if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
+                return Ok(reply(
+                    if self.running.borrow().contains(&socket) { 0 } else { 255 },
+                    "",
+                ));
+            }
+            assert!(command.args.contains(&"ControlMaster=yes".to_owned()));
+            self.openers.set(self.openers.get() + 1);
+            self.running.borrow_mut().insert(socket);
+            Ok(reply(0, ""))
+        }
+    }
+
+    #[test]
+    fn a_session_whose_master_died_is_retried_on_a_reopened_master() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
+        let socket_dir = tempfile::tempdir_in("/tmp").expect("short socket directory");
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
+        let ssh = SshTarget {
+            destination: "master-killed-once-host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let executor = MasterKilledOnce::default();
+        let output = executor.execute(&ssh_command(&ssh, ["true"]));
+        set_ssh_connection_sharing_for_test(None);
+        set_ssh_retry_backoff_for_test(None);
+
+        assert_eq!(output.expect("the retry succeeds").status, 0);
+        let sessions = executor.sessions.borrow();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            executor.openers.get(),
+            2,
+            "the retry reopens the master instead of trusting the earlier check"
+        );
+        for args in sessions.iter() {
+            assert_eq!(args[..6][5], "ProxyCommand=false", "{args:?}");
+        }
     }
 
     #[test]

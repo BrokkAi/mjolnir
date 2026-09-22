@@ -14,7 +14,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{
-    CommandSpec, SSH_RETRY_ATTEMPTS, SshAdmission, SshPermit, is_transport_rejection,
+    BoundedProcessExecutor, CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SSH_RETRY_ATTEMPTS,
+    SshAdmission, SshPermit, SshSessionLease, is_transport_rejection,
 };
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
@@ -139,6 +140,10 @@ pub struct RelayClient {
     worker_build: Option<String>,
     latest_ordinal: u64,
     latest_digest: String,
+    /// The shared-connection session the proxy runs on. Unlike the admission
+    /// permit, which is released once hello completes, the session is in use
+    /// for as long as the proxy runs, so the lease lives as long as `child`.
+    ssh_session: Option<SshSessionLease>,
 }
 
 #[cfg(test)]

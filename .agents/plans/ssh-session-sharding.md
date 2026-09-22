@@ -12,8 +12,8 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
 
 - [x] (2026-09-22) Milestone 1: per-instance socket directory and shard-aware control paths. Sockets now live in `$XDG_RUNTIME_DIR/mjolnir/<instance>` (or `<data dir>/ssh`) and are named `<hash>-<shard>`; every command still uses shard 0 with `ControlMaster=auto` until Milestone 3. User `ssh_args` that configure sharing now suppress Mjolnir's options entirely.
 - [x] (2026-09-22) Milestone 2: session ledger with explicit master opening and the no-fallback guard. `SshSessions::lease`, `SshSessionLease` (`control_path`, `invalidate`), `push_session_args`, `SESSIONS_PER_CONNECTION_ENV` and `SSH_MASTER_OPEN_TIMEOUT` exist in `mj-core/src/targets/ssh.rs`, tested with the hand-written `FakeMasters` executor. Nothing calls them yet. Validated with `cargo test -p mj-core` and `cargo clippy --all-targets -- -D warnings`; `mj-controller` does not use the new code yet, so its suite runs with Milestone 3.
-- [ ] Milestone 3: route every `ssh`/`scp` spawn through the ledger, including the relay.
-- [ ] Milestone 4: validation against a real host with stock `sshd`, then commit.
+- [x] (2026-09-22) Milestone 3: route every `ssh`/`scp` spawn through the ledger, including the relay. `CommandSpec` has `ssh_session: Option<SshTarget>` with the builder `ssh_session(&SshTarget)` and `open_ssh_session(&dyn CommandExecutor) -> SessionCommand`. `ssh_command_owned`, `scp_upload`/`scp_download`, `cache_host.rs` and `recovery_scan.rs` set it; `push_connection_sharing_args` is gone. The three executor spawn paths in `mj-core/src/targets.rs`, the relay in `mj-controller/src/worker_client/connect.rs` (lease stored in `RelayClient::ssh_session`, released only after the proxy is reaped), and the resource and capacity pollers in `mj-controller/src/pollers/capacity.rs` lease a session before spawning. `docs/SSH.md` describes the new behaviour.
+- [ ] Milestone 4: validation against a real host with stock `sshd` (left to Jonathan; see Validation and Acceptance). The unit tests and the docs update from this milestone are done.
 
 ## Surprises & Discoveries
 
@@ -25,6 +25,13 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
   Evidence: tested by hand on 2026-09-22; the piped foreground command returned with exit 0 within a second.
 - Observation: a reloaded `sshd` applies new `MaxSessions` only to new connections; an existing master keeps the limit it was started with.
   Evidence: `60-mj-mux.conf` was written on morannon at 18:16:59Z; refusals continued until the old master was replaced at about 18:24Z.
+
+- Observation: `ssh` refuses the `-J` flag when a `ProxyCommand` came earlier on the command line, but accepts `-o ProxyJump=...` and then ignores it.
+  Evidence (OpenSSH_10.2p1, `ssh -G`, 2026-09-22): `-o ProxyCommand=false -J foo` prints `Cannot specify -J with ProxyCommand`; `-o ProxyCommand=false -o ProxyJump=foo` reports `proxycommand false`; a `ProxyJump` from `ssh_config` is likewise overridden. `-J foo -o ProxyCommand=false` keeps `proxyjump foo`, so the guard must come first.
+- Observation: `command_over_ssh` in `mj-controller/src/targets/container.rs`, which moves a container command to the remote host, kept the original command's metadata and so dropped the wrapped command's `ssh_destination`. Every provisioning, cleanup, recovery and preflight command it built ran without admission.
+  Evidence: the function copied only `program` and `args` from the result of `ssh_command_owned`.
+- Observation: the resource and capacity pollers (`execute_resource_command` in `mj-controller/src/pollers/capacity.rs`) spawn `ssh` themselves with `tokio::process`, outside the executors.
+  Evidence: `grep -rn '.args(&command.args)' mj-controller/src`.
 
 ## Decision Log
 
@@ -58,6 +65,23 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
   Rationale: a lease for an unshared connection (escape hatch set, user-configured sharing, or no Unix sockets) has no socket. `invalidate` lets a caller that saw a session fail with a transport error make the next lease on that shard check the master again at once instead of trusting a check up to 5 seconds old; without it a retry within 5 seconds of a master's death would reuse the dead socket.
   Date/Author: 2026-09-22, Claude (implementation).
 - Decision: The ledger does not retry a failed opener itself. The opener runs through the executor, which already admits it and retries a transport rejection up to three times; after that `lease` returns the error.
+  Date/Author: 2026-09-22, Claude (implementation).
+
+- Decision: The session options always go at the front of the argument list, instead of at an index recorded in the session request. The request is just the `SshTarget`.
+  Rationale: the options must precede any user `ProxyCommand` or `ProxyJump`, and the front satisfies that for both `ssh` and `scp`. Some code rewrites a command's arguments after it is built (for example `CommandPlan`'s secret environment wrapping edits the last argument), and a stored index would silently go stale. At the front the options also override `ssh_config`.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: A `-J host` or `-Jhost` in the user's `ssh_args` is rewritten to `-o ProxyJump=host` in a session command (not in the opener, not for `scp`).
+  Rationale: `ssh` rejects `-J` after `ProxyCommand` (see Surprises). The rewrite is a no-op for a session, which never connects by itself; the opener still receives the user's `-J` unchanged.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: The executors and the relay lease the session before taking the `SshAdmission` permit, not after as the plan said.
+  Rationale: opening a master goes through the executor and takes a permit of its own. A caller that held a permit while waiting for the opener's permit could exhaust the gate: six callers holding all six permits, each waiting for an opener, would wait forever.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: When a session command fails with a transport rejection (exit 255 and a message such as `Connection closed by UNKNOWN port 65535`, which is how a guarded session reports a missing master), the executor and the relay invalidate the lease before the retry, so the retry checks the master and reopens it.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: `command_over_ssh` now copies `ssh_destination` and `ssh_session` from the wrapped command, and the pollers' `execute_resource_command` leases a session in `spawn_blocking` (with a `BoundedProcessExecutor` of `SSH_MASTER_OPEN_TIMEOUT`, 60 seconds per command). The relay uses the same executor for its lease.
+  Rationale: without these, those commands would lose connection sharing entirely and open a direct connection each time, which is the load this plan removes. Copying `ssh_destination` also puts the container-over-SSH commands under admission, as the other SSH commands already were.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: The `mj doctor` runtime checks after the connectivity probe (for example the SSH Podman preflight) use ordinary session commands and therefore can open a master that lingers for `ControlPersist`. This was already true before this plan (they used `ControlMaster=auto`); only the connectivity probe is reuse-only. Left unchanged.
   Date/Author: 2026-09-22, Claude (implementation).
 
 ## Outcomes & Retrospective

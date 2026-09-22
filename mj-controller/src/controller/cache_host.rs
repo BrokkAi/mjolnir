@@ -157,10 +157,9 @@ impl CacheHost {
             Self::Local => CommandSpec::new(remote[0].clone(), remote[1..].iter().cloned()),
             Self::Ssh(ssh) => {
                 let mut args = ssh.ssh_args.clone();
-                targets::push_connection_sharing_args(&mut args, ssh);
                 args.push(ssh.destination.clone());
                 args.push(targets::join_remote_command(&remote));
-                CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
+                CommandSpec::new("ssh", args).ssh_session(ssh)
             }
         };
         command.purpose(purpose)
