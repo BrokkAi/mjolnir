@@ -1406,6 +1406,10 @@ async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
+    // A paging caller needs both halves of the cursor contract: the session it
+    // is reading, and the sequence to continue from.
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["next_after_seq"], 9);
     assert_eq!(body["latest_seq"], 9);
     assert_eq!(
         body["items"][0]["seq"], 9,
