@@ -943,16 +943,6 @@ async fn wait_until(mut condition: impl FnMut() -> bool, blocked: &str) {
     }
 }
 
-/// Line a test up with the coordinator without asserting anything: a
-/// condition that never holds must fail the test on what it broke rather
-/// than on the rendezvous.
-async fn wait_for_rendezvous(mut condition: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !condition() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-}
-
 fn assert_prompt(command: CommandRequest, expected_id: &str, expected_text: &str) {
     let CommandRequest::Prompt { request_id, prompt } = command else {
         panic!("expected ACP prompt command");
@@ -1866,23 +1856,93 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     coordinator.await.unwrap().unwrap();
 }
 
-/// The ACP command channel is shared: elicitation answers ride it beside
-/// dispatched commands. Dispatch therefore holds
-/// the transport capacity it claims against instead of counting free
-/// slots, because a coordinator parked on a command send stops draining
-/// ACP events, which stops the runtime that would have made room for the
-/// command it is waiting on.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
+/// Elicitation answers share the ACP channel with durable commands. They must
+/// not steal capacity between dispatch reserving slots and claiming work.
+#[tokio::test]
+async fn out_of_band_sends_cannot_steal_reserved_dispatch_capacity() {
     const COMMAND_CAPACITY: usize = 2;
     let temp = tempfile::tempdir().unwrap();
     let relay = Arc::new(Mutex::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
-    let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
     let out_of_band = command_tx.clone();
+    let (shell_events, _shell_events_rx) = mpsc::channel(1);
+    let mut user_shells = crate::user_shell::UserShellRegistry::new(
+        temp.path().to_path_buf(),
+        BTreeMap::new(),
+        shell_events,
+    );
+
+    // Lock before starting dispatch itself. The coordinator also takes this
+    // lock before dispatch, so racing its event loop can stall the test before
+    // any permits are reserved.
+    let (claiming_tx, claiming_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let holder_relay = relay.clone();
+    let holder = tokio::task::spawn_blocking(move || {
+        let mut held = holder_relay.lock().expect("relay state lock poisoned");
+        submit(&mut held, "prompt-batched", prompt("second turn"));
+        submit(&mut held, "cancel-batched", RelayCommand::Cancel);
+        claiming_tx
+            .send(())
+            .expect("the test stopped waiting for the claim");
+        // Dropping the sender on a failed assertion also releases the lock.
+        let _ = release_rx.blocking_recv();
+    });
+    claiming_rx.await.unwrap();
+    let dispatch = tokio::task::spawn_blocking(move || {
+        unix::dispatch_pending(
+            &relay,
+            &command_tx,
+            &mut BTreeMap::new(),
+            true,
+            &mut user_shells,
+        )
+    });
+    wait_until(
+        || out_of_band.capacity() == 0,
+        "dispatch never reserved transport capacity before claiming durable work",
+    )
+    .await;
+
+    let out_of_band_attempts = [
+        out_of_band.try_send(elicitation_request()),
+        out_of_band.try_send(elicitation_request()),
+    ];
+    release_tx.send(()).unwrap();
+    holder.await.unwrap();
+    dispatch.await.unwrap().unwrap();
+
+    assert!(
+        out_of_band_attempts
+            .iter()
+            .all(|attempt| matches!(attempt, Err(mpsc::error::TrySendError::Full(_)))),
+        "dispatch must reserve transport capacity before it claims durable work"
+    );
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-batched",
+        "second turn",
+    );
+    assert!(matches!(
+        next_command(&mut command_rx).await,
+        CommandRequest::Cancel { request_id, .. } if request_id == "cancel-batched"
+    ));
+}
+
+#[tokio::test]
+async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-batched", prompt("queued turn"));
+    submit(&mut durable, "cancel-batched", RelayCommand::Cancel);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(2);
+    command_tx.try_send(elicitation_request()).unwrap();
+    command_tx.try_send(elicitation_request()).unwrap();
     let coordinator = tokio::spawn(unix::run_relay_coordinator(
         relay.clone(),
         event_rx,
@@ -1894,95 +1954,44 @@ async fn out_of_band_sends_cannot_park_the_dispatching_coordinator() {
             config_options: Vec::new(),
         })
         .unwrap();
-    submit(
-        &mut relay.lock().unwrap(),
-        "prompt-warm-up",
-        prompt("warm up"),
-    );
-    unix::wake_dispatch(&relay, &wake_tx).unwrap();
-    assert_prompt(
-        next_command(&mut command_rx).await,
-        "prompt-warm-up",
-        "warm up",
-    );
-    event_tx
-        .send(RuntimeEvent::PromptFinished {
-            diagnostic: None,
-            request_id: "prompt-warm-up".into(),
-            stop_reason: "end_turn".into(),
-            usage: None,
-        })
-        .unwrap();
-    // Idle: the warm-up turn is durable and dispatch holds no capacity.
-    wait_until(
-        || {
-            relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .active_prompt
-                .is_none()
-                && out_of_band.capacity() == COMMAND_CAPACITY
-        },
-        "the coordinator never finished the warm-up turn",
-    )
-    .await;
-
-    // Hold the relay state lock to stop dispatch inside its claim: it has
-    // already decided how much transport it may use, and nothing is
-    // durable yet. That is the window an out-of-band send used to steal.
-    let (claiming_tx, claiming_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let holder_relay = relay.clone();
-    let holder = tokio::task::spawn_blocking(move || {
-        let mut held = holder_relay.lock().expect("relay state lock poisoned");
-        submit(&mut held, "prompt-batched", prompt("second turn"));
-        submit(&mut held, "cancel-batched", RelayCommand::Cancel);
-        claiming_tx
-            .send(())
-            .expect("the test stopped waiting for the claim");
-        let _ = release_rx.blocking_recv();
-    });
-    claiming_rx.await.unwrap();
-    // Wake dispatch by hand: the relay lock this test holds is exactly
-    // what `wake_dispatch` would need to report a stopped coordinator.
-    assert!(
-        !matches!(
-            wake_tx.try_send(()),
-            Err(mpsc::error::TrySendError::Closed(()))
-        ),
-        "the relay coordinator stopped before the claim"
-    );
-    wait_for_rendezvous(|| out_of_band.capacity() == 0).await;
-
-    // Out-of-band senders now compete for permits at reservation time.
-    let out_of_band_attempts = [
-        out_of_band.try_send(elicitation_request()),
-        out_of_band.try_send(elicitation_request()),
-    ];
-    release_tx.send(()).unwrap();
-    holder.await.unwrap();
-
     event_tx
         .send(RuntimeEvent::Warning {
-            message: "still draining".into(),
+            message: "out-of-band channel full".into(),
         })
         .unwrap();
     wait_until(
-        || recorded_warning(&relay, "still draining"),
-        "an out-of-band send parked dispatch: the coordinator stopped draining ACP events",
+        || recorded_warning(&relay, "out-of-band channel full"),
+        "out-of-band commands stopped the coordinator from draining ACP events",
     )
     .await;
-    assert!(
-        out_of_band_attempts
-            .iter()
-            .all(|attempt| matches!(attempt, Err(mpsc::error::TrySendError::Full(_)))),
-        "dispatch must reserve transport capacity before it claims durable work"
-    );
+
+    // Once ACP makes room, the same accepted prompt and cancel still dispatch.
+    for _ in 0..2 {
+        assert!(matches!(
+            next_command(&mut command_rx).await,
+            CommandRequest::ResolveElicitation { .. }
+        ));
+    }
+    unix::wake_dispatch(&relay, &wake_tx).unwrap();
+    wait_until(
+        || command_rx.len() == 2,
+        "the coordinator never dispatched the queued commands",
+    )
+    .await;
+    event_tx
+        .send(RuntimeEvent::Warning {
+            message: "durable channel full".into(),
+        })
+        .unwrap();
+    wait_until(
+        || recorded_warning(&relay, "durable channel full"),
+        "durable commands stopped the coordinator from draining ACP events",
+    )
+    .await;
     assert_prompt(
         next_command(&mut command_rx).await,
         "prompt-batched",
-        "second turn",
+        "queued turn",
     );
     assert!(matches!(
         next_command(&mut command_rx).await,
