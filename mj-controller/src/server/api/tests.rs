@@ -3028,10 +3028,7 @@ async fn options_list_what_a_caller_may_launch_without_leaking_configuration() {
     assert_eq!(body["bundles"][0]["repositories"][0]["github"], "owner/hel");
 
     let targets = body["targets"].as_array().unwrap();
-    let raw = targets
-        .iter()
-        .find(|target| target["id"] == "raw")
-        .unwrap();
+    let raw = targets.iter().find(|target| target["id"] == "raw").unwrap();
     assert_eq!(raw["kind"], "local-bare");
     assert_eq!(raw["requires_project_directory"].as_bool(), Some(true));
     // No host reading covers this target in this test. An unchecked target is
@@ -3089,10 +3086,7 @@ async fn options_explain_a_failed_host_without_repeating_its_probe() {
 
     // A target the reading does not cover stays unknown while its neighbour
     // is unavailable.
-    let raw = targets
-        .iter()
-        .find(|target| target["id"] == "raw")
-        .unwrap();
+    let raw = targets.iter().find(|target| target["id"] == "raw").unwrap();
     assert_eq!(raw["availability"], "unknown");
 
     assert_eq!(body["hosts"][0]["label"], "builder");
@@ -3120,8 +3114,7 @@ async fn options_report_the_saved_default_and_publish_only_its_two_identifiers()
     )
     .unwrap();
 
-    let (app, _, _, _) =
-        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+    let (app, _, _, _) = api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
     let response = app
         .oneshot(
             bearer(Request::get("/api/v1/options"))
@@ -3138,4 +3131,135 @@ async fn options_report_the_saved_default_and_publish_only_its_two_identifiers()
     // per-project choices and must not travel as part of the default.
     assert_eq!(body["default"].as_object().unwrap().len(), 2);
     assert!(!body.to_string().contains("/private/project"));
+}
+
+/// Save a fast-start default the way `mj go --global-default` does.
+fn save_global_default(path: &std::path::Path, profile_id: &str, target_id: &str) {
+    mj_core::go::GoPreferences::save_recipe(
+        path,
+        PathBuf::from("/private/project"),
+        mj_core::go::GoRecipe {
+            profile_id: profile_id.into(),
+            target_id: target_id.into(),
+            bundle_id: None,
+            project_directory: None,
+            create_managed_worktree: None,
+            mjolnir_subagents: None,
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+        },
+        true,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn start_without_identifiers_uses_the_saved_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    save_global_default(&path, "codex-1", "podman");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let response = tokio::spawn(app.oneshot(start_request(r#"{"bundle_id":"hel"}"#.into())));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    // The controller always receives two explicit identifiers, whatever the
+    // caller left out: a session whose profile was implicit would be a session
+    // nobody could explain afterwards.
+    assert_eq!(profile_id, "codex-1");
+    assert_eq!(target_id, "podman");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_resolves_only_the_identifier_the_caller_left_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    // The saved default names the bare target; the caller names the container
+    // target instead, and only the profile still falls back.
+    save_global_default(&path, "codex-1", "raw");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let body = r#"{"target_id":"podman","bundle_id":"hel"}"#;
+    let response = tokio::spawn(app.oneshot(start_request(body.into())));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "codex-1", "the profile falls back");
+    assert_eq!(target_id, "podman", "the named target wins");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_identifiers_and_no_saved_default_names_what_is_missing() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("profile_id"), "{message}");
+    assert!(message.contains("no saved default"), "{message}");
+    assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn start_explains_a_saved_default_that_names_a_missing_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("go.json");
+    save_global_default(&path, "gone", "podman");
+    let (app, mut actions, _, _) =
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+
+    let response = app
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The caller named nothing, so "unknown profile" alone would read as
+    // though it had.
+    assert!(message.contains("saved default"), "{message}");
+    assert!(message.contains("gone"), "{message}");
+    assert!(actions.try_recv().is_err());
 }

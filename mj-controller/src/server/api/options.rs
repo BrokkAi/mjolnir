@@ -21,10 +21,7 @@ pub(super) async fn options(State(state): State<ServerState>) -> Json<LaunchOpti
 /// exercise. Everything here comes from the viewer projection, which is
 /// already the controller's redacted answer to "what is configured"; this
 /// function must not reach past it into `Config`.
-pub(super) fn launch_options(
-    snapshot: &ViewerSnapshot,
-    preferences_path: &Path,
-) -> LaunchOptions {
+pub(super) fn launch_options(snapshot: &ViewerSnapshot, preferences_path: &Path) -> LaunchOptions {
     LaunchOptions {
         revision: snapshot.revision,
         profiles: snapshot
@@ -69,7 +66,7 @@ pub(super) fn launch_options(
                 has_error: host.has_error,
             })
             .collect(),
-        default: remembered_default(preferences_path),
+        default: saved_default(preferences_path),
     }
 }
 
@@ -112,8 +109,10 @@ fn launch_target(target: &ViewerTarget, hosts: &[ViewerTargetCapacity]) -> Launc
 ///
 /// A missing file is ordinary, and a damaged one is not worth failing a read
 /// the caller can otherwise use, so both answer `None` with the cause recorded
-/// at debug level.
-fn remembered_default(path: &Path) -> Option<LaunchDefault> {
+/// at debug level. Session creation resolves an omitted profile or target from
+/// the same value, so the pair a caller reads here is the pair it may leave
+/// unnamed.
+pub(super) fn saved_default(path: &Path) -> Option<LaunchDefault> {
     match mj_core::go::GoPreferences::load(path) {
         Ok(preferences) => preferences.default.map(|recipe| LaunchDefault {
             profile_id: recipe.profile_id,

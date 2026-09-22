@@ -51,8 +51,12 @@ repository.
       instance, by the full controller suite (1560 passed), by
       `cargo test --workspace`, and by `cargo clippy --workspace --all-targets
       -- -D warnings`.
-- [ ] Milestone 2: make `profile_id` and `target_id` optional on session create
-      and resolve them from the remembered default.
+- [x] (2026-09-22T15:06Z) Milestone 2: `profile_id` and `target_id` are now
+      optional on session create and resolve independently from the remembered
+      default. `mj new` no longer requires `--profile`/`--target`. Verified by
+      four new contract tests, by the full workspace suite, by
+      `cargo clippy --workspace --all-targets -- -D warnings`, and by a live
+      `mj new` on an isolated instance.
 - [ ] Milestone 3: state in the API documentation which artifact routes are part
       of the stable contract.
 - [ ] Milestone 4 (deferred): ship an mj-owned ACP adapter so new capabilities
@@ -124,6 +128,26 @@ repository.
   effect.
   Evidence: `Error: the web viewer failed to start: Port 3765 is already in use`
 
+- Observation: the `mj-cli` integration test `daemon_startup` stalled for 28
+  minutes during one full workspace run, with a spawned `mj daemon-run` child
+  alive, and then passed on its own in 3.6 seconds serially and 2.2 seconds in
+  parallel, twice, and the following full workspace run passed. The stall
+  coincides with a workspace-wide rebuild running at the same time and with a
+  real daemon of the same user already holding the default viewer port, so it
+  reads as environment sensitivity in a test that starts real daemons rather
+  than a behavior change: nothing in that test binary reaches `new`, the option
+  route, or the controller's configuration. When a workspace run appears to
+  hang, run the suspect binary directly to tell a stall from a failure.
+  Evidence: `ps` showed `daemon_startup-ec5ad5a53fb214c6` at 27:42 elapsed with
+  its child `target/debug/mj daemon-run`; running either the binary or the same
+  tests through cargo afterwards finished in seconds.
+
+- Observation: `mj new` reports resolution failures well past the point where
+  the identifier question is settled, so a deliberately invalid bundle is a
+  clean way to prove that resolution succeeded without provisioning anything.
+  Evidence: `mj new --bundle does-not-exist` with a saved default answers
+  `unknown bundle`, which can only be reached after both identifiers resolved.
+
 ## Decision Log
 
 - Decision: expose one endpoint, `GET /api/v1/options`, rather than separate
@@ -165,6 +189,31 @@ repository.
   what a phone renders. Publishing `Viewer*` types as the contract would freeze
   viewer internals, so a presenter field could never change for phone reasons
   alone. The API types are small and derive from the projection.
+  Date/Author: 2026-09-22, root agent.
+
+- Decision: resolve an omitted profile and target in the HTTP handler, not in
+  the controller.
+  Rationale: the controller's job is to run what it is told, and its action
+  already carries two explicit identifiers that its own validation and its
+  retry records depend on. Resolving in the handler keeps one shared decision
+  point for every caller of the route, leaves the controller's contract
+  unchanged, and keeps the failure a plain bad request instead of a dispatch
+  outcome.
+  Date/Author: 2026-09-22, root agent.
+
+- Decision: relax `mj new`'s `--profile` and `--target` in the same change.
+  Rationale: the command-line interface is a client of this route, and leaving
+  the flags mandatory would keep the zero-configuration path unreachable from a
+  terminal while the API allowed it. It also makes the behavior observable
+  without a hand-written request.
+  Date/Author: 2026-09-22, root agent.
+
+- Decision: leave `POST /wiki/sessions/{wiki_id}/restore` requiring both
+  identifiers.
+  Rationale: a restore reproduces a specific archived session somewhere the
+  caller chooses, so naming the destination is part of the request rather than
+  an inconvenience. Creation is where "I do not care, use my default" is a real
+  intent.
   Date/Author: 2026-09-22, root agent.
 
 ## Context and Orientation
@@ -440,3 +489,38 @@ A request without the bearer token answers 401.
 What remains is Milestone 2, which is the half that makes the default usable:
 without it a caller can read the pair but must still name both identifiers to
 start anything.
+
+### Milestone 2
+
+Reached 2026-09-22. A caller can now read the launch options and start work
+without naming anything: the profile and target each fall back to the pair the
+`mj go` workflow saves, the two resolve independently so naming one still uses
+the default for the other, and the omitted case is expressible at all, which is
+what lets a consumer show a choice only when there is a real one.
+
+The live proof, on an instance whose `config.toml` declares one profile and no
+targets, with `go.json` saving `codex-demo` and `localhost`:
+
+    $ mj new --bundle does-not-exist
+    Error: the Mjolnir API answered 400 Bad Request: unknown bundle
+
+Reaching the bundle check proves both identifiers resolved, because the bundle
+is examined after resolution and nothing is provisioned on this path. Removing
+the saved default changes the answer to what a caller needs to hear:
+
+    $ mj new --bundle does-not-exist
+    Error: the Mjolnir API answered 400 Bad Request: name a profile_id;
+    this instance has no saved default to fall back on
+
+Restoring `go.json` returns the first answer, so resolution is live on every
+request rather than cached at startup. The endpoint reports the same pair:
+
+    default: {'profile_id': 'codex-demo', 'target_id': 'localhost'}
+
+Four contract tests cover what the live run cannot reach cheaply: the resolved
+pair reaching the controller as two explicit identifiers, independent
+resolution, the absent-default message, and the stale-default message for a
+saved profile the user has since deleted.
+
+The remaining gap before a consumer can adopt this is Milestone 3, which names
+the artifact routes as contract, and then Milestone 4, the ACP adapter.

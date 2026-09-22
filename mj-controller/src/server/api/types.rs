@@ -126,6 +126,14 @@ pub struct CreateWorkspaceResponse {
 }
 
 /// Create a session and, optionally, send its first prompt. Served in M2.
+///
+/// `profile_id` and `target_id` may be omitted, and each resolves
+/// independently: a caller may name a profile and take the saved default
+/// target. An omitted identifier comes from the pair the user last saved with
+/// the `mj go` workflow, which the first setup also becomes, so a caller that
+/// has never read `config.toml` can create a session by naming neither. The
+/// controller still receives two explicit identifiers, because a session whose
+/// profile was implicit would be a session nobody can explain later.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartSessionRequest {
@@ -136,8 +144,12 @@ pub struct StartSessionRequest {
     pub mjolnir_subagents: Option<bool>,
     #[serde(default)]
     pub workspace_id: Option<String>,
-    pub profile_id: String,
-    pub target_id: String,
+    /// Omitted follows the saved default. See the type's own documentation.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// Omitted follows the saved default. See the type's own documentation.
+    #[serde(default)]
+    pub target_id: Option<String>,
     #[serde(default)]
     pub bundle_id: Option<String>,
     #[serde(default)]

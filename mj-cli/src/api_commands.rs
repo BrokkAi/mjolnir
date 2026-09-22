@@ -78,12 +78,14 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
 
 #[derive(Debug, Args)]
 pub(crate) struct NewArgs {
-    /// Profile the session runs its harness from.
+    /// Profile the session runs its harness from. Omit it to use the saved
+    /// default that `mj go` records.
     #[arg(long)]
-    profile: String,
-    /// Target template the session is provisioned on.
+    profile: Option<String>,
+    /// Target template the session is provisioned on. Omit it to use the
+    /// saved default that `mj go` records.
     #[arg(long)]
-    target: String,
+    target: Option<String>,
     /// Existing bundle to run. Omit it to bundle `--project-directory`.
     #[arg(long)]
     bundle: Option<String>,
@@ -1261,8 +1263,8 @@ mod tests {
         let Some(Command::New(args)) = cli.command else {
             panic!("expected the new subcommand");
         };
-        assert_eq!(args.profile, "codex");
-        assert_eq!(args.target, "local");
+        assert_eq!(args.profile.as_deref(), Some("codex"));
+        assert_eq!(args.target.as_deref(), Some("local"));
         assert_eq!(args.project_directory, Some(PathBuf::from(".")));
         assert_eq!(args.model.as_deref(), Some("gpt-5"));
         assert_eq!(args.effort.as_deref(), Some("high"));
@@ -1310,6 +1312,20 @@ mod tests {
         assert_eq!(args.workspace_id.as_deref(), Some("workspace-7"));
         assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn creating_a_session_does_not_require_naming_a_profile_or_target() {
+        // Both identifiers fall back to the default `mj go` records, so a
+        // caller that has never read its configuration can still start work.
+        let cli = Cli::try_parse_from(["mj", "new", "--bundle", "bundle-1", "add a README line"])
+            .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new subcommand");
+        };
+        assert!(args.profile.is_none());
+        assert!(args.target.is_none());
+        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
     }
 
     #[test]
