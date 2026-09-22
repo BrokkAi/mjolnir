@@ -10,7 +10,7 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
 
 ## Progress
 
-- [ ] Milestone 1: per-instance socket directory and shard-aware control paths.
+- [x] (2026-09-22) Milestone 1: per-instance socket directory and shard-aware control paths. Sockets now live in `$XDG_RUNTIME_DIR/mjolnir/<instance>` (or `<data dir>/ssh`) and are named `<hash>-<shard>`; every command still uses shard 0 with `ControlMaster=auto` until Milestone 3. User `ssh_args` that configure sharing now suppress Mjolnir's options entirely.
 - [ ] Milestone 2: session ledger with explicit master opening and the no-fallback guard.
 - [ ] Milestone 3: route every `ssh`/`scp` spawn through the ledger, including the relay.
 - [ ] Milestone 4: validation against a real host with stock `sshd`, then commit.
@@ -46,6 +46,13 @@ After this change, Mjolnir works against a stock `sshd` with any number of sessi
 - Decision: The doctor probe and Tab completion keep their current behaviour: they may join an existing master (shard 0) and otherwise open their own direct connection, without the guard.
   Rationale: they run in a CLI process with no ledger, and for a diagnosis a direct connection is the correct, stated behaviour, not a hidden fallback. `mj doctor` must still never leave a master behind.
   Date/Author: 2026-09-22, Jonathan Ellis with Claude.
+
+- Decision: Name sockets `<hash>-<shard>`, where `<hash>` is the first 16 hex digits of a SHA-256 over the destination and the user's `ssh_args`, instead of `ssh`'s `%C-<shard>`.
+  Rationale: `%C` hashes the resolved host, port and user, while the ledger counts sessions by the configured destination. Two destinations that resolve to one host (an alias and `user@address`) would share a `%C` socket but have separate counts, which could exceed the server's limit. With Mjolnir's own name, the socket and the count use the same key. The daemon also knows the concrete path, which it needs to remove a stale socket before opening a master; with `%C` it would have to run `ssh -G` first. The length check becomes exact: the reserve after the directory covers the separator, the 16-digit hash, `-` and a four-digit shard index, and the 17 characters (`.` plus 16 random characters) that `ssh` appends to the path while it binds a new master.
+  Date/Author: 2026-09-22, Claude (implementation).
+- Decision: `push_connection_reuse_args` (and the internal sharing helpers) take the `SshTarget`, and the doctor probe names its socket after the target as configured rather than after its probe-only overrides.
+  Rationale: the socket name depends on the target's `ssh_args`; the probe adds `BatchMode=yes` and `StrictHostKeyChecking=yes`, and hashing those would point it at a socket no daemon uses.
+  Date/Author: 2026-09-22, Claude (implementation).
 
 ## Outcomes & Retrospective
 

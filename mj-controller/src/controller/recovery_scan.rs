@@ -1009,8 +1009,8 @@ fn execute_scan(
 
 fn ssh_spec(ssh: &SshConnection, remote: impl IntoIterator<Item = String>) -> CommandSpec {
     let backend = SshTarget::from(ssh);
-    let mut args = backend.ssh_args;
-    mj_core::targets::push_connection_sharing_args(&mut args);
+    let mut args = backend.ssh_args.clone();
+    mj_core::targets::push_connection_sharing_args(&mut args, &backend);
     args.push(backend.destination.clone());
     args.extend(remote);
     CommandSpec::new("ssh", args).ssh_destination(backend.destination)

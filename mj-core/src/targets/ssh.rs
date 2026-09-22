@@ -21,17 +21,20 @@ use std::time::Duration;
 /// would leave an `ssh` process behind for the whole `ControlPersist` window
 /// even though the user asked only for a diagnosis.
 pub fn ssh_connectivity_probe(ssh: &SshTarget) -> CommandSpec {
-    let mut probe = ssh.clone();
-    probe.ssh_args.splice(
-        0..0,
-        [
-            "-o".to_owned(),
-            "BatchMode=yes".to_owned(),
-            "-o".to_owned(),
-            "StrictHostKeyChecking=yes".to_owned(),
-        ],
-    );
-    ssh_command_with_control(&probe, vec!["true".to_owned()], false)
+    let mut args = vec![
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "StrictHostKeyChecking=yes".to_owned(),
+    ];
+    args.extend(ssh.ssh_args.iter().cloned());
+    // The socket is named after the target as configured, not after these
+    // probe-only overrides, so the probe finds the daemon's master.
+    push_connection_reuse_args(&mut args, ssh);
+    args.push(ssh.destination.clone());
+    args.push(join_remote_command(&["true".to_owned()]));
+    CommandSpec::new("ssh", args)
+        .ssh_destination(ssh.destination.clone())
         .purpose("verify SSH connectivity")
 }
 
@@ -48,17 +51,8 @@ pub fn ssh_command(
 }
 
 pub fn ssh_command_owned(ssh: &SshTarget, remote_args: Vec<String>) -> CommandSpec {
-    ssh_command_with_control(ssh, remote_args, true)
-}
-
-/// Build an `ssh` command, choosing whether it may open the shared master.
-fn ssh_command_with_control(
-    ssh: &SshTarget,
-    remote_args: Vec<String>,
-    may_become_master: bool,
-) -> CommandSpec {
     let mut args = ssh.ssh_args.clone();
-    push_control_args(&mut args, may_become_master);
+    push_connection_sharing_args(&mut args, ssh);
     args.push(ssh.destination.clone());
     args.push(join_remote_command(&remote_args));
     CommandSpec::new("ssh", args).ssh_destination(ssh.destination.clone())
@@ -103,7 +97,7 @@ fn scp_args(ssh: &SshTarget) -> Vec<String> {
             }
         })
         .collect();
-    push_connection_sharing_args(&mut args);
+    push_connection_sharing_args(&mut args, ssh);
     args
 }
 
@@ -129,10 +123,17 @@ pub const CONTROL_MASTER_ENV: &str = "MJ_SSH_CONTROL_MASTER";
 #[cfg(unix)]
 const MAX_CONTROL_PATH: usize = 103;
 
-/// `%C` expands to a hash of host, port, user, and local host: SHA-1 hex
-/// today, and 64 characters is reserved for it so a longer one still fits.
+/// Hex digits of the connection hash in a socket name. 64 bits keeps the
+/// names short while making a collision between two targets implausible.
 #[cfg(unix)]
-const CONTROL_PATH_FILE: &str = "%C";
+const CONNECTION_HASH_HEX: usize = 16;
+
+/// Bytes reserved after the directory for a socket's name: a separator, the
+/// connection hash, `-` and a shard index of up to four digits, and the
+/// `.` plus 16 random characters `ssh` appends to the path while it binds a
+/// new master.
+#[cfg(unix)]
+const CONTROL_SOCKET_NAME_RESERVE: usize = 1 + CONNECTION_HASH_HEX + 1 + 4 + 17;
 
 #[cfg(unix)]
 fn sharing_disabled(value: Option<&std::ffi::OsStr>) -> bool {
@@ -177,16 +178,21 @@ fn sharing_override() -> Option<SshSharingForTest> {
         .clone()
 }
 
-/// Where the ControlMaster sockets live, or `None` when sharing is off.
+/// The directory holding this instance's control sockets, or `None` when
+/// sharing is off.
 ///
-/// `$XDG_RUNTIME_DIR` is preferred because it is short, per-user, and on
-/// tmpfs; the data directory is the fallback. Neither is world-writable, and
-/// the directory is created 0700 because `ssh` will not create it itself.
+/// `$XDG_RUNTIME_DIR/mjolnir/<instance>` is preferred because it is short,
+/// per-user, and on tmpfs; the instance's data directory is the fallback.
+/// Each instance gets its own directory because each daemon counts only its
+/// own sessions: two daemons sharing masters would together exceed the
+/// server's per-connection session limit. Neither location is
+/// world-writable, and the directory is created 0700 because `ssh` will not
+/// create it itself.
 #[cfg(unix)]
-fn control_socket_path() -> Option<PathBuf> {
+fn control_socket_dir() -> Option<PathBuf> {
     match sharing_override() {
         Some(SshSharingForTest::Disabled) => return None,
-        Some(SshSharingForTest::Directory(dir)) => return prepare_control_path(dir),
+        Some(SshSharingForTest::Directory(dir)) => return prepare_control_dir(dir),
         None => {}
     }
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -194,24 +200,31 @@ fn control_socket_path() -> Option<PathBuf> {
         if sharing_disabled(std::env::var_os(CONTROL_MASTER_ENV).as_deref()) {
             return None;
         }
-        let base = match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(runtime) if !runtime.is_empty() => PathBuf::from(runtime).join("mjolnir"),
-            _ => crate::config::data_dir().join("ssh"),
-        };
-        prepare_control_path(base)
+        prepare_control_dir(default_control_dir(
+            std::env::var_os("XDG_RUNTIME_DIR"),
+            crate::config::instance_name(),
+        ))
     })
     .clone()
+}
+
+/// Where an instance keeps its sockets when no test pins the directory.
+#[cfg(unix)]
+fn default_control_dir(runtime: Option<std::ffi::OsString>, instance: Option<String>) -> PathBuf {
+    match runtime {
+        Some(runtime) if !runtime.is_empty() => PathBuf::from(runtime)
+            .join("mjolnir")
+            .join(instance.as_deref().unwrap_or("default")),
+        // The data directory is already specific to the instance.
+        _ => crate::config::data_dir().join("ssh"),
+    }
 }
 
 /// Create the socket directory 0700 and reject one whose sockets would not fit
 /// in a Unix socket address. Failure means no sharing, never a failed command.
 #[cfg(unix)]
-fn prepare_control_path(dir: PathBuf) -> Option<PathBuf> {
-    let socket = dir.join(CONTROL_PATH_FILE);
-    // Measure the path ssh actually binds, with 64 characters reserved for
-    // the `%C` expansion.
-    let bound_len = socket.as_os_str().len() - CONTROL_PATH_FILE.len() + 64;
-    if bound_len > MAX_CONTROL_PATH {
+fn prepare_control_dir(dir: PathBuf) -> Option<PathBuf> {
+    if dir.as_os_str().len() + CONTROL_SOCKET_NAME_RESERVE > MAX_CONTROL_PATH {
         tracing::debug!(
             directory = %dir.display(),
             "skipping SSH connection sharing: control socket path would be too long"
@@ -235,7 +248,57 @@ fn prepare_control_path(dir: PathBuf) -> Option<PathBuf> {
         );
         return None;
     }
-    Some(socket)
+    Some(dir)
+}
+
+/// The identity of one configured connection: its destination and the
+/// user's own `ssh` arguments, which can change the port, user, or route.
+/// Two targets that differ in either get separate masters.
+#[cfg(unix)]
+fn connection_key(ssh: &SshTarget) -> String {
+    let mut key = ssh.destination.clone();
+    for argument in &ssh.ssh_args {
+        key.push('\0');
+        key.push_str(argument);
+    }
+    key
+}
+
+/// The socket file name for one shard of a connection: `<hash>-<shard>`.
+///
+/// Mjolnir names sockets itself rather than using `ssh`'s `%C` so that the
+/// name follows exactly the key the daemon counts sessions under, and so the
+/// daemon knows the concrete path when it must remove a stale socket.
+#[cfg(unix)]
+fn control_socket_name(ssh: &SshTarget, shard: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(connection_key(ssh).as_bytes());
+    let mut name = String::with_capacity(CONNECTION_HASH_HEX + 5);
+    for byte in digest.iter().take(CONNECTION_HASH_HEX / 2) {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name.push_str(&format!("-{shard}"));
+    name
+}
+
+/// Whether the user's own `ssh` arguments already configure connection
+/// sharing. OpenSSH keeps the first value it sees, so Mjolnir cannot add its
+/// own sharing options without either overriding the user or being
+/// overridden; a user who configures sharing owns it, and Mjolnir adds none.
+#[cfg(unix)]
+fn user_configures_sharing(ssh_args: &[String]) -> bool {
+    ssh_args.iter().any(|argument| {
+        if argument.starts_with("-S") {
+            return true;
+        }
+        let option = argument.strip_prefix("-o").unwrap_or(argument).trim_start();
+        let option = option.to_ascii_lowercase();
+        ["controlmaster", "controlpath"].iter().any(|name| {
+            option
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with(['=', ' ', '\t']))
+        })
+    })
 }
 
 /// Append the options that let this command create and keep a shared master
@@ -243,15 +306,13 @@ fn prepare_control_path(dir: PathBuf) -> Option<PathBuf> {
 ///
 /// Every Mjolnir invocation against one destination then rides one
 /// authenticated connection instead of paying for its own handshake. Call this
-/// after the caller's own `ssh_args` and before the destination: OpenSSH keeps
-/// the first value it sees for an option, so a user who sets `ControlMaster`
-/// or `ControlPath` in `extra_args` still wins.
+/// after the caller's own `ssh_args` and before the destination.
 ///
 /// Adds nothing on non-unix (Windows OpenSSH has no ControlMaster), when
-/// `MJ_SSH_CONTROL_MASTER` disables it, or when the socket directory cannot be
-/// prepared.
-pub fn push_connection_sharing_args(args: &mut Vec<String>) {
-    push_control_args(args, true);
+/// `MJ_SSH_CONTROL_MASTER` disables it, when the socket directory cannot be
+/// prepared, or when the user's own arguments configure sharing.
+pub fn push_connection_sharing_args(args: &mut Vec<String>, ssh: &SshTarget) {
+    push_control_args(args, ssh, true);
 }
 
 /// Append the options that let this command *reuse* a shared master without
@@ -264,15 +325,18 @@ pub fn push_connection_sharing_args(args: &mut Vec<String>) {
 /// master would enforce them for its whole lifetime and drop every later
 /// multiplexed session -- an upload, a `podman run`, the worker bootstrap --
 /// on a stall of a couple of seconds. With `ControlMaster=no` the command
-/// joins an existing master when one is up and otherwise opens its own direct
-/// connection, keeping its fail-fast options to itself.
-pub fn push_connection_reuse_args(args: &mut Vec<String>) {
-    push_control_args(args, false);
+/// joins the connection's first master when one is up and otherwise opens its
+/// own direct connection, keeping its fail-fast options to itself.
+pub fn push_connection_reuse_args(args: &mut Vec<String>, ssh: &SshTarget) {
+    push_control_args(args, ssh, false);
 }
 
-fn push_control_args(args: &mut Vec<String>, may_become_master: bool) {
+fn push_control_args(args: &mut Vec<String>, ssh: &SshTarget, may_become_master: bool) {
     #[cfg(unix)]
-    if let Some(socket) = control_socket_path() {
+    if !user_configures_sharing(&ssh.ssh_args)
+        && let Some(dir) = control_socket_dir()
+    {
+        let socket = dir.join(control_socket_name(ssh, 0));
         args.extend([
             "-o".to_owned(),
             if may_become_master {
@@ -289,7 +353,7 @@ fn push_control_args(args: &mut Vec<String>, may_become_master: bool) {
         }
     }
     #[cfg(not(unix))]
-    let _ = (args, may_become_master);
+    let _ = (args, ssh, may_become_master);
 }
 
 pub fn join_remote_command(args: &[String]) -> String {
@@ -394,7 +458,7 @@ pub fn ssh_validation_command(
         "-o".into(),
         "ServerAliveCountMax=1".into(),
     ]);
-    push_connection_reuse_args(&mut args);
+    push_connection_reuse_args(&mut args, ssh);
     args.extend([ssh.destination.clone(), join_remote_command(&remote_args)]);
     CommandSpec::new("ssh", args)
         .ssh_destination(ssh.destination.clone())
@@ -966,17 +1030,21 @@ mod tests {
         )));
         let ssh = SshTarget {
             destination: "host".to_owned(),
-            ssh_args: vec!["-o".to_owned(), "ControlMaster=no".to_owned()],
+            ssh_args: vec!["-p".to_owned(), "2222".to_owned()],
         };
         let args = sharing_args(&ssh);
         set_ssh_connection_sharing_for_test(None);
 
-        let expected_path = format!("ControlPath={}/%C", socket_dir.path().display());
+        let expected_path = format!(
+            "ControlPath={}/{}",
+            socket_dir.path().display(),
+            control_socket_name(&ssh, 0)
+        );
         assert_eq!(
             args,
             vec![
-                "-o".to_owned(),
-                "ControlMaster=no".to_owned(),
+                "-p".to_owned(),
+                "2222".to_owned(),
                 "-o".to_owned(),
                 "ControlMaster=auto".to_owned(),
                 "-o".to_owned(),
@@ -986,13 +1054,88 @@ mod tests {
                 "host".to_owned(),
                 "'true'".to_owned(),
             ],
-            "sharing options must come after the user's own args, which OpenSSH prefers"
         );
         assert_eq!(
             std::os::unix::fs::MetadataExt::mode(
                 &fs::metadata(socket_dir.path()).expect("socket directory")
             ) & 0o777,
             0o700
+        );
+    }
+
+    /// A user who configures sharing in `ssh_args` owns it: Mjolnir adds no
+    /// sharing options of its own, in any spelling OpenSSH accepts.
+    #[test]
+    #[cfg(unix)]
+    fn user_configured_sharing_suppresses_mjolnir_sharing() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let socket_dir = sharing_socket_dir();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            socket_dir.path().to_path_buf(),
+        )));
+        let spellings: [&[&str]; 5] = [
+            &["-o", "ControlMaster=no"],
+            &["-o", "controlpath /tmp/mine"],
+            &["-oControlPath=/tmp/mine"],
+            &["-S", "/tmp/mine"],
+            &["-S/tmp/mine"],
+        ];
+        let mut outputs = Vec::new();
+        for user in spellings {
+            let ssh = SshTarget {
+                destination: "host".to_owned(),
+                ssh_args: user.iter().map(|arg| (*arg).to_owned()).collect(),
+            };
+            outputs.push((ssh.ssh_args.clone(), sharing_args(&ssh)));
+        }
+        set_ssh_connection_sharing_for_test(None);
+
+        for (user, args) in outputs {
+            let mut expected = user.clone();
+            expected.extend(["host".to_owned(), "'true'".to_owned()]);
+            assert_eq!(args, expected, "user args {user:?}");
+        }
+    }
+
+    /// Each instance keeps its own sockets, because each daemon counts only
+    /// its own sessions against a master.
+    #[test]
+    #[cfg(unix)]
+    fn control_sockets_live_in_a_directory_per_instance() {
+        let runtime = Some(std::ffi::OsString::from("/run/user/1000"));
+        assert_eq!(
+            default_control_dir(runtime.clone(), Some("hel2".to_owned())),
+            PathBuf::from("/run/user/1000/mjolnir/hel2")
+        );
+        assert_eq!(
+            default_control_dir(runtime, None),
+            PathBuf::from("/run/user/1000/mjolnir/default")
+        );
+    }
+
+    /// Sockets are named `<hash>-<shard>`, and the hash follows the whole
+    /// configured connection, not only the destination.
+    #[test]
+    #[cfg(unix)]
+    fn socket_names_identify_the_connection_and_the_shard() {
+        let plain = SshTarget {
+            destination: "host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let other_port = SshTarget {
+            destination: "host".to_owned(),
+            ssh_args: vec!["-p".to_owned(), "2222".to_owned()],
+        };
+        let first = control_socket_name(&plain, 0);
+        let second = control_socket_name(&plain, 1);
+        assert_eq!(first.len(), CONNECTION_HASH_HEX + 2, "{first}");
+        assert!(first.ends_with("-0") && second.ends_with("-1"));
+        assert_eq!(first[..CONNECTION_HASH_HEX], second[..CONNECTION_HASH_HEX]);
+        assert_ne!(
+            first[..CONNECTION_HASH_HEX],
+            control_socket_name(&other_port, 0)[..CONNECTION_HASH_HEX]
         );
     }
 
@@ -1025,7 +1168,11 @@ mod tests {
         let completion = executor.seen.borrow()[0].args.clone();
         set_ssh_connection_sharing_for_test(None);
 
-        let control_path = format!("ControlPath={}/%C", socket_dir.path().display());
+        let control_path = format!(
+            "ControlPath={}/{}",
+            socket_dir.path().display(),
+            control_socket_name(&ssh, 0)
+        );
         for args in [&validation, &completion] {
             assert!(args.contains(&"ControlMaster=no".to_owned()), "{args:?}");
             assert!(args.contains(&control_path), "{args:?}");
@@ -1076,7 +1223,11 @@ mod tests {
 
         assert!(args.contains(&"ControlMaster=no".to_owned()), "{args:?}");
         assert!(
-            args.contains(&format!("ControlPath={}/%C", socket_dir.path().display())),
+            args.contains(&format!(
+                "ControlPath={}/{}",
+                socket_dir.path().display(),
+                control_socket_name(&ssh, 0)
+            )),
             "the probe must still join an existing master: {args:?}"
         );
         assert!(
@@ -1133,7 +1284,11 @@ mod tests {
     #[cfg(not(unix))]
     fn connection_sharing_is_unix_only() {
         let mut args = vec!["-o".to_owned(), "BatchMode=yes".to_owned()];
-        push_connection_sharing_args(&mut args);
+        let ssh = SshTarget {
+            destination: "host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        push_connection_sharing_args(&mut args, &ssh);
         assert_eq!(args, vec!["-o".to_owned(), "BatchMode=yes".to_owned()]);
     }
 
@@ -1185,7 +1340,11 @@ mod tests {
             .expect("ssh must run");
         assert!(first.success(), "ssh {host} true failed");
 
-        let control_path = format!("{}/%C", socket_dir.path().display());
+        let control_path = format!(
+            "{}/{}",
+            socket_dir.path().display(),
+            control_socket_name(&ssh, 0)
+        );
         let check = std::process::Command::new("ssh")
             .args([
                 "-O",
