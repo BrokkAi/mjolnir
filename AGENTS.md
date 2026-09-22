@@ -184,6 +184,25 @@ actually show up; toy-sized fixtures prove nothing about this class of bug.
 
 Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` holds the PTY termination test, and `tests/e2e/` holds the shell/expect harness.
 
+## Harness pins
+
+Harness versions are pinned in `mj-core/src/harness_runtime.rs`. When you
+change a pin, update the agent-dev container image in the same commit, so
+container sessions run the same harness versions as managed bare workers:
+
+- Codex and Claude bridges: update the `npm install --global` line in
+  `containers/Containerfile.agent-dev`, as well as the package files in
+  `mj-worker/assets/harnesses/`. The test
+  `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
+  Containerfile and the pins disagree.
+- Muse: update `mj-worker/assets/muse/runtime.json`. The image installs Muse
+  from that file.
+- Grok and Kimi are not in the image. They install on demand.
+
+Pushing the commit to master runs `publish-agent-dev-image.yml`, which
+publishes `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Check that the run
+succeeds.
+
 ## Coding Style & Naming Conventions
 
 Use idiomatic Rust formatted by rustfmt. Prefer clear module boundaries that match the existing runtime/UI split. Name files and modules with `snake_case`; use `PascalCase` for types and enum variants, `snake_case` for functions and variables, and `SCREAMING_SNAKE_CASE` for constants. Keep comments short and useful, especially around async runtime behavior, terminal ownership, or protocol edge cases. Repository-facing text, code comments, and documentation should be written in English.
