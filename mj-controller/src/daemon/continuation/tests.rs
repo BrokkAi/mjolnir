@@ -649,3 +649,23 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
         remote.shutdown.shutdown().await.unwrap();
     }
 }
+
+#[test]
+fn distant_quota_reset_records_the_wait_instead_of_scheduling_one() {
+    let now = 1_700_000_000_000;
+    let horizon = quota::AUTORESUME_HORIZON_MS;
+
+    let (reset, retry, notice) = quota::deadline(Some(now + horizon), now, false);
+    assert_eq!(reset, Some(now + horizon));
+    assert_eq!(retry, Some(now + horizon + 60_000));
+    assert!(notice.contains("Automatically continuing at"), "{notice}");
+
+    let (reset, retry, notice) = quota::deadline(Some(now + horizon + 1), now, false);
+    assert_eq!((reset, retry), (None, None));
+    assert!(notice.contains("more than 16 hours away"), "{notice}");
+    assert!(notice.contains("2023-11-"), "{notice}");
+
+    let (reset, retry, notice) = quota::deadline(None, now, false);
+    assert_eq!((reset, retry), (None, None));
+    assert!(notice.contains("No reliable reset time"), "{notice}");
+}

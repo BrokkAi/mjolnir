@@ -41,6 +41,45 @@ impl Service {
     }
 }
 
+/// How far ahead a quota reset may be and still earn an automatic resume.
+pub(super) const AUTORESUME_HORIZON_MS: i64 = 16 * 60 * 60 * 1000;
+
+/// Decide the stored deadline and the notice that explains it. A reset beyond
+/// the horizon would resume the session against a world that has moved on, so
+/// it records the wait rather than scheduling a continuation.
+pub(super) fn deadline(
+    reset_at_ms: Option<i64>,
+    now_ms: i64,
+    used_cache: bool,
+) -> (Option<i64>, Option<i64>, String) {
+    let local = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms).map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %Z (%:z)")
+                .to_string()
+        })
+    };
+    let distant = reset_at_ms.filter(|reset| reset.saturating_sub(now_ms) > AUTORESUME_HORIZON_MS);
+    let reset_at_ms = reset_at_ms.filter(|_| distant.is_none());
+    let retry_at_ms = reset_at_ms.and_then(|t| t.checked_add(60_000));
+    let notice = match (retry_at_ms.and_then(local), distant.and_then(local)) {
+        (Some(time), _) => format!(
+            "Subscription quota reached. Automatically continuing at {time} (one minute after reset){}.",
+            if used_cache {
+                "; using last-known quota reset times because fresh reset data is unavailable"
+            } else {
+                ""
+            }
+        ),
+        (None, Some(time)) => format!(
+            "Subscription quota reached. Quota resets at {time}, more than {} hours away; no automatic continuation was scheduled because the pending work would likely be stale by then. Resume the session yourself if the work still applies.",
+            AUTORESUME_HORIZON_MS / 3_600_000
+        ),
+        (None, None) => "Subscription quota reached. No reliable reset time is available from the provider, saved quota data, or this message; automatic continuation was not scheduled.".into(),
+    };
+    (reset_at_ms, retry_at_ms, notice)
+}
+
 pub(super) fn message(materialized: &mj_core::state::MaterializedSession) -> Option<String> {
     use mj_core::transcript::{TranscriptBody, materialized_chunks_text};
     let turn = materialized.last_turn_outcome.as_ref()?;
@@ -173,14 +212,11 @@ pub(super) async fn prepare(
         mj_core::clock::epoch_millis() / 1000,
         consumed,
     );
-    let reset_at_ms = reset.and_then(|t| t.checked_mul(1000));
-    let retry_at_ms = reset_at_ms.and_then(|t| t.checked_add(60_000));
-    let notice = match retry_at_ms.and_then(chrono::DateTime::from_timestamp_millis) {
-        Some(time) => format!("Subscription quota reached. Automatically continuing at {} (one minute after reset){}.",
-            time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z (%:z)"),
-            if used_cache { "; using last-known quota reset times because fresh reset data is unavailable" } else { "" }),
-        None => "Subscription quota reached. No reliable reset time is available from the provider, saved quota data, or this message; automatic continuation was not scheduled.".into(),
-    };
+    let (reset_at_ms, retry_at_ms, notice) = deadline(
+        reset.and_then(|t| t.checked_mul(1000)),
+        mj_core::clock::epoch_millis(),
+        used_cache,
+    );
     Ok(QuotaRecovery {
         user_command_id: c.user_command_id.clone().context("missing user request")?,
         completed_command_id: turn.command_id.clone(),

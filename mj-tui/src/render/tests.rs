@@ -3947,7 +3947,16 @@ fn quota_reset_countdown_always_shows_hours() {
     );
     assert_eq!(
         quota_reset_countdown(now, (now + 2 * HOUR + 5 * MINUTE) as i64),
-        "2h"
+        "2h 5m"
+    );
+    assert_eq!(quota_reset_countdown(now, (now + 9 * HOUR) as i64), "9h");
+    assert_eq!(
+        quota_reset_countdown(now, (now + 9 * HOUR + 5 * MINUTE) as i64),
+        "9h 5m"
+    );
+    assert_eq!(
+        quota_reset_countdown(now, (now + 10 * HOUR + 5 * MINUTE) as i64),
+        "10h"
     );
     assert_eq!(
         quota_reset_countdown(now, (now + HOUR + 5 * MINUTE) as i64),
