@@ -883,6 +883,7 @@ fn prompt_action() -> ControllerAction {
 
 fn new_action() -> ControllerAction {
     ControllerAction::New {
+        launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -897,6 +898,7 @@ fn new_action() -> ControllerAction {
 
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

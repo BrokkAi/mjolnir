@@ -15,6 +15,9 @@ pub enum ControllerAction {
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,
+        /// Git revision the session starts at, as the caller typed it.
+        #[serde(default)]
+        launch_base: Option<String>,
         /// None follows the global `[subagents] enabled` setting.
         #[serde(default)]
         mjolnir_subagents: Option<bool>,

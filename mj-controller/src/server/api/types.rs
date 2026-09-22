@@ -139,6 +139,9 @@ pub struct CreateWorkspaceResponse {
 pub struct StartSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
+    /// Git revision the session starts at, as the caller typed it.
+    #[serde(default)]
+    pub launch_base: Option<String>,
     /// None follows the global `[subagents] enabled` setting.
     #[serde(default)]
     pub mjolnir_subagents: Option<bool>,

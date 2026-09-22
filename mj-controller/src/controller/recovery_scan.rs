@@ -508,6 +508,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         mjolnir_subagents: None,
         // The adopting caller probes the running container for this.

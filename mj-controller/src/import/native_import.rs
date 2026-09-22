@@ -132,6 +132,7 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            launch_base: None,
             build_cache: None,
             mjolnir_subagents: None,
             // An imported history is a new session: when it is resumed into a

@@ -674,7 +674,8 @@ mod tests {
                     if query.get("json").is_some_and(|value| value == "true") {
                         seen.lock().unwrap().push(format!("base={}", query["base"]));
                         return (StatusCode::OK, Json(serde_json::json!({
-                            "diff": "+task work\n", "base": "a".repeat(40), "head": "c".repeat(40)
+                            "diff": "+task work\n", "base": "a".repeat(40), "head": "c".repeat(40),
+                            "head_descends_from_base": false
                         })));
                     }
                     (
@@ -723,10 +724,17 @@ mod tests {
         assert_eq!(diff.diff, "+task work\n");
         assert_eq!(diff.base, "a".repeat(40));
         assert_eq!(diff.head, "c".repeat(40));
+        assert_eq!(diff.head_descends_from_base, Some(false));
         assert_eq!(
             *seen.lock().unwrap(),
             vec!["Bearer secret-token", "base=HEAD@{1}"]
         );
+
+        // A worker from before the field answers without it, and the absence
+        // reads as "unknown" rather than failing the whole decode.
+        let older: mj_checkpoint::archive::SessionDiff =
+            serde_json::from_str(r#"{"diff":"+task work\n","base":"aaaa","head":"cccc"}"#).unwrap();
+        assert_eq!(older.head_descends_from_base, None);
     }
 
     #[tokio::test]

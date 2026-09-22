@@ -106,6 +106,7 @@ pub(super) async fn start_session(
     };
     let action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
+        launch_base: request.launch_base.clone(),
         mjolnir_subagents: request.mjolnir_subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,

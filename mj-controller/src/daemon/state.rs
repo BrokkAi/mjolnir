@@ -179,6 +179,7 @@ impl RuntimeState {
         .context("find or create a bundle for the restored session's project")?;
         let registered = self
             .start_create_session(CreateSessionRequest {
+                launch_base: None,
                 create_managed_worktree: None,
                 mjolnir_subagents: None,
                 initial_prompt: None,

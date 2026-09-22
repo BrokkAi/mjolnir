@@ -965,6 +965,7 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

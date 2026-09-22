@@ -1356,6 +1356,12 @@ pub struct SessionDiff {
     pub diff: String,
     pub base: String,
     pub head: String,
+    /// Whether the base is an ancestor of HEAD. `false` means the session
+    /// rewrote history the base was on, so the diff carries changes the
+    /// session did not make. `None` is an older worker whose JSON predates
+    /// this field.
+    #[serde(default)]
+    pub head_descends_from_base: Option<bool>,
 }
 
 pub fn session_diff(
@@ -1410,6 +1416,25 @@ pub fn session_diff_details(
         ["rev-parse", "--verify", "HEAD^{commit}"],
     )
     .context("resolve the session diff head")?;
+    // A base that HEAD no longer descends from means the session rewrote the
+    // history the base sits on, so the diff reverts commits the session never
+    // touched. Status 1 is Git's plain "not an ancestor", not a failure.
+    let ancestry = run_git(
+        runner,
+        repository,
+        ["merge-base", "--is-ancestor", &base, &head],
+        &[],
+    )?;
+    let head_descends_from_base = match ancestry.status {
+        0 => Some(true),
+        1 => Some(false),
+        _ => {
+            return Err(SessionExportError::Failed(git_failure(
+                "compare the session base with HEAD",
+                &ancestry,
+            )));
+        }
+    };
     let base_tree = git_text(
         runner,
         repository,
@@ -1418,7 +1443,12 @@ pub fn session_diff_details(
     .context("resolve the session base tree")?;
     let current = capture_worktree_tree(runner, repository)?;
     let diff = diff_between_trees(runner, repository, Some(&base_tree), &current)?;
-    Ok(SessionDiff { diff, base, head })
+    Ok(SessionDiff {
+        diff,
+        base,
+        head,
+        head_descends_from_base,
+    })
 }
 
 /// The commit a branch was created at, read from its reflog.

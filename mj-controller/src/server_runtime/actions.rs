@@ -136,6 +136,7 @@ pub(super) async fn apply_phone_action(
             title,
             project_directory,
             create_managed_worktree,
+            launch_base,
             mjolnir_subagents,
             dirty_ack: _dirty_ack,
         } => {
@@ -177,6 +178,7 @@ pub(super) async fn apply_phone_action(
                 .start_create_session_controlled(
                     CreateSessionRequest {
                         create_managed_worktree,
+                        launch_base,
                         mjolnir_subagents,
                         initial_prompt: None,
                         workspace_id,

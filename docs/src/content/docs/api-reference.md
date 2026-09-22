@@ -227,6 +227,7 @@ POST /api/v1/sessions
   "target_id": "local",
   "bundle_id": "bundle-1",
   "project_directory": "/home/you/project",
+  "launch_base": "origin/main",
   "title": "add a README line",
   "model": "gpt-5",
   "effort": "high",
@@ -236,7 +237,11 @@ POST /api/v1/sessions
 
 `profile_id` and `target_id` are required. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. Everything else is optional. `idempotency_key` is no
+viewer's own form does it. `launch_base` starts the session at that Git
+revision instead of HEAD (managed worktree) or the remote default branch
+(bundle session) and becomes the session's diff base. A bundle session resolves
+it in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`.
+Everything else is optional. `idempotency_key` is no
 longer accepted: a request that still carries it is rejected as an unknown
 field.
 
@@ -482,8 +487,12 @@ including files the agent never told git about.
 Add `?base=<revision>` to choose an explicit comparison commit without changing
 the recorded launch baseline. Git revisions such as `HEAD~2` are accepted;
 unknown revisions return `409`. Add `json=true` to receive `application/json`
-with `diff`, `base`, and `head` fields. `base` and `head` are resolved commit IDs;
-the patch still includes uncommitted and untracked files. For example,
+with `diff`, `base`, `head`, and `head_descends_from_base` fields. `base` and
+`head` are resolved commit IDs; the patch still includes uncommitted and
+untracked files. `head_descends_from_base` is `false` when the session's HEAD is
+no longer a descendant of the base — the agent rebased, amended, or reset — so
+the diff carries history changes as well as session work; a worker from before
+this field omits it. For example,
 `GET /api/v1/sessions/{session_id}/diff?base=HEAD~2&json=true` reports both the
 chosen baseline and the current checked-out commit. JSON metadata requires an
 updated session worker; older workers return an explicit upgrade refusal.

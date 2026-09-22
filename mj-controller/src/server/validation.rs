@@ -360,6 +360,7 @@ fn validate_action_against(
             project_directory,
             dirty_ack,
             create_managed_worktree,
+            launch_base: _,
             mjolnir_subagents: _,
         } => {
             if !workspace_id.is_empty() {

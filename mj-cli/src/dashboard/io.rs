@@ -2035,6 +2035,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            launch_base: None,
             build_cache: None,
             container_workspace: None,
             mjolnir_subagents: None,

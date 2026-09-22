@@ -438,6 +438,7 @@ pub(super) async fn preflight_new(
     let action = ControllerAction::New {
         mjolnir_subagents: None,
         create_managed_worktree: None,
+        launch_base: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),

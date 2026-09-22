@@ -164,6 +164,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
     std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

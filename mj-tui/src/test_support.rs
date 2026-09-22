@@ -276,6 +276,7 @@ pub(crate) fn config() -> Config {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

@@ -1061,6 +1061,12 @@ pub struct SessionRecord {
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
+    /// The Git revision the session was asked to start at, as the caller typed
+    /// it. None starts at HEAD for a managed worktree and at the remote
+    /// default branch for a bundle session. The resolved commit lands in
+    /// `managed_worktree.base_commit` or in the clone's `mj.baseCommit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_base: Option<String>,
     /// None follows the global `[subagents] enabled` setting at launch time;
     /// Some(true) and Some(false) are explicit per-session choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -654,7 +654,7 @@ fn migrate_zcode_harness_kind(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(super) fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
     connection
         .query_row(
             "SELECT EXISTS(

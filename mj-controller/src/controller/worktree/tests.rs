@@ -207,6 +207,101 @@ fn explicit_worktree_creation_rejects_plain_directories() {
 }
 
 #[test]
+fn a_launch_base_starts_the_worktree_at_that_commit() {
+    const CHILD: &str = "MJ_TEST_WORKTREE_LAUNCH_BASE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_launch_base_starts_the_worktree_at_that_commit",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let root = repository.path().canonicalize().unwrap();
+    let first = test_git(&root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("nested/file.txt"), "second\n").unwrap();
+    test_git(&root, &["commit", "-am", "second"]);
+
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+
+    let mut record = raw_session_on("localhost", root.join("nested").to_str().unwrap());
+    record.launch_base = Some("HEAD~1".into());
+    crate::database::save_session(&record).unwrap();
+    controller.reload().unwrap();
+    assert!(
+        controller
+            .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+            .unwrap()
+    );
+    controller.reload().unwrap();
+    let managed = controller.state.sessions[&record.id]
+        .managed_worktree
+        .clone()
+        .unwrap();
+    // The revision is resolved once, at creation, and the checkout starts there.
+    assert_eq!(managed.base_commit.as_deref(), Some(first.as_str()));
+    assert_eq!(
+        test_git(&managed.worktree_root, &["rev-parse", "HEAD"]),
+        first
+    );
+    controller
+        .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+        .unwrap();
+
+    // A revision the repository does not hold fails provisioning rather than
+    // launching at HEAD and ignoring what the caller asked for.
+    let mut record = raw_session_on("localhost", root.join("nested").to_str().unwrap());
+    record.managed_worktree = None;
+    record.launch_base = Some("no-such-revision".into());
+    crate::database::save_session(&record).unwrap();
+    controller.reload().unwrap();
+    let error = controller
+        .prepare_managed_raw_worktree(&record.id, &ProcessExecutor)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("resolve the launch base"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn a_launch_base_on_a_plain_directory_fails_instead_of_being_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut record = raw_session_on("localhost", directory.path().to_str().unwrap());
+    record.launch_base = Some("HEAD".into());
+    let id = record.id.clone();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(id.clone(), record)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let error = controller
+        .prepare_managed_raw_worktree(&id, &ProcessExecutor)
+        .unwrap_err();
+    assert!(error.to_string().contains("requires a Git project"));
+}
+
+#[test]
 fn local_bare_validation_accepts_projects_and_plain_directories_but_rejects_missing_paths() {
     let project = committed_repository();
     let plain = tempfile::tempdir().unwrap();

@@ -436,6 +436,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,
@@ -611,6 +612,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
         base_commit: None,
     });
     record.resource_allocation = None;
+    record.launch_base = Some("origin/main".into());
     record.target = Some(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
     });
@@ -4796,7 +4798,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     let raw = Connection::open(&path).unwrap();
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
-        DELETE FROM schema_migrations WHERE version = 44;
+        DELETE FROM schema_migrations WHERE version >= 44;
         UPDATE schema_compatibility SET minimum_compatible_version = 43;
         PRAGMA user_version = 43;",
     )
@@ -4804,7 +4806,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     drop(raw);
     let connection = open(&path).unwrap();
     let state = schema::read_schema_state(&connection).unwrap();
-    assert_eq!(state.revision, 44);
+    assert_eq!(state.revision, SCHEMA_VERSION);
     let floor: i64 = connection
         .query_row(
             "SELECT minimum_compatible_version FROM schema_compatibility",

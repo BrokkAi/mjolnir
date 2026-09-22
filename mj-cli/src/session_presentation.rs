@@ -145,6 +145,7 @@ mod tests {
         state.sessions.insert(
             "session-1".into(),
             SessionRecord {
+                launch_base: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,

@@ -1114,6 +1114,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1142,6 +1143,30 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         followups[0].1.prompt.as_deref(),
         Some("add a README line"),
         "the first prompt is the backend's to submit once the harness is ready"
+    );
+}
+
+#[tokio::test]
+async fn start_forwards_the_launch_base_to_the_controller() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response =
+        tokio::spawn(app.oneshot(start_request(start_body(r#","launch_base":"origin/main""#))));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { launch_base, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(launch_base.as_deref(), Some("origin/main"));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
     );
 }
 
@@ -1319,6 +1344,7 @@ async fn a_project_directory_without_a_bundle_creates_the_quick_bundle_first() {
     assert_eq!(
         request.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -2246,6 +2272,7 @@ async fn the_diff_route_forwards_the_base_and_returns_resolved_metadata() {
         diff: "--- a/task\n+++ b/task\n".into(),
         base: "a".repeat(40),
         head: "c".repeat(40),
+        head_descends_from_base: Some(false),
     };
     let backend = Arc::new(FakeBackend {
         diff: Some(serde_json::to_string(&details).unwrap()),

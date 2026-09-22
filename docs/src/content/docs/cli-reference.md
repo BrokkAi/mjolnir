@@ -161,7 +161,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new --profile <id> --target <id> [--bundle <id>] [--project-directory <path>]
-       [--workspace-id <id>] [--title <text>] [--model <name>] [--effort <name>]
+       [--base <revision>] [--workspace-id <id>] [--title <text>]
+       [--model <name>] [--effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--json]
@@ -179,13 +180,28 @@ mj interrupt-turn --session <id>
 mj api-info [--json]
 ```
 
+`mj new --base <revision>` starts the session at that Git revision instead of
+HEAD (managed worktree) or the remote default branch (bundle session), and
+records it as the session's launch base, so `mj diff` compares against it. A
+managed-worktree session resolves the revision in the project's repository; a
+bundle session resolves it in the fresh clone, where only what the remote sent
+exists, so name a commit SHA, a tag, or `origin/<branch>`. A base cannot be
+combined with a session that runs in the selected directory without a worktree.
+
 `mj diff` compares against the recorded launch base by default. Use `--base`
 to compare against an explicit Git commit or revision, for example after
 checking out an older task base. This does not change the session's recorded
-baseline. `--json` returns `diff`, `base`, and `head`; the latter two are resolved
-commit IDs. The patch includes committed, staged, unstaged, and untracked work.
-An unknown base is refused. JSON metadata requires a worker supporting this
-option; an older worker reports that the session needs upgrading.
+baseline. `--json` returns `diff`, `base`, `head`, and `head_descends_from_base`;
+`base` and `head` are resolved commit IDs. The patch includes committed, staged,
+unstaged, and untracked work. An unknown base is refused. `mj diff` asks the
+worker for the metadata either way, so both forms need a worker that supports
+it; an older worker reports that the session needs upgrading.
+
+When `head_descends_from_base` is false, the session's HEAD is no longer a
+descendant of the base — the agent rebased, amended, or reset — so the diff
+carries history changes as well as session work. Without `--json`, `mj diff`
+writes the patch to standard output and one `warning:` line to standard error
+saying so. An older worker leaves the field out, and no warning is printed.
 
 A session belongs to a workspace, and a fresh instance has none. `mj new` no
 longer needs one to exist: with no `--workspace-id` and no global `--workspace`,

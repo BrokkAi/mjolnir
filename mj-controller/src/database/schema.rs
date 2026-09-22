@@ -427,6 +427,31 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;")?;
     }
 
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable relaunching such a session starts it at
+    // HEAD or the remote default branch instead of the recorded revision,
+    // which is a behaviour difference, not data loss. The compatibility floor
+    // stays where it is.
+    if version < 45 {
+        // The column is added only when it is absent, the way migration 34
+        // creates its table only when absent: a store rolled back to an older
+        // revision still carries the column, and a second ALTER would refuse.
+        let add_column =
+            match super::legacy_schema::table_has_column(connection, "sessions", "launch_base")? {
+                true => "",
+                false => "ALTER TABLE sessions ADD COLUMN launch_base TEXT;",
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (45, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 45;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

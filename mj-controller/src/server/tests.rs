@@ -103,6 +103,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: BTreeMap::from([(
             "session-1".into(),
             SessionRecord {
+                launch_base: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -3129,6 +3130,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
     assert_eq!(
         action.action,
         ControllerAction::New {
+            launch_base: None,
             mjolnir_subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -3152,6 +3154,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
+        launch_base: None,
         mjolnir_subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),

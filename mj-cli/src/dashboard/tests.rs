@@ -142,6 +142,7 @@ fn populated_dashboard() -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                launch_base: None,
                 build_cache: None,
                 container_workspace: None,
                 mjolnir_subagents: None,
@@ -1335,6 +1336,7 @@ fn plain_x_no_longer_cancels_anything() {
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

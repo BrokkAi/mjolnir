@@ -803,6 +803,7 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        launch_base: None,
         build_cache: None,
         container_workspace: None,
         mjolnir_subagents: None,

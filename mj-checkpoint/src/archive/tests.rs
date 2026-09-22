@@ -2176,11 +2176,21 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
     commit_file(repository.path(), "tracked.txt", b"changed\n", "work");
     fs::write(repository.path().join("untracked.txt"), b"new\n").unwrap();
 
-    let patch = session_diff(&SystemGit, repository.path(), None, None).unwrap();
+    let details = session_diff_details(&SystemGit, repository.path(), None, None).unwrap();
     assert!(
-        patch.contains("+changed") && patch.contains("untracked.txt"),
-        "the diff covers committed and untracked work: {patch}"
+        details.diff.contains("+changed") && details.diff.contains("untracked.txt"),
+        "the diff covers committed and untracked work: {}",
+        details.diff
     );
+    assert_eq!(details.head_descends_from_base, Some(true));
+
+    // Amending the base commit itself leaves HEAD on history the base is not
+    // part of, so the diff carries changes the session did not write.
+    git(repository.path(), &["reset", "--hard", &base]);
+    git(repository.path(), &["commit", "--amend", "-m", "rewritten"]);
+    assert_ne!(git_line(repository.path(), &["rev-parse", "HEAD"]), base);
+    let rewritten = session_diff_details(&SystemGit, repository.path(), None, None).unwrap();
+    assert_eq!(rewritten.head_descends_from_base, Some(false));
 }
 
 #[test]
@@ -2206,6 +2216,7 @@ fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_
     let chosen = session_diff_details(&SystemGit, root, Some("HEAD^"), None).unwrap();
     assert_eq!(chosen.base, task_base);
     assert_eq!(chosen.head, head);
+    assert_eq!(chosen.head_descends_from_base, Some(true));
     for line in [
         "+committed task",
         "+unstaged work",
@@ -2222,6 +2233,9 @@ fn a_session_diff_can_select_an_older_detached_base_without_changing_the_launch_
     let default = session_diff_details(&SystemGit, root, None, None).unwrap();
     assert_eq!(default.base, launch_base);
     assert_eq!(default.head, head);
+    // The session left the launch base behind, so its diff reverts the
+    // unrelated commit the base carried.
+    assert_eq!(default.head_descends_from_base, Some(false));
     assert!(
         default.diff.contains("-unrelated history"),
         "{}",

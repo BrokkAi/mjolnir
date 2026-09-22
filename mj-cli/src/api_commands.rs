@@ -92,6 +92,10 @@ pub(crate) struct NewArgs {
     /// Directory to bundle and run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
+    /// Start the session at this Git revision instead of HEAD (worktree) or
+    /// the remote default branch (bundle) and diff against it.
+    #[arg(long, value_name = "REV")]
+    base: Option<String>,
     /// Workspace id to create the session in. The global `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
@@ -480,6 +484,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         mjolnir_subagents: None,
         create_managed_worktree: None,
+        launch_base: args.base.clone(),
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
@@ -668,19 +673,28 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
 
 pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let diff = client
-        .diff(&args.session, args.base.as_deref(), args.json)
+    // The metadata form is always requested: the plain form prints only the
+    // patch, but the divergence warning comes from the same answer.
+    let body = client
+        .diff(&args.session, args.base.as_deref(), true)
         .await?;
-    match args.json {
-        true => print_json(
-            &serde_json::from_str::<mj_checkpoint::archive::SessionDiff>(&diff)
-                .context("decode session diff metadata")?,
-        ),
-        false => {
-            print!("{diff}");
-            std::io::stdout().flush().context("write the session diff")
-        }
+    let details = serde_json::from_str::<mj_checkpoint::archive::SessionDiff>(&body)
+        .context("decode session diff metadata")?;
+    if args.json {
+        return print_json(&details);
     }
+    print!("{}", details.diff);
+    std::io::stdout()
+        .flush()
+        .context("write the session diff")?;
+    if details.head_descends_from_base == Some(false) {
+        let head = details.head.chars().take(12).collect::<String>();
+        let base = details.base.chars().take(12).collect::<String>();
+        eprintln!(
+            "warning: HEAD {head} does not descend from base {base}; the diff includes history changes, not only session work. Pass --base to pick another base."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn export(args: ExportArgs) -> Result<()> {
@@ -1199,6 +1213,43 @@ mod tests {
             object.insert(key.clone(), value.clone());
         }
         serde_json::from_value(body).expect("wait response")
+    }
+
+    #[test]
+    fn new_accepts_a_launch_base_and_leaves_it_unset_otherwise() {
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--profile",
+            "codex",
+            "--target",
+            "raw",
+            "--project-directory",
+            "/srv/project",
+            "--base",
+            "HEAD~1",
+        ])
+        .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.base.as_deref(), Some("HEAD~1"));
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--profile",
+            "codex",
+            "--target",
+            "raw",
+            "--project-directory",
+            "/srv/project",
+        ])
+        .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.base, None);
     }
 
     /// A turn the worker failed for going quiet has to say why, where a script
