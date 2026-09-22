@@ -57,6 +57,7 @@ impl RuntimeState {
     }
 
     pub async fn close_workspace(self: &Arc<Self>, workspace_id: String) -> Result<()> {
+        let _upgrade_work = crate::upgrade::activity("workspace close")?;
         let cancelled = Arc::new(AtomicBool::new(false));
         {
             let mut closes = self

@@ -142,10 +142,26 @@ fn old_daemon_fixture() {
                     let stop = stop.clone();
                     connections.spawn(async move {
                         while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
-                            let stopping = matches!(request.action, DaemonAction::Stop);
+                            let busy = std::env::var_os("MJ_TEST_UPGRADE_BUSY_FILE")
+                                .is_some_and(|path| std::path::Path::new(&path).exists());
+                            if matches!(request.action, DaemonAction::PrepareUpgrade) && busy {
+                                let path = std::path::PathBuf::from(std::env::var_os("MJ_TEST_UPGRADE_BUSY_FILE").unwrap());
+                                fs::write(path.with_extension("observed"), "waiting").unwrap();
+                            }
+                            let stopping = matches!(request.action, DaemonAction::Stop | DaemonAction::PrepareUpgrade) && !busy;
                             let reply = match request.action {
                                 DaemonAction::Ping => DaemonReply::Pong,
-                                DaemonAction::Stop => DaemonReply::Done,
+                                DaemonAction::Stop => {
+                                    assert!(!busy, "automatic upgrade cancelled accepted work");
+                                    DaemonReply::Done
+                                }
+                                DaemonAction::PrepareUpgrade => if busy { DaemonReply::UpgradePending } else { DaemonReply::Done },
+                                DaemonAction::RuntimeSnapshot { .. } => DaemonReply::RuntimeSnapshot(Box::new(
+                                    serde_json::from_value(serde_json::json!({
+                                        "revision": 1, "config": mj_core::config::Config::default(),
+                                        "records": [], "sessions": [], "lifecycles": []
+                                    })).unwrap()
+                                )),
                                 other => panic!("new client reused the old daemon: {other:?}"),
                             };
                             write_frame(&mut stream, &ResponseEnvelope {
@@ -165,6 +181,66 @@ fn old_daemon_fixture() {
         }
         fs::remove_file(metadata_path()).unwrap();
     });
+}
+
+#[test]
+fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    let path = old_store(&storage);
+    let busy = storage.path().join("work-in-flight");
+    fs::write(&busy, "accepted work").unwrap();
+    let mut old = OldDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.15.0")
+            .env(
+                "MJ_TEST_OLD_PROTOCOL",
+                mj_client::daemon::PROTOCOL_VERSION.to_string(),
+            )
+            .env("MJ_TEST_UPGRADE_BUSY_FILE", &busy)
+            .env("MJ_INSTANCE", "upgrade-test")
+            .env("MJ_DATA_DIR", storage.path().join("data"))
+            .env("MJ_CONFIG_DIR", storage.path().join("config"))
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !storage.path().join("data/daemon.json").exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::scope(|scope| {
+        let upgrade = scope.spawn(|| {
+            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap()
+        });
+        while !busy.with_extension("observed").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "client did not ask for safe handoff"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(old.0.try_wait().unwrap().is_none());
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            43,
+            "migration must wait for the old writer's work"
+        );
+        drop(db);
+        fs::remove_file(&busy).unwrap();
+        let output = upgrade.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+    assert!(old.0.wait().unwrap().success());
+    assert_upgraded(&path);
 }
 
 #[test]

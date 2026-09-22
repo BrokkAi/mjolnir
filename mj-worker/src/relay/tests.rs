@@ -6,6 +6,89 @@ use super::background::{
 use super::*;
 
 #[test]
+fn idle_upgrade_reservation_defers_without_delaying_steering() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(&mut relay, "running-command", prompt("work"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(&mut relay, "next-command", prompt("change direction"));
+    let before = relay.operational_state().latest_ordinal;
+    let response = relay.handle(relay_request(
+        "reserve",
+        RelayRequest::ReserveIdle {
+            command_id: "upgrade-command".into(),
+        },
+    ));
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::IdleReservation { ordinal: None }
+        }
+    ));
+    assert_eq!(relay.operational_state().latest_ordinal, before);
+    assert!(relay.operational_state().checkpoint_barrier.is_none());
+    submit_relay(
+        &mut relay,
+        "steer-command",
+        RelayCommand::Steer {
+            active_prompt_id: "running-command".into(),
+            queued_prompt_id: "next-command".into(),
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "steer-command");
+    assert_eq!(
+        claimed[0]
+            .steering_prompt
+            .as_ref()
+            .unwrap()
+            .queued_command_id,
+        "next-command"
+    );
+}
+
+#[test]
+fn idle_upgrade_reservation_is_idempotent_and_disconnect_releases_queued_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    let reserve = RelayRequest::ReserveIdle {
+        command_id: "upgrade-command".into(),
+    };
+    let response = relay.handle(relay_request("reserve", reserve.clone()));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::IdleReservation {
+            ordinal: Some(first),
+        },
+    } = response.body
+    else {
+        panic!("idle worker refused reservation: {:?}", response.body);
+    };
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    relay.record_checkpoint_ready("upgrade-command").unwrap();
+    let response = relay.handle(relay_request("retry", reserve));
+    assert!(matches!(response.body, RelayResponseBody::Ok {
+        payload: RelayResponsePayload::IdleReservation { ordinal: Some(ordinal) }
+    } if ordinal == first));
+    submit_relay(&mut relay, "after-command", prompt("next turn"));
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .cancel_checkpoint_barrier_on_disconnect("upgrade-command")
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "after-command");
+}
+
+#[test]
 fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
     use mj_core::native_agent::{NativeAgentCapabilities, NativeAgentEvent, NativeAgentState};
     let temp = tempfile::tempdir().unwrap();

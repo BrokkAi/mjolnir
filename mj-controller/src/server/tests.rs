@@ -1209,6 +1209,46 @@ fn run_viewer_script(name: &str, script: &str) {
     run_web_check(name, script);
 }
 
+#[test]
+fn web_upgrade_waits_for_readiness_and_retries_only_explicit_refusals() {
+    let source = viewer_source(
+        "async function upgradeAwareFetch",
+        "async function request(",
+    );
+    run_viewer_script(
+        "upgrade-admission",
+        &format!(
+            r#"
+{source}
+const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
+globalThis.setTimeout = callback => {{ callback(); }};
+const options = {{ method: 'POST', body: JSON.stringify({{command_id:'steer-1', active_prompt_id:'turn-1'}}) }};
+let actions = 0, probes = 0;
+const response = (status, pending = false) => ({{ status, ok:status === 200,
+  headers:{{get:() => pending ? 'pending' : null}}, body:{{cancel:async () => {{}}}} }});
+globalThis.fetch = async (url, sent) => {{
+  if (url === '/') {{
+    probes++;
+    if (probes === 1) throw new Error('old listener stopped');
+    return response(200);
+  }}
+  assert(sent === options, 'request identity or steering target changed');
+  return ++actions === 1 ? response(503, true) : response(200);
+}};
+assert((await upgradeAwareFetch('/api/actions', options)).ok, 'request did not complete');
+assert(actions === 2 && probes === 2, 'handoff did not wait for the replacement');
+globalThis.fetch = async () => {{ throw new Error('acknowledgement lost'); }};
+let failed = false;
+try {{ await upgradeAwareFetch('/api/actions', options); }} catch {{ failed = true; }}
+assert(failed, 'an ambiguous mutation must not be replayed');
+globalThis.fetch = async () => response(503);
+assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
+  'unrelated service failures must not trigger an upgrade retry');
+"#
+        ),
+    );
+}
+
 /// Live path suggestions are the only place the browser types and asks at
 /// once, so the shipped source has to drop an answer that no longer matches
 /// what the field holds, and accepting a row has to re-announce the edit.

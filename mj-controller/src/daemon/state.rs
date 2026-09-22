@@ -662,6 +662,7 @@ impl RuntimeState {
             return Ok(());
         }
         let cancel = cancellation.child_token();
+        let upgrade_work = crate::upgrade::activity("startup prompt delivery")?;
         queues.insert(
             session_id.to_owned(),
             StartupQueue {
@@ -676,6 +677,7 @@ impl RuntimeState {
         // Outer task supervises inner task: a panic in the drain becomes a
         // reported failure that restores the text, not a queue nobody drains.
         let task = tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
             let supervised = {
                 let runtime = Arc::clone(&runtime);
                 let session_id = drain_session.clone();

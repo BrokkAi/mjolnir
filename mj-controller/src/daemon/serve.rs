@@ -180,10 +180,19 @@ pub(super) async fn serve_client(
         // else requires an exact protocol match.
         let is_management = matches!(
             request.action,
-            DaemonAction::Ping | DaemonAction::Status | DaemonAction::Stop
+            DaemonAction::Ping
+                | DaemonAction::Status
+                | DaemonAction::Stop
+                | DaemonAction::PrepareUpgrade
         );
+        // Hold through the acknowledgement, not merely the action's result.
+        let activity = upgrade_request_activity(&request.action);
         let result = if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
+        } else if activity.is_err() {
+            // No work was accepted. The client can wait and retry this exact
+            // request without risking a duplicate operation.
+            Ok(DaemonReply::UpgradePending)
         } else if request.protocol_version != PROTOCOL_VERSION && !is_management {
             Err(format!(
                 "incompatible daemon protocol {}; expected {}",
@@ -281,9 +290,13 @@ pub(super) async fn write_response(
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .context("daemon background database task panicked")?
+    let activity = crate::upgrade::activity("database operation")?;
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        work()
+    })
+    .await
+    .context("daemon background database task panicked")?
 }
 
 pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {

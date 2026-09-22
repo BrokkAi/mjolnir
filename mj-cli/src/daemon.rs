@@ -37,7 +37,7 @@ impl Drop for DaemonStartGuard {
 }
 
 async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
-    let deadline = Instant::now() + STOP_TIMEOUT + START_TIMEOUT;
+    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
     loop {
         let path = path.clone();
         let guard = tokio::task::spawn_blocking(move || -> Result<Option<DaemonStartGuard>> {
@@ -65,10 +65,10 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
         if let Some(guard) = guard {
             return Ok(guard);
         }
-        ensure!(
-            Instant::now() < deadline,
-            "timed out waiting for another client to finish starting the Mjolnir daemon"
-        );
+        if Instant::now() >= notice_at {
+            eprintln!("Mjolnir is waiting for another client to finish the daemon handoff.");
+            notice_at = Instant::now() + Duration::from_secs(30);
+        }
         tokio::time::sleep(RETRY_DELAY).await;
     }
 }
@@ -313,7 +313,7 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     for attempt in 1..=RESTART_ATTEMPTS {
         if let Ok(metadata) = read_metadata_any() {
-            replace_daemon(&metadata).await?;
+            stop_daemon(&metadata).await?;
         }
         let mut client = connect_or_start_holding(&startup).await?;
         let status = client.status().await?;
@@ -549,10 +549,95 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Clear the way for a different daemon executable. Ask the running daemon to
-/// stop over the frozen management subset first — graceful for every protocol
-/// version — and only signal it when the wire is unreachable.
+/// Automatic upgrades have no authority to cancel work, even when a daemon
+/// is slow or temporarily unreachable. Explicit restart uses `stop_daemon`.
 async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
+    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
+    loop {
+        let previous = metadata.clone();
+        let still_current = tokio::task::spawn_blocking(move || {
+            process_is_alive(previous.pid)
+                && !read_metadata_any().is_ok_and(|current| {
+                    current.pid != previous.pid || current.token != previous.token
+                })
+        })
+        .await
+        .context("inspect daemon handoff owner")?;
+        if !still_current {
+            return Ok(());
+        }
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut client = DaemonClient::connect(metadata.clone()).await?;
+            if metadata.protocol_version >= 33 {
+                match client.request(DaemonAction::PrepareUpgrade).await? {
+                    DaemonReply::Done => Ok(true),
+                    DaemonReply::UpgradePending => Ok(false),
+                    reply => bail!("unexpected upgrade admission reply {reply:?}"),
+                }
+            } else {
+                // Historical daemons cannot provide atomic admission. Inspect
+                // their own activity without opening or migrating their store.
+                let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
+                if !legacy_snapshot_is_idle(&snapshot) {
+                    return Ok(false);
+                }
+                client.stop().await?;
+                Ok(true)
+            }
+        })
+        .await;
+        match ready {
+            Ok(Ok(true)) => {
+                // An acknowledged handoff is not permission to impose a kill
+                // deadline. Keep following this process until it exits.
+                if wait_for_exit(metadata.pid).await.is_ok() {
+                    return Ok(());
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "automatic upgrade cannot establish safe handoff yet")
+            }
+            Err(error) => {
+                tracing::debug!(%error, "automatic upgrade is waiting for the daemon to answer")
+            }
+            Ok(Ok(false)) => {}
+        }
+        if Instant::now() >= notice_at {
+            eprintln!(
+                "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+            );
+            notice_at = Instant::now() + Duration::from_secs(30);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn legacy_snapshot_is_idle(snapshot: &RuntimeSnapshot) -> bool {
+    use mj_core::state::SessionState;
+    snapshot.lifecycles.is_empty()
+        && snapshot.reviews.is_empty()
+        && snapshot.records.iter().all(|record| match record.state {
+            SessionState::Running => snapshot
+                .sessions
+                .iter()
+                .find(|view| view.session_id == record.id)
+                .is_some_and(|view| {
+                    view.connected
+                        && view
+                            .operational
+                            .as_ref()
+                            .is_some_and(|state| state.safe_to_replace(record.harness_kind))
+                }),
+            SessionState::Provisioning
+            | SessionState::Checkpointing
+            | SessionState::Closing
+            | SessionState::Destroying
+            | SessionState::Disconnected => false,
+            _ => true,
+        })
+}
+
+async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
     if let Ok(inner) = DaemonClient::connect(metadata.clone()).await
         && ManagementClient::new(inner).stop_and_wait().await.is_ok()
     {

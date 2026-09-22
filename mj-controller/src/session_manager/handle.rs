@@ -293,9 +293,31 @@ impl ManagedSessionHandle {
     }
 
     pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
+        self.lease_connection_for(None).await
+    }
+
+    /// Background replacement must never take a busy session's control channel.
+    pub async fn lease_idle_connection(
+        &self,
+        harness: mj_core::config::HarnessKind,
+    ) -> Result<Option<ManagedSessionLease>> {
+        match self.lease_connection_for(Some(harness)).await {
+            Ok(lease) => Ok(Some(lease)),
+            Err(error) if error.is::<SessionNotIdle>() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn lease_connection_for(
+        &self,
+        idle_harness: Option<mj_core::config::HarnessKind>,
+    ) -> Result<ManagedSessionLease> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(ActorCommand::Lease { reply })
+            .send(ActorCommand::Lease {
+                idle_harness,
+                reply,
+            })
             .await
             .context("session manager stopped")?;
         let (lease_id, connection) = response.await.context("session manager stopped")??;
@@ -307,6 +329,17 @@ impl ManagedSessionHandle {
         })
     }
 }
+
+#[derive(Debug)]
+pub(super) struct SessionNotIdle;
+
+impl std::fmt::Display for SessionNotIdle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session still has work in flight; upgrade deferred")
+    }
+}
+
+impl std::error::Error for SessionNotIdle {}
 
 pub struct PendingRelaySubmit {
     pub(super) response:

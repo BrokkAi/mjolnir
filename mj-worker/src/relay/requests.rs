@@ -108,6 +108,30 @@ impl DurableRelay {
                 )?;
                 RelayResponsePayload::Status(state)
             }
+            RelayRequest::ReserveIdle { command_id } => {
+                let already_accepted = self.snapshot.handled_commands.contains_key(command_id);
+                let idle = self
+                    .verdict_harness
+                    .is_some_and(|harness| self.operational_state().safe_to_replace(harness));
+                if !already_accepted && !idle {
+                    RelayResponsePayload::IdleReservation { ordinal: None }
+                } else {
+                    match self.submit_command(
+                        command_id,
+                        RelayCommand::BeginCheckpoint {
+                            reason: Some("idle worker replacement".into()),
+                        },
+                    )? {
+                        Ok(RelayResponsePayload::Accepted { ordinal, .. }) => {
+                            RelayResponsePayload::IdleReservation {
+                                ordinal: Some(ordinal),
+                            }
+                        }
+                        Ok(_) => unreachable!("barrier submission returns its accepted ordinal"),
+                        Err(error) => return Ok(RelayResponseBody::Error { error }),
+                    }
+                }
+            }
             RelayRequest::InstallPromptContext { text } => {
                 self.install_prompt_context(text.clone())?;
                 RelayResponsePayload::PromptContextInstalled

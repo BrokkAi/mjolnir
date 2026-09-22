@@ -10,6 +10,75 @@ pub struct IdleWorkspaceLease {
 }
 
 impl IdleWorkspaceLease {
+    /// Reserve an idle worker without taking a busy turn's control channel.
+    pub async fn acquire_for_upgrade(
+        handle: &ManagedSessionHandle,
+        harness: HarnessKind,
+    ) -> Result<Option<Self>> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let Some(mut lease) = handle.lease_idle_connection(harness).await? else {
+                return Ok(None);
+            };
+            let command_id = new_command_id("worker-upgrade")?;
+            if lease.connection_mut().protocol_version() >= 21 {
+                if !lease
+                    .connection_mut()
+                    .reserve_idle(command_id.clone())
+                    .await?
+                {
+                    lease.release();
+                    return Ok(None);
+                }
+            } else {
+                // Historical workers have the same disconnect-safe barrier.
+                // Never wait behind work or infer idle from a failed probe.
+                lease
+                    .connection_mut()
+                    .submit(
+                        command_id.clone(),
+                        RelayCommand::BeginCheckpoint {
+                            reason: Some("idle worker replacement".into()),
+                        },
+                    )
+                    .await?;
+            }
+            loop {
+                let mut snapshot = lease.connection_mut().sync().await?;
+                let ready = checkpoint_barrier_is_ready(&snapshot, &command_id);
+                snapshot.operational.checkpoint_barrier = None;
+                if !snapshot.operational.safe_to_replace(harness) {
+                    // Dropping the connection releases the barrier even if its
+                    // acknowledgement was lost. No worker is stopped.
+                    return Ok(None);
+                }
+                if ready {
+                    return Ok(Some(Self {
+                        lease,
+                        command_id,
+                        harness,
+                    }));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("idle worker reservation timed out; worker was left running")?
+    }
+
+    pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
+        let mut snapshot = self.lease.connection_mut().sync().await?;
+        if !checkpoint_barrier_is_ready(&snapshot, &self.command_id) {
+            return Ok(false);
+        }
+        snapshot.operational.checkpoint_barrier = None;
+        Ok(snapshot.operational.safe_to_replace(self.harness))
+    }
+
+    pub(in crate::controller) fn finish_replacement(mut self, connection: StandaloneSession) {
+        self.lease.replace_connection(connection);
+        self.lease.release();
+    }
+
     pub async fn acquire(handle: &ManagedSessionHandle, harness: HarnessKind) -> Result<Self> {
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut lease = handle.lease_connection().await?;

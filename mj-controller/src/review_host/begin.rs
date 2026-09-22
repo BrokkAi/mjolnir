@@ -66,6 +66,14 @@ impl HostState {
             );
             return;
         }
+        let work = match crate::upgrade::activity("turn review") {
+            Ok(work) => work,
+            Err(error) => {
+                answer(reply, Err(StartRefusal(error.to_string())));
+                return;
+            }
+        };
+        self.upgrade_work.insert(session_id.clone(), work);
         let config = (self.config)();
         let tier = config.tier;
         let control = self.control.clone();
@@ -81,7 +89,11 @@ impl HostState {
             .insert(session_id.clone(), cancelled.clone());
         self.preparing.insert(session_id.clone());
         self.publish(&session_id);
+        let Ok(work) = crate::upgrade::activity("review operation") else {
+            return;
+        };
         tokio::spawn(async move {
+            let _work = work;
             let prepared = prepare(
                 &control,
                 &environment,
@@ -122,13 +134,21 @@ impl HostState {
         {
             return;
         }
+        let Ok(work) = crate::upgrade::activity("review recovery") else {
+            return;
+        };
+        self.upgrade_work.insert(session_id.to_owned(), work);
         hold_prompts(session_id);
         self.recovery_in_flight.insert(session_id.to_owned());
         let control = self.control.clone();
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
+        let Ok(work) = crate::upgrade::activity("review operation") else {
+            return;
+        };
         tokio::spawn(async move {
+            let _work = work;
             let prepared = prepare_recovery(&control, &environment, &session_id).await;
             let _ = events.send(HostEvent::RecoveryPrepared {
                 session_id,

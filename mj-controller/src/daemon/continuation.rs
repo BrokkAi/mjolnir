@@ -16,6 +16,7 @@ enum Outcome {
 }
 
 struct Pending {
+    _upgrade_work: crate::upgrade::Work,
     diagnostic: Option<mj_core::jev::Attempt>,
     submitting: bool,
     generation: u64,
@@ -270,6 +271,10 @@ fn spawn_in(
                     }
                     let new_completion = previous.is_some_and(|old| old != completed) && completed.is_some();
                     if new_completion && check_eligible(&view) && (environment.allowed)(&id) {
+                        let Ok(upgrade_work) = crate::upgrade::activity("automatic continuation") else {
+                            publish(&tx, &environment, id, view, false);
+                            continue;
+                        };
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
                         let session = id.clone();
@@ -279,9 +284,13 @@ fn spawn_in(
                             "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
                         let request_diagnostic = diagnostic.clone();
                         let classify = classifier.clone();
+                        let task_work = upgrade_work.clone();
                         let abort = jobs.spawn(async move {
+                            let _task_work = task_work;
                             let result = async {
+                                let evidence_work = _task_work.clone();
                                 let evidence = tokio::task::spawn_blocking(move || {
+                                    let _evidence_work = evidence_work;
                                     let quota_message = quota::message(&snapshot.materialized);
                                     let materialized = snapshot.materialized;
                                     let ordinary = if snapshot.window.omitted_items > 0 {
@@ -321,6 +330,7 @@ fn spawn_in(
                         pending.insert(
                             id.clone(),
                             Pending {
+                                _upgrade_work: upgrade_work,
                                 diagnostic,
                                 submitting: false,
                                 generation: epoch,
@@ -348,7 +358,9 @@ fn spawn_in(
                                     match result {
                                         Ok(recovery) if (environment.allowed)(&id) && quota_eligible(&p.view) => {
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
+                                            let task_work = p._upgrade_work.clone();
                                             let abort = jobs.spawn(async move {
+                                                let _task_work = task_work;
                                                 let result = quota::schedule(&env, &session, view, recovery).await;
                                                 (session, epoch, Outcome::Submitted(result))
                                             });
@@ -396,7 +408,9 @@ fn spawn_in(
                                 let env = environment.clone();
                                 let session = id.clone();
                                 let view = p.view.clone();
-                                let abort = jobs.spawn(async move {
+                                let task_work = p._upgrade_work.clone();
+                                            let abort = jobs.spawn(async move {
+                                                let _task_work = task_work;
                                     let result = (env.quota)(session.clone(), view).await;
                                     (session, epoch, Outcome::QuotaPrepared(result))
                                 });
@@ -418,7 +432,9 @@ fn spawn_in(
                                 let completed = p.completed.clone();
                                 let evidence_frontier = p.evidence_ordinal;
                                 let diagnostic = p.diagnostic.clone();
-                                let abort = jobs.spawn(async move {
+                                let task_work = p._upgrade_work.clone();
+                                            let abort = jobs.spawn(async move {
+                                                let _task_work = task_work;
                                     let outcome = tokio::time::timeout(Duration::from_secs(15), async {
                                         let handle = control
                                             .wait_for_session(&submit_id, Duration::from_secs(5))
@@ -534,13 +550,16 @@ fn spawn_in(
                         if !view.connected { continue; }
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
+                        let Ok(upgrade_work) = crate::upgrade::activity("quota continuation") else { continue };
                         let env = environment.clone(); let session = id.clone(); let current = view.clone();
+                        let task_work = upgrade_work.clone();
                         let abort = jobs.spawn(async move {
+                            let _task_work = task_work;
                             let result = quota::resume(&env, &session, &current, clear).await;
                             (session, epoch, Outcome::Submitted(result))
                         });
                         retry_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
-                        pending.insert(id.clone(), Pending { diagnostic: None, submitting: true, generation: epoch, abort,
+                        pending.insert(id.clone(), Pending { _upgrade_work: upgrade_work, diagnostic: None, submitting: true, generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
                     let live = (environment.live)();

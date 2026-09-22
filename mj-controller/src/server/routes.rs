@@ -168,7 +168,40 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .nest("/api/v1", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn(upgrade_admission))
         .with_state(state)
+}
+
+/// Include queued HTTP work and finite response bodies in daemon draining.
+/// Event feeds remain reconnectable and must not pin the old daemon forever.
+async fn upgrade_admission(request: Request, next: Next) -> Response<Body> {
+    use futures::StreamExt;
+    let work = match crate::upgrade::activity("HTTP request") {
+        Ok(work) => work,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1"), ("x-mj-upgrade", "pending")],
+                "Mjolnir is completing an upgrade",
+            )
+                .into_response();
+        }
+    };
+    let response = next.run(request).await;
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS
+        || response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"))
+    {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let stream = body.into_data_stream().map(move |chunk| {
+        let _work = &work;
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 pub(super) async fn require_session(

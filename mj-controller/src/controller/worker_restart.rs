@@ -17,8 +17,9 @@ use mj_core::relay::RelayExecutionState;
 use super::Controller;
 use super::readiness::{connect_started_worker_with_timeout, wait_for_native_session};
 use super::worker_binary::{
-    prepare_managed_harness_for_upgrade, replace_installed_worker_binary,
-    replace_installed_worker_launch_config, start_worker, stop_worker_after_target_recovery,
+    install_staged_worker_binary, prepare_managed_harness_for_upgrade,
+    replace_installed_worker_binary, replace_installed_worker_launch_config,
+    stage_worker_binary_for_upgrade, start_worker, stop_worker_after_target_recovery,
     worker_binary_for, worker_probe_diagnosis,
 };
 
@@ -83,6 +84,7 @@ pub(super) struct InstalledWorkerRestart<'a> {
     pub worker_root: &'a str,
     pub reconnect: &'a CommandSpec,
     pub launch: Option<&'a mj_core::worker_launch::WorkerLaunchConfig>,
+    pub prepared: bool,
     pub messages: &'a WorkerRestartMessages,
 }
 
@@ -171,46 +173,29 @@ impl Controller {
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }
 
-        // From here the session actor holds no connection, so no prompt it
-        // accepts can reach the worker: submissions queue until the lease
-        // returns. That is what makes the quiet check below decisive.
+        // Preparation can download a managed harness. Keep the old worker and
+        // its controls available for all of it; reserve only for the swap.
+        let launch = self.current_worker_launch_config(session_id, &backend)?;
+        prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
+            .context("prepare the current managed harness before replacing the worker")?;
+        stage_worker_binary_for_upgrade(executor, &backend, session_id, &binary)
+            .context("stage the current worker while the old worker remains available")?;
         let handle = manager
             .wait_for_session(session_id, UPGRADE_LEASE_TIMEOUT)
             .await?;
-        let mut lease = handle.lease_connection().await?;
-        let snapshot = lease
-            .connection_mut()
-            .sync()
-            .await
-            .context("read the session state before upgrading its worker")?;
-        if worker_runs_installed_build(snapshot.worker_build.as_deref(), &installed) {
-            lease.release();
-            return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
-        }
         let harness = self.state.sessions[session_id].harness_kind;
-        let safe_to_replace = snapshot.operational.safe_to_replace(harness);
-        tracing::debug!(
-            session_id,
-            safe_to_replace,
-            goal_synchronized = snapshot.operational.goal.synchronized(),
-            goal_active = snapshot.operational.goal.active(),
-            native_running = snapshot.operational.goal.running(),
-            "evaluated automatic worker replacement"
-        );
-        if !safe_to_replace {
-            lease.release();
+        let Some(mut lease) =
+            super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+        else {
+            return Ok(WorkerUpgradeOutcome::Deferred);
+        };
+        if !lease.verify_for_upgrade().await? {
             return Ok(WorkerUpgradeOutcome::Deferred);
         }
-        let launch = self.current_worker_launch_config(session_id, &backend)?;
-        if let Err(error) =
-            prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
-                .context("prepare the current managed harness before replacing the worker")
-        {
-            // Preparation never touches the running worker. Return its live
-            // connection directly instead of making the actor reconnect.
-            lease.release();
-            return Err(error);
-        }
+        install_staged_worker_binary(executor, &backend, session_id)
+            .context("install the prepared worker under its idle reservation")?;
+        replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+            .context("install the worker launch configuration under its idle reservation")?;
 
         let restarted = self
             .restart_worker_with_installed_binary(
@@ -221,14 +206,14 @@ impl Controller {
                     worker_root: &worker_root,
                     reconnect: &reconnect,
                     launch: Some(&launch),
+                    prepared: true,
                     messages: &RESTART_FOR_UPGRADE,
                 },
             )
             .await;
         match restarted {
             Ok(connection) => {
-                lease.replace_connection(connection);
-                lease.release();
+                lease.finish_replacement(connection);
                 Ok(WorkerUpgradeOutcome::Upgraded { build: installed })
             }
             Err(error) => {
@@ -253,6 +238,7 @@ impl Controller {
             worker_root,
             reconnect,
             launch,
+            prepared,
             messages,
         } = restart;
         // A failed stop may leave the old worker alive, so it stays outside the
@@ -266,12 +252,14 @@ impl Controller {
             // Copy through hel.next and rename. scp/cp onto a still-mapped hel
             // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
             // and prepare_worker_files writes that path in place.
-            let binary = worker_binary_for(backend, executor)?;
-            replace_installed_worker_binary(executor, backend, session_id, &binary)
-                .context(messages.replace)?;
-            if let Some(launch) = launch {
-                replace_installed_worker_launch_config(executor, backend, session_id, launch)
-                    .context("install the current Mjolnir worker launch configuration")?;
+            if !prepared {
+                let binary = worker_binary_for(backend, executor)?;
+                replace_installed_worker_binary(executor, backend, session_id, &binary)
+                    .context(messages.replace)?;
+                if let Some(launch) = launch {
+                    replace_installed_worker_launch_config(executor, backend, session_id, launch)
+                        .context("install the current Mjolnir worker launch configuration")?;
+                }
             }
             start_worker(executor, backend, worker_root).context(messages.start)?;
             // Journal recovery runs before the daemon binds control.sock. A long
@@ -471,6 +459,7 @@ mod tests {
                     worker_root: &worker_root,
                     reconnect: &reconnect,
                     launch: None,
+                    prepared: false,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
             )
