@@ -41,6 +41,26 @@ impl Gate {
         })
     }
 
+    /// The work holding admission open, sorted, with a count appended when a
+    /// label is held more than once. Used to name the blockers in `Status`.
+    pub(crate) fn active_labels(&self) -> Vec<String> {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .active
+            .iter()
+            .map(|(label, count)| {
+                if *count > 1 {
+                    format!("{label} x{count}")
+                } else {
+                    (*label).to_owned()
+                }
+            })
+            .collect()
+    }
+
     /// Called only for automatic replacement, never explicit Stop.
     pub(crate) fn try_close(&self) -> bool {
         let mut state = self
@@ -83,6 +103,10 @@ pub(crate) fn activity(label: &'static str) -> anyhow::Result<Work> {
     gate().enter(label)
 }
 
+pub(crate) fn active_labels() -> Vec<String> {
+    gate().active_labels()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +125,30 @@ mod tests {
         assert!(gate.try_close());
         assert!(gate.enter("new operation").is_err());
         assert!(gate.try_close(), "handoff admission is idempotent");
+    }
+
+    #[test]
+    fn active_labels_name_each_blocker_and_count_repeats() {
+        let gate = Arc::new(Gate::default());
+        assert!(gate.active_labels().is_empty());
+        let first = gate.enter("session lifecycle").unwrap();
+        let second = gate.enter("session lifecycle").unwrap();
+        let request = gate.enter("client request").unwrap();
+        assert_eq!(
+            gate.active_labels(),
+            vec![
+                "client request".to_owned(),
+                "session lifecycle x2".to_owned()
+            ]
+        );
+        drop(second);
+        assert_eq!(
+            gate.active_labels(),
+            vec!["client request".to_owned(), "session lifecycle".to_owned()]
+        );
+        drop(first);
+        drop(request);
+        assert!(gate.active_labels().is_empty());
     }
 
     #[test]

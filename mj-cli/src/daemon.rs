@@ -603,37 +603,56 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             Ok(Ok(false)) => {}
         }
         if Instant::now() >= notice_at {
-            eprintln!(
-                "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
-            );
+            match upgrade_blockers(metadata).await {
+                Some(blockers) => eprintln!(
+                    "Mjolnir upgrade is waiting for: {}; existing sessions remain available.",
+                    blockers.join(", ")
+                ),
+                None => eprintln!(
+                    "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+                ),
+            }
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
+/// Whether a pre-33 daemon can be replaced now.
+///
+/// The daemon is the control plane, so only its own lifecycle work blocks a
+/// handoff: a lifecycle operation in flight, or a record that is provisioning,
+/// checkpointing, closing, or being destroyed. Running and Disconnected
+/// sessions live in workers that outlive the daemon, and reviews are agent
+/// sessions in those same workers, so neither blocks.
+/// Names the daemon-owned work holding the handoff open, for the wait notice.
+/// A daemon that predates `UpgradeBlockers` fails the frame and closes the
+/// connection; that, any other failure, and an empty answer all yield `None`,
+/// and the caller falls back to the unnamed notice.
+async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
+    let labels = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut client = DaemonClient::connect(metadata.clone()).await.ok()?;
+        match client.request(DaemonAction::UpgradeBlockers).await.ok()? {
+            DaemonReply::UpgradeBlockers(labels) => Some(labels),
+            _ => None,
+        }
+    })
+    .await
+    .ok()??;
+    (!labels.is_empty()).then_some(labels)
+}
+
 fn legacy_snapshot_is_idle(snapshot: &RuntimeSnapshot) -> bool {
     use mj_core::state::SessionState;
     snapshot.lifecycles.is_empty()
-        && snapshot.reviews.is_empty()
-        && snapshot.records.iter().all(|record| match record.state {
-            SessionState::Running => snapshot
-                .sessions
-                .iter()
-                .find(|view| view.session_id == record.id)
-                .is_some_and(|view| {
-                    view.connected
-                        && view
-                            .operational
-                            .as_ref()
-                            .is_some_and(|state| state.safe_to_replace(record.harness_kind))
-                }),
-            SessionState::Provisioning
-            | SessionState::Checkpointing
-            | SessionState::Closing
-            | SessionState::Destroying
-            | SessionState::Disconnected => false,
-            _ => true,
+        && !snapshot.records.iter().any(|record| {
+            matches!(
+                record.state,
+                SessionState::Provisioning
+                    | SessionState::Checkpointing
+                    | SessionState::Closing
+                    | SessionState::Destroying
+            )
         })
 }
 
@@ -817,6 +836,62 @@ fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    fn legacy_record(id: &str, state: mj_core::state::SessionState) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "title": id,
+            "harness_kind": "codex",
+            "last_profile": "codex",
+            "bundle_id": "project",
+            "target_template_id": "podman",
+            "state": state,
+            "created_at": "2026-09-22T00:00:00Z",
+            "updated_at": "2026-09-22T00:00:00Z",
+        })
+    }
+
+    fn legacy_snapshot(records: Vec<serde_json::Value>) -> RuntimeSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "config": mj_core::config::Config::default(),
+            "records": records,
+            "sessions": [],
+            "lifecycles": [],
+        }))
+        .expect("legacy snapshot fixture")
+    }
+
+    /// A pre-33 daemon is replaceable while workers are busy: only its own
+    /// lifecycle work blocks the handoff.
+    #[test]
+    fn legacy_idle_ignores_worker_state_and_reviews() {
+        use mj_core::state::SessionState;
+        // A Running record with no session view at all is the busiest case the
+        // old check could see: it could not confirm the worker was idle.
+        let mut busy = legacy_snapshot(vec![
+            legacy_record("running", SessionState::Running),
+            legacy_record("gone", SessionState::Disconnected),
+        ]);
+        busy.reviews.push(mj_client::review::RuntimeReviewView {
+            session_id: "running".into(),
+            tier: mj_core::review::lanes::ReviewTier::Quick,
+            phase: mj_core::review::driver::TurnReviewPhase::CapturingDelta,
+            roles: Vec::new(),
+            status: "reviewing".into(),
+            verdict: None,
+        });
+        assert!(
+            legacy_snapshot_is_idle(&busy),
+            "worker turns and reviews survive a daemon handoff"
+        );
+
+        let closing = legacy_snapshot(vec![legacy_record("closing", SessionState::Closing)]);
+        assert!(
+            !legacy_snapshot_is_idle(&closing),
+            "a daemon-owned lifecycle state still blocks the handoff"
+        );
+    }
 
     async fn viewer_fixture(
         statuses: Vec<WebViewerStatus>,

@@ -106,18 +106,46 @@ never automatically downgrade a newer daemon or incompatible store. Changes to
 startup, schema, protocol, or release installation must preserve the isolated
 upgrade regressions. Keep terminal upgrade handoff formats backward compatible.
 
+## Control plane and data plane
+
+The daemon (`mj daemon-run`, mj-controller) is the control plane. It owns the
+database, session records, lifecycle operations (provision, checkpoint, close,
+destroy, recovery), the HTTP API, review orchestration, and client attachments.
+It holds no agent state that cannot be rebuilt from the database and from
+workers.
+
+Workers (mj-worker, one per session, local or remote) are the data plane. They
+run the harness process and the agent's turn, own the relay journal and
+checkpoint barriers, and keep running when no daemon is attached. A worker's
+turn, its pending questions, and its review sessions continue across a daemon
+restart; the next daemon reattaches and replays from the journal.
+
+A consequence for design: any daemon-side task must be either short and bounded,
+finishing with the command or response that started it, or resumable from durable
+state at daemon startup. Never make daemon liveness or daemon replacement depend
+on worker state. Never store in daemon memory anything a worker or the database
+cannot give back.
+
+A consequence for upgrades: replacing the daemon waits only for its own bounded
+control operations; replacing a worker waits for that worker to be idle, because
+the worker holds the turn.
+
 Automatic upgrades must never cancel accepted work or use a timeout as permission
-to stop a busy process. Keep steering, answers, and cancellation addressed to the
-active turn while replacement waits. Reserve workers only after atomic idle
-admission; prepare downloads before taking their control connection. Hold daemon
-upgrade admission through accepted tasks, blocking work, queued completion events,
-and response delivery, including after the originating client disconnects. New
-background operations must participate in this ownership. Close admission and
-verify no outstanding work in one decision. Retry only explicitly unaccepted
-requests, preserving command IDs and steering targets; a lost acknowledgement
-does not authorize replay of an arbitrary mutation. Test these races in isolated
-instances. Legacy daemons without atomic admission can only provide an observed
-idle check; never describe that bootstrap as having the new guarantee.
+to stop a busy process. Daemon handoff waits only for daemon-owned work:
+lifecycle operations, startup and session recovery, admissions, automatic
+continuations, and in-flight request and response delivery, including after the
+originating client disconnects. It never waits for worker turns, pending
+questions, or reviews; those live in workers and survive the handoff. New
+daemon-owned background operations must participate in this ownership. Close
+admission and verify no outstanding work in one decision, and name the blocking
+work in the wait notice so the user can see what the upgrade is waiting for.
+Worker replacement is separate and still requires atomic idle admission: reserve
+workers only after that admission, and prepare downloads before taking their
+control connection. Retry only explicitly unaccepted requests, preserving command
+IDs and steering targets; a lost acknowledgement does not authorize replay of an
+arbitrary mutation. Test these races in isolated instances. Legacy daemons
+without atomic admission can only provide an observed idle check; never describe
+that bootstrap as having the new guarantee.
 
 Keep file and path handling independent of the operating system. Use `Path` and
 `PathBuf`; normalize path text only at protocol or rendering boundaries.

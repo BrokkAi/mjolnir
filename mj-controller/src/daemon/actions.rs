@@ -17,6 +17,9 @@ pub(super) async fn handle_action(
             }
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
+        DaemonAction::UpgradeBlockers => {
+            Ok(DaemonReply::UpgradeBlockers(crate::upgrade::active_labels()))
+        }
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {
@@ -591,6 +594,7 @@ pub(super) fn upgrade_request_activity(
         DaemonAction::Ping
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade
+            | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
             | DaemonAction::RuntimeSnapshot { .. }
     ) {

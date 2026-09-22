@@ -3,7 +3,6 @@ use super::*;
 /// What the host's task processes, in order.
 pub(super) enum HostEvent {
     View {
-        upgrade_work: Option<crate::upgrade::Work>,
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
         /// Whether this view had a prompt of ours in flight. Only a turn that
@@ -193,7 +192,6 @@ impl RoleTranscript {
 }
 
 pub(super) struct HostState {
-    pub(super) upgrade_work: BTreeMap<String, crate::upgrade::Work>,
     pub(super) control: SessionManagerControl,
     pub(super) config: ReviewConfigSource,
     pub(super) environment: Arc<dyn ReviewEnvironment>,

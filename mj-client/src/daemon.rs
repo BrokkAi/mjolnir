@@ -398,6 +398,15 @@ pub enum DaemonAction {
     /// Frozen upgrade handshake, available from daemon protocol 33 onward.
     /// Busy replies leave every operation and control channel running.
     PrepareUpgrade,
+    /// Names the daemon-owned work that is currently holding an automatic
+    /// handoff open, for the CLI's wait notice.
+    ///
+    /// Added after protocol 33, so it is not part of the frozen management
+    /// subset. A daemon that predates it cannot deserialize the frame: it
+    /// fails the request and closes the connection. Callers must therefore
+    /// treat any failure, including a dropped connection or an error frame,
+    /// as "unknown" and say nothing about what the upgrade is waiting for.
+    UpgradeBlockers,
     Status,
     WebViewerAccess,
     RecoverWebViewer(crate::web::WebViewerRecovery),
@@ -654,6 +663,9 @@ pub enum DaemonReply {
     NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     UpgradePending,
+    /// Labels for the work holding an automatic handoff open, empty when
+    /// nothing is. Answers `DaemonAction::UpgradeBlockers`.
+    UpgradeBlockers(Vec<String>),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     WebListeners(Vec<crate::web::WebListenerProcess>),

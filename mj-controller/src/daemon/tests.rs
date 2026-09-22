@@ -434,6 +434,39 @@ fn test_runtime_state() -> Arc<RuntimeState> {
     ))
 }
 
+/// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
+/// must report a live gate label and stop reporting it once released. The gate
+/// is process-wide and other tests hold their own labels beside this one, so
+/// the test asserts only on a label nothing else uses.
+#[tokio::test]
+async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
+    const LABEL: &str = "test-only upgrade blocker";
+    let state = test_runtime_state();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    let labels = |reply: DaemonReply| match reply {
+        DaemonReply::UpgradeBlockers(labels) => labels,
+        other => panic!("expected named blockers, got {other:?}"),
+    };
+    let held = crate::upgrade::activity(LABEL).unwrap();
+    let named = labels(
+        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+    );
+    assert!(named.contains(&LABEL.to_owned()), "{named:?}");
+    drop(held);
+    let released = labels(
+        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+    );
+    assert!(
+        !released.contains(&LABEL.to_owned()),
+        "released work is still named: {released:?}"
+    );
+}
+
 #[tokio::test]
 async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     const CHILD: &str = "MJ_UPGRADE_DRAIN_TEST_CHILD";

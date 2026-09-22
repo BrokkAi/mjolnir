@@ -184,6 +184,7 @@ pub(super) async fn serve_client(
                 | DaemonAction::Status
                 | DaemonAction::Stop
                 | DaemonAction::PrepareUpgrade
+                | DaemonAction::UpgradeBlockers
         );
         // Hold through the acknowledgement, not merely the action's result.
         let activity = upgrade_request_activity(&request.action);

@@ -148,6 +148,11 @@ fn old_daemon_fixture() {
                                 let path = std::path::PathBuf::from(std::env::var_os("MJ_TEST_UPGRADE_BUSY_FILE").unwrap());
                                 fs::write(path.with_extension("observed"), "waiting").unwrap();
                             }
+                            // A daemon that predates `UpgradeBlockers` cannot
+                            // decode the frame: it fails the request and drops
+                            // the connection. The client must fall back to the
+                            // notice that names no work.
+                            if matches!(request.action, DaemonAction::UpgradeBlockers) { break; }
                             let stopping = matches!(request.action, DaemonAction::Stop | DaemonAction::PrepareUpgrade) && !busy;
                             let reply = match request.action {
                                 DaemonAction::Ping => DaemonReply::Pong,

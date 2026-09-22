@@ -80,7 +80,6 @@ impl TurnReviewHost {
             .expect("new review persistence lane accepts its initial sweep");
         tokio::spawn(host_loop(
             HostState {
-                upgrade_work: BTreeMap::new(),
                 control,
                 config,
                 environment,
@@ -118,7 +117,6 @@ impl TurnReviewHost {
         // automatic review permanently. An unbounded hand-off keeps the
         // daemon's update loop nonblocking without dropping that edge.
         let _ = self.events.send(HostEvent::View {
-            upgrade_work: crate::upgrade::activity("review observation").ok(),
             session_id: session_id.to_owned(),
             snapshot: view
                 .snapshot

@@ -7,11 +7,7 @@ impl HostState {
     pub(super) fn record_notice(&self, session_id: &str, text: String) {
         let control = self.control.clone();
         let session_id = session_id.to_owned();
-        let Ok(work) = crate::upgrade::activity("review operation") else {
-            return;
-        };
         tokio::spawn(async move {
-            let _work = work;
             let recorded = async {
                 let handle = control
                     .session(session_id.clone())
@@ -68,11 +64,7 @@ impl HostState {
     ) {
         let control = self.control.clone();
         let events = self.events.clone();
-        let Ok(work) = crate::upgrade::activity("review operation") else {
-            return;
-        };
         tokio::spawn(async move {
-            let _work = work;
             let outcome = reviewer_action(&control, &session_id, role, action).await;
             if let Some(event) = into_event(outcome) {
                 let _ = events.send(event);

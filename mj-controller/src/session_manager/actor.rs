@@ -50,10 +50,6 @@ pub(super) async fn run_session_actor(
     view_tx: watch::Sender<ManagedSessionView>,
     updates: CoalescedUpdateSender,
 ) {
-    let Ok(initial_work) = crate::upgrade::activity("worker activity") else {
-        return;
-    };
-    let mut upgrade_work = Some(initial_work);
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
     let mut last_recovery_probe = None;
@@ -73,31 +69,7 @@ pub(super) async fn run_session_actor(
         Command(Option<ActorCommand>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
     }
-    let mut event_work = None;
     loop {
-        // Reconcile before waiting, including after an early `continue` in a
-        // command handler. A freshly synced connection can be newer than the
-        // published view (notably when an idle lease is refused).
-        let snapshot = connection
-            .as_ref()
-            .map(StandaloneSession::snapshot)
-            .or_else(|| view_tx.borrow().snapshot.clone());
-        let busy = lifecycle.is_leased()
-            || !deferred_submits.is_empty()
-            || !reviewer_tasks.is_empty()
-            || crate::review_host::prompt_refusal(&target.session_id).is_some()
-            || snapshot.as_ref().is_none_or(|snapshot| {
-                snapshot.operational.has_work_in_flight()
-                    || !snapshot.materialized.pending_elicitations.is_empty()
-            });
-        if busy {
-            if upgrade_work.is_none() {
-                upgrade_work = event_work.take();
-            }
-        } else {
-            upgrade_work = None;
-        }
-        drop(event_work.take());
         lifecycle.set_retirement_requested(*retirement.borrow_and_update());
         if lifecycle.should_stop() {
             break;
@@ -116,15 +88,6 @@ pub(super) async fn run_session_actor(
                     changed = retirement.changed() => Event::Retirement(changed),
                 }
             } => event,
-        };
-        event_work = match crate::upgrade::activity("worker control") {
-            Ok(work) => Some(work),
-            Err(error) => {
-                if let Event::Command(Some(command)) = event {
-                    command.reject(&target.session_id, &error.to_string());
-                }
-                break;
-            }
         };
         match event {
             Event::Returned(returned) => {
