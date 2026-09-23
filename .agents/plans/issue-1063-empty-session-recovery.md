@@ -1,6 +1,6 @@
 # Make empty-session recovery reproducible and verify worker instance attribution
 
-This ExecPlan follows `.agents/PLANS.md`. Maintain Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective as work proceeds. This is a review draft for #1063 only. The user requested planning and implementation one issue at a time. #965 and #1018 are implemented, validated, pushed, and closed. Do not implement #1063 until the user approves this plan. The later queue remains #1073, then #1083.
+This completed ExecPlan follows `.agents/PLANS.md`. Maintain Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective as work proceeds. It covers #1063 only. The user requested planning and implementation one issue at a time. #965, #1018, and #1063 are implemented, validated, pushed, and closed. The later queue remains #1073, then #1083.
 
 ## Purpose / Big Picture
 
@@ -20,8 +20,8 @@ Issue #1063 reports that restarting the controller daemon left the session worke
 - [x] (2026-09-23) Proved native reload, empty-session replacement, queued prompt delivery, and process attribution in disposable real-worker fixtures. The existing selected-session suspend/resume route is covered at its controller boundary; no full TUI automation was added.
 - [x] (2026-09-23) Added Codex and Claude process-boundary regressions, including used-history refusal, strengthened the instance environment test, and documented the selected-session procedure and QA fixture.
 - [x] (2026-09-23) Validated the full dev-profile `cargo test` suite, final three-case worker recovery test, controller same-harness resume test, `cargo clippy --all-targets -- -D warnings`, formatting, `npm run check`, `npm run build`, and diff whitespace.
-- [ ] Commit on the current branch, push to origin/master, and close #1063.
-- [ ] Only then prepare #1073's plan for separate review.
+- [x] (2026-09-23) Committed as `fdd49cc1`, merged concurrent upstream controller changes, revalidated the controller suite and clippy, pushed `d68e0ea1` to origin/master, posted evidence to #1063, closed it, and removed `agent-in-progress`.
+- [x] (2026-09-23) Prepared #1073's separate review plan after closing #1063; implementation awaits its own approval.
 
 ## Surprises & Discoveries
 
@@ -99,7 +99,7 @@ Each proof and test gets fresh temporary storage. Teardown stops the owned proce
 ## Outcomes & Retrospective
 
 
-The isolated real-worker proof passes for both supported harnesses, including refusal to replace used history, and the process attribution check passes after clean re-execution. The full Rust suite, final focused worker cases, controller resume case, clippy, and docs checks pass. Existing application paths need no production code change; the deliverables are regression coverage and the reproducible selected-session procedure. Publication remains. #1073 and #1083 remain untouched.
+The isolated real-worker proof passes for both supported harnesses, including refusal to replace used history, and the process attribution check passes after clean re-execution. The full Rust suite, final focused worker cases, controller resume case, clippy, and docs checks pass. Existing application paths need no production code change; the deliverables are regression coverage and the reproducible selected-session procedure. The result is published and #1063 is closed. #1073 has a separate review plan but no implementation, and #1083 remains untouched.
 
 Revision (2026-09-23): initial review plan, narrowed after finding the attribution fix in `6f9f65da` and the existing Restart/suspend-resume workflow.
 
