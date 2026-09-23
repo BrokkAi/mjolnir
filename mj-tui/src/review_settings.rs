@@ -133,12 +133,13 @@ impl ReviewSettingsDialog {
             ReviewSettingsFocus::Back,
             mj_chat::components::ActionRole::Back,
         );
+        // This page edits the Settings draft, which Back and Esc keep, so
+        // leaving it asks nothing. Setup asks once, when the whole draft
+        // would be discarded.
+        self.form.get_mut().set_dirty(false);
         self.form
             .get_mut()
-            .track_draft(vec![format!("{:?}", self.review)]);
-        self.form
-            .get_mut()
-            .set_dismiss_actions(&[ReviewSettingsFocus::Back, ReviewSettingsFocus::Cancel]);
+            .set_dismiss_actions(&[ReviewSettingsFocus::Cancel]);
         self.form
             .get_mut()
             .set_default_action(ReviewSettingsFocus::Save);
@@ -705,7 +706,7 @@ impl ReviewSettingsDialog {
         if changed {
             self.prepare();
         }
-        if cancel_setup || dismiss || back {
+        if cancel_setup {
             self.review = self.original_review.clone();
         }
         let outcome = if cancel_setup {

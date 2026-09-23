@@ -177,16 +177,14 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     assert!(dialog(&dashboard).review.profile.is_none());
     assert!(dialog(&dashboard).review.enabled);
     assert!(dialog(&dashboard).can_save());
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(dashboard.dialog_confirmation_open());
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
+    // Esc returns to Settings with the change still in its draft.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!dashboard.dialog_confirmation_open());
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("Esc returns to Settings")
+    };
+    assert!(setup.review_editor.is_none());
+    assert!(setup.is_dirty(), "the enabled review stays in the draft");
 }
 
 #[test]

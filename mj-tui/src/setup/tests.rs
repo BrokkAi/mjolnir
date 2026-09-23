@@ -1288,31 +1288,44 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     dashboard.begin_setup();
     choose(&mut dashboard, "review");
     dashboard.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(dashboard.dialog_confirmation_open());
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
+    // Esc goes back to the first page and keeps the change in the draft, as
+    // the page says it will. Launch campaign finding C-19.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(!dashboard.dialog_confirmation_open());
     assert!(!dashboard.config.review.enabled);
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings remains open after leaving review")
     };
+    assert!(dialog.review_editor.is_none(), "Esc left Code Review");
     assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    // The Back button does the same.
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings")
+    };
+    dialog
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(crate::review_settings::ReviewSettingsFocus::Back);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(!dashboard.dialog_confirmation_open());
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings remains open after leaving review")
+    };
+    assert!(dialog.review_editor.is_none(), "Back left Code Review");
+    assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
     dashboard.handle_key(key(KeyCode::Esc));
-    assert!(dashboard.modal_open());
+    // Leaving Settings with the review change still drafted asks once.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
     dashboard.handle_key(key(KeyCode::Right));
     dashboard.handle_key(key(KeyCode::Enter));
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("discard returns to settings")
-    };
-    assert!(dialog.review_editor.is_none());
-    assert!(!dialog.draft["review"]["enabled"].as_bool().unwrap_or(false));
-    dashboard.handle_key(key(KeyCode::Esc));
     assert!(!dashboard.modal_open());
     assert!(!dashboard.config.review.enabled);
 
