@@ -165,6 +165,12 @@ pub(crate) enum DashboardIoUpdate {
         target_id: String,
         result: std::result::Result<(), String>,
     },
+    MountHistory(
+        std::result::Result<
+            std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
+            String,
+        >,
+    ),
     TargetTest {
         target_id: String,
         result: std::result::Result<(), String>,
@@ -906,6 +912,17 @@ impl DashboardContext {
                     "Container settings failed for {}: {error}",
                     short_id(&session_id)
                 )),
+            },
+            DashboardIoUpdate::MountHistory(result) => match result {
+                Ok(history) => {
+                    // The controller copy is what later `set_state` calls
+                    // publish, so it has to carry the fresh history too.
+                    self.controller.state.mount_history = history.clone();
+                    self.dashboard.apply_mount_history(history);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not refresh recent project directories");
+                }
             },
             DashboardIoUpdate::TargetReadiness {
                 generation,

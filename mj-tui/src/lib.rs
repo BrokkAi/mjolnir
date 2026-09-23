@@ -399,6 +399,9 @@ pub enum DashboardAction {
         generation: u64,
         target_ids: Vec<String>,
     },
+    /// Read the stored mount and project-directory history on a worker and
+    /// hand it back through `DashboardState::apply_mount_history`.
+    LoadMountHistory,
     LoadWebAccess,
     /// Stop the running daemon and start one from the build this surface is
     /// running, then report which build came up. The keep-alive never starts
@@ -773,6 +776,9 @@ pub struct DashboardState {
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
+    /// The New wizard opened and the stored mount and project history should
+    /// be read again, since sessions created after startup add to it.
+    pub(crate) mount_history_refresh_pending: bool,
     /// Selection anchor for the Sessions pane, by id rather than position: the
     /// pane shows different row sets at different explicit sizes, so a
     /// position could silently point at a different session after resizing.
@@ -1014,6 +1020,7 @@ impl DashboardState {
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
+            mount_history_refresh_pending: false,
             selected_session_id: None,
             command_session_override: None,
             sessions_scroll: Cell::new(0),

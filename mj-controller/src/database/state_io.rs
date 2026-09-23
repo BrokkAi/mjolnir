@@ -159,18 +159,7 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     load_targets(&connection, &mut state)?;
     load_mounts(&connection, &mut state)?;
     load_checkpoints(&connection, &mut state)?;
-    let mut statement =
-        connection.prepare("SELECT host, source FROM mount_history ORDER BY host, ordinal")?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            blob_to_path(row.get_ref(1)?.as_blob()?),
-        ))
-    })?;
-    for row in rows {
-        let (host, source) = row?;
-        state.mount_history.entry(host).or_default().push(source);
-    }
+    state.mount_history = read_mount_history(&connection)?;
     let mut statement = connection
         .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
     let rows = statement.query_map([], |row| {
@@ -188,6 +177,30 @@ pub fn load_state_from(path: &Path) -> Result<State> {
     }
     state.validate()?;
     Ok(state)
+}
+
+/// The remembered mount sources and project directories by host key, newest
+/// first, as `load_state` reads them. A dashboard reads this again when a
+/// wizard opens, since sessions created after it started add to the history.
+pub fn load_mount_history() -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    read_mount_history(&open_reader(&database_path())?)
+}
+
+fn read_mount_history(connection: &Connection) -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    let mut history = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut statement =
+        connection.prepare("SELECT host, source FROM mount_history ORDER BY host, ordinal")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            blob_to_path(row.get_ref(1)?.as_blob()?),
+        ))
+    })?;
+    for row in rows {
+        let (host, source) = row?;
+        history.entry(host).or_default().push(source);
+    }
+    Ok(history)
 }
 
 pub fn save_state(state: &State) -> Result<()> {

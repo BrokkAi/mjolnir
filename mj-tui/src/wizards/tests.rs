@@ -4049,6 +4049,41 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     );
 }
 
+/// Another surface or this run's own sessions can remember a project directory
+/// after the dashboard loaded its state. Opening the New wizard asks for the
+/// stored history again, and the project step offers what comes back.
+/// Launch campaign finding C-1.
+#[test]
+fn opening_the_new_wizard_refreshes_recent_projects() {
+    let mut config = config();
+    config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    assert_eq!(
+        dashboard.take_mount_history_refresh(),
+        Some(DashboardAction::LoadMountHistory)
+    );
+    assert_eq!(
+        dashboard.take_mount_history_refresh(),
+        None,
+        "one open asks once"
+    );
+    let mut stored = State::default();
+    stored.remember_project_directory("local", std::path::Path::new("/work/used-this-run"));
+    dashboard.apply_mount_history(stored.mount_history);
+
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the New wizard")
+    };
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert_eq!(
+        wizard.project_history,
+        vec![PathBuf::from("/work/used-this-run")]
+    );
+}
+
 /// Tab moves keyboard focus onto the recent directories, so each one has to
 /// look different while it holds focus, including the one that is already the
 /// selected directory. Launch campaign finding C-2.

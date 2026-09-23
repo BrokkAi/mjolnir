@@ -414,6 +414,14 @@ pub(crate) async fn apply_dashboard_action(
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);
         }
+        DashboardAction::LoadMountHistory => {
+            crate::dashboard::spawn_io(
+                "reading recent project directories",
+                context.dashboard_io_tx.clone(),
+                mj_controller::database::load_mount_history,
+                DashboardIoUpdate::MountHistory,
+            );
+        }
         DashboardAction::CheckTargetReadiness {
             generation,
             target_ids,
