@@ -4048,3 +4048,42 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
         lines[buttons]
     );
 }
+
+/// Tab moves keyboard focus onto the recent directories, so each one has to
+/// look different while it holds focus, including the one that is already the
+/// selected directory. Launch campaign finding C-2.
+#[test]
+fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
+    fn style_of(dashboard: &mut DashboardState, label: &str) -> ratatui::style::Style {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let (column, row) = point(&buffer_lines(&buffer), label);
+        buffer[(column, row)].style()
+    }
+    let labels = ["/work/newer", "/work/older"];
+    let mut dashboard = dashboard_at_local_project_step(&labels);
+    let unfocused = labels.map(|label| style_of(&mut dashboard, label));
+
+    let mut checked = 0;
+    for _ in 0..6 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+        let Mode::New(wizard) = &dashboard.mode else {
+            panic!("expected the local project step")
+        };
+        let Some(WizardControl::RecentProject(index)) = wizard.form.borrow().focused() else {
+            continue;
+        };
+        let label = wizard.project_history[index].display().to_string();
+        let position = labels.iter().position(|known| *known == label).unwrap();
+        assert_ne!(
+            style_of(&mut dashboard, &label),
+            unfocused[position],
+            "{label} looks the same with and without focus"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2, "Tab reaches both recent directories");
+}

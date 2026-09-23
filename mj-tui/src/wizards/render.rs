@@ -34,6 +34,10 @@ pub(crate) fn render_new_wizard(
     surfaces: &mut FrameSurfaces,
 ) {
     let mut form = wizard.form.borrow_mut();
+    // Read focus before the frame starts: `begin_frame` hides last frame's
+    // registrations, so `is_focused` is false for a control drawn before it
+    // registers again, as the recent-directory rows are.
+    let focused_before_frame = form.focused();
     let initial = step_initial(wizard.step);
     begin_form_frame(&mut form, initial);
     if wizard.step == WizardStep::Review {
@@ -148,7 +152,7 @@ pub(crate) fn render_new_wizard(
                             },
                             directory.display()
                         ),
-                        if form.is_focused(WizardControl::RecentProject(index)) {
+                        if focused_before_frame == Some(WizardControl::RecentProject(index)) {
                             theme::selection(true)
                         } else if index == wizard.project_history_index {
                             Style::default().fg(theme::palette().text)
