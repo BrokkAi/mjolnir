@@ -4607,3 +4607,46 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
     assert_eq!(after.user_prompt_tail, before.user_prompt_tail);
     assert_eq!(after.transcript_summary, before.transcript_summary);
 }
+
+/// I1-11: a finished turn leaves its completed dispatch in the ledger until the
+/// daemon acknowledges its events. That record is history, not work, so it
+/// must not make `/clear` think the session is busy.
+#[test]
+fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(&mut relay, "finished-turn", prompt("Remember PINEAPPLE"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "finished-turn",
+            RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.snapshot.dispatches.contains_key("finished-turn"));
+    assert_eq!(
+        relay.operational_state().execution,
+        RelayExecutionState::Idle
+    );
+    let accepted = relay
+        .submit_command("clear-request", RelayCommand::ClearContext)
+        .unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+/// I1-11: the refusal still holds while a turn is running.
+#[test]
+fn clear_is_refused_while_a_turn_is_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    submit_relay(&mut relay, "running-turn", prompt("Write a story"));
+    relay.claim_pending_commands(true).unwrap();
+    let refused = relay
+        .submit_command("clear-request", RelayCommand::ClearContext)
+        .unwrap();
+    assert!(refused.is_err());
+}

@@ -205,7 +205,7 @@ impl DurableRelay {
             }
             if self.snapshot.native_session_id.is_none()
                 || self.snapshot.execution != RelayExecutionState::Idle
-                || !self.snapshot.dispatches.is_empty()
+                || self.unfinished_dispatch()
                 || !self.snapshot.queued_prompts.is_empty()
                 || self.snapshot.goal.running()
                 || self.snapshot.goal.active()
@@ -1479,6 +1479,20 @@ impl DurableRelay {
     /// A promoted configuration change leaves execution idle while it reaches
     /// ACP, so the queue needs its own guard to stay sequential. Completion,
     /// rejection, and interruption all promote the next entry.
+    /// Whether any dispatch is still waiting or running. Terminal records stay
+    /// in the ledger until the daemon acknowledges their events, so they are
+    /// history, not work.
+    fn unfinished_dispatch(&self) -> bool {
+        self.snapshot.dispatches.values().any(|dispatch| {
+            matches!(
+                dispatch.state,
+                RelayDispatchState::Queued
+                    | RelayDispatchState::Pending
+                    | RelayDispatchState::InFlight
+            )
+        })
+    }
+
     fn promoted_config_in_progress(&self) -> bool {
         self.snapshot.dispatches.values().any(|dispatch| {
             matches!(dispatch.command, RelayCommand::SetConfig { .. })
