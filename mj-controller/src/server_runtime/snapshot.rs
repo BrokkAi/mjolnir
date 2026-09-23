@@ -573,6 +573,17 @@ pub(super) fn viewer_snapshot(
         {
             session.transitioning = true;
         }
+        if session.state == mj_core::state::SessionState::Disconnected.as_str()
+            && session.operation.as_ref().is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    crate::server::ViewerOperationKind::Create
+                        | crate::server::ViewerOperationKind::Resume
+                )
+            })
+        {
+            session.state = crate::server::LAUNCHING_STATE.to_owned();
+        }
         let live = operational.get(&session.id);
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =

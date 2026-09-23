@@ -594,8 +594,11 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     if let Some(stop_reason) = &response.stop_reason {
         summary.push_str(&format!(" ({stop_reason})"));
     }
-    if let Some(turn_number) = response.turn_number {
-        summary.push_str(&format!(" turn {turn_number}"));
+    // The same number `mj prompt` printed and `mj wait --turn` takes. The
+    // turn's position in the conversation is a different count, and printing
+    // it here as well made one turn look like two (F-12); it stays in --json.
+    if let Some(turn_id) = response.turn_id {
+        summary.push_str(&format!(" turn {turn_id}"));
     }
     if let Some(elapsed_ms) = response.elapsed_ms {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
@@ -1296,6 +1299,14 @@ mod tests {
         );
         let lines = wait_report_lines(&response);
         assert_eq!(lines[0], "error (harness_inactive)");
+
+        // F-12: `mj prompt` printed "turn 8" and `mj wait` "turn 1" for the
+        // same turn. The wait names it by the number the prompt printed.
+        let numbered = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 8, "turn_number": 1}),
+        );
+        assert_eq!(wait_report_lines(&numbered)[0], "finished turn 8");
         assert!(
             lines.iter().any(|line| line.contains("job_output-7")),
             "the reason is printed: {lines:?}"

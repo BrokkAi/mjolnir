@@ -235,6 +235,14 @@ pub(super) async fn finish_wait(
         .as_ref()
         .and_then(|turn| turn.diagnostic.clone());
     session.last_turn_outcome = session.last_turn_outcome.map(api_turn_outcome);
+    // The published view is a step behind the live actor the decision was
+    // read from, so a wait that ended with the turn could report the session
+    // as still running (F-12). The live execution state is the newer fact.
+    if observation.execution == MaterializedExecutionState::Idle
+        && session.chat_phase == crate::server::ViewerChatPhase::Running
+    {
+        session.chat_phase = crate::server::ViewerChatPhase::Idle;
+    }
     let summary = match decision.turn {
         Some(turn) => Some(backend.turn_summary(session_id.to_owned(), turn).await?),
         None => None,

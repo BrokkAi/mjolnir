@@ -133,10 +133,11 @@ const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_sec
 fn is_coming_up(session: &ViewerSession) -> bool {
     use mj_core::state::SessionState;
     still_live(session)
-        && matches!(
-            SessionState::from_stored(&session.state),
-            Some(SessionState::Provisioning | SessionState::Disconnected)
-        )
+        && (session.state == crate::server::LAUNCHING_STATE
+            || matches!(
+                SessionState::from_stored(&session.state),
+                Some(SessionState::Provisioning | SessionState::Disconnected)
+            ))
 }
 
 /// Whether a session is starting or running without a recorded failure.

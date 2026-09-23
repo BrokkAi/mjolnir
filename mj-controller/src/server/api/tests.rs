@@ -59,6 +59,57 @@ async fn bundle_export_distinguishes_deferral_from_failure() {
     }
 }
 
+#[test]
+fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
+    // F-12: a dashboard-created session listed its hex id as its title.
+    let (config, mut state) = sample_config_state();
+    let record = state.sessions.get_mut("session-1").unwrap();
+    record.session_title_override = None;
+    record.acp_session_title = None;
+    record.title = "proj via fake".into();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(snapshot.sessions[0].title, "proj via fake");
+
+    state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .acp_session_title = Some("Fix the parser".into());
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    assert_eq!(snapshot.sessions[0].title, "Fix the parser");
+}
+
+#[tokio::test]
+async fn a_finished_wait_does_not_report_the_session_still_running() {
+    // F-12: `prompt --wait --json` answered with `chat_phase: running` because
+    // the published view had not caught up with the live actor yet.
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = ApiSession::from(&snapshot.sessions[0]);
+    session.chat_phase = crate::server::ViewerChatPhase::Running;
+    let observation = WaitObservation {
+        execution: MaterializedExecutionState::Idle,
+        ..WaitObservation::default()
+    };
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend::default());
+
+    let response = finish_wait(
+        &backend,
+        "session-1",
+        session,
+        observation,
+        WaitDecision::simple(WaitOutcome::Finished, None),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response.session.chat_phase,
+        crate::server::ViewerChatPhase::Idle
+    );
+}
+
 #[tokio::test]
 async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness() {
     let root = tempfile::tempdir().unwrap();

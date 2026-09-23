@@ -96,7 +96,7 @@ impl ViewerSnapshot {
                     quota_recovery: None,
                     id: session.id.clone(),
                     workspace_id: session.workspace_id.clone(),
-                    title: session.display_title().to_owned(),
+                    title: public_title(session),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),
                     subagent_task_name: subagent.map(|child| child.task_name.clone()),
                     subagent_session_ids,
@@ -832,6 +832,23 @@ pub enum ViewerLifecycleCategory {
     Suspending,
     Suspended,
     Failed,
+}
+
+/// The published state of a session that has been provisioned and whose
+/// start is still connecting its worker. Its record says disconnected, which
+/// reads as a fault while it is only launching (F-12).
+pub const LAUNCHING_STATE: &str = "launching";
+
+/// The name a published session goes by. It is the display title, except
+/// that a session the harness has not named yet and nobody renamed would
+/// otherwise be named by its id, which every listing already prints beside
+/// it (F-12); the title it was created with says more.
+fn public_title(session: &mj_core::state::SessionRecord) -> String {
+    let display = session.display_title();
+    if display == session.id && !session.title.trim().is_empty() {
+        return session.title.clone();
+    }
+    display.to_owned()
 }
 
 impl ViewerLifecycleCategory {
