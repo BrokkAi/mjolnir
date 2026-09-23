@@ -3919,6 +3919,26 @@ fn row_of(lines: &[String], label: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {label:?}: {lines:#?}"))
 }
 
+/// `cd ~/demo && mj`: the local project step starts with the repository `mj`
+/// was started in, ahead of any remembered directory (J-10).
+#[test]
+fn the_local_project_starts_as_the_repository_mj_was_started_in() {
+    let mut config = config();
+    config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+    let mut state = State::default();
+    state.remember_project_directory("local", std::path::Path::new("/work/remembered"));
+    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
+    dashboard.set_launch_project_directory(Some("/home/me/demo".into()));
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("expected the local project step")
+    };
+    assert_eq!(wizard.step, WizardStep::ProjectDirectory);
+    assert_eq!(wizard.project_directory, "/home/me/demo");
+}
+
 /// The step pre-fills a remembered directory, so it has to draw it with the
 /// caret at its end. A value the field holds but does not show takes every
 /// character typed after it and turns the path into two paths.

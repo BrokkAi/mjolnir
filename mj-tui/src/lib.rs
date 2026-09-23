@@ -894,6 +894,9 @@ pub struct DashboardState {
     pub(crate) mode: Mode,
     pub(crate) help_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
+    /// The Git repository `mj` was started in, found before the dashboard
+    /// opened. The new-session wizard offers it as the local project.
+    pub(crate) launch_project_directory: Option<std::path::PathBuf>,
     pub(crate) go_workspaces: BTreeMap<String, go::GoMode>,
     pub(crate) go_contexts: BTreeMap<String, Result<(std::path::PathBuf, String), String>>,
     /// What each session's checkout looked like when last read, for the
@@ -1021,6 +1024,7 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             go: None,
+            launch_project_directory: None,
             go_workspaces: BTreeMap::new(),
             go_contexts: BTreeMap::new(),
             git_status: BTreeMap::new(),

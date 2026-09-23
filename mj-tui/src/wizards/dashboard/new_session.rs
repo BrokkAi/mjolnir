@@ -98,9 +98,15 @@ impl DashboardState {
                         .map(|host| self.state.project_directories(host).to_vec())
                         .unwrap_or_default();
                     wizard.project_history_index = 0;
+                    // A local project starts as the repository `mj` was
+                    // started in; otherwise the most recent project.
+                    let launch = self
+                        .launch_project_directory
+                        .as_ref()
+                        .filter(|_| matches!(target, TargetTemplate::LocalBare));
                     if self.go.is_none()
                         && wizard.project_directory.is_empty()
-                        && let Some(directory) = wizard.project_history.first()
+                        && let Some(directory) = launch.or(wizard.project_history.first())
                     {
                         wizard.project_directory = directory.to_string_lossy().into_owned().into();
                     }

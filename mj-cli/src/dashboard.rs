@@ -453,6 +453,25 @@ pub(super) fn retain_workspace_sessions(
     Ok(())
 }
 
+/// The top level of the Git worktree `mj` was started in, or `None` outside
+/// one. The new-session wizard offers it as the local project.
+fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    let directory = std::env::current_dir().ok()?;
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&directory)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let top_level = String::from_utf8(output.stdout).ok()?;
+    let top_level = top_level.trim();
+    (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
+}
+
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
@@ -482,6 +501,12 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.restore_upgrade(resume).await;
     }
     let mut restart_executable = None;
+    if go.is_none() {
+        let launch = tokio::task::spawn_blocking(launch_repository_top_level)
+            .await
+            .context("find the repository mj was started in")?;
+        context.dashboard.set_launch_project_directory(launch);
+    }
     if let Some((mode, setup)) = go {
         let modes = tokio::task::spawn_blocking(crate::go::saved_workspace_modes)
             .await
