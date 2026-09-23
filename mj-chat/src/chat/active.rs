@@ -111,6 +111,7 @@ enum ChatIoUpdate {
     },
     Clipboard {
         generation: u64,
+        target: super::input_state::ClipboardTarget,
         result: std::result::Result<ClipboardContent, String>,
     },
     AttachmentFinished(AttachmentResult),
@@ -316,13 +317,21 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
         ChatIoUpdate::HistorySearchResults { generation, result } => {
             chat.apply_history_search_results(generation, result);
         }
-        ChatIoUpdate::Clipboard { result, .. } => match result {
-            Ok(content) => chat.handle_clipboard_content(content),
-            Err(error) => {
-                tracing::warn!(%error, "clipboard read failed and was shown in the UI");
-                chat.set_notice(format!("Paste failed: {error}"));
+        ChatIoUpdate::Clipboard {
+            generation,
+            target,
+            result,
+        } => {
+            if generation == chat.input_generation() && target == chat.clipboard_target() {
+                match result {
+                    Ok(content) => chat.handle_clipboard_content(content),
+                    Err(error) => {
+                        tracing::warn!(%error, "clipboard read failed and was shown in the UI");
+                        chat.set_notice(format!("Paste failed: {error}"));
+                    }
+                }
             }
-        },
+        }
         ChatIoUpdate::ToolDiffstats {
             tool_call_id,
             revision,
@@ -377,8 +386,12 @@ fn apply_session_view(state: &mut ChatState, view: Result<ManagedSessionView>) -
     if view.snapshot.is_some() {
         state.set_transcript_loading(false);
     }
+    if view.snapshot.is_none() {
+        state.set_prompt_images_supported(false);
+    }
     if let Some(snapshot) = view.snapshot {
         state.clear_context_supported = snapshot.operational.clear_context;
+        state.set_prompt_images_supported(snapshot.operational.accepts_prompt_images());
         state.apply_materialized(
             &snapshot.materialized,
             &snapshot.operational.config_options,
@@ -682,6 +695,11 @@ impl ActiveChat {
             state.clear_context_supported = snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.operational.clear_context);
+            state.set_prompt_images_supported(
+                snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.operational.accepts_prompt_images()),
+            );
             state.rebuild_command_choices();
             if let Some(harness_kind) = header
                 .harness_kind

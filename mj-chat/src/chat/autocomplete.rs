@@ -525,6 +525,7 @@ mod tests {
     #[test]
     fn attach_command_preserves_the_path_for_background_processing() {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("/attach photos/one.png".into());
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter)),
@@ -889,6 +890,7 @@ mod tests {
     #[test]
     fn goal_control_keeps_attached_drafts_and_bypasses_pending_plan_transition() {
         let mut chat = goal_chat(&["clear"]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("/goal clear ".into());
         assert!(chat.reserve_attachment(1));
         let draft = chat.input.clone();

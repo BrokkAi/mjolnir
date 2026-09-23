@@ -312,7 +312,7 @@ fn with_clipboard<T>(operation: impl FnOnce(&mut arboard::Clipboard) -> Result<T
     operation(clipboard.as_mut().expect("clipboard was initialized"))
 }
 
-/// Read the clipboard, preferring a PNG image whenever one is present.
+/// Read the clipboard, preferring an image whenever one is present.
 ///
 /// On WSL this invokes Windows PowerShell in a single-threaded apartment, as
 /// required by `System.Windows.Forms.Clipboard`, and captures PNG bytes on
@@ -335,10 +335,9 @@ pub fn read_text() -> Result<String> {
             ClipboardContent::Image(_) => bail!("clipboard contains an image, not text"),
         };
     }
-    with_clipboard(|clipboard| {
-        clipboard
-            .get_text()
-            .context("read text from system clipboard")
+    with_clipboard(|clipboard| match read_native_content(clipboard, true)? {
+        ClipboardContent::Text(text) => Ok(text),
+        ClipboardContent::Image(_) => unreachable!("text-only clipboard reader returned an image"),
     })
 }
 
@@ -354,21 +353,42 @@ pub fn write_text(text: &str) -> Result<()> {
     })
 }
 
+// Keep the platform access boundary small so format precedence can be tested
+// without replacing the user's actual desktop clipboard.
+trait NativeClipboard {
+    fn get_image(&mut self) -> std::result::Result<arboard::ImageData<'static>, arboard::Error>;
+    fn get_text(&mut self) -> std::result::Result<String, arboard::Error>;
+}
+
+impl NativeClipboard for arboard::Clipboard {
+    fn get_image(&mut self) -> std::result::Result<arboard::ImageData<'static>, arboard::Error> {
+        arboard::Clipboard::get_image(self)
+    }
+
+    fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
+        arboard::Clipboard::get_text(self)
+    }
+}
+
 fn read_native_clipboard() -> Result<ClipboardContent> {
-    with_clipboard(|clipboard| {
-        // arboard's image API returns raw RGBA pixels. Convert them to PNG so
-        // the ACP payload is portable and matches the WSL path.
-        if let Ok(image) = clipboard.get_image() {
-            return encode_native_image(image).map(ClipboardContent::Image);
-        }
-        let text = clipboard
-            .get_text()
-            .context("read text from system clipboard")?;
-        if text.is_empty() {
-            bail!("clipboard contains neither an image nor text");
-        }
-        Ok(ClipboardContent::Text(text))
-    })
+    with_clipboard(|clipboard| read_native_content(clipboard, false))
+}
+
+fn read_native_content(
+    clipboard: &mut impl NativeClipboard,
+    text_only: bool,
+) -> Result<ClipboardContent> {
+    // arboard returns raw RGBA pixels; the shared optimizer chooses the ACP encoding.
+    if !text_only && let Ok(image) = clipboard.get_image() {
+        return encode_native_image(image).map(ClipboardContent::Image);
+    }
+    let text = clipboard
+        .get_text()
+        .context("read text from system clipboard")?;
+    if !text_only && text.is_empty() {
+        bail!("clipboard contains neither an image nor text");
+    }
+    Ok(ClipboardContent::Text(text))
 }
 
 fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> {
@@ -546,6 +566,77 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeClipboard {
+        image: Option<arboard::ImageData<'static>>,
+        text: Option<String>,
+    }
+
+    impl NativeClipboard for FakeClipboard {
+        fn get_image(
+            &mut self,
+        ) -> std::result::Result<arboard::ImageData<'static>, arboard::Error> {
+            self.image.take().ok_or(arboard::Error::ContentNotAvailable)
+        }
+        fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
+            self.text.take().ok_or(arboard::Error::ContentNotAvailable)
+        }
+    }
+
+    fn clipboard_with_both_formats() -> FakeClipboard {
+        FakeClipboard {
+            image: Some(arboard::ImageData {
+                width: 1,
+                height: 1,
+                bytes: std::borrow::Cow::Owned(vec![255, 0, 0, 255]),
+            }),
+            text: Some("image caption".into()),
+        }
+    }
+
+    #[test]
+    fn native_mixed_clipboard_prefers_images_only_when_allowed() {
+        let mut clipboard = clipboard_with_both_formats();
+        let ClipboardContent::Image(image) = read_native_content(&mut clipboard, false).unwrap()
+        else {
+            panic!("image-capable paste must select the image representation");
+        };
+        assert!(image.mime_type.starts_with("image/"));
+        assert!(!image.data_base64.is_empty());
+        assert_eq!(clipboard.text.as_deref(), Some("image caption"));
+        let mut clipboard = clipboard_with_both_formats();
+        assert!(matches!(read_native_content(&mut clipboard, true).unwrap(),
+            ClipboardContent::Text(text) if text == "image caption"));
+        assert!(
+            clipboard.image.is_some(),
+            "text-only paste must not request image pixels"
+        );
+    }
+
+    #[test]
+    fn native_text_only_clipboard_and_missing_text_keep_their_meaning() {
+        let mut clipboard = FakeClipboard {
+            image: None,
+            text: Some("ordinary text".into()),
+        };
+        assert!(
+            matches!(read_native_content(&mut clipboard, false).unwrap(),
+            ClipboardContent::Text(text) if text == "ordinary text")
+        );
+        let mut clipboard = clipboard_with_both_formats();
+        clipboard.text = None;
+        let error = read_native_content(&mut clipboard, true).unwrap_err();
+        assert!(format!("{error:#}").contains("read text from system clipboard"));
+        assert!(clipboard.image.is_some());
+    }
+
+    #[test]
+    fn invalid_native_image_is_reported_without_silently_selecting_text() {
+        let mut clipboard = clipboard_with_both_formats();
+        clipboard.image.as_mut().unwrap().bytes = std::borrow::Cow::Owned(Vec::new());
+        assert!(read_native_content(&mut clipboard, false).is_err());
+        assert_eq!(clipboard.text.as_deref(), Some("image caption"));
+    }
 
     #[cfg(unix)]
     #[test]

@@ -628,6 +628,14 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Missing initialization advertises no support for image prompts.
+    #[must_use]
+    pub fn accepts_prompt_images(&self) -> bool {
+        self.agent_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.prompt_capabilities.image)
+    }
+
     /// Targeted turn control was introduced with relay protocol 17.
     #[must_use]
     pub fn supports_targeted_turn_control(&self) -> bool {

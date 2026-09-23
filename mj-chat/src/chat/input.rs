@@ -343,6 +343,7 @@ mod tests {
     #[test]
     fn control_k_and_control_y_round_trip_a_line_holding_an_image_marker() {
         let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
         chat.set_input("before\nafter".into());
         chat.handle_key(ctrl('a'));
         assert!(chat.reserve_attachment(0));

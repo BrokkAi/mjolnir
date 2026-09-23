@@ -395,6 +395,30 @@ Inside history search, `Ctrl+R` or `â†‘` selects an older match, `Ctrl+S` or `â†
 
 Toggling the transcript between rendered and raw text (`prefix+t`) and starting or stopping dictation (`prefix+m`) are prefix commands rather than composer-only keys; see [Prefix key](#prefix-key). They act on whichever session's conversation is visible, including from a pane other than Prompt.
 
+## Clipboard images
+
+`Ctrl+V` reads the clipboard on the machine running the terminal client. `Cmd+V`
+works too if your terminal forwards that key to Mjolnir. When the active agent
+advertises image support, Mjolnir prefers an image over text and inserts an
+editable `[image N]` marker. Delete the marker to remove the attachment. `/attach <path>` adds an image from that machine's filesystem under the same capability
+rule.
+
+Agents that have not advertised image support, question answer fields, and
+history search receive only the clipboard's text representation. If none is
+available, the notice includes the clipboard error. Text pasted by your terminal
+always stays text. If image support disappears, existing image drafts are kept;
+remove their markers or wait for support to return before sending. `prefix+m`
+remains the dictation shortcut.
+
+Native macOS and Windows use their system clipboards. Linux needs access to a
+working X11 or Wayland clipboard; a headless shell alone cannot read your desktop
+clipboard. WSL uses Windows PowerShell to read the Windows clipboard. Over SSH,
+Mjolnir runs on the remote machine and cannot read your laptop's clipboard image
+through an ordinary text paste. Run the terminal client locally when you need
+local image paste into a remote session. Terminal and tmux key bindings can
+intercept clipboard shortcuts; configure them to forward the key. OSC 52 copy
+support does not provide image clipboard reads.
+
 ## Shell commands
 
 Start a message with `!` to run the remainder through `bash -lc` inside the selected session's target and workspace:

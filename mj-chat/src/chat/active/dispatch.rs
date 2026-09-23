@@ -94,6 +94,12 @@ impl ActiveChat {
             ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();
+                if !images.is_empty() && !self.state.prompt_images_supported {
+                    restore_unsent_prompt(&mut self.state, text, images);
+                    self.state
+                        .set_notice(super::super::input_state::IMAGE_CAPABILITY_NOTICE);
+                    return ChatEventOutcome::Handled;
+                }
                 let Some(command_id) = self.command_id("prompt") else {
                     restore_unsent_prompt(&mut self.state, text, images);
                     return ChatEventOutcome::Handled;
@@ -289,6 +295,7 @@ impl ActiveChat {
                 let updates = self.chat_io_tx.clone();
                 let text_only = self.state.clipboard_is_text_only();
                 let generation = self.state.input_generation();
+                let target = self.state.clipboard_target();
                 tokio::spawn(async move {
                     let result = match tokio::task::spawn_blocking(move || {
                         if text_only {
@@ -304,8 +311,11 @@ impl ActiveChat {
                         Ok(result) => result,
                         Err(error) => Err(format!("clipboard task failed: {error}")),
                     };
-                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard { generation, result })
-                    {
+                    if let Err(error) = updates.send(ChatIoUpdate::Clipboard {
+                        generation,
+                        target,
+                        result,
+                    }) {
                         tracing::debug!(%error, "clipboard result dropped because the chat closed");
                     }
                 });

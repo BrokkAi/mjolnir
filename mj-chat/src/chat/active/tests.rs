@@ -2769,3 +2769,260 @@ fn earlier_history_ignores_closed_readers_and_allows_retry_without_losing_the_dr
         vec![Line::raw("old message")]
     );
 }
+
+#[test]
+fn clipboard_capability_follows_initialized_session_views() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    assert!(chat.clipboard_is_text_only());
+    let mut view = managed_view(MaterializedSession::empty("clipboard-capabilities"));
+    for (wire, text_only) in [
+        (serde_json::json!({}), true),
+        (
+            serde_json::json!({"promptCapabilities": {"image": true}}),
+            false,
+        ),
+        (
+            serde_json::json!({"promptCapabilities": {"image": false}}),
+            true,
+        ),
+    ] {
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .agent_capabilities = Some(Box::new(serde_json::from_value(wire).unwrap()));
+        apply_session_view(&mut chat, Ok(view.clone()));
+        assert_eq!(chat.clipboard_is_text_only(), text_only);
+    }
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = None;
+    apply_session_view(&mut chat, Ok(view));
+    assert!(chat.clipboard_is_text_only());
+}
+
+fn clipboard_test_chat() -> ActiveChat {
+    let fixture = mj_client::session::replacement_session_test_fixture("clipboard-admission", 72);
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    // Hold processing at the queue boundary so tests control completion order
+    // and never write to an actual session's attachment store.
+    chat.attachment_tasks_in_flight = MAX_ATTACHMENT_TASKS;
+    chat
+}
+
+fn clipboard_result(chat: &ActiveChat, content: ClipboardContent) -> ChatIoUpdate {
+    ChatIoUpdate::Clipboard {
+        generation: chat.state.input_generation(),
+        target: chat.state.clipboard_target(),
+        result: Ok(content),
+    }
+}
+
+#[tokio::test]
+async fn clipboard_completion_requires_image_support_and_preserves_plain_text() {
+    let mut chat = clipboard_test_chat();
+    assert!(!chat.state.prompt_images_supported);
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(super::super::tests::test_image()),
+    ));
+    assert!(chat.draft().is_empty());
+    assert!(chat.attachment_queue.is_empty());
+    assert!(
+        chat.state
+            .notice()
+            .unwrap()
+            .contains("advertised image support")
+    );
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Text("ordinary text".into()),
+    ));
+    assert_eq!(chat.draft(), "ordinary text");
+
+    chat.state.set_prompt_images_supported(true);
+    let image = super::super::tests::test_image();
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(image.clone()),
+    ));
+    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    assert_eq!(chat.state.input, "ordinary text[image 1]");
+    chat.apply_attachment_result(AttachmentResult {
+        sequence,
+        command: None,
+        result: Ok(image.clone()),
+    });
+    assert_eq!(chat.state.input_images[0].image, image);
+    assert_eq!(
+        chat.state.submit_input(),
+        ChatAction::Prompt("ordinary text[image 1]".into())
+    );
+    assert_eq!(chat.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn stale_clipboard_results_do_not_cross_capability_or_input_context_changes() {
+    use super::super::test_support::{ctrl, key};
+    for change in 0..5 {
+        let mut chat = clipboard_test_chat();
+        chat.state.set_prompt_images_supported(true);
+        let pending = clipboard_result(
+            &chat,
+            ClipboardContent::Image(super::super::tests::test_image()),
+        );
+        match change {
+            0 => chat.state.set_prompt_images_supported(false),
+            1 => {
+                chat.state.handle_key(ctrl('r'));
+            }
+            2 => {
+                chat.state
+                    .handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL));
+            }
+            3 => {
+                chat.state.turn_control_dialog_open = true;
+            }
+            _ => {
+                chat.state.handle_key(key(KeyCode::Char('x')));
+            }
+        }
+        let before = chat.state.draft_payload();
+        chat.apply_io_update(pending);
+        assert_eq!(chat.state.draft_payload(), before);
+        assert!(chat.attachment_queue.is_empty());
+        assert!(!chat.paste_in_flight);
+    }
+}
+
+#[tokio::test]
+async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_send() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    let image = super::super::tests::test_image();
+    chat.apply_io_update(clipboard_result(
+        &chat,
+        ClipboardContent::Image(image.clone()),
+    ));
+    let (sequence, _, _) = chat.attachment_queue.pop_front().unwrap();
+    chat.state.set_prompt_images_supported(false);
+    chat.apply_attachment_result(AttachmentResult {
+        sequence,
+        command: None,
+        result: Ok(image.clone()),
+    });
+    let draft = chat.state.draft_payload();
+    assert_eq!(chat.state.submit_input(), ChatAction::None);
+    assert_eq!(chat.state.draft_payload(), draft);
+    chat.state.set_prompt_images_supported(true);
+    assert!(matches!(chat.state.submit_input(), ChatAction::Prompt(_)));
+    assert_eq!(chat.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn clipboard_errors_keep_the_draft_and_report_the_underlying_failure() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_input("keep me".into());
+    chat.apply_io_update(ChatIoUpdate::Clipboard {
+        generation: chat.state.input_generation(),
+        target: chat.state.clipboard_target(),
+        result: Err("clipboard provider disconnected".into()),
+    });
+    assert_eq!(chat.draft(), "keep me");
+    let notice = chat.state.notice().unwrap();
+    assert!(notice.contains("clipboard provider disconnected"));
+    assert!(notice.contains("only clipboard text"));
+}
+
+#[tokio::test]
+async fn opening_a_chat_uses_the_initialized_image_capability() {
+    let fixture = mj_client::session::replacement_session_test_fixture("clipboard-open", 1);
+    let mut view = managed_view(MaterializedSession::empty("clipboard-open"));
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .agent_capabilities = Some(Box::new(
+        serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}})).unwrap(),
+    ));
+    fixture.replacement_view.send_replace(view);
+    let session = fixture.control.session("clipboard-open").await.unwrap();
+    let chat = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    assert!(!chat.state.clipboard_is_text_only());
+}
+
+#[tokio::test]
+async fn a_question_opened_during_clipboard_read_receives_no_stray_content() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    for content in [
+        ClipboardContent::Text("wrong field".into()),
+        ClipboardContent::Image(super::super::tests::test_image()),
+    ] {
+        let pending = clipboard_result(&chat, content);
+        chat.state.restore_elicitation(ElicitationRequest {
+            id: "question".into(),
+            message: "Answer".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        });
+        assert!(chat.state.clipboard_is_text_only());
+        chat.apply_io_update(pending);
+        assert!(chat.state.input_images.is_empty());
+        assert!(chat.state.input.is_empty());
+        assert!(chat.attachment_queue.is_empty());
+        chat.state.elicitation = None;
+    }
+}
+
+#[tokio::test]
+async fn removed_or_failed_pending_attachments_do_not_reappear() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    for result in [
+        Ok(super::super::tests::test_image()),
+        Err("invalid image encoding".into()),
+    ] {
+        assert!(chat.state.reserve_attachment(1));
+        chat.state.clear_input();
+        chat.apply_attachment_result(AttachmentResult {
+            sequence: 1,
+            command: None,
+            result,
+        });
+        assert!(chat.state.input_images.is_empty());
+        assert!(chat.state.input.is_empty());
+    }
+    assert!(chat.state.reserve_attachment(2));
+    chat.apply_attachment_result(AttachmentResult {
+        sequence: 2,
+        command: None,
+        result: Err("invalid image encoding".into()),
+    });
+    assert!(
+        chat.state
+            .notice()
+            .unwrap()
+            .contains("invalid image encoding")
+    );
+    assert_eq!(chat.state.submit_input(), ChatAction::None);
+}

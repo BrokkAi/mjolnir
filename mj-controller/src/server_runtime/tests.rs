@@ -287,72 +287,30 @@ fn a_phone_prompt_becomes_its_text_then_its_images() {
 
 #[test]
 fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
-    use agent_client_protocol::schema::v1::AgentCapabilities;
-    use mj_core::relay::{RelayExecutionState, RelayOperationalState};
+    use mj_core::relay::RelaySnapshot;
 
-    let operational = |agent_capabilities| RelayOperationalState {
-        continuation: Default::default(),
-        relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
-        native_agents: Vec::new(),
-        steering: None,
-        cancelling_prompt_id: None,
-        clear_context: false,
-        clear_context_started_at_ms: None,
-        native_agent_count: 0,
-        expected_continuation: None,
-        inferred_idle_since_ms: None,
-        goal: Default::default(),
-        capacity_retry: None,
-        activity_turn_started_at_ms: None,
-        session_id: "session-1".into(),
-        store_id: None,
-        idle_since_ms: None,
-        execution: RelayExecutionState::Idle,
-        latest_ordinal: 0,
-        latest_digest: String::new(),
-        acknowledged_through: 0,
-        acknowledged_digest: String::new(),
-        recovery_floor_ordinal: 0,
-        recovery_floor_digest: String::new(),
-        native_session_id: None,
-        native_continuity_lost: false,
-        checkpoint_only: false,
-        acp_ready: None,
-        agent_capabilities,
-        agent_info: None,
-        steering_supported: None,
-        config_options: Vec::new(),
-        modes: None,
-        available_commands: Vec::new(),
-        config: std::collections::BTreeMap::new(),
-        active_prompt: None,
-        queued_prompts: Vec::new(),
-        active_user_shells: Vec::new(),
-        active_agent_terminals: Vec::new(),
-        checkpoint_barrier: None,
-        checkpoint_ready: None,
-        last_acp_activity_at_ms: None,
-        current_step_started_at_ms: None,
-        foreground_tool_started_at_ms: None,
-        tools_in_flight: Vec::new(),
-        activity: None,
-        harness_turn: None,
-        last_harness_turn_started_ordinal: None,
-        background_commands: Vec::new(),
-        background_work_known: None,
-    };
-
-    // A session whose agent has not answered `initialize` has advertised
-    // nothing, so the phone is not offered a control the agent may refuse.
-    assert!(!agent_accepts_prompt_images(&operational(None)));
-    assert!(!agent_accepts_prompt_images(&operational(Some(Box::new(
-        AgentCapabilities::default()
-    )))));
-    let mut capabilities = AgentCapabilities::default();
-    capabilities.prompt_capabilities.image = true;
-    assert!(agent_accepts_prompt_images(&operational(Some(Box::new(
-        capabilities
-    )))));
+    let mut snapshot = RelaySnapshot::new("image-capability-poc".into());
+    assert!(!snapshot.operational_state().accepts_prompt_images());
+    // ACP wire shapes, including omitted optional capabilities. Replacing the
+    // advertisement must also revoke an earlier positive result.
+    for (wire, supported) in [
+        (serde_json::json!({}), false),
+        (
+            serde_json::json!({"promptCapabilities": {"image": false}}),
+            false,
+        ),
+        (
+            serde_json::json!({"promptCapabilities": {"image": true}}),
+            true,
+        ),
+        (serde_json::json!({"promptCapabilities": {}}), false),
+    ] {
+        snapshot.agent_capabilities = Some(Box::new(serde_json::from_value(wire).unwrap()));
+        assert_eq!(
+            snapshot.operational_state().accepts_prompt_images(),
+            supported
+        );
+    }
 }
 
 /// Issue #1025: while the daemon has no live view of a worker, every session
