@@ -11,6 +11,10 @@ mj [--instance <name>] [--workspace <name>] [command]
 
 `--workspace` is global and selects a named workspace for workspace-scoped commands. `--instance` (`-i`, or `MJ_INSTANCE`) is also global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
 
+`mj acp` is the one hidden command with a public purpose: it is the ACP agent a
+program starts instead of a coding harness. It is documented in
+[ACP agent](/acp-agent/).
+
 ## Open a surface
 
 | Command | Purpose |

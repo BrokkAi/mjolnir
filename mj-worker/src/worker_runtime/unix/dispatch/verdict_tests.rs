@@ -6,6 +6,42 @@ use tracing::instrument::WithSubscriber;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
+/// tracing-core caches each callsite's interest process-wide. While at most
+/// one dispatcher is registered it asks only the current thread's default, so
+/// a parallel test reaching a Jev callsite first without a subscriber caches
+/// it as `never`, and this file's scoped log capture silently loses the line.
+/// A global subscriber that answers `sometimes` keeps every callsite asking
+/// the scoped subscriber per event.
+struct DeferToScoped;
+
+impl tracing::Subscriber for DeferToScoped {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn scoped_log_capture_sees_every_callsite() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        tracing::subscriber::set_global_default(DeferToScoped)
+            .expect("no other global subscriber in worker unit tests");
+    });
+}
+
 #[derive(Clone, Copy)]
 enum WhileClassifying {
     Wait,
@@ -125,6 +161,7 @@ async fn completed_turn_response(
         endpoint,
     })
     .unwrap();
+    scoped_log_capture_sees_every_callsite();
     let log_path = temp.path().join("worker.log");
     let log = std::fs::File::create(&log_path).unwrap();
     let subscriber = tracing_subscriber::fmt()
@@ -327,4 +364,54 @@ async fn uncertain_and_failed_replied_verdicts_preserve_activity_and_schedule_re
     completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.5, 200).await;
     completed_turn_response(WhileClassifying::KeepCurrent, "unclear", 4, 0.95, 200).await;
     completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.95, 503).await;
+}
+
+/// Sends one classification to a closed port, logging through whatever
+/// dispatcher is current on the calling thread.
+fn ask_once_without_a_classifier() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let client = VerdictClient::new(VerdictSource::Direct {
+            key: "k".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+        })
+        .unwrap();
+        let evidence = mj_core::activity::verdict::TurnEvidence {
+            harness: mj_core::config::HarnessKind::Codex,
+            phase: mj_core::activity::verdict::TurnPhase::Replied,
+            silent_for_s: 0,
+            tools_in_flight: vec![],
+            transcript_summary: String::new(),
+            background_commands: 0,
+            queued_commands: 0,
+            user_prompt_tail: String::new(),
+            assistant_text_tail: String::new(),
+        };
+        let _ = client.ask_logged("s", 1, &evidence).await;
+    });
+}
+
+/// The CI flake in order: this test's dispatcher is the only one registered,
+/// then a thread with no subscriber reaches the Jev callsite first.
+#[test]
+fn scoped_log_capture_keeps_a_callsite_first_reached_without_a_subscriber() {
+    scoped_log_capture_sees_every_callsite();
+    let temp = tempfile::tempdir().unwrap();
+    let log_path = temp.path().join("worker.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(crate::DEFAULT_WORKER_LOG_FILTER)
+        .with_writer(move || log.try_clone().unwrap())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    std::thread::spawn(ask_once_without_a_classifier)
+        .join()
+        .unwrap();
+    tracing::dispatcher::with_default(&dispatch, ask_once_without_a_classifier);
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("Jev classification requested"), "{log}");
 }

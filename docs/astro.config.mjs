@@ -122,6 +122,7 @@ export default defineConfig({
           items: [
             { label: 'CLI reference', slug: 'cli-reference' },
             { label: 'HTTP API reference', slug: 'api-reference' },
+            { label: 'ACP agent', slug: 'acp-agent' },
             { label: 'Security boundaries', slug: 'security' },
             { label: 'Troubleshooting', slug: 'troubleshooting' },
           ],
