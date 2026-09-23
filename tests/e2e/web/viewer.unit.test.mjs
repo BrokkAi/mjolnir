@@ -1037,3 +1037,43 @@ test('path suggestions abort superseded requests and drop stale replies', async 
   assert.equal(requests.length, 4);
   assert.equal(requests[3].body.prefix, '/work/repos/');
 });
+
+test('a signed-out load shows the login form without requesting the snapshot', async () => {
+  // Finding G-3: learning "signed out" from a 401 on /api/snapshot put a
+  // console error on every load of the login page.
+  const run = async statusResponse => {
+    const calls = [];
+    const context = vm.createContext({
+      upgradeAwareFetch: async url => {
+        calls.push(url);
+        if (statusResponse instanceof Error) throw statusResponse;
+        return statusResponse;
+      },
+      refresh: async () => { calls.push('refresh'); return true; },
+      applyRoute: () => calls.push('applyRoute'),
+      showLogin: () => calls.push('showLogin'),
+    });
+    vm.runInContext(
+      sourceBetween('async function knownSignedOut()', 'function renderQueue('),
+      context,
+    );
+    await vm.runInContext('restoreRoute()', context);
+    return calls;
+  };
+  const json = body => ({ ok: true, json: async () => body });
+  assert.deepEqual(await run(json({ signed_in: false })), ['/auth/session', 'showLogin']);
+  assert.deepEqual(
+    await run(json({ signed_in: true })),
+    ['/auth/session', 'refresh', 'applyRoute'],
+  );
+  // A server without the route, or no answer at all, falls back to the
+  // snapshot request, which still reaches the login form on a 401.
+  assert.deepEqual(
+    await run({ ok: false, json: async () => ({}) }),
+    ['/auth/session', 'refresh', 'applyRoute'],
+  );
+  assert.deepEqual(
+    await run(new Error('offline')),
+    ['/auth/session', 'refresh', 'applyRoute'],
+  );
+});
