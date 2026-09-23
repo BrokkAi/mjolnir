@@ -2728,9 +2728,8 @@ fn opening_a_session_shown_elsewhere_is_answered_by_the_pane_that_has_it() {
     assert_eq!(dashboard.pane_session(second), Some("session-2"));
 }
 
-/// A split that would leave either half too small to use is refused and
-/// changes nothing. The controller turns the refusal into the notice "Not
-/// enough room to split".
+/// A split that would leave either half too small to use is refused, leaves
+/// the layout unchanged, and says why on the notice bar.
 #[test]
 fn a_split_with_no_room_is_refused_and_changes_nothing() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2744,6 +2743,32 @@ fn a_split_with_no_room_is_refused_and_changes_nothing() {
     assert!(refused.is_none());
     assert_eq!(dashboard.focused_pane(), before);
     assert_eq!(dashboard.conversation_layout.pane_count(), 1);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(crate::SPLIT_REFUSED_NOTICE)
+    );
+}
+
+/// Launch finding D-2: the refusal notice describes a failed split, so a
+/// later split that succeeds must take it off the bar.
+#[test]
+fn a_successful_split_clears_the_earlier_no_room_notice() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.set_current_session(Some("session-1"));
+    drawn(&mut dashboard, 80, 30);
+    assert!(
+        dashboard
+            .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+            .is_none()
+    );
+    assert!(dashboard.notice().is_some());
+
+    drawn(&mut dashboard, 200, 60);
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+        .expect("a wide frame has room for two panes");
+
+    assert_eq!(dashboard.notice(), None);
 }
 
 /// Moving the focus between panes is a layout change the controller has to

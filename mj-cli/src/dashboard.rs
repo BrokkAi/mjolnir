@@ -1013,8 +1013,6 @@ impl DashboardContext {
         }
         let browse = self.dashboard.browse_pane();
         let Some(new_pane) = self.dashboard.split_conversation_pane(browse, direction) else {
-            self.dashboard
-                .set_notice("Not enough room to split this pane.");
             return;
         };
         self.pin_session_in(session_id, browse);
@@ -1034,8 +1032,6 @@ impl DashboardContext {
             .split_conversation_pane(target, direction)
             .is_none()
         {
-            self.dashboard
-                .set_notice("Not enough room to split this pane.");
             return;
         }
         self.selection.clear();
