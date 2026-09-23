@@ -1,4 +1,5 @@
 //! Normalized ACP data and controls shared by workers and control surfaces.
+pub mod claude_result;
 #[doc(hidden)]
 pub mod dialect;
 pub mod step_clock;
@@ -7,6 +8,7 @@ mod terminal_compat;
 use crate::elicitation::*;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::*;
+pub use claude_result::{ClaudeResultUsage, ClaudeTurnResult};
 use dialect::grok;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -548,6 +550,10 @@ pub enum RuntimeEvent {
         task_id: String,
         can_stop: bool,
     },
+    /// Claude Code reported the end of one model cycle. It travels on the
+    /// same ordered stream as `SessionUpdate`, so everything the adapter sent
+    /// before the result is recorded before it.
+    ClaudeTurnResult(ClaudeTurnResult),
     ElicitationRequested {
         request: ElicitationRequest,
     },

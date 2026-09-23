@@ -202,10 +202,14 @@ pub(super) fn session_capabilities(
             && session.lifecycle == ViewerLifecycleCategory::Live,
         prompt: live && attached && !mutation_busy,
         run_shell: live && attached && !mutation_busy,
+        // A turn Claude Code started on its own after a background task can
+        // be stopped too. A Codex turn of that kind is a native goal, which
+        // has its own controls.
         interrupt_turn: live
             && !mutation_busy
             && operational.is_some_and(|state| {
                 state.active_prompt.is_some()
+                    || (state.harness_turn.is_some() && !state.goal.active())
                     || state.capacity_retry.is_some()
                     || state
                         .continuation

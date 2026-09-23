@@ -176,6 +176,14 @@ impl ChatState {
         self.prompt_in_flight
     }
 
+    /// Whether a turn Claude Code started on its own is running, which Stop
+    /// interrupts. A Codex turn of this kind is a native goal, which has its
+    /// own controls.
+    pub(crate) fn harness_turn_stoppable(&self) -> bool {
+        self.session_activity.harness_turn_started_at_ms.is_some()
+            && !self.session_activity.pursuing_goal
+    }
+
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
         if self.targeted_turn_control_supported
             && self.prompt_in_flight

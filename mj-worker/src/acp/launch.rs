@@ -118,12 +118,15 @@ pub(super) fn session_request_meta(
     if spec.harness != HarnessKind::Claude {
         return None;
     }
+    // The SDK `result` message ends every model cycle. The worker ends a
+    // prompt at the result that answered it instead of waiting for the
+    // adapter's reply, which the adapter holds while background work runs.
     let mut claude_code = serde_json::Map::from_iter([(
         "emitRawSDKMessages".to_owned(),
-        serde_json::json!([{
-            "type": "system",
-            "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE,
-        }]),
+        serde_json::json!([
+            {"type": "system", "subtype": CLAUDE_BACKGROUND_TASKS_CHANGED_SUBTYPE},
+            {"type": "result"},
+        ]),
     )]);
     let mut options = serde_json::Map::from_iter([(
         "perTaskStopAffordance".to_owned(),

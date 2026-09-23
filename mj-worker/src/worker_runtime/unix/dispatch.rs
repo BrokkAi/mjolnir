@@ -131,6 +131,7 @@ async fn run_relay_coordinator_with_verdict(
                     if record_queued_runtime_events(
                         &relay,
                         &mut in_flight,
+                        &commands,
                         &mut events,
                         &mut session_configured,
                         &mut user_shells,
@@ -162,6 +163,7 @@ async fn run_relay_coordinator_with_verdict(
                 if record_runtime_event_batch(
                     &relay,
                     &mut in_flight,
+                    &commands,
                     event,
                     &mut events,
                     &mut session_configured,
@@ -269,9 +271,11 @@ pub(crate) async fn run_relay_coordinator(
 /// admitting a checkpoint barrier. A command event may itself materialize
 /// several durable observations, and queued notification events belong to
 /// the cut ahead of any waiting barrier.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_runtime_event_batch(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     mut first: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
@@ -280,13 +284,20 @@ pub(crate) async fn record_runtime_event_batch(
 ) -> Result<bool> {
     prepare_kimi_runtime_event(kimi_tasks, relay, &mut first).await?;
     track_user_shell_completion(user_shells, &first);
-    if record_runtime_event_and_track_configuration(relay, in_flight, first, session_configured)? {
+    if record_runtime_event_and_track_configuration(
+        relay,
+        in_flight,
+        commands,
+        first,
+        session_configured,
+    )? {
         return Ok(true);
     }
     let queued = events.len();
     record_queued_runtime_events(
         relay,
         in_flight,
+        commands,
         events,
         session_configured,
         user_shells,
@@ -296,9 +307,11 @@ pub(crate) async fn record_runtime_event_batch(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_queued_runtime_events(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
@@ -313,6 +326,7 @@ pub(crate) async fn record_queued_runtime_events(
                 if record_runtime_event_and_track_configuration(
                     relay,
                     in_flight,
+                    commands,
                     event,
                     session_configured,
                 )? {
@@ -348,6 +362,7 @@ pub(crate) fn track_user_shell_completion(
 pub(crate) fn record_runtime_event_and_track_configuration(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     event: RuntimeEvent,
     session_configured: &mut bool,
 ) -> Result<bool> {
@@ -361,12 +376,13 @@ pub(crate) fn record_runtime_event_and_track_configuration(
         *session_configured = false;
     }
     *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
-    record_runtime_event(relay, in_flight, event)
+    record_runtime_event(relay, in_flight, commands, event)
 }
 
 pub(crate) fn record_runtime_event(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
     event: RuntimeEvent,
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
@@ -453,6 +469,11 @@ pub(crate) fn record_runtime_event(
         }
         RuntimeEvent::ClaudeAsyncTaskControlChanged { task_id, can_stop } => {
             relay.claude_async_task_control_changed(task_id, can_stop)?;
+        }
+        RuntimeEvent::ClaudeTurnResult(result) => {
+            if !nominate_claude_prompt_result(in_flight, commands, &result) {
+                relay.claude_turn_result(&result)?;
+            }
         }
         RuntimeEvent::ElicitationRequested { request } => {
             relay.record_observation(RelayObservation::ElicitationRequested { request })?;
@@ -672,6 +693,48 @@ pub(crate) fn record_runtime_event(
         }
     }
     Ok(stopped)
+}
+
+/// Hand a Claude Code result that answers the running prompt to the prompt
+/// loop, and say whether it was handed over.
+///
+/// The loop ends the prompt unless its own state says this cycle is not the
+/// prompt's last, and it reports the completion itself. The loop, not this
+/// coordinator, emits `PromptFinished`, so a prompt still completes exactly
+/// once however the result and the adapter's reply race. Everything the
+/// adapter sent before the result is already recorded, because results travel
+/// on the same ordered stream as session updates. A result that is not handed
+/// over ends a turn Claude Code started on its own, if one is open.
+fn nominate_claude_prompt_result(
+    in_flight: &BTreeMap<String, RelayCommand>,
+    commands: &mpsc::Sender<CommandRequest>,
+    result: &mj_core::acp::ClaudeTurnResult,
+) -> bool {
+    let running_prompt = in_flight
+        .iter()
+        .find(|(_, command)| command.kind() == mj_core::relay::RelayCommandKind::Prompt)
+        .map(|(command_id, _)| command_id.clone());
+    if let (Some(request_id), Some(stop_reason)) = (running_prompt, result.prompt_stop_reason()) {
+        match commands.try_reserve() {
+            Ok(permit) => {
+                permit.send(CommandRequest::ReleasePrompt {
+                    request_id,
+                    received: result.received,
+                    stop_reason,
+                    usage: Some(result.usage.token_usage()),
+                });
+                return true;
+            }
+            // The adapter's reply still ends the prompt, as it did before
+            // results were read; it is only later while background work runs.
+            Err(error) => tracing::warn!(
+                %request_id,
+                %error,
+                "could not hand a Claude result to the prompt loop; the adapter's reply will end the prompt"
+            ),
+        }
+    }
+    false
 }
 
 pub(crate) fn interrupt_in_flight(

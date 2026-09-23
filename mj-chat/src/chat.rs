@@ -663,8 +663,8 @@ pub struct ChatState {
     detailed_activity_clocks: bool,
     activity_reachable: bool,
     /// Whether a prompt of ours is in flight. `phase` also goes Running for a
-    /// turn the harness started on its own, which the relay refuses to cancel,
-    /// so cancellation and the composer's cancel hint key on this instead.
+    /// turn the harness started on its own, so cancellation and the
+    /// composer's cancel hint key on this and on `harness_turn_stoppable`.
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
     targeted_turn_control_supported: bool,

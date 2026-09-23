@@ -896,6 +896,7 @@ pub(crate) fn prompt_bottom_queue_control(chat: &ChatState) -> Option<Line<'stat
         labels.push(format!("{} queued", chat.queued_prompts.len()));
     }
     if chat.prompt_in_flight()
+        || chat.harness_turn_stoppable()
         || (chat.session_activity.capacity_retry.is_some()
             || chat.session_activity.quota_recovery.is_some())
     {

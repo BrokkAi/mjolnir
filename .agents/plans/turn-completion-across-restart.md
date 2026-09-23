@@ -340,6 +340,16 @@ instead of looking like ordinary work for hours.
   mistake as #1025, where a missing fact was filled in with a default.
   Date/Author: 2026-09-18, plan author.
 
+- Decision: for Claude, the definition of a turn used here ("one `session/prompt`
+  and everything until its reply") is revised by
+  `.agents/plans/claude-turns-end-at-the-sdk-result.md` and
+  `.agents/plans/claude-turn-boundary-follow-ups.md`: a Claude prompt now ends
+  at the SDK `result` of the cycle that answered it, because the adapter holds
+  its reply while background subagents run. The alternative rejected above
+  (completing on the origin marker) stays rejected; those plans use the result
+  message, which Claude Code sends for every cycle. Codex is unchanged.
+  Date/Author: 2026-09-23, Opus (implementation of those plans).
+
 ## Outcomes & Retrospective
 
 Both milestones landed and were validated live on 2026-09-18 in instance
