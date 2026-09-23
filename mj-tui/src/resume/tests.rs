@@ -833,6 +833,19 @@ fn slash_moves_focus_to_the_search_box_and_typing_narrows_by_name() {
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 }
 
+/// C-12: when a state filter empties the Live list, the message names the
+/// filter rather than saying nothing is running.
+#[test]
+fn an_empty_filtered_live_list_names_the_filter() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.show_resume_dialog(1, Vec::new());
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert!(rows(&dashboard).is_empty(), "no session is blocked");
+    let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rendered.contains("No blocked sessions"), "{rendered}");
+    assert!(!rendered.contains("No running sessions"), "{rendered}");
+}
+
 /// C-6: Enter in the search box does what Enter on the list does. On the Live
 /// tab that jumps to the matched session and closes the dialog.
 #[test]

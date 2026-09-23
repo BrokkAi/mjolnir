@@ -1961,7 +1961,11 @@ pub(crate) fn render_resume_dialog(
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
             (ResumeTab::Import, true, _) => "Scanning native sessions…".to_owned(),
-            (ResumeTab::Live, _, true) => "No running sessions".to_owned(),
+            // Under a state filter the filter emptied the list, so say which.
+            (ResumeTab::Live, _, true) => match dialog.live_state {
+                Some(state) => format!("No {} sessions", state.label()),
+                None => "No running sessions".to_owned(),
+            },
             (ResumeTab::Hel, _, true) => "No stopped Mjolnir sessions".to_owned(),
             (ResumeTab::Import, _, true) => "No importable sessions".to_owned(),
             (ResumeTab::Archive, _, true) => "No archived sessions".to_owned(),
