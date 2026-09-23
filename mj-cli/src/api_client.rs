@@ -35,10 +35,32 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
 /// that reaches its deadline answers `timeout` rather than failing the client.
 const WAIT_SLACK: Duration = Duration::from_secs(30);
 
+/// How a request the daemon refused with 429 (all of its concurrent action
+/// slots are taken) is retried. A 429 is answered before the daemon admits
+/// the action, so sending it again cannot repeat any work.
+#[derive(Debug, Clone, Copy)]
+struct BusyRetry {
+    first_delay: Duration,
+    max_delay: Duration,
+    /// How long to keep retrying before reporting the refusal.
+    limit: Duration,
+}
+
+impl BusyRetry {
+    /// Session creation holds a slot until provisioning ends, which over SSH
+    /// takes minutes, so the client waits about as long as one provision.
+    const DEFAULT: Self = Self {
+        first_delay: Duration::from_secs(2),
+        max_delay: Duration::from_secs(15),
+        limit: Duration::from_secs(600),
+    };
+}
+
 /// A client for one daemon's API.
 pub(crate) struct ApiClient {
     base_url: String,
     token: String,
+    busy_retry: BusyRetry,
     http: reqwest::Client,
 }
 
@@ -88,6 +110,14 @@ impl ApiClient {
             token,
             http,
         }
+}
+
+            busy_retry: BusyRetry::DEFAULT,
+            http: reqwest::Client::builder()
+                .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .context("build the API HTTP client")?,
+        })
     }
 
     pub(crate) fn base_url(&self) -> &str {
@@ -123,7 +153,43 @@ impl ApiClient {
     /// One request, separating "the API refused it" from "the API could not be
     /// reached or does not speak this contract". Only the refusal is something
     /// a caller may interpret.
+    ///
+    /// A 429 means the daemon is already running as many actions as it allows
+    /// and did not admit this one. The request is sent again with growing
+    /// delays for up to [`BusyRetry::limit`], and each wait is reported on
+    /// stderr so the person sees what the command is waiting for.
     async fn dispatch(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<std::result::Result<reqwest::Response, ApiError>> {
+        let started = std::time::Instant::now();
+        let mut delay = self.busy_retry.first_delay;
+        let mut request = request;
+        loop {
+            let retry = request.try_clone();
+            match self.dispatch_once(request).await? {
+                Err(failure) if failure.status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    let Some(retry) = retry else {
+                        return Ok(Err(failure));
+                    };
+                    if started.elapsed() + delay > self.busy_retry.limit {
+                        return Ok(Err(failure));
+                    }
+                    eprintln!(
+                        "The daemon is busy: {}. Trying again in {}s.",
+                        failure.message.trim_end_matches("; retry shortly"),
+                        delay.as_secs().max(1),
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(self.busy_retry.max_delay);
+                    request = retry;
+                }
+                outcome => return Ok(outcome),
+            }
+        }
+    }
+
+    async fn dispatch_once(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<std::result::Result<reqwest::Response, ApiError>> {
@@ -799,6 +865,65 @@ mod tests {
         let error = client.diff("session-1", None, false).await.unwrap_err();
         assert!(
             format!("{error:#}").contains("no session base recorded"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// A 429 is sent before the daemon admits anything, so the client sends
+    /// the request again until it is admitted, and gives up with the
+    /// daemon's own reason once its time runs out.
+    #[tokio::test]
+    async fn a_busy_daemon_is_retried_until_it_admits_the_request() {
+        let refusals = Arc::new(Mutex::new(2_usize));
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions/{session_id}/prompt",
+                axum::routing::post(|State(refusals): State<Arc<Mutex<usize>>>| async move {
+                    let mut left = refusals.lock().unwrap();
+                    if *left > 0 {
+                        *left -= 1;
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(serde_json::json!({ "error": "at its concurrent action limit" })),
+                        );
+                    }
+                    (StatusCode::ACCEPTED, Json(serde_json::json!({ "turn_id": 7 })))
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let mut response = next.run(request).await;
+                    response
+                        .headers_mut()
+                        .insert(API_VERSION_HEADER, "1".parse().unwrap());
+                    response
+                },
+            ))
+            .with_state(refusals.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut client = ApiClient::new(url, "secret-token".into()).unwrap();
+        client.busy_retry = BusyRetry {
+            first_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(20),
+            limit: Duration::from_secs(5),
+        };
+
+        let response = client.prompt("session-1", "hello".into()).await.unwrap();
+        assert_eq!(response.turn_id, 7);
+        assert_eq!(*refusals.lock().unwrap(), 0);
+
+        *refusals.lock().unwrap() = usize::MAX;
+        client.busy_retry.limit = Duration::from_millis(50);
+        let error = client
+            .prompt("session-1", "hello".into())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("concurrent action limit"),
             "unexpected error: {error:#}"
         );
     }
