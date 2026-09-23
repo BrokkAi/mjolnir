@@ -1130,8 +1130,7 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
         prompt_ordinal: 3,
         ..FakeBackend::default()
     });
-    let (app, _actions, snapshot_tx, _bundles) =
-        api_app(backend.clone(), waiting_for_its_worker);
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
     let request = tokio::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/prompt"))
@@ -1160,8 +1159,7 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
 #[tokio::test(start_paused = true)]
 async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wait() {
     let backend = Arc::new(FakeBackend::default());
-    let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(backend.clone(), waiting_for_its_worker);
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/prompt"))
