@@ -190,10 +190,10 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs workspace lint/tests, CLI release builds, portable Linux musl worker
-checks, and desktop checks in independent jobs. Linux and macOS execute the
-workspace tests; Windows compiles them. Separate jobs check formatting, older
-GNU/Linux compatibility, a deterministic multi-client reliability scenario,
+CI runs workspace lint/tests, portable Linux musl worker checks, and desktop
+checks in independent jobs. Linux and macOS execute the workspace tests;
+Windows compiles them. Separate jobs check formatting, older GNU/Linux
+compatibility, a deterministic multi-client reliability scenario,
 the Linux voice worker, dependency licenses, and packaged legal files.
 Build caches are isolated by job, OS, architecture, and configuration, with
 per-commit keys that restore compatible prior builds and refresh after success.
