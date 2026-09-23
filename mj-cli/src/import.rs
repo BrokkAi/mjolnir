@@ -382,7 +382,7 @@ pub(crate) fn discover_import_profile(
             if option.unavailable_reason.is_none() {
                 option.unavailable_reason = reason.clone();
             }
-            profile.sessions.push(option);
+            push_unique_session(&mut profile.sessions, option);
         }
         if last_publish.is_none_or(|last| last.elapsed() >= SCAN_PUBLISH_INTERVAL) {
             last_publish = Some(Instant::now());
@@ -395,6 +395,20 @@ pub(crate) fn discover_import_profile(
     // The last state always reaches the dialog, whatever the throttle skipped.
     publish(&profile);
     profile
+}
+
+/// Adds one scanned session unless the profile already lists it. A harness
+/// can keep one native session under more than one working-directory entry
+/// (Grok Build did, I2-16); scans run newest first, so the first listing is
+/// the one kept.
+fn push_unique_session(sessions: &mut Vec<ImportSessionOption>, option: ImportSessionOption) {
+    if sessions
+        .iter()
+        .any(|listed| listed.native_session_id == option.native_session_id)
+    {
+        return;
+    }
+    sessions.push(option);
 }
 
 fn import_session_option(
@@ -719,6 +733,25 @@ fn import_session_from_profile(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn a_native_session_is_listed_once() {
+        let option = |id: &str, title: &str| ImportSessionOption {
+            native_session_id: id.into(),
+            title: title.into(),
+            project_directory: String::new(),
+            details: String::new(),
+            unavailable_reason: None,
+            last_activity_ms: 0,
+            natively_archived: false,
+        };
+        let mut sessions = Vec::new();
+        push_unique_session(&mut sessions, option("c8180e55", "newest"));
+        push_unique_session(&mut sessions, option("7459ec1d", "other"));
+        push_unique_session(&mut sessions, option("c8180e55", "older copy"));
+        let titles: Vec<_> = sessions.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["newest", "other"]);
+    }
 
     #[test]
     fn discovery_checks_current_git_availability_even_with_cached_session_metadata() {
