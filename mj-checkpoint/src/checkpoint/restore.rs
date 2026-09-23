@@ -51,6 +51,19 @@ pub fn restore_checkpoint_with_native_state(
         event_frontier: canonical_session.event_frontier,
         event_frontier_digest: canonical_session.event_frontier_digest,
         queued_prompts: canonical_session.queued_prompts,
+        // Selector values name one harness's catalogue, so they carry over
+        // only when the same native conversation continues.
+        accepted_config: if spec.restore_native {
+            ["model", "effort"]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = canonical_session.session.configuration.get(key)?.as_str()?;
+                    (!value.trim().is_empty()).then(|| (key.to_owned(), value.to_owned()))
+                })
+                .collect()
+        } else {
+            Default::default()
+        },
     };
     if spec.discard_queued_prompts {
         seed.queued_prompts.clear();

@@ -265,6 +265,9 @@ impl DurableRelay {
                 snapshot.acknowledged_digest = restored.event_frontier_digest.clone();
                 snapshot.recovery_floor_ordinal = restored.event_frontier;
                 snapshot.recovery_floor_digest = restored.event_frontier_digest;
+                // The accepted model and effort the worker pins on its first
+                // bridge start, exactly as it does after a restart.
+                snapshot.config.extend(restored.accepted_config);
                 for queued in restored.queued_prompts {
                     validate_identifier(&queued.command_id, "restored queued command ID")?;
                     if queued.content.is_empty() {

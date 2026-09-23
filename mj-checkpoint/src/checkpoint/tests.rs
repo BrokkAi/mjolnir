@@ -2184,6 +2184,49 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
         .unwrap()
 }
 
+/// I1-6: a same-harness resume kept the conversation but not the model the
+/// session had selected, because the relay seed carried no configuration.
+#[test]
+fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let configuration = &mut spec.canonical_session.session.configuration;
+    configuration.insert("model".into(), serde_json::json!("opus[1m]"));
+    configuration.insert("effort".into(), serde_json::json!("high"));
+    configuration.insert("mode".into(), serde_json::json!("plan"));
+    export_checkpoint(&spec).unwrap();
+
+    let seed_for = |restore_native: bool| {
+        let relay_root = temp.path().join(format!("seeded-relay-{restore_native}"));
+        restore_checkpoint(
+            &CheckpointRestoreSpec {
+                archive_path: spec.output_path.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                relay_root: relay_root.clone(),
+                harness_home: temp.path().join(format!("seeded-harness-{restore_native}")),
+                restore_repositories: false,
+                restore_native,
+                discard_queued_prompts: false,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        restored_seed(&relay_root).accepted_config
+    };
+
+    assert_eq!(
+        seed_for(true),
+        [
+            ("effort".to_owned(), "high".to_owned()),
+            ("model".to_owned(), "opus[1m]".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert!(seed_for(false).is_empty());
+}
+
 #[test]
 fn restore_seeds_the_relay_frontier_and_can_discard_queued_prompts() {
     let temp = tempfile::tempdir().unwrap();
