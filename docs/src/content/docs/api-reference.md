@@ -85,6 +85,7 @@ A failure is a JSON object with one field:
 | `401` | No bearer token and no valid viewer cookie. |
 | `404` | No such session, or no transcript recorded for it. |
 | `409` | The session cannot do this now: no prompt capability, no live target, a turn still running, no commits to bundle, no recorded base for a diff, no push remote configured. |
+| `429` | Concurrent action limit: retry after the running action finishes. |
 | `500` | The operation was attempted and failed. The message says what failed. |
 | `503` | The daemon is shutting down, or the controller is not accepting actions. |
 
