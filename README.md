@@ -143,13 +143,16 @@ Switching to another directory-linked workspace also switches the folder and
 saved setup used by **New**; unlinked workspaces keep the normal launch wizard.
 Running `mj go` again selects the invoking directory's workspace regardless of
 which workspace you last visited. **New** (or **prefix+c**) starts another concurrent
-session with those choices. **Menu → Change setup** changes
+session with those choices. **Change fast-start setup** in the command palette (**prefix+:**) changes
 this project's next launch; `mj go --global-default` also changes the default
 for new projects. `mj go --setup` opens that setup directly.
 
 The context banner identifies the source folder and the selected session's
-actual working directory, branch, account, and target. Local bare sessions
-share the selected folder unless you enable a separate worktree in setup.
+actual working directory, branch, account, and target. By default a local bare
+session runs in a managed Git worktree at `.mj/worktrees/<id>` inside your
+repository, on a new branch named `mj/<id>`. To let the session work in the
+folder itself instead, clear **Create managed worktree** on the wizard's review
+step; the agent then edits your checkout directly.
 Container and other isolated targets use the existing repository-clone flow:
 they start from the remote default branch, not uncommitted local changes.
 SSH bare targets ask once for the remote folder. Repository choices, remote
