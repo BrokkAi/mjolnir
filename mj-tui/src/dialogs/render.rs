@@ -406,6 +406,24 @@ fn render_text_prompt(
     form.end_frame(DialogControl::Field);
 }
 
+/// The age column of the notice log, one cell per age in seconds: each
+/// "… ago" right-aligned to the widest one and followed by a space, so the
+/// messages start in the same column whether an age reads "44s" or "1m17s".
+pub(crate) fn notice_log_ages(ages: &[u64]) -> Vec<String> {
+    let ages = ages
+        .iter()
+        .map(|&secs| format!("{} ago", mj_client::usage_format::format_clock(secs)))
+        .collect::<Vec<_>>();
+    let width = ages
+        .iter()
+        .map(|age| age.chars().count())
+        .max()
+        .unwrap_or(0);
+    ages.into_iter()
+        .map(|age| format!("{age:>width$} "))
+        .collect()
+}
+
 /// The notice log: one row per remembered notice, newest first, with how
 /// long ago it was reported.
 pub(crate) fn render_notice_log(
@@ -450,27 +468,27 @@ pub(crate) fn render_notice_log(
         );
     } else {
         let now = std::time::Instant::now();
-        let age_width = 8;
+        let ages = notice_log_ages(
+            &history
+                .iter()
+                .map(|record| now.saturating_duration_since(record.at).as_secs())
+                .collect::<Vec<_>>(),
+        );
         // Every message is kept whole: a long failure wraps after its age
         // column rather than losing its tail, which is the part that says
         // what went wrong. The widget wraps by cell, so an unbroken path or
         // token still wraps instead of running off the edge.
         let lines = history
             .iter()
-            .map(|record| {
-                let age = mj_client::usage_format::format_clock(
-                    now.saturating_duration_since(record.at).as_secs(),
-                );
+            .zip(ages)
+            .map(|(record, age)| {
                 let style = if record.failure {
                     Style::default().fg(theme::palette().warning)
                 } else {
                     Style::default().fg(theme::palette().text)
                 };
                 Line::from(vec![
-                    Span::styled(
-                        format!("{:>age_width$} ", format!("{age} ago")),
-                        theme::muted(),
-                    ),
+                    Span::styled(age, theme::muted()),
                     Span::styled(record.text.clone(), style),
                 ])
             })
