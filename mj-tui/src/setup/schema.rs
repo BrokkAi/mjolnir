@@ -154,7 +154,7 @@ pub(super) fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
-        "continuation" => "Automatically continue unfinished requests and quota-blocked sessions",
+        "continuation" => "Continuation",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
@@ -557,7 +557,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Shared by turn review and plan second opinion. Auto prefers another provider with quota; a named profile allows main model and effort overrides."
         }
         "continuation" => {
-            "Automatically continue unfinished requests up to three times between user messages, and resume quota-blocked sessions one minute after the exhausted quota windows reset. Quota retries do not count toward the three continuations."
+            "Continue an unfinished request up to three times between user messages. Resume a quota-blocked session a minute after its quota resets; that is not counted."
         }
         "sessionwiki" => {
             "Your sessions are always indexed into SessionWiki so one search covers every coding tool; this section chooses archiving. The row below shows what it would free."

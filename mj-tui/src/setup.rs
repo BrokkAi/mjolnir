@@ -429,12 +429,22 @@ fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
 /// its contents by the text it draws (`Form::set_list_contents`), so a caret
 /// in the gutter would read as a different list the moment the selection
 /// moved, cancelling the gesture a double-click is halfway through.
+///
+/// When both do not fit, the label gives way first: the value keeps its
+/// width, less a few cells of label, and the two are always separated by at
+/// least one space.
 fn setting_row(name: &str, value: &str, width: u16) -> Line<'static> {
+    const MIN_LABEL: usize = 8;
     let width = usize::from(width).max(SETTING_GUTTER.len() + 4);
-    let name = truncate(name, width.saturating_sub(SETTING_GUTTER.len() + 4));
-    let room = width.saturating_sub(SETTING_GUTTER.len() + name.chars().count() + 2);
-    let value = truncate(value, room);
-    let gap = room.saturating_sub(value.chars().count()) + 1;
+    // Everything between the gutter and the trailing space.
+    let inner = width - SETTING_GUTTER.len() - 1;
+    let label_floor = name.chars().count().min(MIN_LABEL);
+    let value = truncate(value, inner.saturating_sub(label_floor + 1));
+    let value_width = value.chars().count();
+    let name = truncate(name, inner.saturating_sub(value_width + 1));
+    let gap = inner
+        .saturating_sub(name.chars().count() + value_width)
+        .max(1);
     Line::from(vec![
         Span::raw(SETTING_GUTTER),
         Span::raw(name),

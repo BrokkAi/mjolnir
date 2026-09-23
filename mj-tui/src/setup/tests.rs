@@ -2442,3 +2442,64 @@ fn setup_workspace_prefix_completes_on_its_machine() {
     };
     assert!(matches!(*machine, mj_core::config::Machine::Ssh { .. }));
 }
+
+/// Launch campaign finding A-9 / C-4: the Continuation section has a short
+/// name, its row shows its whole value, and its page shows its whole
+/// description.
+#[test]
+fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let text = drawn(&mut dashboard, 100, 30).join("\n");
+    let row = text
+        .lines()
+        .find(|line| line.contains("Continuation"))
+        .unwrap_or_else(|| panic!("no Continuation row in {text}"));
+    assert!(
+        row.contains("Continuation ") && row.contains(" On · 3 continuations plus quota recovery"),
+        "{row}"
+    );
+
+    dashboard.begin_settings_section("continuation", None);
+    let text = drawn(&mut dashboard, 100, 30)
+        .iter()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        text.contains(schema::help(&["continuation".to_owned()])),
+        "{text}"
+    );
+}
+
+/// A row too wide for the page gives up its label before its value, and the
+/// two never touch.
+#[test]
+fn a_setting_row_truncates_its_label_before_its_value() {
+    let line = setting_row(
+        "A label far too long to fit beside its value on this page",
+        "On · 3 continuations plus quota recovery",
+        60,
+    );
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.chars().count() <= 60, "{text}");
+    assert!(
+        text.contains("… On · 3 continuations plus quota recovery"),
+        "{text}"
+    );
+
+    // A value wider than the row keeps a few label cells and a space.
+    let line = setting_row("Name", &"x".repeat(80), 30);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.chars().count() <= 30, "{text}");
+    assert!(text.starts_with("  Name x"), "{text}");
+}
