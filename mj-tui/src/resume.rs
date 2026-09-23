@@ -906,7 +906,15 @@ impl DashboardState {
                     title: session.display_title().to_owned(),
                     origin: workspace.to_owned(),
                     details: session.project_name(&self.config),
-                    last_activity_ms: timestamp_ms(&session.updated_at).unwrap_or_default(),
+                    // The session record's `updated_at` changes only with the
+                    // record, so for a running session it is often the
+                    // creation time. The projection's last activity is what
+                    // the Sessions pane orders by (I1-16).
+                    last_activity_ms: self
+                        .session_activity_at_ms(&session.id)
+                        .and_then(|at| i64::try_from(at).ok())
+                        .or_else(|| timestamp_ms(&session.updated_at))
+                        .unwrap_or_default(),
                     status: ResumeRowStatus::Running,
                     natively_archived: false,
                     unavailable_reason: None,

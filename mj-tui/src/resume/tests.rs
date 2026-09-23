@@ -1437,6 +1437,36 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 }
 
+/// I1-16: LAST ACTIVE for a running session is its last activity, not the
+/// time its record was last written (often its creation).
+#[test]
+fn the_live_tab_shows_each_sessions_last_activity() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    let session_id = dashboard
+        .state
+        .sessions
+        .keys()
+        .next()
+        .cloned()
+        .expect("a live session");
+    let recorded = timestamp_ms(&dashboard.state.sessions[&session_id].updated_at)
+        .expect("the record has a time");
+    let active = recorded + 20 * 60 * 1000;
+    dashboard.session_details.insert(
+        session_id.clone(),
+        crate::ingest::SessionDetail {
+            last_activity_at_ms: Some(u64::try_from(active).unwrap()),
+            ..crate::ingest::SessionDetail::default()
+        },
+    );
+    dashboard.show_resume_dialog(1, Vec::new());
+    let row = rows(&dashboard)
+        .into_iter()
+        .find(|row| row.key == ResumeRowKey::Live(session_id.clone()))
+        .expect("the session is listed");
+    assert_eq!(row.last_activity_ms, active);
+}
+
 /// Enter on a running session in another workspace closes the dialog and takes
 /// the dashboard there, the same jump the attention key makes.
 #[test]
