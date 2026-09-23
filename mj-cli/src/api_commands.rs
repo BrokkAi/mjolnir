@@ -755,6 +755,12 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
             true => print_json(&pushed),
             false => {
                 println!("pushed {} to {}", pushed.branch, pushed.remote);
+                // A push carries commits and nothing else, and the agent may
+                // have left work it never committed (F-13).
+                println!(
+                    "only committed work was pushed; uncommitted changes stay in the session (`mj diff --session {}` shows all of its work)",
+                    args.session
+                );
                 Ok(())
             }
         },

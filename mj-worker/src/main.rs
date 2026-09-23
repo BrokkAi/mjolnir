@@ -347,8 +347,13 @@ fn main() -> Result<()> {
         && let Some(refusal) = error.downcast_ref::<ExportRefused>()
     {
         // A refusal is a precondition the caller can fix, so it leaves the
-        // process with its own exit code and the reason on standard error;
-        // the daemon turns that pair into a 409 rather than a 500.
+        // process with its own exit code and the reason; the daemon turns that
+        // pair into a 409 rather than a 500. The reason goes to standard
+        // output, which carries nothing else now, because standard error also
+        // carries this process's log. It goes to standard error as well for a
+        // daemon that predates reading it from standard output.
+        println!("{refusal}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         eprintln!("{refusal}");
         std::process::exit(EXPORT_REFUSED_EXIT_CODE);
     }
