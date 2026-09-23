@@ -4049,6 +4049,56 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     );
 }
 
+/// The review's Compute row states the allocation itself; the " · " that
+/// joins it to a target name in the target list does not belong there.
+/// Launch campaign finding C-7.
+#[test]
+fn the_review_compute_row_does_not_start_with_a_separator() {
+    let mut configuration = config();
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    let _ = dashboard.take_prerequisite_check();
+    let context = dashboard.path_input_context();
+    dashboard.apply_resolved_project_directory(
+        &context,
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: false,
+                default_create: false,
+            },
+        )),
+    );
+
+    let lines = drawn(&mut dashboard, 120, 40);
+    let compute = &lines[row_of(&lines, "Compute:")];
+    assert!(
+        compute.contains("Compute: fixed/default resources"),
+        "{compute:?}"
+    );
+
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new wizard")
+    };
+    wizard.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+    });
+    let lines = drawn(&mut dashboard, 120, 40);
+    let compute = &lines[row_of(&lines, "Compute:")];
+    assert!(compute.contains("Compute: 2 CPU / "), "{compute:?}");
+}
+
 /// Another surface or this run's own sessions can remember a project directory
 /// after the dashboard loaded its state. Opening the New wizard asks for the
 /// stored history again, and the project step offers what comes back.

@@ -659,8 +659,8 @@ pub(crate) fn render_review_wizard(
             Span::styled(format!(" ({})", target_label(target)), theme::muted()),
         ]),
         Line::from(vec![
-            Span::styled("Compute:", theme::muted()),
-            Span::raw(resource_allocation_label(allocation, None)),
+            Span::styled("Compute: ", theme::muted()),
+            Span::raw(resource_allocation_description(allocation)),
         ]),
     ];
     if moving && source_unavailable {
