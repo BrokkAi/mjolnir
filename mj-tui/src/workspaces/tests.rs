@@ -793,3 +793,21 @@ fn esc_in_a_workspace_dialog_opened_from_the_list_returns_to_the_list() {
         matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
     );
 }
+
+/// Launch campaign finding D-13: after a restart the tabs read
+/// `second  mjolnir` although they read `mjolnir  second` before, because a
+/// fresh dashboard ordered tabs by random workspace id. The host orders them
+/// by creation, and a later runtime update keeps that order.
+#[test]
+fn workspace_tabs_keep_the_hosts_order_across_updates() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let names = std::collections::BTreeMap::from([
+        ("f069".to_owned(), "mjolnir".to_owned()),
+        ("2901".to_owned(), "second".to_owned()),
+    ]);
+    dashboard.set_workspace_names(names.clone());
+    dashboard.order_workspaces(&["f069".to_owned(), "2901".to_owned()]);
+    assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);
+    dashboard.set_workspace_names(names);
+    assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);
+}

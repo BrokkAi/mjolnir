@@ -847,6 +847,21 @@ pub(crate) async fn run_dashboard_for_workspace(
         tracing::warn!(%error, "workspace layout final flush failed");
         eprintln!("{error:#}");
     }
+    // The next `mj` opens the most recently opened workspace. A tab switch
+    // does not count as opening, so mark the workspace shown at exit, or the
+    // restart would return to the one this dashboard started in.
+    if let Some(workspace_id) = context.dashboard.active_workspace_id().map(str::to_owned) {
+        match crate::daemon::connect_existing().await {
+            Ok(mut daemon) => {
+                if let Err(error) = daemon.touch_workspace(workspace_id).await {
+                    tracing::warn!(%error, "could not record the workspace shown at exit");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "daemon unavailable to record the workspace shown at exit");
+            }
+        }
+    }
     if let Some(shutdown) = context.worker_shutdown.take() {
         let result = shutdown
             .shutdown()
@@ -1385,6 +1400,18 @@ impl DashboardContext {
             BTreeMap::new(),
         );
         dashboard.set_workspace_names(workspace_names);
+        // Tabs follow creation order, which a restart does not change; the
+        // listing itself leads with the most recently opened workspace.
+        let mut by_creation = workspaces.iter().collect::<Vec<_>>();
+        by_creation.sort_by(|left, right| {
+            (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
+        });
+        dashboard.order_workspaces(
+            &by_creation
+                .into_iter()
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>(),
+        );
         for (id, sizes) in &layouts {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
         }
