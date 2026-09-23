@@ -44,7 +44,10 @@ variable is set (`default` for the default instance), and in
 `<data dir>/ssh/` otherwise. Each instance has its own directory, so two
 daemons never share a master. A socket is named `<hash>-<shard>`, where the
 hash covers the destination and your `extra_args`, and the shard number counts
-the masters for that host from 0. Mjolnir creates the directory with mode
+the masters for that host from 0. A `<hash>-<shard>.lock` file beside each
+socket makes processes of the same instance (for example the old and new
+daemon during a restart) take turns checking and opening that master, so
+they never open two. Mjolnir creates the directory with mode
 `0700`. If it cannot, or if the socket path would be too long for a unix socket
 address, every command opens its own connection instead. Commands that share
 a master also share its fate: if the underlying connection drops, every

@@ -1022,6 +1022,14 @@ impl SessionLedger {
 /// an error naming the destination instead of a direct connection.
 #[cfg(unix)]
 fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor) -> Result<()> {
+    // Another process of this instance (the old daemon during a restart)
+    // may be checking and opening the same socket. Without this lock both
+    // find no master and both open one; the second finds the socket bound,
+    // prints "already exists, disabling multiplexing", and keeps a plain
+    // background connection that no ControlPersist ever closes (J-18). The
+    // lock also keeps one process from removing, as stale, a socket the
+    // other has just bound.
+    let _opening = lock_master_opening(socket)?;
     if master_running(ssh, socket, executor)? {
         return Ok(());
     }
@@ -1057,6 +1065,26 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
         "could not open a shared SSH connection to {}: {detail}",
         ssh.destination
     )
+}
+
+/// Take the file lock that serializes checking and opening the master on
+/// `socket` across processes. It is held until the returned file is dropped.
+/// The lock file sits beside the socket as `<socket>.lock`; `ssh` binds a
+/// new master at `<socket>.<16 random characters>`, so the names never meet.
+#[cfg(unix)]
+fn lock_master_opening(socket: &Path) -> Result<fs::File> {
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".lock");
+    let path = PathBuf::from(path);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open SSH master lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock SSH master lock {}", path.display()))?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -2362,6 +2390,68 @@ mod tests {
         masters.refuse_open.set(None);
         let lease = ledger.lease(&ssh, dir.path(), &masters).expect("opens");
         assert_eq!(shard_of(&lease), "0");
+    }
+
+    /// A stand-in for `ssh` shared by two threads that play two daemon
+    /// processes (the old and new daemon during a restart). An opener takes a
+    /// while to authenticate; if the socket is bound when it finishes, real
+    /// `ssh` prints "already exists, disabling multiplexing" and keeps a plain
+    /// background connection that nothing will ever close.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct RacingMasters {
+        bound: Mutex<BTreeSet<String>>,
+        masters: AtomicUsize,
+        orphans: AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    impl CommandExecutor for RacingMasters {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let socket = FakeMasters::socket(command);
+            let status = if command.args.windows(2).any(|pair| pair == ["-O", "check"]) {
+                if self.bound.lock().unwrap().contains(&socket) {
+                    0
+                } else {
+                    255
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+                if self.bound.lock().unwrap().insert(socket) {
+                    self.masters.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.orphans.fetch_add(1, Ordering::SeqCst);
+                }
+                0
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    /// Two daemon processes that lease on the same instance's sockets at
+    /// once (J-18) must open one master between them, not one master and one
+    /// orphaned plain connection.
+    #[test]
+    #[cfg(unix)]
+    fn two_processes_opening_one_socket_open_one_master() {
+        let dir = sharing_socket_dir();
+        let ssh = plain_target("racing-host");
+        let fake = RacingMasters::default();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    // Each process has its own ledger.
+                    let ledger = SessionLedger::new(8);
+                    ledger.lease(&ssh, dir.path(), &fake).expect("lease");
+                });
+            }
+        });
+        assert_eq!(fake.masters.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.orphans.load(Ordering::SeqCst), 0);
     }
 
     #[test]
