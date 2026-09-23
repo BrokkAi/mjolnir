@@ -166,10 +166,7 @@ pub(crate) enum DashboardIoUpdate {
         result: std::result::Result<(), String>,
     },
     MountHistory(
-        std::result::Result<
-            std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
-            String,
-        >,
+        std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
     ),
     TargetTest {
         target_id: String,
@@ -1589,8 +1586,9 @@ impl DashboardContext {
                     message.push_str(failure);
                 }
             }
+            tracing::warn!(%session_id, "{message}");
             self.dashboard
-                .set_notice(format!("Session {}: {message}", short_id(&session_id)));
+                .report_session_unreachable(&session_id, false);
         } else if let Err(error) = &result {
             tracing::warn!(%session_id, "stale worker diagnosis task failed: {error}");
         }

@@ -902,6 +902,9 @@ pub struct DashboardState {
     /// When each session's checkout was last asked about, so the host reads
     /// a visible session's status about once a minute and no more.
     pub(crate) git_probe_at: BTreeMap<String, Instant>,
+    /// The unreachable-worker notice last shown for each session, so the
+    /// notice can be withdrawn once the worker answers again.
+    pub(crate) unreachable_notices: BTreeMap<String, String>,
     modal_click_transition: Option<(u16, u16, Instant)>,
     suppress_modal_release: bool,
     /// Monotonic identity for global review settings discoveries. Keeping it on
@@ -1022,6 +1025,7 @@ impl DashboardState {
             go_contexts: BTreeMap::new(),
             git_status: BTreeMap::new(),
             git_probe_at: BTreeMap::new(),
+            unreachable_notices: BTreeMap::new(),
             session_operations: BTreeMap::new(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,

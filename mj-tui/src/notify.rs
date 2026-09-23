@@ -190,6 +190,38 @@ impl DashboardState {
         body
     }
 
+    /// Reports that a session's worker cannot be reached, in one plain
+    /// sentence. The host keeps the relay's own error and any worker
+    /// diagnostics for its log; the footer only says what happened.
+    /// `checking` is true while worker diagnostics are still being collected.
+    pub fn report_session_unreachable(&mut self, session_id: &str, checking: bool) {
+        let name = self.session_notice_name(session_id);
+        let text = if checking {
+            format!("{name} cannot be reached; checking its worker.")
+        } else {
+            format!("{name} cannot be reached. The log has the worker's details.")
+        };
+        self.set_notice(text.clone());
+        self.unreachable_notices.insert(session_id.to_owned(), text);
+    }
+
+    /// Withdraws the unreachable notice for a session whose worker answered
+    /// again, if that notice is still the one showing.
+    pub fn report_session_reachable(&mut self, session_id: &str) {
+        let Some(text) = self.unreachable_notices.remove(session_id) else {
+            return;
+        };
+        let name = self.session_notice_name(session_id);
+        self.replace_notice_if(&text, format!("{name} is reachable again."));
+    }
+
+    fn session_notice_name(&self, session_id: &str) -> String {
+        self.state.sessions.get(session_id).map_or_else(
+            || format!("Session {}", &session_id[..session_id.len().min(8)]),
+            |session| format!("Session {}", session.display_title()),
+        )
+    }
+
     /// The terminal title the host should show: `mj` alone when nothing
     /// needs a person, otherwise counts such as `mj · 1 unreachable · 2 waiting
     /// · 1 unread`. `None` when
@@ -427,5 +459,29 @@ mod tests {
             dashboard.terminal_title().as_deref(),
             Some("mj · 1 unreachable · 1 waiting")
         );
+    }
+
+    #[test]
+    fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
+        let mut dashboard = dashboard();
+        let title = dashboard.state.sessions["done"].display_title().to_owned();
+        dashboard.report_session_unreachable("done", true);
+        let notice = dashboard.notice().unwrap();
+        assert_eq!(
+            notice,
+            format!("Session {title} cannot be reached; checking its worker.")
+        );
+        dashboard.report_session_unreachable("done", false);
+        assert!(!dashboard.notice().unwrap().contains("stderr"));
+        dashboard.report_session_reachable("done");
+        assert_eq!(
+            dashboard.notice().unwrap(),
+            format!("Session {title} is reachable again.")
+        );
+        // A later, unrelated notice is left alone by another recovery.
+        dashboard.report_session_unreachable("done", false);
+        dashboard.set_notice("Profile quotas refreshed.");
+        dashboard.report_session_reachable("done");
+        assert_eq!(dashboard.notice().unwrap(), "Profile quotas refreshed.");
     }
 }
