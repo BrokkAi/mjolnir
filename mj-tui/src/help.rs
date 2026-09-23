@@ -180,15 +180,21 @@ fn entries(dashboard: &DashboardState) -> Vec<HelpEntry> {
     entries
 }
 
+/// A row matches when the whole query appears in one field (so a chord such
+/// as "ctrl+b q" still matches its key column), or when every word of the
+/// query appears somewhere in the row, in any order.
 fn literal(entry: &HelpEntry, needle: &str) -> bool {
-    [
+    let fields = [
         &entry.keys,
         &entry.text.label,
         &entry.text.description,
         &entry.text.category,
     ]
-    .iter()
-    .any(|field| field.to_lowercase().contains(needle))
+    .map(|field| field.to_lowercase());
+    fields.iter().any(|field| field.contains(needle))
+        || needle
+            .split_whitespace()
+            .all(|word| fields.iter().any(|field| field.contains(word)))
 }
 
 impl DashboardState {
@@ -1052,6 +1058,23 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("No matching shortcuts"), "{rendered}");
+    }
+
+    /// Launch campaign finding A-1: a query of several words matches a row
+    /// when each word appears somewhere in it, in any order, so "split pane"
+    /// finds "Split right" in the Panes group even offline.
+    #[test]
+    fn help_filter_matches_each_word_anywhere_in_the_row() {
+        let mut dashboard = dashboard_with_session(running_session());
+        for query in ["split pane", "panes split"] {
+            filter(&mut dashboard, query);
+            let id = dashboard.help_search_generation().unwrap();
+            dashboard.apply_help_search_result(id, Err("offline".into()));
+            let rendered = drawn(&mut dashboard, 120, 40).join("\n");
+            assert!(rendered.contains("Split right"), "{query}: {rendered}");
+            assert!(!rendered.contains("No matching shortcuts"), "{rendered}");
+            assert!(!rendered.contains("Command palette"), "{rendered}");
+        }
     }
 
     #[test]
