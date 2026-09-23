@@ -2547,6 +2547,37 @@ fn dashboard_with_two_sessions() -> DashboardState {
     dashboard
 }
 
+/// Launch finding B-4: a launch that finishes after the user selected
+/// another row must not take the selection back, or the next session
+/// command (such as close) acts on a session the user did not choose.
+#[test]
+fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
+    let mut dashboard = dashboard_with_two_sessions();
+    // The launch selected its session when it started.
+    dashboard.select_active_session("session-1");
+    // While it launches, the user picks the other session.
+    dashboard.select_active_session("session-2");
+    dashboard.focus_sessions();
+
+    dashboard.finish_new_session("session-1");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
+    assert_eq!(dashboard.focus(), Focus::Sessions);
+}
+
+/// When the selection is still on the launching session, finishing the
+/// launch opens it for its first prompt, as before.
+#[test]
+fn a_finished_launch_opens_the_session_the_user_left_selected() {
+    let mut dashboard = dashboard_with_two_sessions();
+    dashboard.select_active_session("session-1");
+
+    dashboard.finish_new_session("session-1");
+
+    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
+    assert_eq!(dashboard.focus(), Focus::Prompt);
+}
+
 #[test]
 fn setting_the_current_session_writes_only_the_focused_pane() {
     let mut dashboard = dashboard_with_two_sessions();
