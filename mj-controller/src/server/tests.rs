@@ -6,6 +6,61 @@ use axum::http::Request;
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
+#[tokio::test]
+async fn open_http_request_and_unread_body_do_not_delay_upgrade() {
+    let gate = Arc::new(crate::upgrade::Gate::default());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Body::from_stream(futures::stream::pending::<
+                            Result<String, std::convert::Infallible>,
+                        >())
+                    }
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            gate.clone(),
+            upgrade_admission,
+        ));
+
+    let request = tokio::spawn(
+        app.clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap()),
+    );
+    entered.notified().await;
+    assert!(gate.active_labels().is_empty());
+    assert!(
+        gate.try_close(),
+        "a waiting HTTP handler must not hold handoff"
+    );
+    release.notify_one();
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        gate.active_labels().is_empty(),
+        "an unread response must not hold handoff"
+    );
+
+    let rejected = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.headers()["x-mj-upgrade"], "pending");
+}
+
 use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
