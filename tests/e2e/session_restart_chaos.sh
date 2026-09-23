@@ -16,6 +16,11 @@ hel_input=$1
 hel_binary=$(cd -- "$(dirname -- "$hel_input")" && pwd)/$(basename -- "$hel_input")
 command -v python3 >/dev/null
 command -v timeout >/dev/null
+# Requests must speak the relay's exact protocol, so read it from the source
+# the worker under test was built from rather than pinning a number here.
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+relay_protocol=$(sed -n 's/^pub const RELAY_PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' "$repo_root/mj-core/src/relay.rs")
+[[ -n $relay_protocol ]] || { echo "could not read RELAY_PROTOCOL_VERSION" >&2; exit 2; }
 
 chaos_root=$(mktemp -d)
 artifact_dir=${MJ_CHAOS_ARTIFACT_DIR:-}
@@ -209,7 +214,7 @@ start_worker() {
 }
 
 attach_response() {
-    printf '%s\n' '{"request_id":"chaos-attach","protocol_version":5,"request":{"method":"attach","params":{"after_ordinal":0,"after_digest":"0000000000000000000000000000000000000000000000000000000000000000"}}}' |
+    printf '{"request_id":"chaos-attach","protocol_version":%s,"request":{"method":"attach","params":{"after_ordinal":0,"after_digest":"0000000000000000000000000000000000000000000000000000000000000000"}}}\n' "$relay_protocol" |
         timeout 5 "$hel_binary" worker proxy --root "$worker_root" 2>>"$proxy_log"
 }
 
@@ -282,7 +287,7 @@ exec {proxy_input_fd}<>"$proxy_input"
 "$hel_binary" worker proxy --root "$worker_root" <&$proxy_input_fd >"$chaos_root/held-proxy.out" 2>>"$proxy_log" &
 proxy_pid=$!
 require_pid "$proxy_pid" proxy
-printf '%s\n' '{"request_id":"held-proxy","protocol_version":5,"request":{"method":"status"}}' >&$proxy_input_fd
+printf '{"request_id":"held-proxy","protocol_version":%s,"request":{"method":"status"}}\n' "$relay_protocol" >&$proxy_input_fd
 kill_exact proxy "$proxy_pid" KILL 0
 wait "$proxy_pid" 2>/dev/null || true
 exec {proxy_input_fd}>&-
