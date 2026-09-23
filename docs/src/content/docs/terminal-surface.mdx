@@ -288,7 +288,8 @@ for its hidden rows, and a minimized Sessions pane carries one in its title.
 When a session you are not looking at starts needing you, Mjolnir rings the
 terminal bell after a short delay and keeps the terminal window title at
 `mj · 2 waiting · 1 unread`, so a background tab or a tmux window shows the
-count without switching to it. **Setup → Notifications** turns the bell off,
+count without switching to it. Failed and unreachable sessions are counted
+under their own words, for example `mj · 1 unreachable · 2 waiting`. **Setup → Notifications** turns the bell off,
 adds a desktop notification, or changes the delay; see
 [Configuration](/configuration/#notifications-notify).
 

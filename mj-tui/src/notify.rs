@@ -191,27 +191,34 @@ impl DashboardState {
     }
 
     /// The terminal title the host should show: `mj` alone when nothing
-    /// needs a person, otherwise `mj · 2 waiting · 1 unread`. `None` when
+    /// needs a person, otherwise counts such as `mj · 1 unreachable · 2 waiting
+    /// · 1 unread`. `None` when
     /// the configuration keeps the title alone.
     pub fn terminal_title(&self) -> Option<String> {
         if !self.config.notify.title {
             return None;
         }
-        let (waiting, unread) =
-            self.attention_queue()
-                .into_iter()
-                .fold((0, 0), |(waiting, unread), entry| match entry.level {
-                    AttentionLevel::Waiting
-                    | AttentionLevel::Unreachable
-                    | AttentionLevel::Failed => (waiting + 1, unread),
-                    _ => (waiting, unread + 1),
-                });
-        let mut title = String::from("mj");
-        if waiting > 0 {
-            title.push_str(&format!(" · {waiting} waiting"));
+        // Questions, unreachable workers and failures each get their own
+        // word, most urgent first: "waiting" means a question for a person.
+        let (mut failed, mut unreachable, mut waiting, mut unread) = (0, 0, 0, 0);
+        for entry in self.attention_queue() {
+            match entry.level {
+                AttentionLevel::Failed => failed += 1,
+                AttentionLevel::Unreachable => unreachable += 1,
+                AttentionLevel::Waiting => waiting += 1,
+                _ => unread += 1,
+            }
         }
-        if unread > 0 {
-            title.push_str(&format!(" · {unread} unread"));
+        let mut title = String::from("mj");
+        for (count, word) in [
+            (failed, "failed"),
+            (unreachable, "unreachable"),
+            (waiting, "waiting"),
+            (unread, "unread"),
+        ] {
+            if count > 0 {
+                title.push_str(&format!(" · {count} {word}"));
+            }
         }
         Some(title)
     }
@@ -409,5 +416,16 @@ mod tests {
         config.notify.title = false;
         dashboard.set_config(config);
         assert_eq!(dashboard.terminal_title(), None);
+    }
+
+    #[test]
+    fn the_title_names_an_unreachable_worker_apart_from_questions() {
+        let mut dashboard = dashboard();
+        dashboard.state.sessions.get_mut("done").unwrap().state =
+            mj_core::state::SessionState::Disconnected;
+        assert_eq!(
+            dashboard.terminal_title().as_deref(),
+            Some("mj · 1 unreachable · 1 waiting")
+        );
     }
 }
