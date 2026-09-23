@@ -1002,6 +1002,20 @@ fn archived_row_shows_indexed_target_and_profile() {
     );
     assert_eq!(bare.origin, "localhost/project");
 
+    // C-14: a session that ran in a managed worktree is named by the project
+    // it worked on, not by the worktree's session-id directory.
+    let worktree = archived(WikiRow {
+        project: "/home/dev/project/.mj/worktrees/556ebcbaee181".into(),
+        ..tagged_wiki_row("worktree", "localhost", "codex-2")
+    });
+    assert_eq!(worktree.origin, "localhost/project");
+    let nested = archived(WikiRow {
+        project: "/home/dev/project/.mj/worktrees/556ebcbaee181/sub".into(),
+        target: None,
+        ..tagged_wiki_row("nested", "localhost", "codex-2")
+    });
+    assert_eq!(nested.origin, "local/sub");
+
     let container = archived(tagged_wiki_row("container", "podman", "codex-2"));
     assert_eq!(container.origin, "podman");
 

@@ -735,19 +735,33 @@ fn snippet_text(hit: &WikiRow) -> Option<String> {
 /// it the way the live session summary does. Without one there is nothing to go
 /// on but the project path, which is shown as a local origin.
 fn archive_origin_of(config: &Config, hit: &WikiRow) -> String {
+    let project = source_project_path(std::path::Path::new(&hit.project));
     let Some(target_id) = hit.target.as_deref() else {
-        return archive_origin(&hit.project);
+        return archive_origin(&project);
     };
-    let project = std::path::Path::new(&hit.project);
     mj_core::state::target_label(
         config,
         target_id,
-        (!hit.project.trim().is_empty()).then_some(project),
+        (!hit.project.trim().is_empty()).then_some(project.as_path()),
     )
 }
 
-fn archive_origin(project: &str) -> String {
-    std::path::Path::new(project).file_name().map_or_else(
+/// The project a recorded directory stands for. A managed worktree lives at
+/// `<repository>/.mj/worktrees/<session id>/<relative>`; the project it works
+/// on is `<repository>/<relative>`, which is what the other tabs name.
+fn source_project_path(path: &std::path::Path) -> std::path::PathBuf {
+    let parts: Vec<_> = path.components().collect();
+    let marker = parts
+        .windows(3)
+        .position(|window| window[0].as_os_str() == ".mj" && window[1].as_os_str() == "worktrees");
+    let Some(index) = marker else {
+        return path.to_path_buf();
+    };
+    parts[..index].iter().chain(&parts[index + 3..]).collect()
+}
+
+fn archive_origin(project: &std::path::Path) -> String {
+    project.file_name().map_or_else(
         || LOCAL_ORIGIN.to_owned(),
         |project| format!("{LOCAL_ORIGIN}/{}", project.to_string_lossy()),
     )
