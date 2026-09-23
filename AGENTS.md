@@ -20,6 +20,13 @@ connected prose and plain language; use lists when they improve clarity.
 Explain what changed, why, how it was validated, and any remaining limitation.
 Keep messages between agents equally clear and readable.
 
+# Coordination
+
+Multiple people and their agents work on this project concurrently. Self-assign and add the `agent-in-progress`
+label to any issue you begin working on to avoid overlapping work. Remove the
+label if you stand down without resolving the issue. Avoid working on
+tasks assigned to other people unless explicitly directed to do so.
+
 # ExecPlans
 
 Use an ExecPlan for a complex feature or a significant refactor. Follow `.agents/PLANS.md` from design through implementation.
