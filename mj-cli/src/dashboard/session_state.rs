@@ -304,8 +304,8 @@ impl DashboardContext {
         }
         let due = self
             .dashboard
-            .git_probe_candidates(std::time::Instant::now());
-        for session_id in due.into_iter().take(2) {
+            .git_probe_candidates(std::time::Instant::now(), 2);
+        for session_id in due {
             self.spawn_git_probe(session_id);
         }
     }

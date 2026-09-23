@@ -4318,24 +4318,52 @@ fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     });
     let mut dashboard = dashboard_with_session(session);
     let start = std::time::Instant::now();
-    assert_eq!(dashboard.git_probe_candidates(start), ["session-1"]);
-    assert!(dashboard.git_probe_candidates(start).is_empty());
+    assert_eq!(dashboard.git_probe_candidates(start, 2), ["session-1"]);
+    assert!(dashboard.git_probe_candidates(start, 2).is_empty());
     assert!(
         dashboard
-            .git_probe_candidates(start + std::time::Duration::from_secs(30))
+            .git_probe_candidates(start + std::time::Duration::from_secs(30), 2)
             .is_empty()
     );
     assert_eq!(
-        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61)),
+        dashboard.git_probe_candidates(start + std::time::Duration::from_secs(61), 2),
         ["session-1"]
     );
     // A stopped session's target is gone, so there is nothing to read.
     dashboard.state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
     assert!(
         dashboard
-            .git_probe_candidates(start + std::time::Duration::from_secs(200))
+            .git_probe_candidates(start + std::time::Duration::from_secs(200), 2)
             .is_empty()
     );
+}
+
+/// Launch finding D-3: after a restart every session is due at once. The
+/// host reads only a few per pass, so a session it did not read must stay
+/// due; marking all of them as read left all but the first few without a
+/// branch marker for good.
+#[test]
+fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
+    let target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/work".into(),
+    };
+    let mut first = running_session();
+    first.target = Some(target.clone());
+    let mut dashboard = dashboard_with_session(first);
+    for id in ["session-2", "session-3", "session-4"] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.target = Some(target.clone());
+        dashboard.state.sessions.insert(id.into(), session);
+    }
+    let start = std::time::Instant::now();
+
+    let mut probed = dashboard.git_probe_candidates(start, 2);
+    assert_eq!(probed.len(), 2, "one pass reads at most the limit");
+    probed.extend(dashboard.git_probe_candidates(start + std::time::Duration::from_secs(1), 2));
+    probed.sort();
+
+    assert_eq!(probed, ["session-1", "session-2", "session-3", "session-4"]);
 }
 
 #[test]
