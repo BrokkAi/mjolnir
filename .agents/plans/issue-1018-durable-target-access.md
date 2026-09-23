@@ -23,8 +23,8 @@ Issue #1018 reports six running SSH Podman sessions whose template was removed. 
 - [x] (2026-09-23) Focused regressions pass, including complete SSH/AWS access, cleanup retry, and concurrent deletion during reload.
 - [x] (2026-09-23) Final `env -u NO_COLOR cargo test`, `cargo clippy --all-targets -- -D warnings`, formatting, and diff checks pass.
 - [x] (2026-09-23) Required validation passed in isolated stores.
-- [ ] Commit on the current branch and push to origin/master.
-- [ ] Close #1018 and remove `agent-in-progress`; only then prepare #1063's plan. The remaining queue is #1073 followed by #1083.
+- [x] (2026-09-23) Committed `d81fd67c` on the current branch and pushed to origin/master.
+- [x] (2026-09-23) Closed #1018 with validation evidence and removed `agent-in-progress`; then prepared #1063's separate review plan. The later queue is #1073 followed by #1083.
 
 ## Surprises & Discoveries
 
@@ -128,7 +128,7 @@ Backfill is idempotent and never overwrites an existing access snapshot. Creatio
 
 Implementation and validation are complete. Existing sessions retain access independently of target-template removal or name reuse. Isolated regressions cover SSH Podman restart/export resolution/destroy retry, borrowed children, missing legacy configuration, concurrent backfill/deletion, SSH/AWS conversion, resume rollback, target replacement, migration preservation, checkpoint export and HTTP conflicts. Final workspace tests pass, including 1,594 controller tests and 453 core tests, along with all-targets clippy, formatting, and diff checks. The live database and real remote resources were not touched.
 
-Migration 46 preserves session data and refuses older readers/writers. A remote legacy record that lost its connection configuration before backfill still requires restoring that original template once. Explicit creation/resume still requires the selected destination template. Publication and issue closure are next; later issues remain untouched.
+Migration 46 preserves session data and refuses older readers/writers. A remote legacy record that lost its connection configuration before backfill still requires restoring that original template once. Explicit creation/resume still requires the selected destination template. Published as `d81fd67c` to origin/master and closed #1018. #1063 now has a separate review plan; its implementation awaits approval.
 
 Revision (2026-09-23): approval received. Store the snapshot on the session row so access settings become durable before provisioning creates any resource, including partial failures without a locator. Revision 46 is breaking because older writers can change a locator while retaining an access snapshot for the previous resource. Preserve execution policy and target environment as well as connection settings: restarting an existing worker needs those inputs after template removal. Backfill uses a conditional database update and returns the winning snapshot, preventing concurrent backfills from overwriting saved settings.
 
