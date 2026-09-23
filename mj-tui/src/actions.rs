@@ -1014,7 +1014,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
             KeyHint::plain(KeyCode::Char('e'), "e"),
         ],
         action: None,
-        footer: footer_word!("edit profile"),
+        footer: footer_word!("rename profile"),
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: profiles_present,

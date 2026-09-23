@@ -1625,6 +1625,17 @@ fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     );
 }
 
+/// A-11: Enter on the Quota pane opens the profile-ID rename, so the hint
+/// says rename rather than promising a profile editor.
+#[test]
+fn the_quota_footer_says_enter_renames_the_profile() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus = Focus::Quota;
+    let footer = combined_footer_text(&dashboard, 200);
+    assert!(footer.starts_with("Enter rename profile"), "{footer}");
+    assert!(!footer.contains("edit profile"), "{footer}");
+}
+
 /// A-12: at every ordinary width and for every pane focus, the chord group
 /// leads with the prefix, and the palette's `:` never follows a colon.
 #[test]
