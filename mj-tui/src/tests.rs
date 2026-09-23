@@ -870,6 +870,41 @@ fn cancel_with_nothing_in_flight_shows_a_notice() {
     assert_eq!(dashboard.notice().as_deref(), Some("Nothing to cancel"));
 }
 
+/// Launch campaign finding A-10: a pinned pane restored for a suspended
+/// session kept trying to attach and failed after 15 seconds with a notice
+/// that named no session. The pane is emptied instead, with a notice that
+/// names the session; a failure to open names it too.
+#[test]
+fn a_pinned_pane_releases_a_suspended_session_and_names_it() {
+    let mut session = stopped_session();
+    session.session_title_override = Some("Pinned B".into());
+    let mut dashboard = dashboard_with_session(session);
+    let pane = dashboard.browse_pane();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+        .unwrap();
+    dashboard.set_pane_session(pane, Some("session-1"));
+    assert!(dashboard.pane_session_is_suspended("session-1"));
+    dashboard.release_suspended_pane(pane, "session-1");
+    assert_eq!(dashboard.pane_session(pane), None);
+    let notice = dashboard.notice().unwrap();
+    assert!(notice.contains("Session Pinned B is suspended"), "{notice}");
+
+    dashboard.report_open_failure(
+        "session-1",
+        "Session opening did not respond within 15 seconds",
+    );
+    let notice = dashboard.notice().unwrap();
+    assert!(
+        notice.starts_with("Could not open Session Pinned B: "),
+        "{notice}"
+    );
+
+    // A session being resumed is on its way back and is not released.
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+    assert!(!dashboard.pane_session_is_suspended("session-1"));
+}
+
 /// Launch campaign finding B-10: the title is a record field, not worker
 /// state, so a session that is still starting can be renamed from the
 /// Sessions pane and from its type-ahead composer.

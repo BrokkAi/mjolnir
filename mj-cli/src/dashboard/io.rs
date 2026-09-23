@@ -751,14 +751,8 @@ impl DashboardContext {
                     }
                     Err(error) => {
                         tracing::warn!(%session_id, %error, "could not open session");
-                        let detach = self
-                            .dashboard
-                            .first_key_label(mj_tui::CommandId::QuitDetach)
-                            .map(|key| format!(" {key} quits."))
-                            .unwrap_or_default();
-                        self.dashboard.set_notice(format!(
-                            "Could not open session: {error}. Press Enter in Sessions to retry, or select another session.{detach}"
-                        ));
+                        self.dashboard
+                            .report_open_failure(&session_id, &error.to_string());
                     }
                 }
             }

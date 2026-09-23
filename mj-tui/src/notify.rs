@@ -215,7 +215,46 @@ impl DashboardState {
         self.replace_notice_if(&text, format!("{name} is reachable again."));
     }
 
-    fn session_notice_name(&self, session_id: &str) -> String {
+    /// Reports that a session could not be opened, naming it, so a failure
+    /// from a restored pane says which of its sessions it was about.
+    pub fn report_open_failure(&mut self, session_id: &str, error: &str) {
+        let name = self.session_notice_name(session_id);
+        let detach = self
+            .first_key_label(crate::CommandId::QuitDetach)
+            .map(|key| format!(" {key} quits."))
+            .unwrap_or_default();
+        self.set_notice(format!(
+            "Could not open {name}: {error}. Press Enter in Sessions to retry, or select another session.{detach}"
+        ));
+    }
+
+    /// Whether a pane holding `session_id` must not attach to it: the
+    /// session is suspended (or otherwise not running) and no transition is
+    /// bringing it back.
+    pub fn pane_session_is_suspended(&self, session_id: &str) -> bool {
+        self.transition_kind(session_id).is_none()
+            && self
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| !session.state.is_active())
+    }
+
+    /// Empties the pane that held a suspended session, instead of attaching
+    /// to a session with no worker, and says so. The host saves the layout.
+    pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
+        self.set_pane_session(pane, None);
+        let name = self.session_notice_name(session_id);
+        let resume = self
+            .first_key_label(crate::CommandId::ResumeDialog)
+            .map(|key| format!(" {key} finds it to resume."))
+            .unwrap_or_default();
+        self.set_notice(format!(
+            "{name} is suspended, so it was unpinned from its pane.{resume}"
+        ));
+    }
+
+    pub(crate) fn session_notice_name(&self, session_id: &str) -> String {
         self.state.sessions.get(session_id).map_or_else(
             || format!("Session {}", &session_id[..session_id.len().min(8)]),
             |session| format!("Session {}", session.display_title()),
