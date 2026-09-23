@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -28,7 +29,11 @@ use agent_client_protocol::{Agent, Stdio};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use mj_controller::server::api::{StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse};
+use mj_controller::server::api::{
+    ApiSession, StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
+};
+use mj_controller::server::{ViewerChatPhase, ViewerLifecycleCategory};
+use tokio_util::task::TaskTracker;
 
 use crate::api_client::ApiClient;
 
@@ -48,11 +53,76 @@ pub(crate) struct AcpArgs {
     /// the project, which is what a local target needs.
     #[arg(long)]
     pub(crate) bundle: Option<String>,
+    /// What happens to the sessions this process created when it exits.
+    #[arg(long = "on-exit", value_enum, default_value_t = ExitPolicy::Keep)]
+    pub(crate) on_exit: ExitPolicy,
+}
+
+/// What the adapter does with its sessions when its consumer is gone.
+///
+/// The policy runs once, when the adapter exits, over every session it
+/// created: a consumer that sends several prompts to one session, or opens
+/// several sessions, is not interrupted between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ExitPolicy {
+    /// Leave every session as it is, for a consumer a person follows up on.
+    #[default]
+    Keep,
+    /// Checkpoint each session and release its worker and target, leaving a
+    /// session a person can resume.
+    Suspend,
+    /// Destroy each session once its turn has stopped, for a scheduler that
+    /// takes its answer from the turn and wants nothing left behind.
+    Destroy,
+}
+
+impl ExitPolicy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Suspend => "suspend",
+            Self::Destroy => "destroy",
+        }
+    }
+}
+
+/// How long the exit policy waits for the daemon.
+///
+/// Suspension and destruction are answered when the daemon admits them, not
+/// when they finish, so the adapter watches the session to learn how each one
+/// ended. These bound that watch; they never cancel the daemon's work.
+#[derive(Debug, Clone, Copy)]
+struct ExitTiming {
+    /// How often the session is looked at.
+    poll: Duration,
+    /// How long an interrupted turn may take to stop before destruction is
+    /// refused. Destroying a session with a turn still running would throw
+    /// away work nobody has seen.
+    settle: Duration,
+    /// How long a suspension or destruction may take. A suspension checkpoints
+    /// the workspace, which on a large checkout over SSH takes minutes.
+    finish: Duration,
+}
+
+impl Default for ExitTiming {
+    fn default() -> Self {
+        Self {
+            poll: Duration::from_secs(1),
+            settle: Duration::from_secs(60),
+            finish: Duration::from_secs(300),
+        }
+    }
 }
 
 /// What the adapter needs beyond one request.
 struct Adapter {
     args: AcpArgs,
+    timing: ExitTiming,
+    /// Session creations in flight. Each runs on its own task so a creation
+    /// the daemon accepted is recorded even when the consumer leaves before
+    /// the answer arrives, and the exit policy waits for them, so it never
+    /// misses a session because its creation had not answered yet.
+    creating: TaskTracker,
     /// The sessions this process created. A prompt may only name one of these,
     /// so an adapter instance cannot be used to drive unrelated sessions that
     /// happen to live in the same daemon.
@@ -69,12 +139,7 @@ struct Adapter {
 /// Returns when the consumer closes its side of the pipe or the connection
 /// fails.
 pub(crate) async fn serve(args: AcpArgs) -> Result<()> {
-    let adapter = Arc::new(Adapter {
-        args,
-        sessions: Mutex::new(HashSet::new()),
-        active: Mutex::new(HashSet::new()),
-        cancelling: Mutex::new(HashSet::new()),
-    });
+    let adapter = Arc::new(Adapter::new(args, ExitTiming::default()));
     let served = Agent
         .builder()
         .name("mjolnir")
@@ -87,7 +152,7 @@ pub(crate) async fn serve(args: AcpArgs) -> Result<()> {
         .on_receive_request(
             {
                 let adapter = Arc::clone(&adapter);
-                async move |request: NewSessionRequest, responder, _cx| match adapter
+                async move |request: NewSessionRequest, responder, _cx| match Arc::clone(&adapter)
                     .new_session(request)
                     .await
                 {
@@ -135,13 +200,58 @@ pub(crate) async fn serve(args: AcpArgs) -> Result<()> {
             },
             agent_client_protocol::on_receive_notification!(),
         )
-        .connect_to(Stdio::new())
-        .await;
+        .connect_to(Stdio::new());
+    let served = match adapter.args.on_exit {
+        // Unchanged from before the policy existed: a signal ends the process
+        // where it stands.
+        ExitPolicy::Keep => served.await,
+        // A consumer that stops its agent with a signal instead of closing the
+        // pipe gets the policy it asked for all the same.
+        ExitPolicy::Suspend | ExitPolicy::Destroy => tokio::select! {
+            served = served => served,
+            signal = termination() => {
+                tracing::info!(signal, "stopping on a signal");
+                Ok(())
+            }
+        },
+    };
     // The consumer is gone, so nothing it started can be watched or steered any
-    // more: stop the turns it can no longer see. The sessions themselves stay,
-    // because they are durable and a person may still want to resume one.
+    // more: stop the turns it can no longer see. What happens to the sessions
+    // themselves is the exit policy's decision.
     adapter.stop_active_turns().await;
-    served.context("serving the Agent Client Protocol on standard input and output")
+    let retired = adapter.apply_exit_policy().await;
+    let served = served.context("serving the Agent Client Protocol on standard input and output");
+    match (served, retired) {
+        (Ok(()), retired) => retired,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(retired)) => Err(error.context(format!("{retired:#}"))),
+    }
+}
+
+/// Resolve when the process is asked to stop, naming the signal.
+async fn termination() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut terminate), Ok(mut hangup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) else {
+            tracing::warn!("could not listen for termination signals; only an interrupt is heard");
+            let _ = tokio::signal::ctrl_c().await;
+            return "interrupt";
+        };
+        tokio::select! {
+            _ = terminate.recv() => "terminate",
+            _ = hangup.recv() => "hangup",
+            _ = tokio::signal::ctrl_c() => "interrupt",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "interrupt"
+    }
 }
 
 /// Answer `initialize`.
@@ -156,23 +266,51 @@ fn initialize(_request: InitializeRequest) -> InitializeResponse {
 }
 
 impl Adapter {
+    fn new(args: AcpArgs, timing: ExitTiming) -> Self {
+        Self {
+            args,
+            timing,
+            creating: TaskTracker::new(),
+            sessions: Mutex::new(HashSet::new()),
+            active: Mutex::new(HashSet::new()),
+            cancelling: Mutex::new(HashSet::new()),
+        }
+    }
+
     /// Create the Mjolnir session that one ACP session will run in.
     ///
     /// The ACP session id is the Mjolnir session id. Keeping them the same
     /// means a consumer's logs, `mj sessions`, and the daemon's own records all
     /// name one thing, which is the difference between a debuggable integration
     /// and a search for a mapping table.
-    async fn new_session(&self, request: NewSessionRequest) -> Result<SessionId> {
+    async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<SessionId> {
         let client = ApiClient::connect()
             .await
             .context("connect to the Mjolnir daemon")?;
+        self.new_session_with(client, request).await
+    }
+
+    /// The creation path through a client the caller supplies.
+    async fn new_session_with(
+        self: Arc<Self>,
+        client: ApiClient,
+        request: NewSessionRequest,
+    ) -> Result<SessionId> {
         let start = start_request(&self.args, &request.cwd);
-        let started = client.start(&start).await.context("create the session")?;
-        self.sessions
-            .lock()
-            .expect("adapter session set")
-            .insert(started.session_id.clone());
-        Ok(SessionId::new(started.session_id))
+        let adapter = Arc::clone(&self);
+        let created = self.creating.spawn(async move {
+            let started = client.start(&start).await.context("create the session")?;
+            adapter
+                .sessions
+                .lock()
+                .expect("adapter session set")
+                .insert(started.session_id.clone());
+            anyhow::Ok(started.session_id)
+        });
+        let session_id = created
+            .await
+            .context("the session creation task failed")??;
+        Ok(SessionId::new(session_id))
     }
 
     fn owns(&self, session_id: &str) -> bool {
@@ -256,6 +394,11 @@ impl Adapter {
 
     /// Stop the turns the consumer can no longer see.
     async fn stop_active_turns(&self) {
+        // Reaching the daemon starts one, which a consumer that never ran a
+        // turn did not ask for.
+        if self.active.lock().expect("adapter active set").is_empty() {
+            return;
+        }
         match ApiClient::connect().await {
             Ok(client) => self.stop_active_turns_with(&client).await,
             Err(error) => {
@@ -278,6 +421,74 @@ impl Adapter {
         }
     }
 
+    /// Apply the exit policy to every session this adapter created.
+    async fn apply_exit_policy(&self) -> Result<()> {
+        self.apply_exit_policy_via(ApiClient::connect).await
+    }
+
+    /// The exit policy, reaching the daemon through `connect`, which is only
+    /// called when there is something to retire.
+    ///
+    /// Sessions are retired concurrently and independently, so one that fails
+    /// does not keep the others alive. Every failure is reported, naming the
+    /// session and the state it was left in.
+    async fn apply_exit_policy_via<Connect>(&self, connect: impl FnOnce() -> Connect) -> Result<()>
+    where
+        Connect: std::future::Future<Output = Result<ApiClient>>,
+    {
+        let policy = self.args.on_exit;
+        if policy == ExitPolicy::Keep {
+            return Ok(());
+        }
+        self.creating.close();
+        self.creating.wait().await;
+        let sessions = self.owned_sessions();
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let client = connect().await.with_context(|| {
+            format!(
+                "reach the Mjolnir daemon to {} sessions {}; they were left as they were",
+                policy.name(),
+                sessions.join(", ")
+            )
+        })?;
+        let client = &client;
+        let outcomes = futures::future::join_all(sessions.iter().map(|session_id| async move {
+            match policy {
+                ExitPolicy::Keep => Ok(()),
+                ExitPolicy::Suspend => suspend_session(client, session_id, self.timing).await,
+                ExitPolicy::Destroy => destroy_session(client, session_id, self.timing).await,
+            }
+        }))
+        .await;
+        let failures: Vec<String> = outcomes
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| format!("{error:#}"))
+            .collect();
+        if failures.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "the --on-exit {} policy did not complete: {}",
+            policy.name(),
+            failures.join("; ")
+        )
+    }
+
+    fn owned_sessions(&self) -> Vec<String> {
+        let mut sessions: Vec<String> = self
+            .sessions
+            .lock()
+            .expect("adapter session set")
+            .iter()
+            .cloned()
+            .collect();
+        sessions.sort();
+        sessions
+    }
+
     fn mark_cancelled(&self, session_id: &str) {
         self.cancelling
             .lock()
@@ -295,6 +506,188 @@ async fn interrupt(client: &ApiClient, session_id: &str) {
     if let Err(error) = client.interrupt_turn(session_id).await {
         tracing::warn!(%error, %session_id, "could not interrupt a turn");
     }
+}
+
+/// Suspend one session and wait until the daemon says how that ended.
+///
+/// A session that is already suspended is left alone. A suspension that fails
+/// leaves the session live, and the daemon records why on it; that reason is
+/// what the consumer is told.
+async fn suspend_session(client: &ApiClient, session_id: &str, timing: ExitTiming) -> Result<()> {
+    let Some(session) = look(client, session_id).await? else {
+        bail!("session {session_id} no longer exists, so it could not be suspended");
+    };
+    if session.lifecycle == ViewerLifecycleCategory::Suspended {
+        return Ok(());
+    }
+    client.suspend(session_id).await.with_context(|| {
+        format!(
+            "suspend session {session_id}; it was left {}, and `mj suspend --session {session_id}` retries",
+            session.state
+        )
+    })?;
+    watch(client, session_id, timing, timing.finish, "suspend", |session| {
+        let Some(session) = session else {
+            return Watch::Failed("it no longer exists".to_owned());
+        };
+        match session.lifecycle {
+            ViewerLifecycleCategory::Suspended => Watch::Done,
+            ViewerLifecycleCategory::Failed => {
+                Watch::Failed(format!("it ended {}{}", session.state, reason(session)))
+            }
+            ViewerLifecycleCategory::Suspending => Watch::Pending,
+            ViewerLifecycleCategory::Live | ViewerLifecycleCategory::Starting => {
+                match lifecycle_failure(session) {
+                    Some(error) => Watch::Failed(format!(
+                        "{error}; it is still {}, and `mj suspend --session {session_id}` retries",
+                        session.state
+                    )),
+                    // The daemon has not taken the suspension up yet.
+                    None => Watch::Pending,
+                }
+            }
+        }
+    })
+    .await
+}
+
+/// Destroy one session once its turn has stopped, and wait until it is gone.
+///
+/// Destruction is refused, not forced, when an interrupted turn does not stop
+/// in time: the session is then left live for a person to inspect, rather than
+/// removed with work nobody has seen.
+async fn destroy_session(client: &ApiClient, session_id: &str, timing: ExitTiming) -> Result<()> {
+    let settled = watch(
+        client,
+        session_id,
+        timing,
+        timing.settle,
+        "stop the turn of",
+        |session| {
+            let Some(session) = session else {
+                return Watch::Done;
+            };
+            match session.lifecycle {
+                ViewerLifecycleCategory::Live if session.chat_phase == ViewerChatPhase::Running => {
+                    Watch::Pending
+                }
+                // A close someone else started owns the session until it ends.
+                ViewerLifecycleCategory::Suspending => Watch::Pending,
+                // Provisioning is cancelled by the destruction itself, and
+                // nothing runs in a suspended or failed session.
+                ViewerLifecycleCategory::Live
+                | ViewerLifecycleCategory::Starting
+                | ViewerLifecycleCategory::Suspended
+                | ViewerLifecycleCategory::Failed => Watch::Done,
+            }
+        },
+    )
+    .await;
+    if let Err(error) = settled {
+        bail!(
+            "{error:#}; it was not destroyed, and `mj destroy --session {session_id}` removes it"
+        );
+    }
+    if look(client, session_id).await?.is_none() {
+        return Ok(());
+    }
+    client.destroy(session_id, false).await.with_context(|| {
+        format!(
+            "destroy session {session_id}; it was left as it was, and `mj destroy --session {session_id}` retries"
+        )
+    })?;
+    watch(
+        client,
+        session_id,
+        timing,
+        timing.finish,
+        "destroy",
+        |session| {
+            let Some(session) = session else {
+                return Watch::Done;
+            };
+            match session.lifecycle {
+                ViewerLifecycleCategory::Failed => {
+                    Watch::Failed(format!("it ended {}{}", session.state, reason(session)))
+                }
+                ViewerLifecycleCategory::Suspending => Watch::Pending,
+                ViewerLifecycleCategory::Live
+                | ViewerLifecycleCategory::Starting
+                | ViewerLifecycleCategory::Suspended => match lifecycle_failure(session) {
+                    Some(error) => Watch::Failed(format!(
+                        "{error}; it is still {}, and `mj destroy --session {session_id}` retries",
+                        session.state
+                    )),
+                    // The daemon has not taken the destruction up yet.
+                    None => Watch::Pending,
+                },
+            }
+        },
+    )
+    .await
+}
+
+/// What one look at a session says about the operation being watched.
+enum Watch {
+    Pending,
+    Done,
+    Failed(String),
+}
+
+/// Look at a session until `judge` says the operation ended, or `within`
+/// passes. Running out of time is a failure: the daemon may still finish, but
+/// the adapter cannot say that it did.
+async fn watch(
+    client: &ApiClient,
+    session_id: &str,
+    timing: ExitTiming,
+    within: Duration,
+    operation: &str,
+    judge: impl Fn(Option<&ApiSession>) -> Watch,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let session = look(client, session_id).await?;
+        match judge(session.as_ref()) {
+            Watch::Done => return Ok(()),
+            Watch::Failed(why) => bail!("could not {operation} session {session_id}: {why}"),
+            Watch::Pending => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let last = session.map_or_else(
+                || "gone".to_owned(),
+                |session| format!("{}{}", session.state, reason(&session)),
+            );
+            bail!(
+                "could not {operation} session {session_id} within {}s; it was last {last}, and `mj sessions --session {session_id}` shows whether the daemon finished",
+                within.as_secs()
+            );
+        }
+        tokio::time::sleep(timing.poll).await;
+    }
+}
+
+async fn look(client: &ApiClient, session_id: &str) -> Result<Option<ApiSession>> {
+    client
+        .session_if_known(session_id)
+        .await
+        .with_context(|| format!("look up session {session_id}"))
+}
+
+/// The sentence a failed suspension or destruction recorded on the session.
+fn lifecycle_failure(session: &ApiSession) -> Option<&str> {
+    session
+        .error
+        .as_deref()
+        .filter(|error| mj_core::state::is_public_lifecycle_error(error))
+}
+
+fn reason(session: &ApiSession) -> String {
+    session
+        .error
+        .as_deref()
+        .map(|error| format!(" ({error})"))
+        .unwrap_or_default()
 }
 
 /// Run one turn and report how it ended.
@@ -407,7 +800,7 @@ fn start_request(args: &AcpArgs, cwd: &std::path::Path) -> StartSessionRequest {
 mod tests {
     use super::*;
     use axum::extract::{Path, State};
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use axum::{Json, Router};
     use mj_controller::server::api::{API_VERSION, API_VERSION_HEADER};
     use serde_json::{Value, json};
@@ -434,7 +827,48 @@ mod tests {
         /// Whether interrupting fails, which is what a cancel racing a dead
         /// daemon looks like.
         interrupt_fails: bool,
+        /// Sessions whose suspension or destruction the daemon refuses.
+        refuses: &'static [&'static str],
+        /// How long creating a session takes to answer.
+        start_delay: Duration,
     }
+
+    /// One answer to looking a session up.
+    #[derive(Clone)]
+    enum Look {
+        Missing,
+        Session {
+            lifecycle: &'static str,
+            state: &'static str,
+            chat_phase: &'static str,
+            error: Option<&'static str>,
+        },
+    }
+
+    const IDLE: Look = Look::Session {
+        lifecycle: "live",
+        state: "running",
+        chat_phase: "idle",
+        error: None,
+    };
+    const WORKING: Look = Look::Session {
+        lifecycle: "live",
+        state: "running",
+        chat_phase: "running",
+        error: None,
+    };
+    const SUSPENDING: Look = Look::Session {
+        lifecycle: "suspending",
+        state: "suspending",
+        chat_phase: "idle",
+        error: None,
+    };
+    const SUSPENDED: Look = Look::Session {
+        lifecycle: "suspended",
+        state: "suspended",
+        chat_phase: "idle",
+        error: None,
+    };
 
     struct FakeDaemon {
         turn: FakeTurn,
@@ -442,6 +876,11 @@ mod tests {
         prompt: Mutex<Vec<(String, Value)>>,
         wait: Mutex<Vec<(String, Value)>>,
         interrupts: Mutex<Vec<String>>,
+        /// Every lifecycle call and lookup, in the order they arrived.
+        calls: Mutex<Vec<String>>,
+        /// What each lookup of a session answers, in turn. The last answer
+        /// repeats, so a session stays where its script leaves it.
+        looks: Mutex<std::collections::HashMap<String, std::collections::VecDeque<Look>>>,
     }
 
     impl FakeDaemon {
@@ -452,14 +891,25 @@ mod tests {
                 prompt: Mutex::new(Vec::new()),
                 wait: Mutex::new(Vec::new()),
                 interrupts: Mutex::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
+                looks: Mutex::new(std::collections::HashMap::new()),
             });
             let app = Router::new()
                 .route("/api/v1/sessions", post(record_start))
+                .route("/api/v1/sessions/{session_id}", get(record_look))
                 .route("/api/v1/sessions/{session_id}/prompt", post(record_prompt))
                 .route("/api/v1/sessions/{session_id}/wait", post(record_wait))
                 .route(
                     "/api/v1/sessions/{session_id}/interrupt-turn",
                     post(record_interrupt),
+                )
+                .route(
+                    "/api/v1/sessions/{session_id}/suspend",
+                    post(record_suspend),
+                )
+                .route(
+                    "/api/v1/sessions/{session_id}/destroy",
+                    post(record_destroy),
                 )
                 .with_state(Arc::clone(&daemon));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -473,12 +923,141 @@ mod tests {
                 .expect("build the client");
             (client, daemon)
         }
+
+        /// Script what looking `session_id` up answers.
+        fn script(&self, session_id: &str, looks: &[Look]) {
+            self.looks
+                .lock()
+                .unwrap()
+                .insert(session_id.to_owned(), looks.iter().cloned().collect());
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// The lifecycle calls alone, without the lookups between them.
+        fn lifecycle_calls(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter(|call| !call.starts_with("look "))
+                .collect()
+        }
+    }
+
+    /// The session shape the API answers, which the fake has to honor in full:
+    /// it is the daemon's contract, not something a test gets to simplify.
+    fn session_json(
+        session_id: &str,
+        lifecycle: &str,
+        state: &str,
+        chat_phase: &str,
+        error: Option<&str>,
+    ) -> Value {
+        json!({
+            "id": session_id,
+            "workspace_id": "default",
+            "title": "adapter session",
+            "harness_kind": "codex",
+            "profile_id": "codex-work",
+            "target_id": "localhost",
+            "bundle_id": "",
+            "state": state,
+            "lifecycle": lifecycle,
+            "chat_phase": chat_phase,
+            "is_idle": chat_phase == "idle",
+            "has_error": error.is_some(),
+            "error": error,
+            "created_at": "now",
+            "updated_at": "now"
+        })
+    }
+
+    async fn record_look(
+        State(daemon): State<Arc<FakeDaemon>>,
+        Path(session_id): Path<String>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        daemon
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("look {session_id}"));
+        let look = {
+            let mut looks = daemon.looks.lock().unwrap();
+            let script = looks.entry(session_id.clone()).or_default();
+            match script.len() {
+                0 => Look::Missing,
+                1 => script[0].clone(),
+                _ => script.pop_front().unwrap(),
+            }
+        };
+        match look {
+            Look::Missing => (
+                axum::http::StatusCode::NOT_FOUND,
+                version(),
+                Json(json!({"error": "unknown session"})),
+            )
+                .into_response(),
+            Look::Session {
+                lifecycle,
+                state,
+                chat_phase,
+                error,
+            } => (
+                version(),
+                Json(session_json(
+                    &session_id,
+                    lifecycle,
+                    state,
+                    chat_phase,
+                    error,
+                )),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn record_lifecycle(
+        daemon: &FakeDaemon,
+        operation: &str,
+        session_id: &str,
+        body: &Value,
+    ) -> ([(&'static str, &'static str); 1], axum::http::StatusCode) {
+        daemon
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("{operation} {session_id} {body}"));
+        let status = if daemon.turn.refuses.contains(&session_id) {
+            axum::http::StatusCode::CONFLICT
+        } else {
+            axum::http::StatusCode::ACCEPTED
+        };
+        (version(), status)
+    }
+
+    async fn record_suspend(
+        State(daemon): State<Arc<FakeDaemon>>,
+        Path(session_id): Path<String>,
+        Json(body): Json<Value>,
+    ) -> ([(&'static str, &'static str); 1], axum::http::StatusCode) {
+        record_lifecycle(&daemon, "suspend", &session_id, &body).await
+    }
+
+    async fn record_destroy(
+        State(daemon): State<Arc<FakeDaemon>>,
+        Path(session_id): Path<String>,
+        Json(body): Json<Value>,
+    ) -> ([(&'static str, &'static str); 1], axum::http::StatusCode) {
+        record_lifecycle(&daemon, "destroy", &session_id, &body).await
     }
 
     async fn record_start(
         State(daemon): State<Arc<FakeDaemon>>,
         Json(body): Json<Value>,
     ) -> ([(&'static str, &'static str); 1], Json<Value>) {
+        tokio::time::sleep(daemon.turn.start_delay).await;
         daemon.start.lock().unwrap().push(body);
         (
             version(),
@@ -500,25 +1079,8 @@ mod tests {
         Path(session_id): Path<String>,
         Json(body): Json<Value>,
     ) -> ([(&'static str, &'static str); 1], Json<Value>) {
-        // A wait answers with the session's public view as well as the outcome,
-        // so the fake has to carry one: the shape is the daemon's contract, not
-        // something this test gets to simplify.
-        let session = json!({
-            "id": session_id,
-            "workspace_id": "default",
-            "title": "adapter session",
-            "harness_kind": "codex",
-            "profile_id": "codex-work",
-            "target_id": "localhost",
-            "bundle_id": "",
-            "state": "running",
-            "lifecycle": "live",
-            "chat_phase": "idle",
-            "is_idle": true,
-            "has_error": false,
-            "created_at": "now",
-            "updated_at": "now"
-        });
+        // A wait answers with the session's public view as well as the outcome.
+        let session = session_json(&session_id, "live", "running", "idle", None);
         let pending: Vec<Value> = daemon
             .turn
             .pending_message
@@ -540,6 +1102,11 @@ mod tests {
         State(daemon): State<Arc<FakeDaemon>>,
         Path(session_id): Path<String>,
     ) -> ([(&'static str, &'static str); 1], axum::http::StatusCode) {
+        daemon
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("interrupt {session_id}"));
         daemon.interrupts.lock().unwrap().push(session_id);
         let status = if daemon.turn.interrupt_fails {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -630,6 +1197,7 @@ mod tests {
             profile: Some("codex-work".to_owned()),
             target: Some("builder-podman".to_owned()),
             bundle: Some("product".to_owned()),
+            on_exit: ExitPolicy::Keep,
         };
         let managed = start_request(&args, StdPath::new("/work/project"));
         assert_eq!(managed.profile_id.as_deref(), Some("codex-work"));
@@ -673,12 +1241,262 @@ mod tests {
 
     /// An adapter that already knows one session, without a daemon to create it.
     fn adapter_owning(session_id: &str) -> Adapter {
-        Adapter {
-            args: AcpArgs::default(),
-            sessions: Mutex::new(HashSet::from([session_id.to_owned()])),
-            active: Mutex::new(HashSet::new()),
-            cancelling: Mutex::new(HashSet::new()),
-        }
+        adapter_with(ExitPolicy::Keep, &[session_id])
+    }
+
+    /// An adapter with an exit policy that already knows its sessions, and
+    /// deadlines short enough for a test to run out of.
+    fn adapter_with(on_exit: ExitPolicy, sessions: &[&str]) -> Adapter {
+        let adapter = Adapter::new(
+            AcpArgs {
+                on_exit,
+                ..AcpArgs::default()
+            },
+            ExitTiming {
+                poll: Duration::from_millis(5),
+                settle: Duration::from_millis(300),
+                finish: Duration::from_millis(300),
+            },
+        );
+        adapter
+            .sessions
+            .lock()
+            .unwrap()
+            .extend(sessions.iter().map(|id| (*id).to_owned()));
+        adapter
+    }
+
+    /// Leave as a consumer that is gone: stop its turns, then apply the policy.
+    async fn exit(adapter: &Adapter, client: ApiClient) -> Result<()> {
+        adapter.stop_active_turns_with(&client).await;
+        adapter.apply_exit_policy_via(|| async { Ok(client) }).await
+    }
+
+    fn working(adapter: &Adapter, session_id: &str) {
+        adapter.active.lock().unwrap().insert(session_id.to_owned());
+    }
+
+    #[tokio::test]
+    async fn keeping_leaves_every_session_as_it_was() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let adapter = adapter_with(ExitPolicy::Keep, &["session-1"]);
+        working(&adapter, "session-1");
+
+        exit(&adapter, client).await.expect("keeping cannot fail");
+
+        assert_eq!(
+            daemon.calls(),
+            ["interrupt session-1"],
+            "the turn stops, and nothing else happens to the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspending_stops_the_turn_then_waits_for_the_suspension_to_finish() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        // The daemon answers a suspension when it admits it, so the session is
+        // still live on the first look after, and suspended only later.
+        daemon.script("session-1", &[IDLE, IDLE, SUSPENDING, SUSPENDED]);
+        let adapter = adapter_with(ExitPolicy::Suspend, &["session-1"]);
+        working(&adapter, "session-1");
+
+        exit(&adapter, client).await.expect("the session suspends");
+
+        assert_eq!(
+            daemon.calls(),
+            [
+                "interrupt session-1",
+                "look session-1",
+                r#"suspend session-1 {"acknowledge_active_subagents":true}"#,
+                "look session-1",
+                "look session-1",
+                "look session-1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn destroying_waits_for_the_turn_to_stop_and_then_for_the_session_to_go() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script(
+            "session-1",
+            &[WORKING, WORKING, IDLE, IDLE, IDLE, Look::Missing],
+        );
+        let adapter = adapter_with(ExitPolicy::Destroy, &["session-1"]);
+        working(&adapter, "session-1");
+
+        exit(&adapter, client)
+            .await
+            .expect("the session is destroyed");
+
+        assert_eq!(
+            daemon.calls(),
+            [
+                "interrupt session-1",
+                "look session-1",
+                "look session-1",
+                "look session-1",
+                // The look that confirms the session still exists.
+                "look session-1",
+                r#"destroy session-1 {"delete_branch":false}"#,
+                "look session-1",
+                "look session-1",
+            ],
+            "destruction waits until the turn is no longer running, and keeps the branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_will_not_stop_is_not_destroyed() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script("session-1", &[WORKING]);
+        let adapter = adapter_with(ExitPolicy::Destroy, &["session-1"]);
+        working(&adapter, "session-1");
+
+        let error = exit(&adapter, client)
+            .await
+            .expect_err("a running turn is not destroyed");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("session-1") && message.contains("was not destroyed"),
+            "the consumer is told which session was left and why: {message}"
+        );
+        assert_eq!(daemon.lifecycle_calls(), ["interrupt session-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_suspension_is_reported_rather_than_claimed() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script(
+            "session-1",
+            &[
+                IDLE,
+                SUSPENDING,
+                Look::Session {
+                    lifecycle: "live",
+                    state: "running",
+                    chat_phase: "idle",
+                    error: Some("the suspension did not finish: the checkpoint failed"),
+                },
+            ],
+        );
+        let adapter = adapter_with(ExitPolicy::Suspend, &["session-1"]);
+
+        let error = exit(&adapter, client)
+            .await
+            .expect_err("a failed suspension is a failure");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("the checkpoint failed") && message.contains("still running"),
+            "the reason and the state the session was left in are both named: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_suspension_the_daemon_refuses_is_reported() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            refuses: &["session-1"],
+            ..FakeTurn::default()
+        })
+        .await;
+        daemon.script("session-1", &[IDLE]);
+        let adapter = adapter_with(ExitPolicy::Suspend, &["session-1"]);
+
+        let error = exit(&adapter, client)
+            .await
+            .expect_err("a refused suspension is a failure");
+
+        assert!(
+            format!("{error:#}").contains("suspend session session-1"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_suspension_that_does_not_finish_in_time_is_not_reported_as_done() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        daemon.script("session-1", &[IDLE, SUSPENDING]);
+        let adapter = adapter_with(ExitPolicy::Suspend, &["session-1"]);
+
+        let error = exit(&adapter, client)
+            .await
+            .expect_err("an unconfirmed suspension is not a success");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("within") && message.contains("last suspending"),
+            "the consumer learns the outcome is unknown and where it was: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_session_is_retired_even_when_one_fails() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            refuses: &["session-2"],
+            ..FakeTurn::default()
+        })
+        .await;
+        daemon.script("session-1", &[IDLE, IDLE, Look::Missing]);
+        daemon.script("session-2", &[IDLE]);
+        let adapter = adapter_with(ExitPolicy::Destroy, &["session-1", "session-2"]);
+
+        let error = exit(&adapter, client)
+            .await
+            .expect_err("one session could not be destroyed");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("session-2"), "{message}");
+        assert!(
+            !message.contains("session-1"),
+            "a session that was destroyed is not reported as failed: {message}"
+        );
+        let mut destroyed: Vec<String> = daemon
+            .lifecycle_calls()
+            .into_iter()
+            .filter(|call| call.starts_with("destroy "))
+            .collect();
+        destroyed.sort();
+        assert_eq!(
+            destroyed,
+            [
+                r#"destroy session-1 {"delete_branch":false}"#,
+                r#"destroy session-2 {"delete_branch":false}"#,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_created_as_the_consumer_left_is_still_retired() {
+        // The consumer asked for a session and left before the daemon answered.
+        // The daemon still created it, so the policy must still reach it.
+        let (client, daemon) = FakeDaemon::start(FakeTurn {
+            start_delay: Duration::from_millis(100),
+            ..FakeTurn::default()
+        })
+        .await;
+        daemon.script("session-1", &[IDLE, IDLE, Look::Missing]);
+        let adapter = Arc::new(adapter_with(ExitPolicy::Destroy, &[]));
+        let creating = Arc::clone(&adapter).new_session_with(
+            client.clone(),
+            NewSessionRequest::new(std::path::PathBuf::from("/work/project")),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), creating)
+                .await
+                .is_err(),
+            "the consumer leaves while the creation is still in flight"
+        );
+
+        exit(&adapter, client)
+            .await
+            .expect("the session is destroyed");
+
+        assert_eq!(
+            daemon.lifecycle_calls(),
+            [r#"destroy session-1 {"delete_branch":false}"#]
+        );
     }
 
     #[tokio::test]

@@ -35,6 +35,7 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
 const WAIT_SLACK: Duration = Duration::from_secs(30);
 
 /// A client for one daemon's API.
+#[derive(Clone)]
 pub(crate) struct ApiClient {
     base_url: String,
     token: String,
