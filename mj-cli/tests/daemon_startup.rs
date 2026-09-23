@@ -198,7 +198,7 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     let mut old = OldDaemon(
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "old_daemon_fixture", "--nocapture"])
-            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.15.0")
+            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.18.0")
             .env(
                 "MJ_TEST_OLD_PROTOCOL",
                 mj_client::daemon::PROTOCOL_VERSION.to_string(),
