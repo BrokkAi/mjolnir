@@ -4818,6 +4818,46 @@ fn idle_parent_suspension_confirms_when_a_subagent_is_active() {
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
+/// Launch finding B-3: the row menu is titled with the session's name, so
+/// the Suspend confirmation and the Rename dialog must name it the same way
+/// instead of by its id.
+#[test]
+fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: ACP pretty name"), "{suspend}");
+    assert!(!suspend.contains("Session: session-1"), "{suspend}");
+    dashboard.handle_key(key(KeyCode::Esc));
+
+    chord(&mut dashboard, CommandId::RenameSession);
+    let rename = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(rename.contains("Session: ACP pretty name"), "{rename}");
+    assert!(!rename.contains("Session: session-1"), "{rename}");
+}
+
+/// Without a title the dialogs fall back to the id, which is the only name
+/// the session has.
+#[test]
+fn suspend_confirmation_falls_back_to_the_id_for_an_untitled_session() {
+    let mut session = running_session();
+    session.acp_session_title = None;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .current_turn_started_at = Some(1);
+    chord(&mut dashboard, CommandId::SuspendSession);
+    let suspend = drawn(&mut dashboard, 120, 40).join("\n");
+    assert!(suspend.contains("Session: session-1"), "{suspend}");
+}
+
 #[test]
 fn working_session_suspension_confirms_and_cancel_is_safe() {
     let mut dashboard = dashboard_with_session(running_session());

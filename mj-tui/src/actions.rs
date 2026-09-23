@@ -1496,12 +1496,14 @@ impl DashboardState {
                             session_id: session.id.clone(),
                         };
                     }
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::SuspendSession {
+                    self.mode = crate::Mode::Confirm(
+                        ConfirmDialog::new(Confirmation::SuspendSession {
                             session_id: session.id.clone(),
                             active_children,
                             interrupting,
-                        }));
+                        })
+                        .naming_session(session.display_title()),
+                    );
                 }
                 DashboardAction::None
             }
@@ -1512,17 +1514,22 @@ impl DashboardState {
             CommandId::NewSessionWizard => self.begin_new(),
             CommandId::ChangeGoSetup => self.change_go_setup(),
             CommandId::RestartSession => {
-                let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+                let Some((session_id, name)) = self
+                    .selected_session()
+                    .map(|s| (s.id.clone(), s.display_title().to_owned()))
+                else {
                     return DashboardAction::None;
                 };
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
                 if self.attention_level(&session_id) == crate::AttentionLevel::Working {
-                    self.mode =
-                        crate::Mode::Confirm(ConfirmDialog::new(Confirmation::InterruptWork {
+                    self.mode = crate::Mode::Confirm(
+                        ConfirmDialog::new(Confirmation::InterruptWork {
                             session_id,
                             restart: true,
-                        }));
+                        })
+                        .naming_session(&name),
+                    );
                     return DashboardAction::None;
                 }
                 DashboardAction::RestartSession { session_id }
@@ -1552,13 +1559,16 @@ impl DashboardState {
             CommandId::ChangedFiles => self.begin_changed_files(),
             CommandId::MoveSession => self.begin_move(),
             CommandId::DestroySession => {
-                let Some(session_id) = self.selected_session().map(|session| session.id.clone())
+                let Some((session_id, name)) = self
+                    .selected_session()
+                    .map(|session| (session.id.clone(), session.display_title().to_owned()))
                 else {
                     return DashboardAction::None;
                 };
-                self.mode = crate::Mode::Confirm(ConfirmDialog::new(Confirmation::ForceDestroy {
-                    session_id,
-                }));
+                self.mode = crate::Mode::Confirm(
+                    ConfirmDialog::new(Confirmation::ForceDestroy { session_id })
+                        .naming_session(&name),
+                );
                 DashboardAction::None
             }
             CommandId::MarkAllRead => self.mark_all_read(),

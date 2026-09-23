@@ -647,7 +647,7 @@ pub(crate) fn render_rename_editor(
         area,
         &editor.form,
         &editor.title,
-        &format!("Session: {}", editor.session_id),
+        &format!("Session: {}", editor.session_name),
         "Rename session",
         surfaces,
     );
@@ -1092,11 +1092,23 @@ pub(crate) fn render_repository_origin(
     form.end_frame(DialogControl::Field);
 }
 
+/// The line that says which session a dialog is about: its name when the
+/// caller knows one, else its id.
+fn session_line(session_id: &str, session_name: Option<&str>) -> Line<'static> {
+    let name = session_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(session_id);
+    Line::raw(format!("Session: {name}"))
+}
+
 /// Title and body of one confirmation, without its buttons.
 ///
 /// Split out so the wording a dialog shows can be asserted without
 /// rendering a frame and reading cells back.
-pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, Vec<Line<'static>>) {
+pub(crate) fn confirmation_body(
+    confirmation: &Confirmation,
+    session_name: Option<&str>,
+) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { repairs, .. } => (
             "Repair Git tracking?",
@@ -1182,7 +1194,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         Confirmation::DestroyStopped { session_id, .. } => (
             " Destroy suspended session? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::raw(
                     "Mjolnir will permanently destroy the recovery archive and session record.",
@@ -1198,7 +1210,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         } => (
             " Suspension could not complete ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::styled(
                     format!("Suspension failed: {error}"),
@@ -1216,7 +1228,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
                 " Suspend while working? "
             },
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::styled(
                     "The agent is in the middle of a turn.",
@@ -1235,7 +1247,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             interrupting,
         } => {
             let mut lines = vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw("Save a recovery copy and release the environment."),
                 Line::raw("You can resume this session later."),
             ];
@@ -1255,7 +1267,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         } => (
             " Discard changes since checkpoint? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(format!("Recovery copy: {}", checkpoint.created_at)),
                 Line::raw("Release the environment using this older recovery copy."),
                 Line::raw("All work since that copy may be permanently lost."),
@@ -1267,7 +1279,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
             error,
             recoverable,
         } => {
-            let mut lines = vec![Line::raw(format!("Session: {session_id}")), Line::raw("")];
+            let mut lines = vec![session_line(session_id, session_name), Line::raw("")];
             match error {
                 Some(error) => lines.push(Line::styled(
                     format!("Failed: {error}"),
@@ -1349,7 +1361,7 @@ pub(crate) fn confirmation_body(confirmation: &Confirmation) -> (&'static str, V
         Confirmation::ForceDestroy { session_id } => (
             " Destroy session? ",
             vec![
-                Line::raw(format!("Session: {session_id}")),
+                session_line(session_id, session_name),
                 Line::raw(""),
                 Line::raw(
                     "Permanently destroy this session, its environment, and its recovery archive?",
@@ -1385,7 +1397,7 @@ pub(crate) fn render_confirmation(
         Confirmation::RecoverMove { .. } => 14,
         Confirmation::ForceDestroy { .. } => 11,
     };
-    let (title, mut lines) = confirmation_body(confirmation);
+    let (title, mut lines) = confirmation_body(confirmation, dialog.session_name.as_deref());
     let buttons = confirmation_buttons(confirmation);
     lines.push(Line::raw(""));
     lines.push(confirmation_key_line(buttons));

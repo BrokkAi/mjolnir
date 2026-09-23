@@ -623,7 +623,9 @@ impl DashboardState {
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some(),
             };
-            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mode = Mode::Confirm(
+                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+            );
             return DashboardAction::None;
         }
         if let Some(operation) = self
@@ -652,7 +654,9 @@ impl DashboardState {
                 error: session.last_error.clone(),
                 recoverable: session.checkpoint.is_some(),
             };
-            self.mode = Mode::Confirm(ConfirmDialog::new(confirmation));
+            self.mode = Mode::Confirm(
+                ConfirmDialog::new(confirmation).naming_session(session.display_title()),
+            );
             return DashboardAction::None;
         }
         let session_id = session.id.clone();
